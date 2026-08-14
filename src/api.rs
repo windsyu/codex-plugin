@@ -13,7 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -292,6 +292,17 @@ fn event_query(
     source: Option<String>,
     method: Option<String>,
 ) -> Response {
+    match state.database.retention_low_watermark() {
+        Ok(low_watermark) if after < low_watermark => {
+            return api_error(
+                StatusCode::GONE,
+                "CURSOR_EXPIRED",
+                "event cursor is older than the retention window",
+            );
+        }
+        Err(error) => return internal_error(error),
+        _ => {}
+    }
     let limit = limit.unwrap_or(100).clamp(1, 200) as i64;
     let thread_param = thread.as_deref();
     let source_param = source.as_deref();
@@ -387,11 +398,19 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
     .into_response()
 }
 
-async fn sse_stream(
-    State(state): State<ApiState>,
-    Query(query): Query<EventQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn sse_stream(State(state): State<ApiState>, Query(query): Query<EventQuery>) -> Response {
     let mut cursor = query.after_event_seq.unwrap_or(0);
+    match state.database.retention_low_watermark() {
+        Ok(low_watermark) if cursor < low_watermark => {
+            return api_error(
+                StatusCode::GONE,
+                "CURSOR_EXPIRED",
+                "event cursor is older than the retention window",
+            );
+        }
+        Err(error) => return internal_error(error),
+        _ => {}
+    }
     let database = state.database.clone();
     let stream = async_stream::stream! {
         loop {
@@ -407,15 +426,17 @@ async fn sse_stream(
             }
             for row in rows {
                 cursor = row["eventSeq"].as_i64().unwrap_or(cursor);
-                yield Ok(Event::default().id(cursor.to_string()).event("event").json_data(row).unwrap());
+                yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("event").json_data(row).unwrap());
             }
         }
     };
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("heartbeat"),
-    )
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("heartbeat"),
+        )
+        .into_response()
 }
 
 async fn ws_stream(ws: WebSocketUpgrade, State(state): State<ApiState>) -> Response {
@@ -442,6 +463,19 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
         .get("afterEventSeq")
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    if database
+        .retention_low_watermark()
+        .is_ok_and(|low_watermark| cursor < low_watermark)
+    {
+        let _ = socket
+            .send(Message::Text(
+                json!({"type":"error","code":"CURSOR_EXPIRED"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
     if socket
         .send(Message::Text(
             json!({"type":"subscribed","afterEventSeq":cursor})
@@ -805,6 +839,26 @@ mod tests {
             },
         );
         assert!(matches!(mismatched, Err(CursorFailure::Invalid(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn expired_event_cursor_returns_gone() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        database.connect()?.execute(
+            "UPDATE retention_state SET value_integer=5 WHERE key='raw_low_watermark'",
+            [],
+        )?;
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+        };
+        let response = event_query(&state, 4, Some(10), None, None, None);
+        assert_eq!(response.status(), StatusCode::GONE);
         Ok(())
     }
 

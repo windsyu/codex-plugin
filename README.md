@@ -15,10 +15,11 @@
 - SSE 与 WebSocket committed-event 续传；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、`doctor`、`rebuild-projections`；
+- `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、retention/purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -56,6 +57,8 @@ cp observer.example.toml observer.toml
 ```bash
 cargo run -- doctor
 cargo run -- import
+cargo run -- retention
+cargo run -- retention --apply
 ```
 
 启动周期扫描、API 和 Viewer：

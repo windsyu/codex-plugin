@@ -7,6 +7,9 @@ allowed_origins = ["http://127.0.0.1:4765"]
 [storage]
 database = "observer-data/observer.sqlite"
 fingerprint_key_file = "observer-data/fingerprint.key"
+raw_event_retention_days = 30
+delta_retention_days = 7
+blob_retention_days = 14
 
 [[sources]]
 name = "default"
@@ -18,4 +21,3 @@ scan_interval_seconds = 30
 max_raw_event_bytes = 67108864
 keep_reasoning = true
 keep_raw_json = true
-

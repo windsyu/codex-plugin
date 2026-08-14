@@ -7,6 +7,9 @@ allowed_origins = ["http://127.0.0.1:4766"]
 [storage]
 database = "../target/fixture-observer-data/observer.sqlite"
 fingerprint_key_file = "../target/fixture-observer-data/fingerprint.key"
+raw_event_retention_days = 30
+delta_retention_days = 7
+blob_retention_days = 14
 
 [[sources]]
 name = "synthetic-fixture"

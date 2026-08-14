@@ -556,6 +556,7 @@ mod tests {
         )?;
         let database = Database::open(&config.storage.database)?;
         database.migrate()?;
+        database.migrate()?;
         let importer = Importer::new(&config, &database)?;
         let first = importer.import_all()?;
         assert_eq!(first.events_inserted, 2);
@@ -659,6 +660,44 @@ mod tests {
         fs::rename(active, archived)?;
         assert_eq!(importer.import_all()?.events_inserted, 0);
         assert_eq!(database.max_event_seq()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_keeps_dedupe_tombstones_and_projections() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        config.sources[0].codex_home =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        assert_eq!(importer.import_all()?.events_inserted, 12);
+        database
+            .connect()?
+            .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
+
+        let preview = database.run_retention(1, false)?;
+        assert_eq!(preview.candidate_raw_events, 12);
+        assert_eq!(preview.deleted_raw_events, 0);
+        let applied = database.run_retention(1, true)?;
+        assert_eq!(applied.deleted_raw_events, 12);
+        assert_eq!(applied.dedupe_tombstones_retained, 12);
+        assert_eq!(database.max_event_seq()?, 12);
+        assert_eq!(database.retention_low_watermark()?, 12);
+
+        let connection = database.connect()?;
+        let raw_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM raw_events", [], |row| row.get(0))?;
+        let thread_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
+        assert_eq!(raw_count, 0);
+        assert_eq!(thread_count, 1);
+        connection.execute("DELETE FROM source_checkpoints", [])?;
+        let replay = importer.import_all()?;
+        assert_eq!(replay.events_inserted, 0);
+        assert_eq!(replay.events_deduplicated, 12);
+        assert!(database.rebuild_projections().is_err());
         Ok(())
     }
 }

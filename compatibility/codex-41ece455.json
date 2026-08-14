@@ -1,6 +1,7 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "observerVersion": "0.1.0",
+  "observerSchemaVersion": 3,
   "liveMode": "off",
   "rolloutTopLevelTypes": [
     "session_meta",

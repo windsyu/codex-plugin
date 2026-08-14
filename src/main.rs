@@ -42,6 +42,12 @@ enum Command {
     },
     /// Rebuild Thread/Turn/Item projections from retained raw events.
     RebuildProjections,
+    /// Preview or apply raw-event retention; projections and dedupe tombstones remain.
+    Retention {
+        /// Apply deletions. Without this flag the command is a dry run.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[tokio::main]
@@ -84,6 +90,10 @@ async fn main() -> Result<()> {
         Command::RebuildProjections => {
             let rebuilt = database.rebuild_projections()?;
             println!("rebuilt {rebuilt} events");
+        }
+        Command::Retention { apply } => {
+            let report = database.run_retention(config.storage.raw_event_retention_days, apply)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {
             let initial = Importer::new(&config, database.as_ref())?.import_all()?;

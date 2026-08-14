@@ -30,6 +30,9 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     pub database: PathBuf,
     pub fingerprint_key_file: PathBuf,
+    pub raw_event_retention_days: u64,
+    pub delta_retention_days: u64,
+    pub blob_retention_days: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +80,9 @@ impl Default for StorageConfig {
         Self {
             database: PathBuf::from("observer-data/observer.sqlite"),
             fingerprint_key_file: PathBuf::from("observer-data/fingerprint.key"),
+            raw_event_retention_days: 30,
+            delta_retention_days: 7,
+            blob_retention_days: 14,
         }
     }
 }

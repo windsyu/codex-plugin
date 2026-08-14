@@ -8,10 +8,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::model::{Checkpoint, DoctorReport, DoctorSource, NormalizedEvent};
+use crate::model::{Checkpoint, DoctorReport, DoctorSource, NormalizedEvent, RetentionReport};
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
+const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
 
 #[derive(Debug)]
 pub struct Database {
@@ -68,11 +69,21 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_2)
                 .context("apply migration 0002")?;
+            connection
+                .execute_batch(MIGRATION_3)
+                .context("apply migration 0003")?;
         } else if version == 1 {
             connection
                 .execute_batch(MIGRATION_2)
                 .context("apply migration 0002")?;
-        } else if version != 2 {
+            connection
+                .execute_batch(MIGRATION_3)
+                .context("apply migration 0003")?;
+        } else if version == 2 {
+            connection
+                .execute_batch(MIGRATION_3)
+                .context("apply migration 0003")?;
+        } else if version != 3 {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
@@ -130,8 +141,27 @@ impl Database {
         let mut deduplicated = 0;
         let mut last_event_seq: Option<i64> = None;
         for event in batch.events {
-            let changed = transaction.execute(
-                "INSERT OR IGNORE INTO raw_events(
+            let existing = transaction
+                .query_row(
+                    "SELECT stored_raw_hash,original_event_seq FROM event_dedupes WHERE dedupe_key=?1",
+                    [&event.dedupe_key],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            if let Some((existing_hash, original_event_seq)) = existing {
+                if existing_hash != event.stored_raw_hash {
+                    anyhow::bail!(
+                        "dedupe integrity conflict at source ordinal {}",
+                        event.source_seq
+                    );
+                }
+                last_event_seq = Some(original_event_seq);
+                deduplicated += 1;
+                continue;
+            }
+
+            transaction.execute(
+                "INSERT INTO raw_events(
                    event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
                    thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,
                    source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error)
@@ -144,29 +174,15 @@ impl Database {
                     event.raw_json, event.redaction_json, event.decode_status, event.decode_error,
                 ],
             )?;
-            let event_seq: i64 = transaction.query_row(
-                "SELECT event_seq FROM raw_events WHERE dedupe_key=?1",
-                [&event.dedupe_key],
-                |row| row.get(0),
+            let event_seq = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO event_dedupes(dedupe_key,stored_raw_hash,original_event_seq,source_id,retained)
+                 VALUES (?1,?2,?3,?4,1)",
+                params![event.dedupe_key, event.stored_raw_hash, event_seq, event.source_id],
             )?;
             last_event_seq = Some(event_seq);
-            if changed == 1 {
-                inserted += 1;
-                project_event(&transaction, event, event_seq)?;
-            } else {
-                let existing_hash: String = transaction.query_row(
-                    "SELECT stored_raw_hash FROM raw_events WHERE dedupe_key=?1",
-                    [&event.dedupe_key],
-                    |row| row.get(0),
-                )?;
-                if existing_hash != event.stored_raw_hash {
-                    anyhow::bail!(
-                        "dedupe integrity conflict at source ordinal {}",
-                        event.source_seq
-                    );
-                }
-                deduplicated += 1;
-            }
+            inserted += 1;
+            project_event(&transaction, event, event_seq)?;
         }
 
         transaction.execute(
@@ -208,10 +224,74 @@ impl Database {
 
     pub fn max_event_seq(&self) -> Result<i64> {
         Ok(self.connect()?.query_row(
-            "SELECT COALESCE(MAX(event_seq),0) FROM raw_events",
+            "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='raw_events'),0)",
             [],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn retention_low_watermark(&self) -> Result<i64> {
+        Ok(self.connect()?.query_row(
+            "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn run_retention(&self, retention_days: u64, apply: bool) -> Result<RetentionReport> {
+        let retention_ms = retention_days
+            .checked_mul(86_400_000)
+            .context("raw retention duration overflow")? as i64;
+        let cutoff = now_ms().saturating_sub(retention_ms);
+        let mut connection = self.connect()?;
+        let low_before: i64 = connection.query_row(
+            "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (candidates, max_candidate): (i64, Option<i64>) = connection.query_row(
+            "SELECT COUNT(*),MAX(event_seq) FROM raw_events WHERE observed_at_ms < ?1",
+            [cutoff],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if !apply || candidates == 0 {
+            return Ok(RetentionReport {
+                applied: apply,
+                cutoff_at_ms: cutoff,
+                candidate_raw_events: candidates as usize,
+                deleted_raw_events: 0,
+                low_watermark_before: low_before,
+                low_watermark_after: low_before,
+                dedupe_tombstones_retained: 0,
+            });
+        }
+
+        let transaction = connection.transaction()?;
+        let tombstones = transaction.execute(
+            "UPDATE event_dedupes SET retained=0 WHERE retained=1 AND original_event_seq IN
+             (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1)",
+            [cutoff],
+        )?;
+        let deleted =
+            transaction.execute("DELETE FROM raw_events WHERE observed_at_ms < ?1", [cutoff])?;
+        let low_after = low_before.max(max_candidate.unwrap_or(low_before));
+        transaction.execute(
+            "INSERT INTO retention_state(key,value_integer,updated_at_ms)
+             VALUES ('raw_low_watermark',?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value_integer=MAX(retention_state.value_integer,excluded.value_integer),
+               updated_at_ms=excluded.updated_at_ms",
+            params![low_after, now_ms()],
+        )?;
+        transaction.commit()?;
+        Ok(RetentionReport {
+            applied: true,
+            cutoff_at_ms: cutoff,
+            candidate_raw_events: candidates as usize,
+            deleted_raw_events: deleted,
+            low_watermark_before: low_before,
+            low_watermark_after: low_after,
+            dedupe_tombstones_retained: tombstones,
+        })
     }
 
     pub fn doctor(&self, config: &Config) -> Result<DoctorReport> {
@@ -247,6 +327,12 @@ impl Database {
     }
 
     pub fn rebuild_projections(&self) -> Result<usize> {
+        let low_watermark = self.retention_low_watermark()?;
+        if low_watermark > 0 {
+            anyhow::bail!(
+                "projection rebuild is unsafe after raw retention (low watermark {low_watermark})"
+            );
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute_batch(

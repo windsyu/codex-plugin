@@ -79,6 +79,18 @@ pub struct ImportReport {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionReport {
+    pub applied: bool,
+    pub cutoff_at_ms: i64,
+    pub candidate_raw_events: usize,
+    pub deleted_raw_events: usize,
+    pub low_watermark_before: i64,
+    pub low_watermark_after: i64,
+    pub dedupe_tombstones_retained: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub status: String,
     pub database: String,
