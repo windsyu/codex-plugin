@@ -13,8 +13,11 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::ingest::thread_key;
 use crate::model::{
-    Checkpoint, DoctorReport, DoctorSource, ExportReport, NormalizedEvent, PurgeReport,
-    RetentionReport,
+    Checkpoint, CoverageFlags, DoctorReport, DoctorSource, ExportReport, NormalizedEvent,
+    PurgeReport, RetentionReport,
+};
+use crate::permissions::{
+    create_private_file, prepare_database_files, prepare_private_dir, prepare_private_file,
 };
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
@@ -26,7 +29,8 @@ const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql")
 const MIGRATION_7: &str = include_str!("../migrations/0007_local_purge.sql");
 const MIGRATION_8: &str = include_str!("../migrations/0008_search_lookup_index.sql");
 const MIGRATION_9: &str = include_str!("../migrations/0009_unknown_rollout_status.sql");
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+const MIGRATION_10: &str = include_str!("../migrations/0010_completeness_v2.sql");
+pub const LATEST_SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug)]
 pub struct Database {
@@ -60,6 +64,7 @@ pub struct IngestBatch<'a> {
     pub byte_offset: u64,
     pub ordinal: u64,
     pub current_turn_id: Option<&'a str>,
+    pub clean_eof: bool,
     pub events: &'a [NormalizedEvent],
 }
 
@@ -83,8 +88,12 @@ impl Database {
 
     pub fn open_with_blobs(path: &Path, blob_dir: &Path, inline_blob_bytes: usize) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create database directory {}", parent.display()))?;
+            prepare_private_dir(parent, "Observer data")?;
+        }
+        if fs::symlink_metadata(path).is_ok() {
+            prepare_private_file(path, "Observer database")?;
+        } else {
+            drop(create_private_file(path, "Observer database")?);
         }
         let database = Self {
             path: path.to_path_buf(),
@@ -93,6 +102,7 @@ impl Database {
         };
         database.initialize_blob_dir()?;
         let _ = database.connect()?;
+        prepare_database_files(path)?;
         Ok(database)
     }
 
@@ -105,28 +115,7 @@ impl Database {
     }
 
     fn initialize_blob_dir(&self) -> Result<()> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&self.blob_dir)
-            .with_context(|| format!("create blob directory {}", self.blob_dir.display()))?;
-        let metadata = fs::symlink_metadata(&self.blob_dir)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!("blob_dir must be a direct directory");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                anyhow::bail!("blob_dir must be owned by the current user with mode 0700");
-            }
-        }
-        Ok(())
+        prepare_private_dir(&self.blob_dir, "blob")
     }
 
     fn prepare_blob(&self, event: &NormalizedEvent) -> Result<Option<PreparedBlob>> {
@@ -147,6 +136,7 @@ impl Database {
             builder.mode(0o700);
         }
         builder.create(parent)?;
+        prepare_private_dir(parent, "blob shard")?;
         if !final_path.exists() {
             let temp_path = parent.join(format!(".{stored_hash}.{}.tmp", uuid::Uuid::new_v4()));
             let mut options = OpenOptions::new();
@@ -175,6 +165,7 @@ impl Database {
         {
             anyhow::bail!("existing content-addressed blob does not match expected file");
         }
+        prepare_private_file(&final_path, "Observer blob")?;
         let mut verified = Vec::with_capacity(bytes.len());
         self.open_blob_path(&relative_path)?
             .read_to_end(&mut verified)?;
@@ -315,6 +306,7 @@ impl Database {
             (7, MIGRATION_7),
             (8, MIGRATION_8),
             (9, MIGRATION_9),
+            (10, MIGRATION_10),
         ] {
             if version < target {
                 connection
@@ -322,7 +314,9 @@ impl Database {
                     .with_context(|| format!("apply migration {target:04}"))?;
             }
         }
+        recompute_all_completeness(&connection)?;
         connection.execute_batch("PRAGMA integrity_check;")?;
+        prepare_database_files(&self.path)?;
         Ok(())
     }
 
@@ -393,6 +387,7 @@ impl Database {
         let mut inserted = 0;
         let mut deduplicated = 0;
         let mut last_event_seq: Option<i64> = None;
+        let mut touched_threads = HashSet::new();
         for event in batch.events {
             if purged_threads.contains(&event.thread_key) {
                 deduplicated += 1;
@@ -469,6 +464,8 @@ impl Database {
             inserted += 1;
             if stored_event.projectable {
                 project_event(&transaction, &stored_event, event_seq)?;
+                update_event_coverage(&transaction, &stored_event)?;
+                touched_threads.insert(stored_event.thread_key.clone());
                 let reference_key = projection_reference_key(&stored_event);
                 if let Some(blob) = prepared_blob
                     .as_ref()
@@ -500,6 +497,28 @@ impl Database {
                     batch.byte_offset as i64, batch.ordinal as i64, batch.current_turn_id,
                     last_event_seq, now_ms()],
         )?;
+        if batch.clean_eof {
+            let turn_keys = {
+                let mut statement = transaction.prepare(
+                    "SELECT DISTINCT thread_key,turn_id FROM raw_events
+                     WHERE source_id=?1 AND epoch_id=?2 AND turn_id IS NOT NULL",
+                )?;
+                statement
+                    .query_map(params![batch.source_id, batch.epoch_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (thread_key, turn_id) in turn_keys {
+                let mut coverage = load_coverage(&transaction, &thread_key, &turn_id)?;
+                coverage.durable_eof_reached = true;
+                store_coverage(&transaction, &thread_key, &turn_id, &coverage)?;
+                touched_threads.insert(thread_key);
+            }
+        }
+        for thread_key in touched_threads {
+            recompute_thread_completeness(&transaction, &thread_key)?;
+        }
         transaction.commit()?;
         Ok((inserted, deduplicated))
     }
@@ -581,9 +600,27 @@ impl Database {
             "UPDATE source_epochs SET closed_at_ms=?1,close_reason=?2 WHERE source_id=?3 AND epoch_id=?4",
             params![now_ms(), reason, source_id, epoch_id],
         )?;
+        let turn_keys = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT thread_key,turn_id FROM raw_events
+                 WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'' AND turn_id IS NOT NULL",
+            )?;
+            statement
+                .query_map(params![source_id, epoch_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut thread_keys = HashSet::new();
+        for (thread_key, turn_id) in turn_keys {
+            let mut coverage = load_coverage(&transaction, &thread_key, &turn_id)?;
+            coverage.source_disconnect_count = coverage.source_disconnect_count.saturating_add(1);
+            coverage.live_epoch_contiguous = false;
+            store_coverage(&transaction, &thread_key, &turn_id, &coverage)?;
+            thread_keys.insert(thread_key);
+        }
         transaction.execute(
-            "UPDATE threads SET runtime_status_stale=1,
-               completeness_reasons_json='[\"source_disconnected\"]'
+            "UPDATE threads SET runtime_status_stale=1
              WHERE thread_key IN (SELECT DISTINCT thread_key FROM raw_events WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'')",
             params![source_id, epoch_id],
         )?;
@@ -592,6 +629,9 @@ impl Database {
              WHERE source_id=?1 AND epoch_id=?2 AND state='pending'",
             params![source_id, epoch_id],
         )?;
+        for thread_key in thread_keys {
+            recompute_thread_completeness(&transaction, &thread_key)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -599,6 +639,14 @@ impl Database {
     pub fn max_event_seq(&self) -> Result<i64> {
         Ok(self.connect()?.query_row(
             "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='raw_events'),0)",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn legacy_redaction_event_count(&self) -> Result<i64> {
+        Ok(self.connect()?.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE redaction_json NOT LIKE '%known-secrets-v2%'",
             [],
             |row| row.get(0),
         )?)
@@ -815,8 +863,14 @@ impl Database {
                 .as_object_mut()
                 .map(|event| event.remove("blobRelativePath"));
         }
+        let legacy_redaction_events = events
+            .iter()
+            .filter(|event| event["redaction"]["ruleVersion"] != "known-secrets-v2")
+            .count();
         let export = json!({
             "format":"codex-local-observer-export-v1","exportedAtMs":now_ms(),
+            "privacy":{"legacyRedactionEvents":legacy_redaction_events,
+              "warning":if legacy_redaction_events > 0 { Some("legacy redaction records were not reprocessed") } else { None }},
             "thread":thread,"turns":turns,"items":items,"rawEvents":events
         });
         write_private_new(output, &serde_json::to_vec_pretty(&export)?)?;
@@ -826,6 +880,7 @@ impl Database {
             turns: turns.len(),
             items: items.len(),
             raw_events: events.len(),
+            legacy_redaction_events,
         })
     }
 
@@ -1130,6 +1185,7 @@ impl Database {
         };
         for (seq, event) in &events {
             project_event(&transaction, event, *seq)?;
+            update_event_coverage(&transaction, event)?;
             let reference_key = projection_reference_key(event);
             if let Some(blob_id) = event
                 .blob_id
@@ -1150,6 +1206,7 @@ impl Database {
                 )?;
             }
         }
+        recompute_all_completeness(&transaction)?;
         transaction.commit()?;
         Ok(events.len())
     }
@@ -1179,6 +1236,252 @@ impl Database {
             .query_map(rusqlite::params_from_iter(parameters), mapper)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn load_coverage(
+    connection: &Connection,
+    thread_key: &str,
+    turn_id: &str,
+) -> Result<CoverageFlags> {
+    let stored = connection
+        .query_row(
+            "SELECT coverage_json FROM turns WHERE thread_key=?1 AND turn_id=?2",
+            params![thread_key, turn_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default())
+}
+
+fn coverage_state(coverage: &CoverageFlags) -> (&'static str, Vec<&'static str>) {
+    let durable_any =
+        coverage.durable_started || coverage.durable_terminal || coverage.durable_eof_reached;
+    let live_any = coverage.live_started
+        || coverage.live_terminal
+        || coverage.live_epoch_id.is_some()
+        || coverage.source_disconnect_count > 0;
+    if coverage.coverage_evidence_retained_incomplete {
+        return (
+            if durable_any {
+                "durable_partial"
+            } else if live_any {
+                "live_partial"
+            } else {
+                "metadata_only"
+            },
+            vec!["coverage_evidence_retained_incomplete"],
+        );
+    }
+    if durable_any {
+        if coverage.durable_started && coverage.durable_terminal && coverage.durable_eof_reached {
+            return ("durable_complete", Vec::new());
+        }
+        let mut reasons = Vec::new();
+        if !coverage.durable_started {
+            reasons.push("durable_turn_start_missing");
+        }
+        if !coverage.durable_terminal {
+            reasons.push("durable_turn_not_terminal");
+        }
+        if !coverage.durable_eof_reached {
+            reasons.push("durable_eof_not_reached");
+        }
+        return ("durable_partial", reasons);
+    }
+    if live_any {
+        if coverage.live_started
+            && coverage.live_terminal
+            && coverage.live_epoch_contiguous
+            && coverage.source_disconnect_count == 0
+            && coverage.decode_error_count == 0
+        {
+            return ("live_complete", Vec::new());
+        }
+        let mut reasons = Vec::new();
+        if !coverage.live_started {
+            reasons.push("attached_after_turn_started");
+        }
+        if !coverage.live_terminal {
+            reasons.push("live_turn_not_terminal");
+        }
+        if !coverage.live_epoch_contiguous {
+            reasons.push("live_epoch_incomplete");
+        }
+        if coverage.source_disconnect_count > 0 {
+            reasons.push("source_disconnected");
+        }
+        if coverage.decode_error_count > 0 {
+            reasons.push("live_decode_error");
+        }
+        return ("live_partial", reasons);
+    }
+    ("metadata_only", Vec::new())
+}
+
+fn store_coverage(
+    connection: &Connection,
+    thread_key: &str,
+    turn_id: &str,
+    coverage: &CoverageFlags,
+) -> Result<()> {
+    let (state, reasons) = coverage_state(coverage);
+    connection.execute(
+        "UPDATE turns SET coverage_json=?1,capture_completeness=?2,completeness_reasons_json=?3
+         WHERE thread_key=?4 AND turn_id=?5",
+        params![
+            serde_json::to_string(coverage)?,
+            state,
+            serde_json::to_string(&reasons)?,
+            thread_key,
+            turn_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_event_coverage(connection: &Connection, event: &NormalizedEvent) -> Result<()> {
+    let Some(turn_id) = event.turn_id.as_deref() else {
+        return Ok(());
+    };
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_key=?1 AND turn_id=?2)",
+        params![event.thread_key, turn_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let mut coverage = load_coverage(connection, &event.thread_key, turn_id)?;
+    if event.decode_status == "error" {
+        coverage.decode_error_count = coverage.decode_error_count.saturating_add(1);
+        if event.durability == "transient" {
+            coverage.live_epoch_contiguous = false;
+        }
+    } else if event.decode_status == "unknown" {
+        coverage.unknown_event_count = coverage.unknown_event_count.saturating_add(1);
+    }
+    store_coverage(connection, &event.thread_key, turn_id, &coverage)
+}
+
+fn recompute_thread_completeness(connection: &Connection, thread_key: &str) -> Result<()> {
+    let turns = {
+        let mut statement = connection.prepare(
+            "SELECT capture_completeness,completeness_reasons_json,coverage_json
+             FROM turns WHERE thread_key=?1",
+        )?;
+        statement
+            .query_map([thread_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let (state, reasons) = if turns.is_empty() {
+        ("metadata_only", Vec::<String>::new())
+    } else {
+        let mut reasons = std::collections::BTreeSet::new();
+        let mut has_ephemeral_lost = false;
+        let mut has_partial = false;
+        let mut has_durable_evidence = false;
+        let mut all_durable_complete = true;
+        let mut has_live_only_complete = false;
+        for (turn_state, turn_reasons, coverage_json) in &turns {
+            let coverage: CoverageFlags = serde_json::from_str(coverage_json).unwrap_or_default();
+            has_durable_evidence |= coverage.durable_started
+                || coverage.durable_terminal
+                || coverage.durable_eof_reached;
+            has_ephemeral_lost |= turn_state == "ephemeral_lost";
+            has_partial |= turn_state.ends_with("_partial");
+            all_durable_complete &= turn_state == "durable_complete";
+            has_live_only_complete |= turn_state == "live_complete";
+            if let Ok(values) = serde_json::from_str::<Vec<String>>(turn_reasons) {
+                reasons.extend(values);
+            }
+        }
+        let state = if has_ephemeral_lost {
+            "ephemeral_lost"
+        } else if has_partial {
+            if has_durable_evidence {
+                "durable_partial"
+            } else {
+                "live_partial"
+            }
+        } else if all_durable_complete {
+            "durable_complete"
+        } else if has_live_only_complete {
+            reasons.insert("contains_live_only_turns".into());
+            "live_complete"
+        } else {
+            "metadata_only"
+        };
+        (state, reasons.into_iter().collect())
+    };
+    connection.execute(
+        "UPDATE threads SET capture_completeness=?1,completeness_reasons_json=?2 WHERE thread_key=?3",
+        params![state, serde_json::to_string(&reasons)?, thread_key],
+    )?;
+    Ok(())
+}
+
+fn recompute_all_completeness(connection: &Connection) -> Result<()> {
+    let retained_incomplete = connection
+        .query_row(
+            "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        > 0;
+    let turn_keys = {
+        let mut statement = connection.prepare("SELECT thread_key,turn_id FROM turns")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (thread_key, turn_id) in &turn_keys {
+        let mut coverage = load_coverage(connection, thread_key, turn_id)?;
+        let (decode_errors, unknown_events, durable_started, durable_terminal):
+            (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = connection.query_row(
+            "SELECT
+               SUM(CASE WHEN decode_status='error' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN decode_status='unknown' THEN 1 ELSE 0 END),
+               MAX(CASE WHEN durability='durable' AND method IN ('event/task_started','event/turn_started') THEN 1 ELSE 0 END),
+               MAX(CASE WHEN durability='durable' AND method IN ('event/task_complete','event/turn_complete') THEN 1 ELSE 0 END)
+             FROM raw_events WHERE thread_key=?1 AND turn_id=?2",
+            params![thread_key, turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        coverage.decode_error_count = coverage
+            .decode_error_count
+            .max(decode_errors.unwrap_or(0).max(0) as u64);
+        coverage.unknown_event_count = coverage
+            .unknown_event_count
+            .max(unknown_events.unwrap_or(0).max(0) as u64);
+        coverage.durable_started |= durable_started.unwrap_or(0) > 0;
+        coverage.durable_terminal |= durable_terminal.unwrap_or(0) > 0;
+        coverage.durable_eof_reached |= coverage.durable_terminal;
+        coverage.coverage_evidence_retained_incomplete |= retained_incomplete;
+        store_coverage(connection, thread_key, turn_id, &coverage)?;
+    }
+    let thread_keys = {
+        let mut statement = connection.prepare("SELECT thread_key FROM threads")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for thread_key in thread_keys {
+        recompute_thread_completeness(connection, &thread_key)?;
+    }
+    Ok(())
 }
 
 fn project_event(
@@ -1334,21 +1637,12 @@ fn project_event(
                     },
                 )?;
                 transaction.execute(
-                        "UPDATE threads SET capture_completeness='durable_complete',completeness_reasons_json='[]',runtime_status='idle' WHERE thread_key=?1",
-                        [&event.thread_key],
-                    )?;
+                    "UPDATE threads SET runtime_status='idle' WHERE thread_key=?1",
+                    [&event.thread_key],
+                )?;
             }
         }
         _ => {}
-    }
-
-    if event.top_type != "session_meta" && event.durability == "durable" {
-        transaction.execute(
-            "UPDATE threads SET capture_completeness=CASE WHEN capture_completeness='durable_complete' THEN capture_completeness ELSE 'durable_partial' END,
-               completeness_reasons_json=CASE WHEN capture_completeness='durable_complete' THEN completeness_reasons_json ELSE '[\"durable_rollout_may_still_be_growing\"]' END
-             WHERE thread_key=?1",
-            [&event.thread_key],
-        )?;
     }
 
     if event.phase == "request"
@@ -1469,8 +1763,7 @@ fn project_live_lifecycle(
                     tx, event, event_seq, turn_id, "running", time, None, true, false,
                 )?;
                 tx.execute(
-                    "UPDATE threads SET runtime_status='active',runtime_status_stale=0,
-                       capture_completeness='live_partial',completeness_reasons_json='[\"live_turn_not_terminal\"]'
+                    "UPDATE threads SET runtime_status='active',runtime_status_stale=0
                      WHERE thread_key=?1",
                     [&event.thread_key],
                 )?;
@@ -1505,21 +1798,8 @@ fn project_live_lifecycle(
                     true,
                 )?;
                 tx.execute(
-                    "UPDATE threads SET runtime_status='idle',runtime_status_stale=0,
-                       capture_completeness=?1,completeness_reasons_json=?2 WHERE thread_key=?3",
-                    params![
-                        if live_started {
-                            "live_complete"
-                        } else {
-                            "live_partial"
-                        },
-                        if live_started {
-                            "[]"
-                        } else {
-                            "[\"attached_after_turn_started\"]"
-                        },
-                        event.thread_key
-                    ],
+                    "UPDATE threads SET runtime_status='idle',runtime_status_stale=0 WHERE thread_key=?1",
+                    [&event.thread_key],
                 )?;
             }
         }
@@ -1540,12 +1820,23 @@ fn upsert_live_turn(
     live_started: bool,
     live_terminal: bool,
 ) -> Result<()> {
-    let complete = live_started && live_terminal;
-    let coverage = json!({
-        "liveStarted":live_started,"liveTerminal":live_terminal,"liveEpochContiguous":complete,
-        "durableStarted":false,"durableTerminal":false,"durableEofReached":false,
-        "decodeErrorCount":0,"unknownEventCount":0,"sourceDisconnectCount":0
-    });
+    let mut coverage = load_coverage(tx, &event.thread_key, turn_id)?;
+    if live_started {
+        if coverage.live_epoch_id.as_deref() != Some(event.epoch_id.as_str()) {
+            coverage.live_epoch_id = Some(event.epoch_id.clone());
+            coverage.live_started = true;
+            coverage.live_terminal = false;
+            coverage.live_epoch_contiguous = true;
+        } else {
+            coverage.live_started = true;
+        }
+    }
+    if live_terminal {
+        coverage.live_terminal = true;
+        coverage.live_epoch_contiguous &= coverage.live_started
+            && coverage.live_epoch_id.as_deref() == Some(event.epoch_id.as_str());
+    }
+    let (completeness, reasons) = coverage_state(&coverage);
     tx.execute(
         "INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
            started_at_ms,completed_at_ms,projection_json,provenance_json,last_event_seq)
@@ -1559,10 +1850,11 @@ fn upsert_live_turn(
            projection_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.projection_json ELSE excluded.projection_json END,
            provenance_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.provenance_json ELSE excluded.provenance_json END,
            last_event_seq=excluded.last_event_seq",
-        params![event.thread_key,turn_id,status,if complete {"live_complete"} else {"live_partial"},
-            if complete {"[]"} else {"[\"live_epoch_incomplete\"]"},coverage.to_string(),started,completed,
+        params![event.thread_key,turn_id,status,completeness,
+            serde_json::to_string(&reasons)?,serde_json::to_string(&coverage)?,started,completed,
             event.payload.to_string(),json!({"eventSeq":seq,"source":"app_server","epoch":event.epoch_id}).to_string(),seq],
     )?;
+    store_coverage(tx, &event.thread_key, turn_id, &coverage)?;
     Ok(())
 }
 
@@ -1573,21 +1865,10 @@ fn upsert_turn(
     update: TurnUpdate<'_>,
 ) -> Result<()> {
     let terminal = matches!(update.status, "completed" | "failed" | "interrupted");
-    let completeness = if terminal {
-        "durable_complete"
-    } else {
-        "durable_partial"
-    };
-    let reasons = if terminal {
-        "[]"
-    } else {
-        "[\"durable_turn_not_terminal\"]"
-    };
-    let coverage = json!({
-        "liveStarted":false,"liveTerminal":false,"liveEpochContiguous":false,
-        "durableStarted":update.durable_started,"durableTerminal":terminal,"durableEofReached":terminal,
-        "decodeErrorCount":0,"unknownEventCount":0,"sourceDisconnectCount":0
-    });
+    let mut coverage = load_coverage(tx, &event.thread_key, update.turn_id)?;
+    coverage.durable_started |= update.durable_started;
+    coverage.durable_terminal |= terminal;
+    let (completeness, reasons) = coverage_state(&coverage);
     tx.execute(
         "INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
            started_at_ms,completed_at_ms,execution_context_json,projection_json,provenance_json,last_event_seq)
@@ -1598,10 +1879,11 @@ fn upsert_turn(
            completed_at_ms=COALESCE(excluded.completed_at_ms,turns.completed_at_ms),
            execution_context_json=COALESCE(excluded.execution_context_json,turns.execution_context_json),
            projection_json=excluded.projection_json,provenance_json=excluded.provenance_json,last_event_seq=excluded.last_event_seq",
-        params![event.thread_key, update.turn_id, update.status, completeness, reasons, coverage.to_string(), update.started, update.completed,
+        params![event.thread_key, update.turn_id, update.status, completeness, serde_json::to_string(&reasons)?, serde_json::to_string(&coverage)?, update.started, update.completed,
                 if event.top_type == "turn_context" { Some(event.payload.to_string()) } else { None },
                 event.payload.to_string(), json!({"eventSeq":seq}).to_string(), seq],
     )?;
+    store_coverage(tx, &event.thread_key, update.turn_id, &coverage)?;
     Ok(())
 }
 
@@ -1813,6 +2095,29 @@ mod tests {
     use crate::ingest::Importer;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[test]
+    fn database_and_data_directory_are_private_on_disk() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new()?;
+        let data = temp.path().join("observer-data");
+        fs::create_dir(&data)?;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755))?;
+        let path = data.join("custom.database");
+        let database = Database::open(&path)?;
+        database.migrate()?;
+        assert_eq!(fs::metadata(&data)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+
+        let target = temp.path().join("target.sqlite");
+        fs::write(&target, b"")?;
+        let link = data.join("linked.sqlite");
+        symlink(&target, &link)?;
+        assert!(Database::open(&link).is_err());
+        Ok(())
+    }
+
     fn version_four_database(temp: &TempDir) -> Result<Database> {
         let database = Database::open(&temp.path().join("observer.sqlite"))?;
         let connection = database.connect()?;
@@ -1852,7 +2157,7 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 9);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
         assert!(blob_table);
         assert!(relation_column);
         assert!(purge_table);
@@ -1956,7 +2261,7 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(status, "unknown");
-        assert_eq!(version, 9);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
         Ok(())
     }
 
@@ -1999,7 +2304,10 @@ mod tests {
         database.migrate()?;
         let report = Database::doctor_read_only(&config)?;
         assert_eq!(report.status, "healthy");
-        assert_eq!(report.database, "ok; schema_version=9");
+        assert_eq!(
+            report.database,
+            format!("ok; schema_version={LATEST_SCHEMA_VERSION}")
+        );
         Ok(())
     }
 

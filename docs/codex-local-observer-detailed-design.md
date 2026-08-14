@@ -1411,6 +1411,8 @@ raw input bytes
 
 `redaction_json` 保存规则版本和被修改 JSON Pointer。
 
+V1 schema 10 起采用 `known-secrets-v2`：除上述字段外，递归处理 HTTP/MCP auth、URL query token/signature 与常见 credential/JWT 形态；image/audio data URI 或带明确 media type 的 base64 正文只保存 media type、估算大小和 keyed fingerprint marker。升级不会自动重写 schema 9 及更早版本已持久化的 raw/blob/projection，health、Viewer 与 export 必须持续显示 legacy redaction 数量和风险，直到用户显式 purge/reimport。
+
 ### 18.3 Retention
 
 默认建议：

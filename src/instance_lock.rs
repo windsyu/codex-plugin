@@ -1,10 +1,12 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(not(unix))]
 use anyhow::bail;
 use anyhow::{Context, Result};
+
+use crate::permissions::{prepare_private_dir, prepare_private_file};
 
 /// Advisory process lock guarding every writer that targets one Observer database.
 pub struct InstanceLock {
@@ -17,7 +19,7 @@ impl InstanceLock {
         let directory = database_path
             .parent()
             .context("database path must have a parent directory")?;
-        fs::create_dir_all(directory)?;
+        prepare_private_dir(directory, "Observer data")?;
         let path = directory.join("observer.lock");
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
@@ -29,6 +31,7 @@ impl InstanceLock {
         let file = options
             .open(&path)
             .with_context(|| format!("open Observer lock {}", path.display()))?;
+        prepare_private_file(&path, "Observer lock")?;
         lock_exclusive_nonblocking(&file)
             .with_context(|| format!("another Observer writer already owns {}", path.display()))?;
         Ok(Self { file, path })

@@ -65,7 +65,8 @@ async function connect() {
     const [health, threads, sources] = await Promise.all([api('/v1/health'), apiAll('/v1/threads?limit=200'), api('/v1/sources')]);
     sessionStorage.setItem('observer-token', state.token);
     $('health').className = `health health-${health.data.status}`;
-    $('health').textContent = `${health.data.status} · event ${health.asOfEventSeq}`;
+    const legacy = health.data.privacy?.legacyRedactionEvents || 0;
+    $('health').textContent = `${health.data.status} · event ${health.asOfEventSeq}${legacy ? ` · ${legacy} legacy privacy records` : ''}`;
     $('auth').classList.add('hidden');
     $('workspace').classList.remove('hidden');
     state.threads = threads.data;

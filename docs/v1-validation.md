@@ -2,7 +2,7 @@
 
 Date: 2026-08-14  
 Observer version: 0.1.0  
-Observer schema: 9  
+Observer schema: 10
 Codex source baseline: `41ece455b7fa7166f4fc38522952afdaa2604e18`  
 Codex CLI used for live compatibility: 0.146.1  
 App Server v2 schema SHA-256: `1a193fc005458d9a06642adf81350fc6280f64f50558ab34cdd0b75e20d164d9`
@@ -10,7 +10,7 @@ App Server v2 schema SHA-256: `1a193fc005458d9a06642adf81350fc6280f64f50558ab34c
 ## Automated gates
 
 ```text
-cargo test --all-targets                         45 passed
+cargo test --all-targets                         50 passed
 cargo clippy --all-targets -- -D warnings       passed
 cargo build --release                            passed
 node --check web/app.js                          passed
@@ -27,6 +27,7 @@ git diff --check                                 passed
 - 两个 `CODEX_HOME` 中相同 Codex Thread ID 的复合身份隔离；
 - token/Origin、secret redaction、symlink/no-follow、blob Range、只读 pending request；
 - export 不覆盖且只输出脱敏数据；purge 审计、抑制墓碑与强制重放不复活。
+- schema 10 私有文件 mode 自动收紧、redaction v2 与多 Turn completeness/clean EOF 聚合。
 
 ## Release binary E2E
 

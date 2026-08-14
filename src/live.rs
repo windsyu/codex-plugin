@@ -341,6 +341,7 @@ fn ingest_envelope(
         byte_offset: 0,
         ordinal: session.source_seq as u64,
         current_turn_id: current_turn_id.as_deref(),
+        clean_eof: false,
         events: &events,
     })?;
     Ok(())
@@ -356,7 +357,7 @@ fn normalize_envelope(
     let source_fingerprint = blake3::keyed_hash(&session.fingerprint_key, &original)
         .to_hex()
         .to_string();
-    let (redacted, redaction_audit) = redact::redact(envelope);
+    let (redacted, redaction_audit) = redact::redact(envelope, &session.fingerprint_key);
     let stored = serde_json::to_string(&redacted)?;
     let method = redacted
         .get("method")

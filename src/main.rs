@@ -5,6 +5,7 @@ mod ingest;
 mod instance_lock;
 mod live;
 mod model;
+mod permissions;
 mod redact;
 mod watcher;
 
@@ -72,6 +73,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    permissions::set_private_umask();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

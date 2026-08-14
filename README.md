@@ -11,7 +11,8 @@
 - 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
 - SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；
-- 已知 secret key、credential prefix 和环境变量值入库前脱敏；
+- redaction v2 在入库前处理 secret/header/MCP auth、URL token/signature，并以不可还原 marker 丢弃 image/audio base64 正文；
+- Thread completeness 从全部 Turn coverage 聚合，clean EOF、decode/unknown/disconnect 计数不会再被后续事件清零；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
 - Viewer 自动消费 Thread/Turn/Item/Search cursor 与 raw event sequence，不静默截断长时间线；
@@ -22,6 +23,7 @@
 - `export` 输出独占创建的 `0600` 脱敏 JSON；`purge --observer-copy-only --yes` 删除并持续抑制本地副本，写入无正文审计；
 - 超过 `inline_blob_bytes` 的已脱敏 raw JSON 使用内容寻址 blob 原子落盘；投影保存引用，支持 orphan sweep、引用感知 retention 和安全 Range 下载；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
+- Observer 数据目录为 `0700`，数据库/WAL/SHM、lock、token、key 和 blob 为 `0600`；当前用户拥有的旧宽松 mode 会自动收紧；
 - 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
 - live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
@@ -145,6 +147,7 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 - Web Viewer 仅渲染已脱敏副本，JSON 使用 `textContent`，不执行 Markdown、HTML、SVG 或 ANSI；
 - blob 路径完全由服务端生成，下载强制 attachment，单 Range、并发上限 4；文件使用 `O_NOFOLLOW` 打开；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
+- redaction v2 不自动重写历史 v1 记录；health、Viewer 和 export 会报告 legacy record 警告；
 - API Router 不存在 POST/PUT/PATCH/DELETE 业务路由；
 - Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；
 - App Server transport 仍为官方实验能力，因此默认关闭，协议不兼容时退回 store-only。

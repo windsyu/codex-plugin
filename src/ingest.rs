@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 use crate::config::{Config, SourceConfig};
 use crate::db::{Database, IngestBatch, classify_item, now_ms, summary_text};
 use crate::model::{ImportReport, NormalizedEvent};
+use crate::permissions::{prepare_private_dir, prepare_private_file};
 use crate::redact;
 
 pub struct Importer<'a> {
@@ -141,6 +142,7 @@ impl<'a> Importer<'a> {
             checkpoint.byte_offset
         };
         let mut logical_ordinal = if compressed { 0 } else { start_ordinal };
+        let mut clean_eof = true;
         let mut reader = open_rollout_reader(
             path,
             compressed,
@@ -156,6 +158,7 @@ impl<'a> Importer<'a> {
             self.config.capture.max_raw_event_bytes,
         )? {
             if !record.terminated && !compressed {
+                clean_eof = false;
                 break;
             }
             consumed_bytes += record.bytes_read;
@@ -193,6 +196,7 @@ impl<'a> Importer<'a> {
                     if compressed { 0 } else { consumed_bytes },
                     logical_ordinal,
                     current_turn.as_deref(),
+                    false,
                     &mut events,
                     report,
                 )?;
@@ -210,6 +214,7 @@ impl<'a> Importer<'a> {
             },
             logical_ordinal,
             current_turn.as_deref(),
+            clean_eof,
             &mut events,
             report,
         )?;
@@ -238,10 +243,11 @@ impl<'a> Importer<'a> {
         byte_offset: u64,
         ordinal: u64,
         current_turn_id: Option<&str>,
+        clean_eof: bool,
         events: &mut Vec<NormalizedEvent>,
         report: &mut ImportReport,
     ) -> Result<()> {
-        if events.is_empty() {
+        if events.is_empty() && !clean_eof {
             return Ok(());
         }
         let (inserted, deduplicated) = self.database.ingest_batch(IngestBatch {
@@ -252,6 +258,7 @@ impl<'a> Importer<'a> {
             byte_offset,
             ordinal,
             current_turn_id,
+            clean_eof,
             events,
         })?;
         report.events_inserted += inserted;
@@ -293,7 +300,7 @@ impl<'a> Importer<'a> {
                 Some(error),
             ),
         };
-        let (redacted, redaction_audit) = redact::redact(&raw);
+        let (redacted, redaction_audit) = redact::redact(&raw, &self.fingerprint_key);
         let stored = serde_json::to_string(&redacted).expect("JSON serialization cannot fail");
         let top_type = redacted
             .get("type")
@@ -641,11 +648,10 @@ fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Resu
 
 pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        validate_private_parent(parent, "fingerprint key")?;
+        prepare_private_dir(parent, "fingerprint key")?;
     }
     if fs::symlink_metadata(path).is_ok() {
-        validate_private_file(path, "fingerprint key")?;
+        prepare_private_file(path, "fingerprint key")?;
         let bytes =
             fs::read(path).with_context(|| format!("read fingerprint key {}", path.display()))?;
         return bytes
@@ -671,11 +677,10 @@ pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
 
 pub fn load_or_create_token(path: &Path) -> Result<String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        validate_private_parent(parent, "bearer token")?;
+        prepare_private_dir(parent, "bearer token")?;
     }
     if fs::symlink_metadata(path).is_ok() {
-        validate_private_file(path, "bearer token")?;
+        prepare_private_file(path, "bearer token")?;
         return Ok(fs::read_to_string(path)?.trim().to_string());
     }
     let mut bytes = [0_u8; 32];
@@ -692,36 +697,6 @@ pub fn load_or_create_token(path: &Path) -> Result<String> {
     writeln!(file, "{token}")?;
     file.sync_all()?;
     Ok(token)
-}
-
-fn validate_private_file(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("{label} must be a direct regular file");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            anyhow::bail!("{label} must be owned by the current user with mode 0600");
-        }
-        validate_private_parent(path.parent().context("private file has no parent")?, label)?;
-    }
-    Ok(())
-}
-
-fn validate_private_parent(path: &Path, label: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(path)?;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
-            anyhow::bail!("{label} directory must not be writable by group or other users");
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (path, label);
-    Ok(())
 }
 
 fn parse_time_ms(value: &str) -> Option<i64> {
@@ -776,6 +751,123 @@ mod tests {
         let third = importer.import_all()?;
         assert_eq!(third.events_inserted, 1);
         assert_eq!(database.max_event_seq()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn thread_completeness_aggregates_every_turn_and_clean_eof() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-completeness-thread.jsonl");
+        let mut file = File::create(&rollout)?;
+        for value in [
+            json!({"type":"session_meta","payload":{"id":"completeness-thread"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}),
+        ] {
+            writeln!(file, "{value}")?;
+        }
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        importer.import_all()?;
+        let connection = database.connect()?;
+        let thread_state: String = connection.query_row(
+            "SELECT capture_completeness FROM threads WHERE codex_thread_id='completeness-thread'",
+            [],
+            |row| row.get(0),
+        )?;
+        let turn_states = {
+            let mut statement = connection.prepare(
+                "SELECT turn_id,capture_completeness,json_extract(coverage_json,'$.durableEofReached')
+                 FROM turns ORDER BY turn_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        assert_eq!(thread_state, "durable_partial");
+        assert_eq!(
+            turn_states,
+            vec![
+                ("turn-1".into(), "durable_complete".into(), true),
+                ("turn-2".into(), "durable_partial".into(), true)
+            ]
+        );
+        drop(connection);
+
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}})
+        )?;
+        file.sync_all()?;
+        importer.import_all()?;
+        let complete: String = database.connect()?.query_row(
+            "SELECT capture_completeness FROM threads WHERE codex_thread_id='completeness-thread'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(complete, "durable_complete");
+        Ok(())
+    }
+
+    #[test]
+    fn redaction_v2_secrets_never_reach_database_or_export() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-redaction-v2.jsonl");
+        let media = format!("data:image/png;base64,{}", "A".repeat(256));
+        let mut file = File::create(&rollout)?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"redaction-v2"}})
+        )?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"event_msg","payload":{"type":"mcp_tool_call_begin","turn_id":"turn-redact",
+              "url":"https://example.test/?token=url-secret&view=ok",
+              "auth":{"bearerToken":"mcp-secret"},"image":media}})
+        )?;
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let raw: String = database.connect()?.query_row(
+            "SELECT group_concat(raw_json,'') FROM raw_events",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!raw.contains("url-secret"));
+        assert!(!raw.contains("mcp-secret"));
+        assert!(!raw.contains(&"A".repeat(128)));
+        assert!(raw.contains("media_payload"));
+        let thread_key: String = database.connect()?.query_row(
+            "SELECT thread_key FROM threads WHERE codex_thread_id='redaction-v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let output = temp.path().join("redaction-export.json");
+        let report = database.export_thread(&thread_key, &output)?;
+        assert_eq!(report.legacy_redaction_events, 0);
+        let exported = fs::read_to_string(output)?;
+        assert!(!exported.contains("url-secret"));
+        assert!(!exported.contains("mcp-secret"));
+        assert!(!exported.contains(&"A".repeat(128)));
         Ok(())
     }
 
@@ -1079,7 +1171,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_credentials_reject_symlinks_and_broad_permissions() -> Result<()> {
+    fn private_credentials_reject_symlinks_and_repair_broad_permissions() -> Result<()> {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = TempDir::new()?;
@@ -1093,7 +1185,8 @@ mod tests {
         let broad = temp.path().join("broad-token");
         fs::write(&broad, "secret")?;
         fs::set_permissions(&broad, fs::Permissions::from_mode(0o644))?;
-        assert!(load_or_create_token(&broad).is_err());
+        assert_eq!(load_or_create_token(&broad)?, "secret");
+        assert_eq!(fs::metadata(&broad)?.permissions().mode() & 0o777, 0o600);
         Ok(())
     }
 

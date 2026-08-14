@@ -181,6 +181,7 @@ async fn style_css() -> Response {
 
 async fn health(State(state): State<ApiState>) -> Response {
     let seq = state.database.max_event_seq().unwrap_or(0);
+    let legacy_redaction_events = state.database.legacy_redaction_event_count().unwrap_or(0);
     let sources = state.database.query_json(
         "SELECT source_id,kind,status,last_seen_at_ms,last_error_json FROM sources ORDER BY source_id", &[],
         |row| Ok(json!({
@@ -193,7 +194,9 @@ async fn health(State(state): State<ApiState>) -> Response {
     Json(ApiEnvelope::new(seq, json!({
         "status": if sources.iter().any(|source| source["status"] == "degraded") { "degraded" } else { "healthy" },
         "ready":true,"database":{"migration":"ok","wal":"ok"},"ingest":{"projectionLag":0},
-        "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()}
+        "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()},
+        "privacy":{"redactionRuleVersion":"known-secrets-v2","legacyRedactionEvents":legacy_redaction_events,
+          "warning":if legacy_redaction_events > 0 { Some("legacy records may contain values not covered by redaction v2") } else { None }}
     }))).into_response()
 }
 
