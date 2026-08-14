@@ -4,10 +4,11 @@
 
 ## 已实现
 
-- plain `.jsonl` 与 cold `.jsonl.zst` 扫描；
+- plain `.jsonl` 从 checkpoint byte offset 流式续读，cold `.jsonl.zst` 按 logical ordinal 流式重放；每 500 条事务提交；
 - 文件系统 watcher 触发 200ms debounce rescan，并保留周期全量扫描兜底；
 - active / archived rollout 发现和重复导入幂等；
 - EOF 半行保留、坏 JSON 审计占位、unknown variant 无损保存；
+- 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
 - Thread、Turn、Item、event、search、health、source 和 capabilities REST API；

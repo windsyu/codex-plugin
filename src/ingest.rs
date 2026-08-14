@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -30,6 +30,14 @@ struct LineContext<'a> {
     thread_key: &'a str,
     thread_id: &'a str,
     current_turn: Option<&'a str>,
+}
+
+struct BoundedRecord {
+    line: Vec<u8>,
+    bytes_read: u64,
+    payload_len: usize,
+    terminated: bool,
+    oversize_fingerprint: Option<String>,
 }
 
 impl<'a> Importer<'a> {
@@ -94,7 +102,7 @@ impl<'a> Importer<'a> {
         let representation = if compressed { "zstd" } else { "plain" };
         let metadata =
             fs::metadata(path).with_context(|| format!("stat rollout {}", path.display()))?;
-        let identity = file_identity(path, &metadata);
+        let identity = file_identity(path, &metadata, compressed)?;
         let checkpoint_key =
             URL_SAFE_NO_PAD.encode(blake3::hash(path.to_string_lossy().as_bytes()).as_bytes());
         let mut checkpoint = self.database.checkpoint(&checkpoint_key)?;
@@ -111,26 +119,14 @@ impl<'a> Importer<'a> {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        let bytes = if compressed {
-            let input = File::open(path)?;
-            let mut decoder = zstd::stream::read::Decoder::new(input)
-                .with_context(|| format!("open zstd rollout {}", path.display()))?;
-            let mut bytes = Vec::new();
-            decoder
-                .read_to_end(&mut bytes)
-                .with_context(|| format!("decode zstd rollout {}", path.display()))?;
-            bytes
-        } else {
-            fs::read(path).with_context(|| format!("read rollout {}", path.display()))?
-        };
-
-        let (thread_id, session_meta) = find_thread_identity(&bytes).unwrap_or_else(|| {
-            (
-                thread_id_from_filename(path)
-                    .unwrap_or_else(|| format!("unresolved-{}", &checkpoint_key[..16])),
-                None,
-            )
-        });
+        let (thread_id, session_meta) =
+            find_thread_identity(path, compressed).unwrap_or_else(|| {
+                (
+                    thread_id_from_filename(path)
+                        .unwrap_or_else(|| format!("unresolved-{}", &checkpoint_key[..16])),
+                    None,
+                )
+            });
         let thread_key = thread_key(source_id, &thread_id);
         let archived = path
             .components()
@@ -139,86 +135,84 @@ impl<'a> Importer<'a> {
         let start_ordinal = checkpoint.ordinal;
         let mut current_turn = checkpoint.current_turn_id.clone();
         let mut events = Vec::new();
-        let mut consumed_bytes = 0_u64;
-        let mut logical_ordinal = 0_u64;
-        let mut reader = BufReader::new(bytes.as_slice());
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            let read = reader.read_until(b'\n', &mut line)?;
-            if read == 0 {
+        let mut consumed_bytes = if compressed {
+            0
+        } else {
+            checkpoint.byte_offset
+        };
+        let mut logical_ordinal = if compressed { 0 } else { start_ordinal };
+        let mut reader = open_rollout_reader(
+            path,
+            compressed,
+            if compressed {
+                0
+            } else {
+                checkpoint.byte_offset
+            },
+        )?;
+        while let Some(record) = read_bounded_record(
+            reader.as_mut(),
+            &self.fingerprint_key,
+            self.config.capture.max_raw_event_bytes,
+        )? {
+            if !record.terminated && !compressed {
                 break;
             }
-            if !line.ends_with(b"\n") && !compressed {
-                break;
-            }
-            consumed_bytes += read as u64;
+            consumed_bytes += record.bytes_read;
             logical_ordinal += 1;
             if logical_ordinal <= start_ordinal {
-                update_current_turn_from_line(&line, &mut current_turn);
+                if record.oversize_fingerprint.is_none() {
+                    update_current_turn_from_line(&record.line, &mut current_turn);
+                }
                 continue;
             }
-            let event = self.normalize_line(
-                &line,
-                LineContext {
-                    source_id,
-                    epoch_id: &epoch_id,
-                    source_seq: logical_ordinal as i64,
-                    thread_key: &thread_key,
-                    thread_id: &thread_id,
-                    current_turn: current_turn.as_deref(),
-                },
-            );
+            let context = LineContext {
+                source_id,
+                epoch_id: &epoch_id,
+                source_seq: logical_ordinal as i64,
+                thread_key: &thread_key,
+                thread_id: &thread_id,
+                current_turn: current_turn.as_deref(),
+            };
+            let event = if let Some(fingerprint) = record.oversize_fingerprint {
+                self.normalize_record(&[], context, Some(fingerprint), Some(record.payload_len))
+            } else {
+                self.normalize_line(&record.line, context)
+            };
             if event.decode_status == "error" {
                 report.decode_errors += 1;
             }
             update_current_turn(&event, &mut current_turn);
             events.push(event);
-        }
-
-        // Compressed rollouts are immutable, so a final non-newline record is complete.
-        if compressed && consumed_bytes < bytes.len() as u64 {
-            let rest = &bytes[consumed_bytes as usize..];
-            if !rest.is_empty() {
-                logical_ordinal += 1;
-                if logical_ordinal > start_ordinal {
-                    let event = self.normalize_line(
-                        rest,
-                        LineContext {
-                            source_id,
-                            epoch_id: &epoch_id,
-                            source_seq: logical_ordinal as i64,
-                            thread_key: &thread_key,
-                            thread_id: &thread_id,
-                            current_turn: current_turn.as_deref(),
-                        },
-                    );
-                    if event.decode_status == "error" {
-                        report.decode_errors += 1;
-                    }
-                    update_current_turn(&event, &mut current_turn);
-                    events.push(event);
-                }
-                consumed_bytes = bytes.len() as u64;
+            if events.len() >= 500 {
+                self.commit_batch(
+                    source_id,
+                    &epoch_id,
+                    &checkpoint_key,
+                    &identity,
+                    if compressed { 0 } else { consumed_bytes },
+                    logical_ordinal,
+                    current_turn.as_deref(),
+                    &mut events,
+                    report,
+                )?;
             }
         }
-
-        let (inserted, deduplicated) = self.database.ingest_batch(IngestBatch {
+        self.commit_batch(
             source_id,
-            epoch_id: &epoch_id,
-            checkpoint_key: &checkpoint_key,
-            file_identity: &identity,
-            byte_offset: if compressed {
+            &epoch_id,
+            &checkpoint_key,
+            &identity,
+            if compressed {
                 metadata.len()
             } else {
                 consumed_bytes
             },
-            ordinal: logical_ordinal,
-            current_turn_id: current_turn.as_deref(),
-            events: &events,
-        })?;
-        report.events_inserted += inserted;
-        report.events_deduplicated += deduplicated;
+            logical_ordinal,
+            current_turn.as_deref(),
+            &mut events,
+            report,
+        )?;
         self.database.mark_location(
             source_id,
             &thread_id,
@@ -234,15 +228,59 @@ impl<'a> Importer<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn commit_batch(
+        &self,
+        source_id: &str,
+        epoch_id: &str,
+        checkpoint_key: &str,
+        file_identity: &str,
+        byte_offset: u64,
+        ordinal: u64,
+        current_turn_id: Option<&str>,
+        events: &mut Vec<NormalizedEvent>,
+        report: &mut ImportReport,
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let (inserted, deduplicated) = self.database.ingest_batch(IngestBatch {
+            source_id,
+            epoch_id,
+            checkpoint_key,
+            file_identity,
+            byte_offset,
+            ordinal,
+            current_turn_id,
+            events,
+        })?;
+        report.events_inserted += inserted;
+        report.events_deduplicated += deduplicated;
+        events.clear();
+        Ok(())
+    }
+
     fn normalize_line(&self, line: &[u8], context: LineContext<'_>) -> NormalizedEvent {
+        self.normalize_record(line, context, None, None)
+    }
+
+    fn normalize_record(
+        &self,
+        line: &[u8],
+        context: LineContext<'_>,
+        fingerprint_override: Option<String>,
+        oversize_len: Option<usize>,
+    ) -> NormalizedEvent {
         let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
-        let fingerprint = blake3::keyed_hash(&self.fingerprint_key, trimmed)
-            .to_hex()
-            .to_string();
-        let parsed = if trimmed.len() > self.config.capture.max_raw_event_bytes {
+        let fingerprint = fingerprint_override.unwrap_or_else(|| {
+            blake3::keyed_hash(&self.fingerprint_key, trimmed)
+                .to_hex()
+                .to_string()
+        });
+        let parsed = if let Some(byte_length) = oversize_len {
             Err(format!(
                 "record exceeds max_raw_event_bytes ({})",
-                trimmed.len()
+                byte_length
             ))
         } else {
             serde_json::from_slice::<Value>(trimmed).map_err(|error| error.to_string())
@@ -250,7 +288,7 @@ impl<'a> Importer<'a> {
         let (raw, decode_status, decode_error) = match parsed {
             Ok(value) => (value, "decoded".to_string(), None),
             Err(error) => (
-                json!({"type":"decode_error","payload":{"byteLength":trimmed.len(),"fingerprint":&fingerprint[..16]}}),
+                json!({"type":"decode_error","payload":{"byteLength":oversize_len.unwrap_or(trimmed.len()),"fingerprint":&fingerprint[..16]}}),
                 "error".to_string(),
                 Some(error),
             ),
@@ -352,16 +390,105 @@ fn discover_rollouts(codex_home: &Path) -> Result<Vec<PathBuf>> {
     Ok(files.into_iter().collect())
 }
 
-fn find_thread_identity(bytes: &[u8]) -> Option<(String, Option<Value>)> {
-    let reader = BufReader::new(bytes);
-    for line in reader.lines().take(64) {
-        let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+fn read_bounded_record(
+    reader: &mut dyn BufRead,
+    fingerprint_key: &[u8; 32],
+    max_bytes: usize,
+) -> std::io::Result<Option<BoundedRecord>> {
+    let mut line = Vec::new();
+    let mut bytes_read = 0_u64;
+    let mut payload_len = 0_usize;
+    let mut terminated = false;
+    let mut oversized = false;
+    let mut hasher = blake3::Hasher::new_keyed(fingerprint_key);
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let payload = newline.map_or(buffer, |index| &buffer[..index]);
+        hasher.update(payload);
+        payload_len = payload_len.saturating_add(payload.len());
+        if !oversized {
+            if payload_len <= max_bytes {
+                line.extend_from_slice(payload);
+            } else {
+                oversized = true;
+                line.clear();
+                line.shrink_to(0);
+            }
+        }
+        let consumed = payload.len() + usize::from(newline.is_some());
+        reader.consume(consumed);
+        bytes_read += consumed as u64;
+        if newline.is_some() {
+            terminated = true;
+            if !oversized {
+                line.push(b'\n');
+            }
+            break;
+        }
+    }
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    Ok(Some(BoundedRecord {
+        line,
+        bytes_read,
+        payload_len,
+        terminated,
+        oversize_fingerprint: oversized.then(|| hasher.finalize().to_hex().to_string()),
+    }))
+}
+
+fn open_rollout_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open rollout {}", path.display()))?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("rollout is not a regular file");
+    }
+    Ok(file)
+}
+
+fn open_rollout_reader(path: &Path, compressed: bool, offset: u64) -> Result<Box<dyn BufRead>> {
+    let mut file = open_rollout_file(path)?;
+    if compressed {
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .with_context(|| format!("open zstd rollout {}", path.display()))?;
+        Ok(Box::new(BufReader::new(decoder)))
+    } else {
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+fn find_thread_identity(path: &Path, compressed: bool) -> Option<(String, Option<Value>)> {
+    let mut reader = open_rollout_reader(path, compressed, 0).ok()?;
+    let mut line = Vec::new();
+    for _ in 0..64 {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            break;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
             let payload = value.get("payload")?;
-            if let Some(id) = payload.get("id").and_then(Value::as_str) {
+            if let Some(id) = payload
+                .get("id")
+                .or_else(|| payload.get("session_id"))
+                .and_then(Value::as_str)
+            {
                 return Some((id.to_string(), Some(payload.clone())));
             }
         }
@@ -375,7 +502,15 @@ fn thread_id_from_filename(path: &Path) -> Option<String> {
         .strip_suffix(".zst")
         .unwrap_or(name)
         .strip_suffix(".jsonl")?;
-    stem.rsplit('-').next().map(str::to_string)
+    for start in (0..stem.len()).rev() {
+        let Some(candidate) = stem.get(start..start.saturating_add(36)) else {
+            continue;
+        };
+        if Uuid::parse_str(candidate).is_ok() {
+            return Some(candidate.to_string());
+        }
+    }
+    stem.strip_prefix("rollout-").map(str::to_string)
 }
 
 fn update_current_turn_from_line(line: &[u8], current: &mut Option<String>) {
@@ -452,22 +587,39 @@ pub(crate) fn thread_key(source_id: &str, thread_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{source_id}\0{thread_id}"))
 }
 
-fn file_identity(_path: &Path, metadata: &fs::Metadata) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", metadata.dev(), metadata.ino())
+fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Result<String> {
+    let mut identity = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            format!("{}:{}", metadata.dev(), metadata.ino())
+        }
+        #[cfg(not(unix))]
+        {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|v| v.as_nanos())
+                .unwrap_or(0);
+            format!("{}:{}:{}", path.display(), metadata.len(), modified)
+        }
+    };
+    if compressed {
+        let mut file = open_rollout_file(path)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        identity.push(':');
+        identity.push_str(hasher.finalize().to_hex().as_str());
     }
-    #[cfg(not(unix))]
-    {
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|v| v.as_nanos())
-            .unwrap_or(0);
-        format!("{}:{}:{}", _path.display(), metadata.len(), modified)
-    }
+    Ok(identity)
 }
 
 pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
@@ -629,6 +781,43 @@ mod tests {
         let report = Importer::new(&config, &database)?.import_all()?;
         assert_eq!(report.events_inserted, 3);
         assert_eq!(report.decode_errors, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_line_is_bounded_audited_and_does_not_block_next_record() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        config.capture.max_raw_event_bytes = 1024;
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-thread-oversize.jsonl");
+        let mut file = File::create(&rollout)?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"thread-oversize"}})
+        )?;
+        writeln!(file, "{}", "x".repeat(16 * 1024))?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"future_variant","payload":{"after":true}})
+        )?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let report = Importer::new(&config, &database)?.import_all()?;
+        assert_eq!(report.events_inserted, 3);
+        assert_eq!(report.decode_errors, 1);
+        let connection = database.connect()?;
+        let (status, byte_length): (String, i64) = connection.query_row(
+            "SELECT decode_status,json_extract(raw_json,'$.payload.byteLength')
+             FROM raw_events WHERE source_seq=2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "error");
+        assert!(byte_length > 1024);
         Ok(())
     }
 
@@ -840,6 +1029,127 @@ mod tests {
         fs::write(&broad, "secret")?;
         fs::set_permissions(&broad, fs::Permissions::from_mode(0o644))?;
         assert!(load_or_create_token(&broad).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn importer_streams_more_than_one_transaction_batch() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-thread-batches.jsonl");
+        let mut file = File::create(&rollout)?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"thread-batches"}})
+        )?;
+        for ordinal in 1..=1200 {
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"future_variant","payload":{"ordinal":ordinal}})
+            )?;
+        }
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let report = Importer::new(&config, &database)?.import_all()?;
+        assert_eq!(report.events_inserted, 1201);
+        let connection = database.connect()?;
+        let (events, ordinal): (i64, i64) = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM raw_events),ordinal FROM source_checkpoints LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((events, ordinal), (1201, 1201));
+        Ok(())
+    }
+
+    #[test]
+    fn changed_zstd_content_resets_epoch_even_when_inode_is_reused() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-thread-zstd-fingerprint.jsonl.zst");
+        let write_zstd = |version: i64| -> Result<()> {
+            let file = File::create(&rollout)?;
+            let mut encoder = zstd::stream::write::Encoder::new(file, 1)?;
+            writeln!(
+                encoder,
+                "{}",
+                json!({"type":"session_meta","payload":{"id":"thread-zstd-fingerprint"}})
+            )?;
+            writeln!(
+                encoder,
+                "{}",
+                json!({"type":"future_variant","payload":{"version":version}})
+            )?;
+            encoder.finish()?;
+            Ok(())
+        };
+        write_zstd(1)?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        assert_eq!(importer.import_all()?.events_inserted, 2);
+        write_zstd(2)?;
+        assert_eq!(importer.import_all()?.events_inserted, 1);
+        assert_eq!(database.max_event_seq()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn plain_and_zstd_siblings_share_logical_dedupe_identity() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let contents = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-sibling\"}}\n",
+            "{\"type\":\"future_variant\",\"payload\":{}}\n"
+        );
+        fs::write(sessions.join("rollout-thread-sibling.jsonl"), contents)?;
+        let compressed = File::create(sessions.join("rollout-thread-sibling.jsonl.zst"))?;
+        let mut encoder = zstd::stream::write::Encoder::new(compressed, 1)?;
+        encoder.write_all(contents.as_bytes())?;
+        encoder.finish()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let report = Importer::new(&config, &database)?.import_all()?;
+        assert_eq!(report.files_scanned, 2);
+        assert_eq!(report.events_inserted, 2);
+        assert_eq!(report.events_deduplicated, 2);
+        assert_eq!(database.max_event_seq()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn filename_fallback_preserves_complete_uuid_and_rollout_slug() {
+        assert_eq!(
+            thread_id_from_filename(Path::new(
+                "rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl"
+            )),
+            Some("00000000-0000-7000-8000-000000000001".into())
+        );
+        assert_eq!(
+            thread_id_from_filename(Path::new("rollout-thread-with-slug.jsonl.zst")),
+            Some("thread-with-slug".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollout_reader_rejects_symlink_target() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new()?;
+        let target = temp.path().join("target.jsonl");
+        fs::write(&target, "{}\n")?;
+        let link = temp.path().join("rollout-link.jsonl");
+        symlink(target, &link)?;
+        assert!(open_rollout_reader(&link, false, 0).is_err());
         Ok(())
     }
 }
