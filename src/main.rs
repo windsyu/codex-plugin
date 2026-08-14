@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::sync::watch;
 use tracing::{error, info};
@@ -50,6 +50,24 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Export one redacted Observer thread copy without modifying Codex data.
+    Export {
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Permanently suppress and delete one local Observer thread copy.
+    Purge {
+        #[arg(long)]
+        thread: String,
+        /// Confirm that only the Observer copy, never the Codex store, is targeted.
+        #[arg(long)]
+        observer_copy_only: bool,
+        /// Non-interactive destructive-operation confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -64,6 +82,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
     config.validate()?;
+    if let Command::Doctor { json } = &cli.command {
+        let report = Database::doctor_read_only(&config)?;
+        print_doctor(report, *json)?;
+        return Ok(());
+    }
+    if let Command::Purge {
+        observer_copy_only,
+        yes,
+        ..
+    } = &cli.command
+    {
+        if !observer_copy_only {
+            anyhow::bail!(
+                "purge requires --observer-copy-only; Codex source data is never modified"
+            );
+        }
+        if !yes {
+            anyhow::bail!("purge requires explicit --yes confirmation");
+        }
+    }
     let instance_lock = InstanceLock::acquire(config.database_path())?;
     info!(path = %instance_lock.path().display(), "Observer writer lock acquired");
     let database = Arc::new(Database::open_with_blobs(
@@ -72,11 +110,9 @@ async fn main() -> Result<()> {
         config.capture.inline_blob_bytes,
     )?);
     database.migrate()?;
-    if !matches!(&cli.command, Command::Doctor { .. }) {
-        let swept = database.sweep_orphan_blobs(60 * 60 * 1000)?;
-        if swept > 0 {
-            info!(files = swept, "removed orphan blob files");
-        }
+    let swept = database.sweep_orphan_blobs(60 * 60 * 1000)?;
+    if swept > 0 {
+        info!(files = swept, "removed orphan blob files");
     }
 
     match cli.command {
@@ -84,21 +120,7 @@ async fn main() -> Result<()> {
             let report = Importer::new(&config, database.as_ref())?.import_all()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Doctor { json } => {
-            let report = database.doctor(&config)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("status: {}", report.status);
-                println!("database: {}", report.database);
-                for source in report.sources {
-                    println!(
-                        "source {}: {} ({})",
-                        source.name, source.status, source.path
-                    );
-                }
-            }
-        }
+        Command::Doctor { .. } => unreachable!("doctor exits before writer initialization"),
         Command::RebuildProjections => {
             let rebuilt = database.rebuild_projections()?;
             println!("rebuilt {rebuilt} events");
@@ -109,6 +131,19 @@ async fn main() -> Result<()> {
                 config.storage.blob_retention_days,
                 apply,
             )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Export { thread, output } => {
+            let output = safe_export_output(&config, &output)?;
+            let report = database.export_thread(&thread, &output)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Purge {
+            thread,
+            observer_copy_only: _,
+            yes: _,
+        } => {
+            let report = database.purge_thread(&thread)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {
@@ -177,4 +212,67 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_doctor(report: crate::model::DoctorReport, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("status: {}", report.status);
+        println!("database: {}", report.database);
+        for source in report.sources {
+            println!(
+                "source {}: {} ({})",
+                source.name, source.status, source.path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn safe_export_output(config: &Config, output: &std::path::Path) -> Result<PathBuf> {
+    let absolute = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(output)
+    };
+    let parent = absolute
+        .parent()
+        .context("export output must have a parent directory")?;
+    let file_name = absolute
+        .file_name()
+        .context("export output must have a file name")?;
+    let resolved = std::fs::canonicalize(parent)
+        .with_context(|| format!("resolve export directory {}", parent.display()))?
+        .join(file_name);
+    if config.sources.iter().any(|source| {
+        let source_home =
+            std::fs::canonicalize(&source.codex_home).unwrap_or_else(|_| source.codex_home.clone());
+        resolved.starts_with(source_home)
+    }) {
+        anyhow::bail!("export output must not be inside a Codex source");
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn export_output_cannot_target_codex_source() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&config.sources[0].codex_home)?;
+        let inside = config.sources[0].codex_home.join("export.json");
+        assert!(safe_export_output(&config, &inside).is_err());
+        let outside = temp.path().join("export.json");
+        assert_eq!(
+            safe_export_output(&config, &outside)?,
+            std::fs::canonicalize(temp.path())?.join("export.json")
+        );
+        Ok(())
+    }
 }

@@ -1430,10 +1430,10 @@ V1 运维 CLI 可提供本机显式命令：
 
 ```text
 codex-observerd export --thread <threadKey> --output <path>
-codex-observerd purge --thread <threadKey> --observer-copy-only
+codex-observerd purge --thread <threadKey> --observer-copy-only --yes
 ```
 
-这两个操作属于 Observer 本地数据管理，不是 Codex Thread mutation。`purge` 必须二次确认或显式 `--yes`，并生成不含内容正文的 audit log。
+这两个操作属于 Observer 本地数据管理，不是 Codex Thread mutation。`purge` 必须二次确认或显式 `--yes`，并生成不含内容正文的 audit log。V1 采用持久化 `purged_threads` 抑制墓碑：purge 后的 source rescan/live 只推进 checkpoint，不重新保存该 Thread；具体取舍见 [ADR 0004](decisions/0004-purge-suppression-tombstones.md)。
 
 ## 19. 安全设计
 
@@ -1639,6 +1639,8 @@ observer_retention_deleted_total{kind}
 ### 22.4 `doctor`
 
 `doctor` 执行只读诊断：
+
+`doctor` 在 writer lock、数据库/目录创建和 migration 之前运行；数据库缺失或 schema 落后只报告 degraded，不修改现场。
 
 - 配置和权限；
 - CODEX_HOME / sessions / archive 可读性；

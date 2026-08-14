@@ -98,6 +98,28 @@ pub struct RetentionReport {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportReport {
+    pub thread_key: String,
+    pub output: String,
+    pub turns: usize,
+    pub items: usize,
+    pub raw_events: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeReport {
+    pub thread_key: String,
+    pub deleted_turns: usize,
+    pub deleted_items: usize,
+    pub deleted_raw_events: usize,
+    pub deleted_blobs: usize,
+    pub suppression_tombstone: bool,
+    pub audit_id: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub status: String,
     pub database: String,

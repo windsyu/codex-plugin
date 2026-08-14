@@ -14,7 +14,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -636,8 +636,27 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
     .into_response()
 }
 
-async fn sse_stream(State(state): State<ApiState>, Query(query): Query<EventQuery>) -> Response {
-    let mut cursor = query.after_event_seq.unwrap_or(0);
+async fn sse_stream(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<EventQuery>,
+) -> Response {
+    let last_event_id = match headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::parse::<i64>)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "CURSOR_INVALID",
+                "Last-Event-ID must be an integer event sequence",
+            );
+        }
+    };
+    let mut cursor = query.after_event_seq.or(last_event_id).unwrap_or(0);
     match state.database.retention_low_watermark() {
         Ok(low_watermark) if cursor < low_watermark => {
             return api_error(
@@ -650,6 +669,11 @@ async fn sse_stream(State(state): State<ApiState>, Query(query): Query<EventQuer
         _ => {}
     }
     let database = state.database.clone();
+    let filters = StreamFilters {
+        thread_keys: query.thread_key.into_iter().collect(),
+        source_ids: query.source_id.into_iter().collect(),
+        methods: query.method.into_iter().collect(),
+    };
     let stream = async_stream::stream! {
         loop {
             let rows = database.query_json(
@@ -664,7 +688,9 @@ async fn sse_stream(State(state): State<ApiState>, Query(query): Query<EventQuer
             }
             for row in rows {
                 cursor = row["eventSeq"].as_i64().unwrap_or(cursor);
-                yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("event").json_data(row).unwrap());
+                if filters.matches(&row) {
+                    yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("event").json_data(row).unwrap());
+                }
             }
         }
     };
@@ -683,48 +709,49 @@ async fn ws_stream(ws: WebSocketUpgrade, State(state): State<ApiState>) -> Respo
 }
 
 async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
-    let Some(Ok(Message::Text(text))) = socket.next().await else {
+    let Ok(Some(Ok(Message::Text(text)))) =
+        tokio::time::timeout(Duration::from_secs(5), socket.next()).await
+    else {
+        let _ = send_ws_value(
+            &mut socket,
+            json!({"type":"error","code":"CURSOR_INVALID","message":"subscribe frame required within 5 seconds"}),
+        )
+        .await;
         return;
     };
-    let request: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    if request.get("type").and_then(Value::as_str) != Some("subscribe") {
-        let _ = socket
-            .send(Message::Text(
-                json!({"type":"error","code":"CURSOR_INVALID"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
+    let Ok(request) = serde_json::from_str::<WsSubscribe>(&text) else {
+        let _ = send_ws_value(
+            &mut socket,
+            json!({"type":"error","code":"CURSOR_INVALID","message":"invalid subscribe frame"}),
+        )
+        .await;
+        return;
+    };
+    if request.kind != "subscribe" || !request.filters.is_valid() {
+        let _ = send_ws_value(
+            &mut socket,
+            json!({"type":"error","code":"CURSOR_INVALID","message":"invalid subscribe type or filters"}),
+        )
+        .await;
         return;
     }
-    let mut cursor = request
-        .get("afterEventSeq")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    let mut cursor = request.after_event_seq.unwrap_or(0);
     if database
         .retention_low_watermark()
         .is_ok_and(|low_watermark| cursor < low_watermark)
     {
-        let _ = socket
-            .send(Message::Text(
-                json!({"type":"error","code":"CURSOR_EXPIRED"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
+        let _ = send_ws_value(&mut socket, json!({"type":"error","code":"CURSOR_EXPIRED"})).await;
         return;
     }
-    if socket
-        .send(Message::Text(
-            json!({"type":"subscribed","afterEventSeq":cursor})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .is_err()
+    if !send_ws_value(
+        &mut socket,
+        json!({"type":"subscribed","afterEventSeq":cursor}),
+    )
+    .await
     {
         return;
     }
+    let mut last_heartbeat = tokio::time::Instant::now();
     loop {
         let rows = database.query_json(
             "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
@@ -733,14 +760,21 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
         ).unwrap_or_default();
         for row in rows {
             cursor = row["eventSeq"].as_i64().unwrap_or(cursor);
+            if !request.filters.matches(&row) {
+                continue;
+            }
             let frame = json!({"type":"event","eventSeq":cursor,"data":row});
-            if socket
-                .send(Message::Text(frame.to_string().into()))
-                .await
-                .is_err()
-            {
+            if !send_ws_value(&mut socket, frame).await {
+                close_slow_consumer(&mut socket, cursor).await;
                 return;
             }
+        }
+        if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+            if !send_ws_value(&mut socket, json!({"type":"heartbeat","eventSeq":cursor})).await {
+                close_slow_consumer(&mut socket, cursor).await;
+                return;
+            }
+            last_heartbeat = tokio::time::Instant::now();
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(750)) => {},
@@ -752,6 +786,74 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
             }
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WsSubscribe {
+    #[serde(rename = "type")]
+    kind: String,
+    after_event_seq: Option<i64>,
+    #[serde(default)]
+    filters: StreamFilters,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamFilters {
+    #[serde(default)]
+    thread_keys: Vec<String>,
+    #[serde(default)]
+    source_ids: Vec<String>,
+    #[serde(default)]
+    methods: Vec<String>,
+}
+
+impl StreamFilters {
+    fn is_valid(&self) -> bool {
+        [&self.thread_keys, &self.source_ids, &self.methods]
+            .into_iter()
+            .all(|values| {
+                values.len() <= 100
+                    && values
+                        .iter()
+                        .all(|value| !value.is_empty() && value.len() <= 256)
+            })
+    }
+
+    fn matches(&self, event: &Value) -> bool {
+        matches_filter(&self.thread_keys, event["threadKey"].as_str())
+            && matches_filter(&self.source_ids, event["sourceId"].as_str())
+            && matches_filter(&self.methods, event["method"].as_str())
+    }
+}
+
+fn matches_filter(values: &[String], actual: Option<&str>) -> bool {
+    values.is_empty() || actual.is_some_and(|actual| values.iter().any(|value| value == actual))
+}
+
+async fn send_ws_value(socket: &mut WebSocket, value: Value) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            socket.send(Message::Text(value.to_string().into()))
+        )
+        .await,
+        Ok(Ok(()))
+    )
+}
+
+async fn close_slow_consumer(socket: &mut WebSocket, cursor: i64) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Text(
+            json!({"type":"error","code":"SLOW_CONSUMER","lastEventSeq":cursor})
+                .to_string()
+                .into(),
+        )),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
 }
 
 fn envelope_query(
@@ -1604,6 +1706,59 @@ mod tests {
         assert_eq!(parse_byte_range(Some("bytes=-3"), 10), Ok(Some((7, 9))));
         assert!(parse_byte_range(Some("bytes=10-"), 10).is_err());
         assert!(parse_byte_range(Some("bytes=1-2,4-5"), 10).is_err());
+    }
+
+    #[test]
+    fn websocket_subscribe_filters_are_bounded_and_match_events() -> Result<()> {
+        let request: WsSubscribe = serde_json::from_value(json!({
+            "type":"subscribe",
+            "afterEventSeq":12,
+            "filters":{"threadKeys":["thread-a"],"sourceIds":["source-a"],"methods":["item/completed"]}
+        }))?;
+        assert!(request.filters.is_valid());
+        assert!(request.filters.matches(&json!({
+            "threadKey":"thread-a","sourceId":"source-a","method":"item/completed"
+        })));
+        assert!(!request.filters.matches(&json!({
+            "threadKey":"thread-b","sourceId":"source-a","method":"item/completed"
+        })));
+        let invalid = StreamFilters {
+            methods: vec!["x".repeat(257)],
+            ..StreamFilters::default()
+        };
+        assert!(!invalid.is_valid());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sse_rejects_invalid_last_event_id() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let state = ApiState {
+            database,
+            token: Arc::new("token".into()),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("not-an-integer"));
+        let response = sse_stream(
+            State(state),
+            headers,
+            Query(EventQuery {
+                after_event_seq: None,
+                limit: None,
+                thread_key: None,
+                source_id: None,
+                method: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
     }
 
     #[tokio::test]

@@ -14,10 +14,11 @@
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
-- SSE 与 WebSocket committed-event 续传；
+- SSE 与 WebSocket committed-event 续传、Thread/source/method 过滤、心跳和慢消费者断开；SSE 支持 `Last-Event-ID`；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
-- `serve`、`import`、`doctor`、`rebuild-projections`；
+- `serve`、`import`、严格只读 `doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
+- `export` 输出独占创建的 `0600` 脱敏 JSON；`purge --observer-copy-only --yes` 删除并持续抑制本地副本，写入无正文审计；
 - 超过 `inline_blob_bytes` 的已脱敏 raw JSON 使用内容寻址 blob 原子落盘；投影保存引用，支持 orphan sweep、引用感知 retention 和安全 Range 下载；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
 - 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
@@ -25,7 +26,7 @@
 - live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。purge/export 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。完整性能加固属于后续 V1 收口切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -74,7 +75,11 @@ cargo run -- doctor
 cargo run -- import
 cargo run -- retention
 cargo run -- retention --apply
+cargo run -- export --thread '<threadKey>' --output ./thread-export.json
+cargo run -- purge --thread '<threadKey>' --observer-copy-only --yes
 ```
+
+`doctor` 不获取 writer lock、不创建数据库或 blob 目录、也不执行 migration。`export` 拒绝覆盖已有文件及写入任一 Codex source。`purge` 仅删除 Observer 数据；抑制墓碑会阻止后续 rescan/live 自动恢复该 Thread，Codex rollout 保持不变。
 
 启动周期扫描、API 和 Viewer：
 
@@ -128,6 +133,8 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 ```json
 {"type":"subscribe","afterEventSeq":0,"filters":{}}
 ```
+
+`filters` 可包含 `threadKeys`、`sourceIds`、`methods` 数组，每类最多 100 个值。发送阻塞超过 10 秒时服务端尝试返回 `SLOW_CONSUMER` 并关闭连接；客户端应从最后收到的 `eventSeq` 重连。
 
 ## 安全边界
 

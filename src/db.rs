@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -6,12 +7,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::ingest::thread_key;
-use crate::model::{Checkpoint, DoctorReport, DoctorSource, NormalizedEvent, RetentionReport};
+use crate::model::{
+    Checkpoint, DoctorReport, DoctorSource, ExportReport, NormalizedEvent, PurgeReport,
+    RetentionReport,
+};
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
@@ -19,6 +23,7 @@ const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
 const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
 const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql");
+const MIGRATION_7: &str = include_str!("../migrations/0007_local_purge.sql");
 
 #[derive(Debug)]
 pub struct Database {
@@ -313,6 +318,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
         } else if version == 1 {
             connection
                 .execute_batch(MIGRATION_2)
@@ -329,6 +337,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
         } else if version == 2 {
             connection
                 .execute_batch(MIGRATION_3)
@@ -342,6 +353,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
         } else if version == 3 {
             connection
                 .execute_batch(MIGRATION_4)
@@ -352,6 +366,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
         } else if version == 4 {
             connection
                 .execute_batch(MIGRATION_5)
@@ -359,11 +376,21 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
         } else if version == 5 {
             connection
                 .execute_batch(MIGRATION_6)
                 .context("apply migration 0006")?;
-        } else if version != 6 {
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
+        } else if version == 6 {
+            connection
+                .execute_batch(MIGRATION_7)
+                .context("apply migration 0007")?;
+        } else if version != 7 {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
@@ -427,11 +454,21 @@ impl Database {
             "INSERT OR IGNORE INTO source_epochs(source_id, epoch_id, opened_at_ms) VALUES (?1, ?2, ?3)",
             params![batch.source_id, batch.epoch_id, now_ms()],
         )?;
+        let purged_threads = {
+            let mut statement = transaction.prepare("SELECT thread_key FROM purged_threads")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?
+        };
 
         let mut inserted = 0;
         let mut deduplicated = 0;
         let mut last_event_seq: Option<i64> = None;
         for event in batch.events {
+            if purged_threads.contains(&event.thread_key) {
+                deduplicated += 1;
+                continue;
+            }
             let existing = transaction
                 .query_row(
                     "SELECT stored_raw_hash,original_event_seq FROM event_dedupes WHERE dedupe_key=?1",
@@ -547,14 +584,23 @@ impl Database {
         identity: &str,
         archived: bool,
     ) -> Result<()> {
-        self.connect()?.execute(
+        let connection = self.connect()?;
+        let purged: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM purged_threads WHERE store_source_id=?1 AND codex_thread_id=?2)",
+            params![source_id, thread_id],
+            |row| row.get(0),
+        )?;
+        if purged {
+            return Ok(());
+        }
+        connection.execute(
             "INSERT INTO rollout_locations(store_source_id,codex_thread_id,path,representation,file_identity,active,archived,last_seen_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(store_source_id,codex_thread_id,path) DO UPDATE SET representation=excluded.representation,
                file_identity=excluded.file_identity,active=excluded.active,archived=excluded.archived,last_seen_at_ms=excluded.last_seen_at_ms",
             params![source_id, thread_id, path.display().to_string(), representation, identity, !archived, archived, now_ms()],
         )?;
-        self.connect()?.execute(
+        connection.execute(
             "UPDATE threads SET archived=?1 WHERE store_source_id=?2 AND codex_thread_id=?3",
             params![archived, source_id, thread_id],
         )?;
@@ -746,23 +792,264 @@ impl Database {
         })
     }
 
-    pub fn doctor(&self, config: &Config) -> Result<DoctorReport> {
+    pub fn export_thread(&self, thread_key: &str, output: &Path) -> Result<ExportReport> {
         let connection = self.connect()?;
-        let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-        let mut degraded = integrity != "ok";
+        let thread = connection
+            .query_row(
+                "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,
+                   capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,recency_at_ms,
+                   projection_json,provenance_json,last_event_seq FROM threads WHERE thread_key=?1",
+                [thread_key],
+                |row| {
+                    Ok(json!({
+                        "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,
+                        "storeSourceId":row.get::<_,String>(2)?,"name":row.get::<_,Option<String>>(3)?,
+                        "cwd":row.get::<_,Option<String>>(4)?,"source":row.get::<_,Option<String>>(5)?,
+                        "model":row.get::<_,Option<String>>(6)?,"archived":row.get::<_,bool>(7)?,
+                        "captureCompleteness":row.get::<_,String>(8)?,
+                        "completenessReasons":parse_stored_json(row.get::<_,String>(9)?),
+                        "createdAtMs":row.get::<_,Option<i64>>(10)?,"updatedAtMs":row.get::<_,Option<i64>>(11)?,
+                        "recencyAtMs":row.get::<_,Option<i64>>(12)?,
+                        "projection":parse_stored_json(row.get::<_,String>(13)?),
+                        "provenance":parse_stored_json(row.get::<_,String>(14)?),
+                        "lastEventSeq":row.get::<_,i64>(15)?
+                    }))
+                },
+            )
+            .optional()?
+            .with_context(|| format!("thread {thread_key} was not found"))?;
+        let turns = self.query_json(
+            "SELECT turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
+               started_at_ms,completed_at_ms,execution_context_json,projection_json,provenance_json,last_event_seq
+             FROM turns WHERE thread_key=?1 ORDER BY COALESCE(started_at_ms,0),turn_id",
+            &[&thread_key],
+            |row| {
+                Ok(json!({
+                    "turnId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,
+                    "captureCompleteness":row.get::<_,String>(2)?,
+                    "completenessReasons":parse_stored_json(row.get::<_,String>(3)?),
+                    "coverage":parse_stored_json(row.get::<_,String>(4)?),
+                    "startedAtMs":row.get::<_,Option<i64>>(5)?,"completedAtMs":row.get::<_,Option<i64>>(6)?,
+                    "executionContext":row.get::<_,Option<String>>(7)?.map(parse_stored_json),
+                    "projection":parse_stored_json(row.get::<_,String>(8)?),
+                    "provenance":parse_stored_json(row.get::<_,String>(9)?),"lastEventSeq":row.get::<_,i64>(10)?
+                }))
+            },
+        )?;
+        let items = self.query_json(
+            "SELECT turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,summary_text,
+               projection_json,provenance_json,last_event_seq FROM items WHERE thread_key=?1
+             ORDER BY COALESCE(started_at_ms,0),turn_scope,item_id",
+            &[&thread_key],
+            |row| {
+                Ok(json!({
+                    "turnScope":row.get::<_,String>(0)?,"itemId":row.get::<_,String>(1)?,
+                    "turnId":row.get::<_,Option<String>>(2)?,"itemType":row.get::<_,String>(3)?,
+                    "status":row.get::<_,String>(4)?,"startedAtMs":row.get::<_,Option<i64>>(5)?,
+                    "completedAtMs":row.get::<_,Option<i64>>(6)?,"summaryText":row.get::<_,Option<String>>(7)?,
+                    "projection":parse_stored_json(row.get::<_,String>(8)?),
+                    "provenance":parse_stored_json(row.get::<_,String>(9)?),"lastEventSeq":row.get::<_,i64>(10)?
+                }))
+            },
+        )?;
+        let mut events = self.query_json(
+            "SELECT e.event_seq,e.event_id,e.source_id,e.epoch_id,e.source_seq,e.observed_at_ms,e.event_at_ms,
+               e.turn_id,e.item_id,e.method,e.phase,e.durability,e.raw_json,e.redaction_json,e.decode_status,
+               e.decode_error,e.stored_raw_hash,e.blob_id,b.relative_path
+             FROM raw_events e LEFT JOIN blobs b ON b.blob_id=e.blob_id WHERE e.thread_key=?1 ORDER BY e.event_seq",
+            &[&thread_key],
+            |row| {
+                Ok(json!({
+                    "eventSeq":row.get::<_,i64>(0)?,"eventId":row.get::<_,String>(1)?,
+                    "sourceId":row.get::<_,String>(2)?,"sourceEpoch":row.get::<_,String>(3)?,
+                    "sourceSeq":row.get::<_,i64>(4)?,"observedAtMs":row.get::<_,i64>(5)?,
+                    "eventAtMs":row.get::<_,Option<i64>>(6)?,"turnId":row.get::<_,Option<String>>(7)?,
+                    "itemId":row.get::<_,Option<String>>(8)?,"method":row.get::<_,String>(9)?,
+                    "phase":row.get::<_,String>(10)?,"durability":row.get::<_,String>(11)?,
+                    "raw":parse_stored_json(row.get::<_,String>(12)?),
+                    "redaction":parse_stored_json(row.get::<_,String>(13)?),
+                    "decodeStatus":row.get::<_,String>(14)?,"decodeError":row.get::<_,Option<String>>(15)?,
+                    "storedRawHash":row.get::<_,String>(16)?,"blobId":row.get::<_,Option<String>>(17)?,
+                    "blobRelativePath":row.get::<_,Option<String>>(18)?
+                }))
+            },
+        )?;
+        for event in &mut events {
+            if let Some(relative_path) = event
+                .get("blobRelativePath")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                event["raw"] = parse_stored_json(self.read_blob_relative(&relative_path)?);
+            }
+            event
+                .as_object_mut()
+                .map(|event| event.remove("blobRelativePath"));
+        }
+        let export = json!({
+            "format":"codex-local-observer-export-v1","exportedAtMs":now_ms(),
+            "thread":thread,"turns":turns,"items":items,"rawEvents":events
+        });
+        write_private_new(output, &serde_json::to_vec_pretty(&export)?)?;
+        Ok(ExportReport {
+            thread_key: thread_key.to_string(),
+            output: output.display().to_string(),
+            turns: turns.len(),
+            items: items.len(),
+            raw_events: events.len(),
+        })
+    }
+
+    pub fn purge_thread(&self, thread_key: &str) -> Result<PurgeReport> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let (store_source_id, codex_thread_id): (String, String) = transaction
+            .query_row(
+                "SELECT store_source_id,codex_thread_id FROM threads WHERE thread_key=?1",
+                [thread_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .with_context(|| format!("thread {thread_key} was not found"))?;
+        let blob_candidates = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT b.blob_id,b.relative_path FROM blobs b JOIN blob_references r ON r.blob_id=b.blob_id
+                 WHERE r.event_seq IN (SELECT event_seq FROM raw_events WHERE thread_key=?1)",
+            )?;
+            statement
+                .query_map([thread_key], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let deleted_turns: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM turns WHERE thread_key=?1",
+            [thread_key],
+            |row| row.get(0),
+        )?;
+        let deleted_items: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM items WHERE thread_key=?1",
+            [thread_key],
+            |row| row.get(0),
+        )?;
+        let deleted_raw_events: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE thread_key=?1",
+            [thread_key],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO purged_threads(thread_key,store_source_id,codex_thread_id,purged_at_ms)
+             VALUES (?1,?2,?3,?4)",
+            params![thread_key, store_source_id, codex_thread_id, now_ms()],
+        )?;
+        let audit_id = format!("audit_{}", uuid::Uuid::now_v7());
+        transaction.execute(
+            "INSERT INTO maintenance_audit(audit_id,action,target_kind,target_key,occurred_at_ms,details_json)
+             VALUES (?1,'purge','thread',?2,?3,?4)",
+            params![
+                audit_id,
+                thread_key,
+                now_ms(),
+                json!({"observerCopyOnly":true,"deletedRawEvents":deleted_raw_events,
+                  "deletedTurns":deleted_turns,"deletedItems":deleted_items}).to_string()
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM event_dedupes WHERE original_event_seq IN
+             (SELECT event_seq FROM raw_events WHERE thread_key=?1)",
+            [thread_key],
+        )?;
+        transaction.execute(
+            "DELETE FROM blob_references WHERE event_seq IN
+             (SELECT event_seq FROM raw_events WHERE thread_key=?1)",
+            [thread_key],
+        )?;
+        transaction.execute("DELETE FROM search_index WHERE thread_key=?1", [thread_key])?;
+        transaction.execute(
+            "DELETE FROM pending_requests WHERE thread_key=?1",
+            [thread_key],
+        )?;
+        transaction.execute("DELETE FROM items WHERE thread_key=?1", [thread_key])?;
+        transaction.execute("DELETE FROM turns WHERE thread_key=?1", [thread_key])?;
+        transaction.execute("DELETE FROM raw_events WHERE thread_key=?1", [thread_key])?;
+        transaction.execute(
+            "DELETE FROM rollout_locations WHERE store_source_id=?1 AND codex_thread_id=?2",
+            params![store_source_id, codex_thread_id],
+        )?;
+        transaction.execute("DELETE FROM threads WHERE thread_key=?1", [thread_key])?;
+        let mut deleted_blob_paths = Vec::new();
+        for (blob_id, relative_path) in blob_candidates {
+            if transaction.execute(
+                "DELETE FROM blobs WHERE blob_id=?1
+                 AND NOT EXISTS (SELECT 1 FROM blob_references WHERE blob_id=?1)",
+                [&blob_id],
+            )? > 0
+            {
+                deleted_blob_paths.push(relative_path);
+            }
+        }
+        transaction.commit()?;
+        for relative_path in &deleted_blob_paths {
+            let path = self.resolve_blob_path(relative_path)?;
+            if let Err(error) = fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), error = %error, "delete purged blob file failed");
+            }
+        }
+        Ok(PurgeReport {
+            thread_key: thread_key.to_string(),
+            deleted_turns,
+            deleted_items,
+            deleted_raw_events,
+            deleted_blobs: deleted_blob_paths.len(),
+            suppression_tombstone: true,
+            audit_id,
+        })
+    }
+
+    pub fn doctor_read_only(config: &Config) -> Result<DoctorReport> {
+        let database_path = config.database_path();
+        let (database, mut degraded) = if database_path.is_file() {
+            match Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                Ok(connection) => {
+                    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+                    let integrity = connection
+                        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                        .unwrap_or_else(|error| format!("unreadable: {error}"));
+                    let version = connection
+                        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                        .unwrap_or(-1);
+                    let healthy = integrity == "ok" && version == 7;
+                    (format!("{integrity}; schema_version={version}"), !healthy)
+                }
+                Err(error) => (format!("unreadable: {error}"), true),
+            }
+        } else {
+            ("missing".into(), true)
+        };
         let sources = config
             .sources
             .iter()
             .map(|source| {
-                let exists = source.codex_home.is_dir();
-                degraded |= !exists;
+                let sessions = source.codex_home.join("sessions");
+                let archive = source.codex_home.join("archived_sessions");
+                let home_readable = fs::read_dir(&source.codex_home).is_ok();
+                let sessions_readable = fs::read_dir(&sessions).is_ok();
+                let archive_readable = !archive.exists() || fs::read_dir(&archive).is_ok();
+                let readable = home_readable && sessions_readable && archive_readable;
+                degraded |= !readable;
                 DoctorSource {
                     name: source.name.clone(),
                     path: source.codex_home.display().to_string(),
-                    status: if exists {
+                    status: if readable {
                         "readable".into()
+                    } else if !home_readable {
+                        "home_missing_or_unreadable".into()
+                    } else if !sessions_readable {
+                        "sessions_missing_or_unreadable".into()
                     } else {
-                        "missing".into()
+                        "archive_unreadable".into()
                     },
                 }
             })
@@ -773,7 +1060,7 @@ impl Database {
             } else {
                 "healthy".into()
             },
-            database: integrity,
+            database,
             sources,
         })
     }
@@ -1555,6 +1842,38 @@ pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+fn parse_stored_json(value: String) -> Value {
+    serde_json::from_str(&value).unwrap_or(Value::Null)
+}
+
+fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("export output must have a parent directory")?;
+    if !parent.is_dir() {
+        anyhow::bail!("export output directory does not exist");
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(path)
+            .with_context(|| format!("create export output {}", path.display()))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
@@ -1562,6 +1881,7 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::Importer;
     use tempfile::TempDir;
 
     fn version_four_database(temp: &TempDir) -> Result<Database> {
@@ -1593,9 +1913,15 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 6);
+        let purge_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='purged_threads')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 7);
         assert!(blob_table);
         assert!(relation_column);
+        assert!(purge_table);
         Ok(())
     }
 
@@ -1641,6 +1967,28 @@ mod tests {
     }
 
     #[test]
+    fn migration_seven_rolls_back_purge_tables_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = version_four_database(&temp)?;
+        let connection = database.connect()?;
+        connection.execute_batch(MIGRATION_5)?;
+        connection.execute_batch(MIGRATION_6)?;
+        connection.execute("CREATE TABLE maintenance_audit(conflict INTEGER)", [])?;
+        drop(connection);
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let purge_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='purged_threads')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 6);
+        assert!(!purge_table);
+        Ok(())
+    }
+
+    #[test]
     fn orphan_sweeper_removes_only_files_without_database_rows() -> Result<()> {
         let temp = TempDir::new()?;
         let database = Database::open(&temp.path().join("observer.sqlite"))?;
@@ -1659,6 +2007,88 @@ mod tests {
         )?;
         assert_eq!(database.sweep_orphan_blobs(0)?, 0);
         assert!(referenced.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_is_read_only_and_reports_missing_or_current_database() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.storage.database = temp.path().join("missing/observer.sqlite");
+        config.sources[0].codex_home = temp.path().join("codex-home");
+        fs::create_dir_all(config.sources[0].codex_home.join("sessions"))?;
+
+        let report = Database::doctor_read_only(&config)?;
+        assert_eq!(report.status, "degraded");
+        assert_eq!(report.database, "missing");
+        assert!(!temp.path().join("missing").exists());
+
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let report = Database::doctor_read_only(&config)?;
+        assert_eq!(report.status, "healthy");
+        assert_eq!(report.database, "ok; schema_version=7");
+        Ok(())
+    }
+
+    #[test]
+    fn export_then_purge_is_redacted_audited_and_not_reimported() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.blob_dir = temp.path().join("blobs");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Database::open_with_blobs(
+            &config.storage.database,
+            &config.storage.blob_dir,
+            config.capture.inline_blob_bytes,
+        )?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let thread_key: String = database.connect()?.query_row(
+            "SELECT thread_key FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let output = temp.path().join("thread-export.json");
+        let exported = database.export_thread(&thread_key, &output)?;
+        assert!(exported.raw_events > 0);
+        assert!(exported.turns > 0);
+        let contents = fs::read_to_string(&output)?;
+        assert!(contents.contains("codex-local-observer-export-v1"));
+        assert!(!contents.contains("fixture-secret-must-be-redacted"));
+        assert!(!contents.contains("Bearer fixture-secret"));
+        assert!(database.export_thread(&thread_key, &output).is_err());
+
+        let purged = database.purge_thread(&thread_key)?;
+        assert!(purged.deleted_raw_events > 0);
+        assert!(purged.suppression_tombstone);
+        let connection = database.connect()?;
+        let thread_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE thread_key=?1)",
+            [&thread_key],
+            |row| row.get(0),
+        )?;
+        let audit: String = connection.query_row(
+            "SELECT details_json FROM maintenance_audit WHERE audit_id=?1",
+            [&purged.audit_id],
+            |row| row.get(0),
+        )?;
+        assert!(!thread_exists);
+        assert!(!audit.contains("fixture-secret"));
+        connection.execute("DELETE FROM source_checkpoints", [])?;
+        drop(connection);
+
+        Importer::new(&config, &database)?.import_all()?;
+        let thread_exists: bool = database.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE thread_key=?1)",
+            [&thread_key],
+            |row| row.get(0),
+        )?;
+        assert!(!thread_exists);
         Ok(())
     }
 }
