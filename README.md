@@ -13,7 +13,7 @@
 - SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
-- Thread 列表支持签名 keyset cursor、稳定 `asOfEventSeq`、筛选和普通文本查询；
+- Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
 - SSE 与 WebSocket committed-event 续传；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、`doctor`、`rebuild-projections`；
@@ -25,7 +25,7 @@
 - live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。purge/export 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -120,6 +120,8 @@ V1 当前注册的接口全部为 `GET`：
 /v1/stream
 /v1/stream/ws
 ```
+
+`/v1/threads`、`/turns`、`/items` 与 `/search` 使用不透明的签名 `cursor`；客户端应原样传回响应中的 `nextCursor`。`items` 还支持 `turnId`、`itemType` 筛选。游标不能跨端点、Thread 或筛选条件复用。
 
 WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 

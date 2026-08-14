@@ -28,7 +28,7 @@ use tower_http::trace::TraceLayer;
 use crate::config::Config;
 use crate::db::Database;
 use crate::ingest::load_or_create_token;
-use crate::model::{ApiEnvelope, Pagination};
+use crate::model::ApiEnvelope;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -440,37 +440,29 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
 async fn turns(
     State(state): State<ApiState>,
     Path(thread_key): Path<String>,
-    Query(page): Query<Pagination>,
+    Query(query): Query<TurnQuery>,
 ) -> Response {
-    let limit = page.limit.unwrap_or(100).clamp(1, 200) as i64;
-    envelope_query(&state,
-        "SELECT turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,started_at_ms,
-          completed_at_ms,execution_context_json,projection_json,last_event_seq FROM turns WHERE thread_key=?1
-          ORDER BY started_at_ms,turn_id LIMIT ?2",
-        &[&thread_key,&limit], |row| Ok(json!({
-            "turnId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,
-            "captureCompleteness":row.get::<_,String>(2)?,"completenessReasons":parse_json(row.get::<_,String>(3)?),
-            "coverage":parse_json(row.get::<_,String>(4)?),"startedAtMs":row.get::<_,Option<i64>>(5)?,
-            "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":parse_optional_json(row.get::<_,Option<String>>(7)?),
-            "raw":parse_json(row.get::<_,String>(8)?),"lastEventSeq":row.get::<_,i64>(9)?
-        })))
+    match query_turns(&state, &thread_key, query) {
+        Ok(response) => response,
+        Err(CursorFailure::Invalid(message)) => {
+            api_error(StatusCode::BAD_REQUEST, "CURSOR_INVALID", &message)
+        }
+        Err(CursorFailure::Internal(error)) => internal_error(error),
+    }
 }
 
 async fn items(
     State(state): State<ApiState>,
     Path(thread_key): Path<String>,
-    Query(page): Query<Pagination>,
+    Query(query): Query<ItemQuery>,
 ) -> Response {
-    let limit = page.limit.unwrap_or(200).clamp(1, 200) as i64;
-    envelope_query(&state,
-        "SELECT turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,summary_text,
-          projection_json,provenance_json,last_event_seq FROM items WHERE thread_key=?1 ORDER BY started_at_ms,item_id LIMIT ?2",
-        &[&thread_key,&limit], |row| Ok(json!({
-            "turnScope":row.get::<_,String>(0)?,"itemId":row.get::<_,String>(1)?,"turnId":row.get::<_,Option<String>>(2)?,
-            "itemType":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?,"startedAtMs":row.get::<_,Option<i64>>(5)?,
-            "completedAtMs":row.get::<_,Option<i64>>(6)?,"summaryText":row.get::<_,Option<String>>(7)?,
-            "raw":parse_json(row.get::<_,String>(8)?),"provenance":parse_json(row.get::<_,String>(9)?),"lastEventSeq":row.get::<_,i64>(10)?
-        })))
+    match query_items(&state, &thread_key, query) {
+        Ok(response) => response,
+        Err(CursorFailure::Invalid(message)) => {
+            api_error(StatusCode::BAD_REQUEST, "CURSOR_INVALID", &message)
+        }
+        Err(CursorFailure::Internal(error)) => internal_error(error),
+    }
 }
 
 async fn thread_events(
@@ -563,6 +555,33 @@ struct ThreadCursor {
     last_thread_key: String,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ItemQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+    turn_id: Option<String>,
+    item_type: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageCursor {
+    endpoint: String,
+    query_fingerprint: String,
+    as_of_event_seq: i64,
+    last_sort: i64,
+    last_key: String,
+    last_secondary: Option<String>,
+}
+
 enum CursorFailure {
     Invalid(String),
     Internal(anyhow::Error),
@@ -574,9 +593,11 @@ impl From<anyhow::Error> for CursorFailure {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchQuery {
     q: String,
+    cursor: Option<String>,
     limit: Option<usize>,
 }
 
@@ -588,15 +609,13 @@ async fn search(State(state): State<ApiState>, Query(query): Query<SearchQuery>)
             "search query must contain 1 to 256 characters",
         );
     }
-    let expression = search_expression(&query.q);
-    let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
-    envelope_query(&state,
-        "SELECT entity_key,thread_key,item_id,snippet(search_index,3,'','', ' … ',20),bm25(search_index)
-         FROM search_index WHERE search_index MATCH ?1 ORDER BY rank LIMIT ?2",
-        &[&expression,&limit], |row| Ok(json!({
-            "entityKey":row.get::<_,String>(0)?,"threadKey":row.get::<_,String>(1)?,
-            "itemId":row.get::<_,String>(2)?,"snippet":row.get::<_,String>(3)?,"score":row.get::<_,f64>(4)?
-        })))
+    match query_search(&state, query) {
+        Ok(response) => response,
+        Err(CursorFailure::Invalid(message)) => {
+            api_error(StatusCode::BAD_REQUEST, "CURSOR_INVALID", &message)
+        }
+        Err(CursorFailure::Internal(error)) => internal_error(error),
+    }
 }
 
 async fn capabilities(State(state): State<ApiState>) -> Response {
@@ -849,6 +868,230 @@ fn query_threads(state: &ApiState, query: ThreadQuery) -> Result<Response, Curso
     Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
 }
 
+fn query_turns(
+    state: &ApiState,
+    thread_key: &str,
+    query: TurnQuery,
+) -> Result<Response, CursorFailure> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let fingerprint = query_fingerprint(&json!({"threadKey":thread_key}));
+    let endpoint = format!("turns:{thread_key}");
+    let decoded_cursor = decode_bound_page_cursor(
+        query.cursor.as_deref(),
+        &endpoint,
+        &fingerprint,
+        &state.token,
+    )?;
+    let as_of = decoded_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_of_event_seq)
+        .unwrap_or(state.database.max_event_seq()?);
+    let mut sql = String::from(
+        "SELECT turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,started_at_ms,
+          completed_at_ms,execution_context_json,projection_json,last_event_seq FROM turns
+          WHERE thread_key=? AND last_event_seq<=?",
+    );
+    let mut parameters = vec![
+        SqlValue::Text(thread_key.to_string()),
+        SqlValue::Integer(as_of),
+    ];
+    if let Some(cursor) = &decoded_cursor {
+        sql.push_str(
+            " AND (COALESCE(started_at_ms,0)>? OR (COALESCE(started_at_ms,0)=? AND turn_id>?))",
+        );
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Text(cursor.last_key.clone()));
+    }
+    sql.push_str(" ORDER BY COALESCE(started_at_ms,0),turn_id LIMIT ?");
+    parameters.push(SqlValue::Integer((limit + 1) as i64));
+    let mut rows = state
+        .database
+        .query_json_owned(&sql, parameters, turn_row)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        let last = rows.last().expect("non-empty page at limit");
+        Some(encode_page_cursor(
+            &PageCursor {
+                endpoint,
+                query_fingerprint: fingerprint,
+                as_of_event_seq: as_of,
+                last_sort: last["startedAtMs"].as_i64().unwrap_or(0),
+                last_key: last["turnId"].as_str().unwrap_or_default().to_string(),
+                last_secondary: None,
+            },
+            &state.token,
+        )?)
+    } else {
+        None
+    };
+    Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
+}
+
+fn query_items(
+    state: &ApiState,
+    thread_key: &str,
+    query: ItemQuery,
+) -> Result<Response, CursorFailure> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 200);
+    let fingerprint = query_fingerprint(&json!({
+        "threadKey":thread_key,
+        "turnId":query.turn_id,
+        "itemType":query.item_type
+    }));
+    let endpoint = format!("items:{thread_key}");
+    let decoded_cursor = decode_bound_page_cursor(
+        query.cursor.as_deref(),
+        &endpoint,
+        &fingerprint,
+        &state.token,
+    )?;
+    let as_of = decoded_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_of_event_seq)
+        .unwrap_or(state.database.max_event_seq()?);
+    let mut sql = String::from(
+        "SELECT turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,summary_text,
+          projection_json,provenance_json,last_event_seq FROM items WHERE thread_key=? AND last_event_seq<=?",
+    );
+    let mut parameters = vec![
+        SqlValue::Text(thread_key.to_string()),
+        SqlValue::Integer(as_of),
+    ];
+    if let Some(turn_id) = query.turn_id {
+        sql.push_str(" AND turn_id=?");
+        parameters.push(SqlValue::Text(turn_id));
+    }
+    if let Some(item_type) = query.item_type {
+        sql.push_str(" AND item_type=?");
+        parameters.push(SqlValue::Text(item_type));
+    }
+    if let Some(cursor) = &decoded_cursor {
+        let secondary = cursor.last_secondary.as_deref().ok_or_else(|| {
+            CursorFailure::Invalid("item cursor is missing its secondary key".into())
+        })?;
+        sql.push_str(
+            " AND (COALESCE(started_at_ms,0)>?
+             OR (COALESCE(started_at_ms,0)=? AND turn_scope>?)
+             OR (COALESCE(started_at_ms,0)=? AND turn_scope=? AND item_id>?))",
+        );
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Text(cursor.last_key.clone()));
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Text(cursor.last_key.clone()));
+        parameters.push(SqlValue::Text(secondary.to_string()));
+    }
+    sql.push_str(" ORDER BY COALESCE(started_at_ms,0),turn_scope,item_id LIMIT ?");
+    parameters.push(SqlValue::Integer((limit + 1) as i64));
+    let mut rows = state
+        .database
+        .query_json_owned(&sql, parameters, item_row)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        let last = rows.last().expect("non-empty page at limit");
+        Some(encode_page_cursor(
+            &PageCursor {
+                endpoint,
+                query_fingerprint: fingerprint,
+                as_of_event_seq: as_of,
+                last_sort: last["startedAtMs"].as_i64().unwrap_or(0),
+                last_key: last["turnScope"].as_str().unwrap_or_default().to_string(),
+                last_secondary: Some(last["itemId"].as_str().unwrap_or_default().to_string()),
+            },
+            &state.token,
+        )?)
+    } else {
+        None
+    };
+    Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
+}
+
+fn query_search(state: &ApiState, query: SearchQuery) -> Result<Response, CursorFailure> {
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let fingerprint = query_fingerprint(&json!({"q":query.q}));
+    let decoded_cursor = decode_bound_page_cursor(
+        query.cursor.as_deref(),
+        "search",
+        &fingerprint,
+        &state.token,
+    )?;
+    let as_of = decoded_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_of_event_seq)
+        .unwrap_or(state.database.max_event_seq()?);
+    let mut sql = String::from(
+        "SELECT search_index.entity_key,search_index.thread_key,search_index.item_id,i.turn_id,
+          snippet(search_index,3,'','', ' … ',20),bm25(search_index),i.last_event_seq
+         FROM search_index JOIN items i
+           ON search_index.entity_key=i.thread_key || ':' || i.turn_scope || ':' || i.item_id
+         WHERE search_index MATCH ? AND i.last_event_seq<=?",
+    );
+    let mut parameters = vec![
+        SqlValue::Text(search_expression(&query.q)),
+        SqlValue::Integer(as_of),
+    ];
+    if let Some(cursor) = &decoded_cursor {
+        sql.push_str(
+            " AND (i.last_event_seq<? OR (i.last_event_seq=? AND search_index.entity_key>?))",
+        );
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Integer(cursor.last_sort));
+        parameters.push(SqlValue::Text(cursor.last_key.clone()));
+    }
+    sql.push_str(" ORDER BY i.last_event_seq DESC,search_index.entity_key LIMIT ?");
+    parameters.push(SqlValue::Integer((limit + 1) as i64));
+    let mut rows = state
+        .database
+        .query_json_owned(&sql, parameters, search_row)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        let last = rows.last().expect("non-empty page at limit");
+        Some(encode_page_cursor(
+            &PageCursor {
+                endpoint: "search".into(),
+                query_fingerprint: fingerprint,
+                as_of_event_seq: as_of,
+                last_sort: last["lastEventSeq"].as_i64().unwrap_or(0),
+                last_key: last["entityKey"].as_str().unwrap_or_default().to_string(),
+                last_secondary: None,
+            },
+            &state.token,
+        )?)
+    } else {
+        None
+    };
+    Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
+}
+
+fn decode_bound_page_cursor(
+    encoded: Option<&str>,
+    endpoint: &str,
+    fingerprint: &str,
+    token: &str,
+) -> Result<Option<PageCursor>, CursorFailure> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let cursor = decode_page_cursor(encoded, token)
+        .map_err(|error| CursorFailure::Invalid(error.to_string()))?;
+    if cursor.endpoint != endpoint || cursor.query_fingerprint != fingerprint {
+        return Err(CursorFailure::Invalid(
+            "cursor does not match the current query".into(),
+        ));
+    }
+    Ok(Some(cursor))
+}
+
+fn query_fingerprint(value: &Value) -> String {
+    blake3::hash(value.to_string().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
 fn thread_query_fingerprint(query: &ThreadQuery) -> String {
     let canonical = json!({
         "sourceId":query.source_id,
@@ -893,6 +1136,29 @@ fn decode_cursor(value: &str, token: &str) -> Result<ThreadCursor> {
     Ok(serde_json::from_slice(&payload)?)
 }
 
+fn encode_page_cursor(cursor: &PageCursor, token: &str) -> Result<String> {
+    let payload = serde_json::to_vec(cursor)?;
+    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(payload),
+        URL_SAFE_NO_PAD.encode(signature.as_bytes())
+    ))
+}
+
+fn decode_page_cursor(value: &str, token: &str) -> Result<PageCursor> {
+    let (payload, signature) = value
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
+    let payload = URL_SAFE_NO_PAD.decode(payload)?;
+    let signature = URL_SAFE_NO_PAD.decode(signature)?;
+    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
+    if !constant_time_eq(&signature, expected.as_bytes()) {
+        anyhow::bail!("cursor signature is invalid");
+    }
+    Ok(serde_json::from_slice(&payload)?)
+}
+
 fn search_expression(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -916,6 +1182,34 @@ fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "approvalPolicy":row.get::<_,Option<String>>(31)?,"approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
         "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
         "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?
+    }))
+}
+
+fn turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "turnId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,
+        "captureCompleteness":row.get::<_,String>(2)?,"completenessReasons":parse_json(row.get::<_,String>(3)?),
+        "coverage":parse_json(row.get::<_,String>(4)?),"startedAtMs":row.get::<_,Option<i64>>(5)?,
+        "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":parse_optional_json(row.get::<_,Option<String>>(7)?),
+        "raw":parse_json(row.get::<_,String>(8)?),"lastEventSeq":row.get::<_,i64>(9)?
+    }))
+}
+
+fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "turnScope":row.get::<_,String>(0)?,"itemId":row.get::<_,String>(1)?,"turnId":row.get::<_,Option<String>>(2)?,
+        "itemType":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?,"startedAtMs":row.get::<_,Option<i64>>(5)?,
+        "completedAtMs":row.get::<_,Option<i64>>(6)?,"summaryText":row.get::<_,Option<String>>(7)?,
+        "raw":parse_json(row.get::<_,String>(8)?),"provenance":parse_json(row.get::<_,String>(9)?),"lastEventSeq":row.get::<_,i64>(10)?
+    }))
+}
+
+fn search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "entityKey":row.get::<_,String>(0)?,"threadKey":row.get::<_,String>(1)?,
+        "itemId":row.get::<_,String>(2)?,"turnId":row.get::<_,Option<String>>(3)?,
+        "snippet":row.get::<_,String>(4)?,"score":row.get::<_,f64>(5)?,
+        "lastEventSeq":row.get::<_,i64>(6)?
     }))
 }
 
@@ -1121,6 +1415,162 @@ mod tests {
             },
         );
         assert!(matches!(mismatched, Err(CursorFailure::Invalid(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_item_and_search_cursors_page_and_bind_queries() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let connection = database.connect()?;
+        connection.execute_batch(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+               capture_completeness,completeness_reasons_json,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-a','source','thread-a',0,'durable_complete','[]','{}','{}',0),
+                    ('thread-b','source','thread-b',0,'durable_complete','[]','{}','{}',0);
+             INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,
+               coverage_json,started_at_ms,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-a','turn-1','completed','durable_complete','[]','{}',1000,'{}','{}',0),
+                    ('thread-a','turn-2','completed','durable_complete','[]','{}',1000,'{}','{}',0),
+                    ('thread-a','turn-3','completed','durable_complete','[]','{}',2000,'{}','{}',0);
+             INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,started_at_ms,
+               summary_text,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-a','turn-1','item-1','turn-1','message','completed',1000,'needle alpha','{}','{}',0),
+                    ('thread-a','turn-1','item-2','turn-1','message','completed',1000,'needle beta','{}','{}',0),
+                    ('thread-a','turn-2','item-3','turn-2','message','completed',2000,'needle gamma','{}','{}',0);
+             INSERT INTO search_index(entity_key,thread_key,item_id,text)
+             VALUES ('thread-a:turn-1:item-1','thread-a','item-1','needle alpha'),
+                    ('thread-a:turn-1:item-2','thread-a','item-2','needle beta'),
+                    ('thread-a:turn-2:item-3','thread-a','item-3','needle gamma');",
+        )?;
+        drop(connection);
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([8_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+
+        let first = query_turns(
+            &state,
+            "thread-a",
+            TurnQuery {
+                limit: Some(2),
+                ..TurnQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let first: Value =
+            serde_json::from_slice(&axum::body::to_bytes(first.into_body(), usize::MAX).await?)?;
+        let turn_cursor = first["nextCursor"].as_str().unwrap().to_string();
+        let second = query_turns(
+            &state,
+            "thread-a",
+            TurnQuery {
+                cursor: Some(turn_cursor.clone()),
+                limit: Some(2),
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let second: Value =
+            serde_json::from_slice(&axum::body::to_bytes(second.into_body(), usize::MAX).await?)?;
+        assert_eq!(first["data"].as_array().unwrap().len(), 2);
+        assert_eq!(second["data"].as_array().unwrap().len(), 1);
+        assert_ne!(first["data"][1]["turnId"], second["data"][0]["turnId"]);
+        assert!(matches!(
+            query_turns(
+                &state,
+                "thread-b",
+                TurnQuery {
+                    cursor: Some(turn_cursor),
+                    limit: None
+                }
+            ),
+            Err(CursorFailure::Invalid(_))
+        ));
+
+        let first = query_items(
+            &state,
+            "thread-a",
+            ItemQuery {
+                limit: Some(2),
+                ..ItemQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let first: Value =
+            serde_json::from_slice(&axum::body::to_bytes(first.into_body(), usize::MAX).await?)?;
+        let item_cursor = first["nextCursor"].as_str().unwrap().to_string();
+        let second = query_items(
+            &state,
+            "thread-a",
+            ItemQuery {
+                cursor: Some(item_cursor.clone()),
+                limit: Some(2),
+                ..ItemQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let second: Value =
+            serde_json::from_slice(&axum::body::to_bytes(second.into_body(), usize::MAX).await?)?;
+        assert_eq!(second["data"].as_array().unwrap().len(), 1);
+        assert_ne!(first["data"][1]["itemId"], second["data"][0]["itemId"]);
+        assert!(matches!(
+            query_items(
+                &state,
+                "thread-a",
+                ItemQuery {
+                    cursor: Some(item_cursor),
+                    item_type: Some("tool_call".into()),
+                    ..ItemQuery::default()
+                }
+            ),
+            Err(CursorFailure::Invalid(_))
+        ));
+
+        let first = query_search(
+            &state,
+            SearchQuery {
+                q: "needle".into(),
+                cursor: None,
+                limit: Some(2),
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let first: Value =
+            serde_json::from_slice(&axum::body::to_bytes(first.into_body(), usize::MAX).await?)?;
+        let search_cursor = first["nextCursor"].as_str().unwrap().to_string();
+        let second = query_search(
+            &state,
+            SearchQuery {
+                q: "needle".into(),
+                cursor: Some(search_cursor.clone()),
+                limit: Some(2),
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let second: Value =
+            serde_json::from_slice(&axum::body::to_bytes(second.into_body(), usize::MAX).await?)?;
+        assert_eq!(first["data"].as_array().unwrap().len(), 2);
+        assert_eq!(second["data"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            first["data"][1]["entityKey"],
+            second["data"][0]["entityKey"]
+        );
+        assert!(matches!(
+            query_search(
+                &state,
+                SearchQuery {
+                    q: "different".into(),
+                    cursor: Some(search_cursor),
+                    limit: None
+                }
+            ),
+            Err(CursorFailure::Invalid(_))
+        ));
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -109,9 +109,4 @@ pub struct DoctorSource {
     pub name: String,
     pub path: String,
     pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Pagination {
-    pub limit: Option<usize>,
 }
