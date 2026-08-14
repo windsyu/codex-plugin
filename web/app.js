@@ -81,18 +81,23 @@ async function selectThread(threadKey) {
   ]);
   $('empty').classList.add('hidden');
   $('thread-detail').classList.remove('hidden');
-  renderHeader(detail.data.thread);
+  renderHeader(detail.data.thread, detail.data.relations);
   renderTimeline(turns.data, items.data);
   text($('diagnostics'), JSON.stringify(detail.data.diagnostics, null, 2));
   text($('raw-events'), JSON.stringify(events.data, null, 2));
 }
 
-function renderHeader(thread) {
+function renderHeader(thread, relations) {
   const header = $('thread-header');
   header.replaceChildren();
   header.append(element('p', 'eyebrow', thread.archived ? 'ARCHIVED THREAD' : 'DURABLE THREAD'));
   header.append(element('h2', '', thread.name || thread.codexThreadId));
-  header.append(element('p', 'thread-meta', [thread.model, thread.cwdDisplay, thread.source].filter(Boolean).join(' · ')));
+  header.append(element('p', 'thread-meta', [thread.model, thread.modelProvider, thread.agentNickname, thread.agentRole, thread.cwdDisplay, thread.source].filter(Boolean).join(' · ')));
+  const relationLabels = [];
+  if (relations?.parent) relationLabels.push(`parent: ${relations.parent.name || relations.parent.codexThreadId}`);
+  if (relations?.forkedFrom) relationLabels.push(`forked from: ${relations.forkedFrom.name || relations.forkedFrom.codexThreadId}`);
+  if (relations?.children?.length) relationLabels.push(`${relations.children.length} child Thread`);
+  if (relationLabels.length) header.append(element('p', 'thread-relations', relationLabels.join(' · ')));
   const banner = $('capture-banner');
   banner.replaceChildren(badge(thread.captureCompleteness));
   banner.append(element('span', '', thread.completenessReasons.length ? thread.completenessReasons.join(' · ') : '持久化历史已观察到终止事件'));

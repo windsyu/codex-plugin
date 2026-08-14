@@ -1,7 +1,7 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "observerVersion": "0.1.0",
-  "observerSchemaVersion": 5,
+  "observerSchemaVersion": 6,
   "liveMode": "opt_in_preview",
   "rolloutTopLevelTypes": [
     "session_meta",
@@ -31,6 +31,8 @@
     "streamingRolloutReader": true,
     "zstdContentFingerprint": true,
     "boundedOversizeRecords": true,
+    "threadRelations": true,
+    "turnExecutionContext": true,
     "contentAddressedBlobs": true,
     "blobRangeRequests": true,
     "appServerProtocol": true,

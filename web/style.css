@@ -49,6 +49,7 @@ button:hover { background: #2c573d; }
 .empty-state { margin-top: 18vh !important; text-align: center; color: var(--muted); }
 .empty-state h2 { color: var(--text); font-size: 32px; }
 .thread-meta { color: var(--muted); overflow-wrap: anywhere; }
+.thread-relations { color: #8fcfa5; font-size: 13px; }
 .capture-banner { display: flex; align-items: center; gap: 12px; margin: 22px 0 28px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
 .badge { flex: none; display: inline-block; border: 1px solid #435149; border-radius: 99px; padding: 3px 7px; color: #b9c5be; font: 600 10px/1.2 ui-monospace, monospace; text-transform: uppercase; }
 .badge-durable_complete, .badge-completed { color: var(--accent); border-color: #356548; }

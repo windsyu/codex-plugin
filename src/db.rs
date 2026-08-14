@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
 use crate::config::Config;
+use crate::ingest::thread_key;
 use crate::model::{Checkpoint, DoctorReport, DoctorSource, NormalizedEvent, RetentionReport};
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
@@ -17,6 +18,7 @@ const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
 const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
+const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql");
 
 #[derive(Debug)]
 pub struct Database {
@@ -308,6 +310,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_5)
                 .context("apply migration 0005")?;
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
         } else if version == 1 {
             connection
                 .execute_batch(MIGRATION_2)
@@ -321,6 +326,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_5)
                 .context("apply migration 0005")?;
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
         } else if version == 2 {
             connection
                 .execute_batch(MIGRATION_3)
@@ -331,6 +339,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_5)
                 .context("apply migration 0005")?;
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
         } else if version == 3 {
             connection
                 .execute_batch(MIGRATION_4)
@@ -338,11 +349,21 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_5)
                 .context("apply migration 0005")?;
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
         } else if version == 4 {
             connection
                 .execute_batch(MIGRATION_5)
                 .context("apply migration 0005")?;
-        } else if version != 5 {
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
+        } else if version == 5 {
+            connection
+                .execute_batch(MIGRATION_6)
+                .context("apply migration 0006")?;
+        } else if version != 6 {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
@@ -968,13 +989,46 @@ fn project_event(
     match event.top_type.as_str() {
         "session_meta" => {
             let p = &event.payload;
+            let parent_thread_id = p
+                .get("parent_thread_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let forked_from_id = p
+                .get("forked_from_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let parent_thread_key = parent_thread_id
+                .as_deref()
+                .map(|id| thread_key(&event.store_source_id, id));
+            let forked_from_thread_key = forked_from_id
+                .as_deref()
+                .map(|id| thread_key(&event.store_source_id, id));
+            let history_base = p.get("history_base").filter(|value| !value.is_null());
+            let session_projection = json!({
+                "sessionId":p.get("session_id").or_else(|| p.get("id")),
+                "parentThreadId":parent_thread_id,"forkedFromId":forked_from_id,
+                "cwd":p.get("cwd"),"source":p.get("source"),"threadSource":p.get("thread_source"),
+                "originator":p.get("originator"),"cliVersion":p.get("cli_version"),
+                "agentNickname":p.get("agent_nickname"),"agentRole":p.get("agent_role"),"agentPath":p.get("agent_path"),
+                "modelProvider":p.get("model_provider"),"historyMode":p.get("history_mode"),"historyBase":history_base
+            });
             transaction.execute(
-                "UPDATE threads SET session_id=?1,cwd=?2,source=?3,model=?4,created_at_ms=COALESCE(?5,created_at_ms),
-                   projection_json=?6,provenance_json=?7,last_event_seq=?8 WHERE thread_key=?9",
+                "UPDATE threads SET session_id=?1,cwd=?2,source=?3,model_provider=?4,created_at_ms=COALESCE(?5,created_at_ms),
+                   parent_thread_id=?6,parent_thread_key=?7,forked_from_id=?8,forked_from_thread_key=?9,
+                   agent_nickname=?10,agent_role=?11,agent_path=?12,originator=?13,cli_version=?14,
+                   thread_source=?15,history_mode=?16,history_base_json=?17,
+                   projection_json=?18,provenance_json=?19,last_event_seq=?20 WHERE thread_key=?21",
                 params![
-                    p.get("session_id").and_then(Value::as_str), p.get("cwd").and_then(Value::as_str),
-                    value_as_string(p.get("source")), p.get("model_provider").and_then(Value::as_str),
-                    p.get("timestamp").and_then(Value::as_str).and_then(parse_time_ms), projection,
+                    p.get("session_id").or_else(|| p.get("id")).and_then(Value::as_str),
+                    p.get("cwd").and_then(Value::as_str),value_as_string(p.get("source")),
+                    p.get("model_provider").and_then(Value::as_str),
+                    p.get("timestamp").and_then(Value::as_str).and_then(parse_time_ms),
+                    parent_thread_id,parent_thread_key,forked_from_id,forked_from_thread_key,
+                    p.get("agent_nickname").and_then(Value::as_str),p.get("agent_role").and_then(Value::as_str),
+                    p.get("agent_path").and_then(Value::as_str),p.get("originator").and_then(Value::as_str),
+                    p.get("cli_version").and_then(Value::as_str),value_as_string(p.get("thread_source")),
+                    value_as_string(p.get("history_mode")),history_base.map(Value::to_string),
+                    session_projection.to_string(),
                     json!({"sessionMeta":{"eventSeq":event_seq,"source":"rollout"}}).to_string(), event_seq, event.thread_key,
                 ],
             )?;
@@ -995,8 +1049,15 @@ fn project_event(
                 )?;
             }
             transaction.execute(
-                "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),projection_json=?3 WHERE thread_key=?4",
-                params![event.payload.get("cwd").and_then(Value::as_str), event.payload.get("model").and_then(Value::as_str), projection, event.thread_key],
+                "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),reasoning_effort=?3,
+                   approval_policy=?4,approvals_reviewer_json=?5,sandbox_json=?6,active_permission_profile_json=?7,
+                   projection_json=?8 WHERE thread_key=?9",
+                params![event.payload.get("cwd").and_then(Value::as_str), event.payload.get("model").and_then(Value::as_str),
+                    value_as_string(event.payload.get("effort")),value_as_string(event.payload.get("approval_policy")),
+                    event.payload.get("approvals_reviewer").filter(|value| !value.is_null()).map(Value::to_string),
+                    event.payload.get("sandbox_policy").filter(|value| !value.is_null()).map(Value::to_string),
+                    event.payload.get("permission_profile").filter(|value| !value.is_null()).map(Value::to_string),
+                    projection,event.thread_key],
             )?;
         }
         "event_msg" => {
@@ -1348,6 +1409,9 @@ pub fn classify_item(raw: &Value) -> Option<String> {
             .to_string(),
         ),
         "compacted" => Some("reasoning".into()),
+        "inter_agent_communication" | "inter_agent_communication_metadata" => {
+            Some("sub_agent".into())
+        }
         "event_msg" => match kind {
             "user_message" => Some("user_message".into()),
             "agent_message" => Some("agent_message".into()),
@@ -1418,6 +1482,7 @@ pub fn summary_text(raw: &Value) -> Option<String> {
     if let Some(text) = payload
         .get("message")
         .and_then(Value::as_str)
+        .or_else(|| payload.get("content").and_then(Value::as_str))
         .or_else(|| payload.get("text").and_then(Value::as_str))
         .or_else(|| payload.get("name").and_then(Value::as_str))
         .or_else(|| payload.get("call_id").and_then(Value::as_str))
@@ -1511,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_five_upgrades_version_four_idempotently() -> Result<()> {
+    fn migrations_upgrade_version_four_idempotently() -> Result<()> {
         let temp = TempDir::new()?;
         let database = version_four_database(&temp)?;
         database.migrate()?;
@@ -1523,8 +1588,14 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 5);
+        let relation_column: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='parent_thread_key')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 6);
         assert!(blob_table);
+        assert!(relation_column);
         Ok(())
     }
 
@@ -1545,6 +1616,27 @@ mod tests {
         )?;
         assert_eq!(version, 4);
         assert!(!blob_column);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_six_rolls_back_metadata_columns_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = version_four_database(&temp)?;
+        database.connect()?.execute_batch(MIGRATION_5)?;
+        database
+            .connect()?
+            .execute("CREATE INDEX threads_parent ON threads(thread_key)", [])?;
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let parent_column: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='parent_thread_key')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 5);
+        assert!(!parent_column);
         Ok(())
     }
 

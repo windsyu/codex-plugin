@@ -830,7 +830,7 @@ mod tests {
         let database = Database::open(&config.storage.database)?;
         database.migrate()?;
         let report = Importer::new(&config, &database)?.import_all()?;
-        assert_eq!(report.events_inserted, 12);
+        assert_eq!(report.events_inserted, 17);
         let connection = database.connect()?;
         let threads: i64 =
             connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
@@ -838,10 +838,11 @@ mod tests {
             connection.query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))?;
         let items: i64 =
             connection.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?;
-        let completeness: String =
-            connection.query_row("SELECT capture_completeness FROM threads", [], |row| {
-                row.get(0)
-            })?;
+        let complete_threads: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM threads WHERE capture_completeness='durable_complete'",
+            [],
+            |row| row.get(0),
+        )?;
         let raw_mcp: String = connection.query_row(
             "SELECT raw_json FROM raw_events WHERE method='event/mcp_tool_call_begin'",
             [],
@@ -852,9 +853,48 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!((threads, turns), (1, 1));
-        assert!(items >= 6);
-        assert_eq!(completeness, "durable_complete");
+        let relation: (bool, bool, String, String, String, String) = connection.query_row(
+            "SELECT c.parent_thread_key=p.thread_key,c.forked_from_thread_key=p.thread_key,
+               c.agent_nickname,c.agent_role,c.history_mode,c.model_provider
+             FROM threads c JOIN threads p ON p.codex_thread_id='00000000-0000-7000-8000-000000000001'
+             WHERE c.codex_thread_id='00000000-0000-7000-8000-000000000002'",
+            [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        )?;
+        let execution: (String, String, String) = connection.query_row(
+            "SELECT model,reasoning_effort,approval_policy FROM threads
+             WHERE codex_thread_id='00000000-0000-7000-8000-000000000002'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let sub_agent_items: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM items WHERE item_type='sub_agent'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!((threads, turns), (2, 2));
+        assert!(items >= 7);
+        assert_eq!(complete_threads, 2);
+        assert_eq!(
+            relation,
+            (
+                true,
+                true,
+                "fixture-child".into(),
+                "researcher".into(),
+                "paginated".into(),
+                "openai".into()
+            )
+        );
+        assert_eq!(
+            execution,
+            (
+                "gpt-child-fixture".into(),
+                "high".into(),
+                "on-request".into()
+            )
+        );
+        assert_eq!(sub_agent_items, 1);
         assert!(chinese_search_hits >= 1);
         assert!(!raw_mcp.contains("fixture-secret"));
         assert!(raw_mcp.contains("$redacted"));
@@ -900,19 +940,19 @@ mod tests {
         let database = Database::open(&config.storage.database)?;
         database.migrate()?;
         let importer = Importer::new(&config, &database)?;
-        assert_eq!(importer.import_all()?.events_inserted, 12);
+        assert_eq!(importer.import_all()?.events_inserted, 17);
         database
             .connect()?
             .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
 
         let preview = database.run_retention(1, 1, false)?;
-        assert_eq!(preview.candidate_raw_events, 12);
+        assert_eq!(preview.candidate_raw_events, 17);
         assert_eq!(preview.deleted_raw_events, 0);
         let applied = database.run_retention(1, 1, true)?;
-        assert_eq!(applied.deleted_raw_events, 12);
-        assert_eq!(applied.dedupe_tombstones_retained, 12);
-        assert_eq!(database.max_event_seq()?, 12);
-        assert_eq!(database.retention_low_watermark()?, 12);
+        assert_eq!(applied.deleted_raw_events, 17);
+        assert_eq!(applied.dedupe_tombstones_retained, 17);
+        assert_eq!(database.max_event_seq()?, 17);
+        assert_eq!(database.retention_low_watermark()?, 17);
 
         let connection = database.connect()?;
         let raw_count: i64 =
@@ -920,11 +960,11 @@ mod tests {
         let thread_count: i64 =
             connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
         assert_eq!(raw_count, 0);
-        assert_eq!(thread_count, 1);
+        assert_eq!(thread_count, 2);
         connection.execute("DELETE FROM source_checkpoints", [])?;
         let replay = importer.import_all()?;
         assert_eq!(replay.events_inserted, 0);
-        assert_eq!(replay.events_deduplicated, 12);
+        assert_eq!(replay.events_deduplicated, 17);
         assert!(database.rebuild_projections().is_err());
         Ok(())
     }

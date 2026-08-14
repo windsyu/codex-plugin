@@ -383,17 +383,46 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
     let rows = state.database.query_json(
         "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,runtime_status,
           runtime_status_stale,capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,
-          recency_at_ms,last_message_preview,last_event_seq FROM threads WHERE thread_key=?1",
+          recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
+          forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
+          history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
+          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE thread_key=?1",
         &[&thread_key], thread_row,
     );
     match rows {
         Ok(mut rows) if !rows.is_empty() => {
             let seq = state.database.max_event_seq().unwrap_or(0);
+            let thread = rows.remove(0);
+            let parent = relation_target(
+                &state.database,
+                thread["parentThreadKey"].as_str(),
+                thread["parentThreadId"].as_str(),
+            );
+            let forked_from = relation_target(
+                &state.database,
+                thread["forkedFromThreadKey"].as_str(),
+                thread["forkedFromId"].as_str(),
+            );
+            let children = state.database.query_json(
+                "SELECT thread_key,codex_thread_id,name,runtime_status,runtime_status_stale,capture_completeness
+                 FROM threads WHERE parent_thread_key=?1 OR forked_from_thread_key=?1 ORDER BY created_at_ms,thread_key",
+                &[&thread_key], relation_row,
+            ).unwrap_or_default();
+            let store_source_id = thread["storeSourceId"].as_str().unwrap_or_default();
+            let sources = state.database.query_json(
+                "SELECT source_id,kind,status,last_seen_at_ms FROM sources WHERE source_id=?1 OR source_id IN
+                 (SELECT DISTINCT source_id FROM raw_events WHERE thread_key=?2) ORDER BY kind,source_id",
+                &[&store_source_id,&thread_key], |row| Ok(json!({
+                    "sourceId":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,
+                    "status":row.get::<_,String>(2)?,"lastSeenAtMs":row.get::<_,Option<i64>>(3)?
+                })),
+            ).unwrap_or_default();
+            let coverage_summary = turn_coverage_summary(&state.database, &thread_key);
             Json(ApiEnvelope::new(
                 seq,
                 json!({
-                    "thread":rows.remove(0),"sources":[],"coverageSummary":{},
-                    "relations":{"parent":null,"forkedFrom":null,"children":[]},
+                    "thread":thread,"sources":sources,"coverageSummary":coverage_summary,
+                    "relations":{"parent":parent,"forkedFrom":forked_from,"children":children},
                     "diagnostics":diagnostics(&state.database,&thread_key)
                 }),
             ))
@@ -759,7 +788,10 @@ fn query_threads(state: &ApiState, query: ThreadQuery) -> Result<Response, Curso
     let mut sql = String::from(
         "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,runtime_status,
           runtime_status_stale,capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,
-          recency_at_ms,last_message_preview,last_event_seq FROM threads WHERE last_event_seq <= ?",
+          recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
+          forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
+          history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
+          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE last_event_seq <= ?",
     );
     let mut parameters = vec![SqlValue::Integer(as_of)];
     if let Some(source_id) = query.source_id {
@@ -874,7 +906,63 @@ fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "completenessReasons":parse_json(row.get::<_,String>(11)?),"createdAtMs":row.get::<_,Option<i64>>(12)?,
         "updatedAtMs":row.get::<_,Option<i64>>(13)?,"recencyAtMs":row.get::<_,Option<i64>>(14)?,
         "lastMessagePreview":row.get::<_,Option<String>>(15)?,"lastEventSeq":row.get::<_,i64>(16)?
+        ,"parentThreadId":row.get::<_,Option<String>>(17)?,"parentThreadKey":row.get::<_,Option<String>>(18)?,
+        "forkedFromId":row.get::<_,Option<String>>(19)?,"forkedFromThreadKey":row.get::<_,Option<String>>(20)?,
+        "agentNickname":row.get::<_,Option<String>>(21)?,"agentRole":row.get::<_,Option<String>>(22)?,
+        "agentPath":row.get::<_,Option<String>>(23)?,"originator":row.get::<_,Option<String>>(24)?,
+        "cliVersion":row.get::<_,Option<String>>(25)?,"threadSource":row.get::<_,Option<String>>(26)?,
+        "historyMode":row.get::<_,Option<String>>(27)?,"historyBase":parse_optional_json(row.get::<_,Option<String>>(28)?),
+        "modelProvider":row.get::<_,Option<String>>(29)?,"reasoningEffort":row.get::<_,Option<String>>(30)?,
+        "approvalPolicy":row.get::<_,Option<String>>(31)?,"approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
+        "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
+        "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?
     }))
+}
+
+fn relation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,
+        "name":row.get::<_,Option<String>>(2)?,"status":row.get::<_,Option<String>>(3)?,
+        "stale":row.get::<_,bool>(4)?,"captureCompleteness":row.get::<_,String>(5)?,"resolved":true
+    }))
+}
+
+fn relation_target(
+    database: &Database,
+    thread_key: Option<&str>,
+    thread_id: Option<&str>,
+) -> Value {
+    let Some(thread_key) = thread_key else {
+        return Value::Null;
+    };
+    database
+        .query_json(
+            "SELECT thread_key,codex_thread_id,name,runtime_status,runtime_status_stale,capture_completeness
+             FROM threads WHERE thread_key=?1",
+            &[&thread_key],
+            relation_row,
+        )
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .unwrap_or_else(|| {
+            json!({"threadKey":thread_key,"codexThreadId":thread_id,"resolved":false})
+        })
+}
+
+fn turn_coverage_summary(database: &Database, thread_key: &str) -> Value {
+    let rows = database
+        .query_json(
+            "SELECT capture_completeness,COUNT(*) FROM turns WHERE thread_key=?1
+             GROUP BY capture_completeness ORDER BY capture_completeness",
+            &[&thread_key],
+            |row| {
+                Ok(json!({
+                    "captureCompleteness":row.get::<_,String>(0)?,"count":row.get::<_,i64>(1)?
+                }))
+            },
+        )
+        .unwrap_or_default();
+    json!({"turns":rows})
 }
 
 fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -939,6 +1027,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::Importer;
     use tempfile::TempDir;
 
     #[test]
@@ -1110,6 +1199,59 @@ mod tests {
         );
         let body = axum::body::to_bytes(response.into_body(), 16).await?;
         assert_eq!(&body[..], b"2345");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_detail_resolves_parent_fork_children_and_execution_metadata() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Arc::new(Database::open(&config.storage.database)?);
+        database.migrate()?;
+        Importer::new(&config, database.as_ref())?.import_all()?;
+        let connection = database.connect()?;
+        let child_key: String = connection.query_row(
+            "SELECT thread_key FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000002'",
+            [],
+            |row| row.get(0),
+        )?;
+        let parent_key: String = connection.query_row(
+            "SELECT thread_key FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+        drop(connection);
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+        let child = thread_detail(State(state.clone()), Path(child_key)).await;
+        let child: Value =
+            serde_json::from_slice(&axum::body::to_bytes(child.into_body(), usize::MAX).await?)?;
+        assert_eq!(child["data"]["relations"]["parent"]["resolved"], true);
+        assert_eq!(child["data"]["relations"]["forkedFrom"]["resolved"], true);
+        assert_eq!(child["data"]["thread"]["reasoningEffort"], "high");
+        assert_eq!(child["data"]["thread"]["modelProvider"], "openai");
+
+        let parent = thread_detail(State(state), Path(parent_key)).await;
+        let parent: Value =
+            serde_json::from_slice(&axum::body::to_bytes(parent.into_body(), usize::MAX).await?)?;
+        assert_eq!(
+            parent["data"]["relations"]["children"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(parent["data"]["coverageSummary"]["turns"][0]["count"], 1);
         Ok(())
     }
 

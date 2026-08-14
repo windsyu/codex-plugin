@@ -10,8 +10,9 @@
 - EOF 半行保留、坏 JSON 审计占位、unknown variant 无损保存；
 - 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
+- SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
-- Thread、Turn、Item、event、search、health、source 和 capabilities REST API；
+- Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
 - Thread 列表支持签名 keyset cursor、稳定 `asOfEventSeq`、筛选和普通文本查询；
 - SSE 与 WebSocket committed-event 续传；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；

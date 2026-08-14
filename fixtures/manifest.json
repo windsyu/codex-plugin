@@ -4,7 +4,8 @@
   "containsPrivateData": false,
   "codexSourceBaseline": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "rolloutFiles": [
-    "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl"
+    "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl",
+    "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-10-00-00000000-0000-7000-8000-000000000002.jsonl"
   ],
   "liveFixtures": [
     "live-observer.fixture.toml",
@@ -20,6 +21,8 @@
     "shell lifecycle",
     "MCP lifecycle",
     "unknown top-level variant",
+    "parent, fork, sub-agent and history-base relations",
+    "per-turn model, effort, approval, sandbox and permission profile",
     "secret redaction",
     "App Server observe_new and attach_loaded probe"
   ]
