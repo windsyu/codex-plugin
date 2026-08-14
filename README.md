@@ -5,6 +5,7 @@
 ## 已实现
 
 - plain `.jsonl` 与 cold `.jsonl.zst` 扫描；
+- 文件系统 watcher 触发 200ms debounce rescan，并保留周期全量扫描兜底；
 - active / archived rollout 发现和重复导入幂等；
 - EOF 半行保留、坏 JSON 审计占位、unknown variant 无损保存；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
@@ -13,6 +14,7 @@
 - SSE 与 WebSocket committed-event 续传；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、`doctor`、`rebuild-projections`；
+- Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
 当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、retention/purge/export、签名 cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。

@@ -2,8 +2,10 @@ mod api;
 mod config;
 mod db;
 mod ingest;
+mod instance_lock;
 mod model;
 mod redact;
+mod watcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use tracing::{error, info};
 use crate::config::Config;
 use crate::db::Database;
 use crate::ingest::Importer;
+use crate::instance_lock::InstanceLock;
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-observerd", version, about)]
@@ -53,6 +56,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
     config.validate()?;
+    let instance_lock = InstanceLock::acquire(config.database_path())?;
+    info!(path = %instance_lock.path().display(), "Observer writer lock acquired");
     let database = Arc::new(Database::open(config.database_path())?);
     database.migrate()?;
 
@@ -88,6 +93,14 @@ async fn main() -> Result<()> {
                 "initial import complete"
             );
 
+            let (_watcher, mut rescan_hints) = watcher::RolloutWatcher::start(&config)?;
+            let second = Importer::new(&config, database.as_ref())?.import_all()?;
+            info!(
+                files = second.files_scanned,
+                events = second.events_inserted,
+                "post-watcher reconciliation complete"
+            );
+
             let scan_config = config.clone();
             let scan_db = database.clone();
             tokio::spawn(async move {
@@ -95,7 +108,15 @@ async fn main() -> Result<()> {
                 let mut ticker = tokio::time::interval(Duration::from_secs(interval));
                 ticker.tick().await;
                 loop {
-                    ticker.tick().await;
+                    tokio::select! {
+                        _ = ticker.tick() => {}
+                        hint = rescan_hints.recv() => {
+                            let Some(path) = hint else { break };
+                            tracing::debug!(path = %path.display(), "rollout watcher requested rescan");
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            while rescan_hints.try_recv().is_ok() {}
+                        }
+                    }
                     let cfg = scan_config.clone();
                     let db = scan_db.clone();
                     match tokio::task::spawn_blocking(move || {
