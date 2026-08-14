@@ -129,11 +129,35 @@ function renderItem(item) {
   if (item.itemType === 'approval' || item.itemType === 'user_question') {
     card.append(element('p', 'readonly-notice', 'Observer V1 为只读模式，请在原 Codex 客户端中处理该请求。'));
   }
+  for (const blobRef of item.raw?.blobRefs || []) {
+    const download = element('button', 'blob-download', `下载已脱敏大 payload（${blobRef.size} bytes）`);
+    download.type = 'button';
+    download.addEventListener('click', () => downloadBlob(blobRef.blobId, download));
+    card.append(download);
+  }
   const details = element('details', 'item-raw');
   details.append(element('summary', '', '已脱敏 JSON / provenance'));
   details.append(element('pre', '', JSON.stringify({ raw: item.raw, provenance: item.provenance }, null, 2)));
   card.append(details);
   return card;
+}
+
+async function downloadBlob(blobId, button) {
+  button.disabled = true;
+  try {
+    const response = await fetch(`/v1/blobs/${encodeURIComponent(blobId)}`, { headers: headers(), cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'observer-redacted-blob.json';
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    $('source-summary').textContent = `Blob 下载失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function search() {

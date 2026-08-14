@@ -428,6 +428,7 @@ fn normalize_envelope(
         turn_id,
         item_id,
         request_id,
+        blob_id: None,
         method,
         phase: phase.clone(),
         durability: "transient".into(),

@@ -16,13 +16,14 @@
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、`doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
+- 超过 `inline_blob_bytes` 的已脱敏 raw JSON 使用内容寻址 blob 原子落盘；投影保存引用，支持 orphan sweep、引用感知 retention 和安全 Range 下载；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
 - 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
 - live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。blob 外置、purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -111,6 +112,7 @@ V1 当前注册的接口全部为 `GET`：
 /v1/threads/{threadKey}/items
 /v1/threads/{threadKey}/events
 /v1/events
+/v1/blobs/{blobId}
 /v1/search?q=...
 /v1/meta/capabilities
 /v1/stream
@@ -127,6 +129,7 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 
 - Observer 只读打开 Codex rollout，不修改 Codex SQLite、rollout 或 writer lock；
 - Web Viewer 仅渲染已脱敏副本，JSON 使用 `textContent`，不执行 Markdown、HTML、SVG 或 ANSI；
+- blob 路径完全由服务端生成，下载强制 attachment，单 Range、并发上限 4；文件使用 `O_NOFOLLOW` 打开；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
 - API Router 不存在 POST/PUT/PATCH/DELETE 业务路由；
 - Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；

@@ -66,8 +66,18 @@ async fn main() -> Result<()> {
     config.validate()?;
     let instance_lock = InstanceLock::acquire(config.database_path())?;
     info!(path = %instance_lock.path().display(), "Observer writer lock acquired");
-    let database = Arc::new(Database::open(config.database_path())?);
+    let database = Arc::new(Database::open_with_blobs(
+        config.database_path(),
+        &config.storage.blob_dir,
+        config.capture.inline_blob_bytes,
+    )?);
     database.migrate()?;
+    if !matches!(&cli.command, Command::Doctor { .. }) {
+        let swept = database.sweep_orphan_blobs(60 * 60 * 1000)?;
+        if swept > 0 {
+            info!(files = swept, "removed orphan blob files");
+        }
+    }
 
     match cli.command {
         Command::Import => {
@@ -94,7 +104,11 @@ async fn main() -> Result<()> {
             println!("rebuilt {rebuilt} events");
         }
         Command::Retention { apply } => {
-            let report = database.run_retention(config.storage.raw_event_retention_days, apply)?;
+            let report = database.run_retention(
+                config.storage.raw_event_retention_days,
+                config.storage.blob_retention_days,
+                apply,
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {

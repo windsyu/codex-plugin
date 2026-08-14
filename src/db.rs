@@ -1,4 +1,6 @@
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -14,10 +16,30 @@ const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
+const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
 
 #[derive(Debug)]
 pub struct Database {
     path: PathBuf,
+    blob_dir: PathBuf,
+    inline_blob_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlobRecord {
+    pub blob_id: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub path: PathBuf,
+}
+
+struct PreparedBlob {
+    blob_id: String,
+    stored_hash: String,
+    media_type: &'static str,
+    size_bytes: usize,
+    relative_path: String,
+    redaction_json: String,
 }
 
 pub struct IngestBatch<'a> {
@@ -40,14 +62,26 @@ struct TurnUpdate<'a> {
 }
 
 impl Database {
+    #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self> {
+        let blob_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("blobs");
+        Self::open_with_blobs(path, &blob_dir, 256 * 1024)
+    }
+
+    pub fn open_with_blobs(path: &Path, blob_dir: &Path, inline_blob_bytes: usize) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create database directory {}", parent.display()))?;
         }
         let database = Self {
             path: path.to_path_buf(),
+            blob_dir: blob_dir.to_path_buf(),
+            inline_blob_bytes,
         };
+        database.initialize_blob_dir()?;
         let _ = database.connect()?;
         Ok(database)
     }
@@ -58,6 +92,201 @@ impl Database {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(connection)
+    }
+
+    fn initialize_blob_dir(&self) -> Result<()> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&self.blob_dir)
+            .with_context(|| format!("create blob directory {}", self.blob_dir.display()))?;
+        let metadata = fs::symlink_metadata(&self.blob_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("blob_dir must be a direct directory");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+                anyhow::bail!("blob_dir must be owned by the current user with mode 0700");
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_blob(&self, event: &NormalizedEvent) -> Result<Option<PreparedBlob>> {
+        let bytes = event.raw_json.as_bytes();
+        if bytes.len() <= self.inline_blob_bytes {
+            return Ok(None);
+        }
+        let stored_hash = event.stored_raw_hash.clone();
+        let blob_id = format!("blob_{stored_hash}");
+        let relative_path = format!("{}/{}.json", &stored_hash[..2], stored_hash);
+        let final_path = self.blob_dir.join(&relative_path);
+        let parent = final_path.parent().context("blob path has no parent")?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent)?;
+        if !final_path.exists() {
+            let temp_path = parent.join(format!(".{stored_hash}.{}.tmp", uuid::Uuid::new_v4()));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temp_path)
+                .with_context(|| format!("create blob temp file {}", temp_path.display()))?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            if let Err(error) = fs::rename(&temp_path, &final_path) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error).context("atomically publish blob");
+            }
+            fs::File::open(parent)?.sync_all()?;
+        }
+        let metadata = fs::symlink_metadata(&final_path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != bytes.len() as u64
+        {
+            anyhow::bail!("existing content-addressed blob does not match expected file");
+        }
+        let mut verified = Vec::with_capacity(bytes.len());
+        self.open_blob_path(&relative_path)?
+            .read_to_end(&mut verified)?;
+        if blake3::hash(&verified).to_hex().as_str() != stored_hash {
+            anyhow::bail!("content-addressed blob hash verification failed");
+        }
+        Ok(Some(PreparedBlob {
+            blob_id,
+            stored_hash,
+            media_type: "application/json",
+            size_bytes: bytes.len(),
+            relative_path,
+            redaction_json: event.redaction_json.clone(),
+        }))
+    }
+
+    fn resolve_blob_path(&self, relative_path: &str) -> Result<PathBuf> {
+        let relative = Path::new(relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            anyhow::bail!("invalid stored blob relative path");
+        }
+        Ok(self.blob_dir.join(relative))
+    }
+
+    fn open_blob_path(&self, relative_path: &str) -> Result<fs::File> {
+        let path = self.resolve_blob_path(relative_path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open blob {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("stored blob is not a regular file");
+        }
+        Ok(file)
+    }
+
+    fn read_blob_relative(&self, relative_path: &str) -> Result<String> {
+        let mut contents = String::new();
+        self.open_blob_path(relative_path)?
+            .read_to_string(&mut contents)?;
+        Ok(contents)
+    }
+
+    pub fn blob_record(&self, blob_id: &str) -> Result<Option<BlobRecord>> {
+        let record = self
+            .connect()?
+            .query_row(
+                "SELECT b.blob_id,b.media_type,b.size_bytes,b.relative_path
+                 FROM blobs b WHERE b.blob_id=?1
+                   AND EXISTS (SELECT 1 FROM blob_references r WHERE r.blob_id=b.blob_id)",
+                [blob_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        record
+            .map(|(blob_id, media_type, size_bytes, relative_path)| {
+                Ok(BlobRecord {
+                    blob_id,
+                    media_type,
+                    size_bytes: size_bytes as u64,
+                    path: self.resolve_blob_path(&relative_path)?,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn open_blob(&self, record: &BlobRecord) -> Result<fs::File> {
+        let relative = record
+            .path
+            .strip_prefix(&self.blob_dir)
+            .context("blob record escaped blob_dir")?;
+        let file = self.open_blob_path(&relative.to_string_lossy())?;
+        if file.metadata()?.len() != record.size_bytes {
+            anyhow::bail!("blob file size does not match metadata");
+        }
+        Ok(file)
+    }
+
+    pub fn sweep_orphan_blobs(&self, grace_ms: u64) -> Result<usize> {
+        let connection = self.connect()?;
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_millis(grace_ms))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let mut deleted = 0;
+        for entry in walkdir::WalkDir::new(&self.blob_dir)
+            .follow_links(false)
+            .min_depth(1)
+        {
+            let entry = entry?;
+            if !entry.file_type().is_file() || entry.metadata()?.modified()? > cutoff {
+                continue;
+            }
+            let relative = entry.path().strip_prefix(&self.blob_dir)?;
+            let relative = relative.to_string_lossy();
+            let referenced: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM blobs WHERE relative_path=?1)",
+                [relative.as_ref()],
+                |row| row.get(0),
+            )?;
+            if !referenced {
+                fs::remove_file(entry.path())?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     pub fn migrate(&self) -> Result<()> {
@@ -76,6 +305,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_4)
                 .context("apply migration 0004")?;
+            connection
+                .execute_batch(MIGRATION_5)
+                .context("apply migration 0005")?;
         } else if version == 1 {
             connection
                 .execute_batch(MIGRATION_2)
@@ -86,6 +318,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_4)
                 .context("apply migration 0004")?;
+            connection
+                .execute_batch(MIGRATION_5)
+                .context("apply migration 0005")?;
         } else if version == 2 {
             connection
                 .execute_batch(MIGRATION_3)
@@ -93,11 +328,21 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_4)
                 .context("apply migration 0004")?;
+            connection
+                .execute_batch(MIGRATION_5)
+                .context("apply migration 0005")?;
         } else if version == 3 {
             connection
                 .execute_batch(MIGRATION_4)
                 .context("apply migration 0004")?;
-        } else if version != 4 {
+            connection
+                .execute_batch(MIGRATION_5)
+                .context("apply migration 0005")?;
+        } else if version == 4 {
+            connection
+                .execute_batch(MIGRATION_5)
+                .context("apply migration 0005")?;
+        } else if version != 5 {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
@@ -185,22 +430,49 @@ impl Database {
                 continue;
             }
 
+            let prepared_blob = self.prepare_blob(event)?;
+            let mut stored_event = event.clone();
+            if let Some(blob) = prepared_blob.as_ref() {
+                let blob_ref = json!({
+                    "blobId":blob.blob_id,"size":blob.size_bytes,"mediaType":blob.media_type,
+                    "storedHash":blob.stored_hash,"redacted":true
+                });
+                stored_event.blob_id = Some(blob.blob_id.clone());
+                stored_event.raw_json = json!({"blobRef":blob_ref}).to_string();
+                if stored_event.item_type.is_some() {
+                    stored_event.payload = json!({"blobRefs":[blob_ref]});
+                }
+            }
+
             transaction.execute(
                 "INSERT INTO raw_events(
                    event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
                    thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,
-                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id,blob_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
                 params![
-                    event.event_id, event.source_id, event.epoch_id, event.source_seq,
-                    event.dedupe_key, event.observed_at_ms, event.event_at_ms,
-                    event.thread_key, event.codex_thread_id, event.turn_id, event.item_id,
-                    event.method, event.phase, event.durability, event.source_fingerprint, event.stored_raw_hash,
-                    event.raw_json, event.redaction_json, event.decode_status, event.decode_error,
-                    event.request_id, event.store_source_id,
+                    stored_event.event_id, stored_event.source_id, stored_event.epoch_id, stored_event.source_seq,
+                    stored_event.dedupe_key, stored_event.observed_at_ms, stored_event.event_at_ms,
+                    stored_event.thread_key, stored_event.codex_thread_id, stored_event.turn_id, stored_event.item_id,
+                    stored_event.method, stored_event.phase, stored_event.durability, stored_event.source_fingerprint, stored_event.stored_raw_hash,
+                    stored_event.raw_json, stored_event.redaction_json, stored_event.decode_status, stored_event.decode_error,
+                    stored_event.request_id, stored_event.store_source_id, stored_event.blob_id,
                 ],
             )?;
             let event_seq = transaction.last_insert_rowid();
+            if let Some(blob) = prepared_blob.as_ref() {
+                transaction.execute(
+                    "INSERT INTO blobs(blob_id,stored_hash,media_type,size_bytes,relative_path,redaction_json,created_event_seq,created_at_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(blob_id) DO NOTHING",
+                    params![blob.blob_id,blob.stored_hash,blob.media_type,blob.size_bytes as i64,
+                        blob.relative_path,blob.redaction_json,event_seq,now_ms()],
+                )?;
+                transaction.execute(
+                    "INSERT INTO blob_references(reference_kind,reference_key,blob_id,event_seq)
+                     VALUES ('raw_event',?1,?2,?3)",
+                    params![event_seq.to_string(), blob.blob_id, event_seq],
+                )?;
+            }
             transaction.execute(
                 "INSERT INTO event_dedupes(dedupe_key,stored_raw_hash,original_event_seq,source_id,retained)
                  VALUES (?1,?2,?3,?4,1)",
@@ -208,8 +480,26 @@ impl Database {
             )?;
             last_event_seq = Some(event_seq);
             inserted += 1;
-            if event.projectable {
-                project_event(&transaction, event, event_seq)?;
+            if stored_event.projectable {
+                project_event(&transaction, &stored_event, event_seq)?;
+                let reference_key = projection_reference_key(&stored_event);
+                if let Some(blob) = prepared_blob
+                    .as_ref()
+                    .filter(|_| stored_event.item_type.is_some())
+                {
+                    transaction.execute(
+                        "INSERT INTO blob_references(reference_kind,reference_key,blob_id,event_seq)
+                         VALUES ('projection',?1,?2,?3)
+                         ON CONFLICT(reference_kind,reference_key) DO UPDATE SET
+                           blob_id=excluded.blob_id,event_seq=excluded.event_seq",
+                        params![reference_key,blob.blob_id,event_seq],
+                    )?;
+                } else {
+                    transaction.execute(
+                        "DELETE FROM blob_references WHERE reference_kind='projection' AND reference_key=?1",
+                        [reference_key],
+                    )?;
+                }
             }
         }
 
@@ -326,11 +616,20 @@ impl Database {
         )?)
     }
 
-    pub fn run_retention(&self, retention_days: u64, apply: bool) -> Result<RetentionReport> {
+    pub fn run_retention(
+        &self,
+        retention_days: u64,
+        blob_retention_days: u64,
+        apply: bool,
+    ) -> Result<RetentionReport> {
         let retention_ms = retention_days
             .checked_mul(86_400_000)
             .context("raw retention duration overflow")? as i64;
         let cutoff = now_ms().saturating_sub(retention_ms);
+        let blob_retention_ms = blob_retention_days
+            .checked_mul(86_400_000)
+            .context("blob retention duration overflow")? as i64;
+        let blob_cutoff = now_ms().saturating_sub(blob_retention_ms);
         let mut connection = self.connect()?;
         let low_before: i64 = connection.query_row(
             "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
@@ -342,12 +641,25 @@ impl Database {
             [cutoff],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if !apply || candidates == 0 {
+        let candidate_blobs: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM blobs b WHERE b.created_at_ms < ?1 AND NOT EXISTS (
+               SELECT 1 FROM blob_references r WHERE r.blob_id=b.blob_id AND (
+                 r.reference_kind='projection' OR (r.reference_kind='raw_event' AND EXISTS (
+                   SELECT 1 FROM raw_events e WHERE e.event_seq=r.event_seq AND e.observed_at_ms>=?2
+                 ))
+               )
+             )",
+            params![blob_cutoff, cutoff],
+            |row| row.get(0),
+        )?;
+        if !apply || (candidates == 0 && candidate_blobs == 0) {
             return Ok(RetentionReport {
                 applied: apply,
                 cutoff_at_ms: cutoff,
                 candidate_raw_events: candidates as usize,
                 deleted_raw_events: 0,
+                candidate_blobs: candidate_blobs as usize,
+                deleted_blobs: 0,
                 low_watermark_before: low_before,
                 low_watermark_after: low_before,
                 dedupe_tombstones_retained: 0,
@@ -360,8 +672,29 @@ impl Database {
              (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1)",
             [cutoff],
         )?;
+        transaction.execute(
+            "DELETE FROM blob_references WHERE reference_kind='raw_event' AND (
+               event_seq IN (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1)
+               OR NOT EXISTS (SELECT 1 FROM raw_events e WHERE e.event_seq=blob_references.event_seq)
+             )",
+            [cutoff],
+        )?;
         let deleted =
             transaction.execute("DELETE FROM raw_events WHERE observed_at_ms < ?1", [cutoff])?;
+        let blob_paths = {
+            let mut statement = transaction.prepare(
+                "SELECT relative_path FROM blobs b WHERE b.created_at_ms < ?1
+                 AND NOT EXISTS (SELECT 1 FROM blob_references r WHERE r.blob_id=b.blob_id)",
+            )?;
+            statement
+                .query_map([blob_cutoff], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let deleted_blobs = transaction.execute(
+            "DELETE FROM blobs WHERE created_at_ms < ?1
+             AND NOT EXISTS (SELECT 1 FROM blob_references r WHERE r.blob_id=blobs.blob_id)",
+            [blob_cutoff],
+        )?;
         let low_after = low_before.max(max_candidate.unwrap_or(low_before));
         transaction.execute(
             "INSERT INTO retention_state(key,value_integer,updated_at_ms)
@@ -371,11 +704,21 @@ impl Database {
             params![low_after, now_ms()],
         )?;
         transaction.commit()?;
+        for relative_path in blob_paths {
+            let path = self.resolve_blob_path(&relative_path)?;
+            if let Err(error) = fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), error = %error, "delete expired blob file failed");
+            }
+        }
         Ok(RetentionReport {
             applied: true,
             cutoff_at_ms: cutoff,
             candidate_raw_events: candidates as usize,
             deleted_raw_events: deleted,
+            candidate_blobs: candidate_blobs as usize,
+            deleted_blobs,
             low_watermark_before: low_before,
             low_watermark_after: low_after,
             dedupe_tombstones_retained: tombstones,
@@ -424,17 +767,45 @@ impl Database {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute_batch(
-            "DELETE FROM search_index; DELETE FROM items; DELETE FROM turns; DELETE FROM threads;",
+            "DELETE FROM blob_references WHERE reference_kind='projection';
+             DELETE FROM search_index; DELETE FROM items; DELETE FROM turns; DELETE FROM threads;",
         )?;
         let events = {
             let mut statement = transaction.prepare(
                 "SELECT event_seq,event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
                  thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,source_fingerprint,stored_raw_hash,
-                 raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id FROM raw_events ORDER BY event_seq"
+                 raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id,blob_id,
+                 (SELECT relative_path FROM blobs WHERE blobs.blob_id=raw_events.blob_id)
+                 FROM raw_events ORDER BY event_seq"
             )?;
             let rows = statement.query_map([], |row| {
                 let raw_json: String = row.get(17)?;
-                let raw: Value = serde_json::from_str(&raw_json).unwrap_or(Value::Null);
+                let stored_raw_hash: String = row.get(16)?;
+                let blob_id: Option<String> = row.get(23)?;
+                let relative_path: Option<String> = row.get(24)?;
+                let materialized_raw = if let Some(relative_path) = relative_path {
+                    self.read_blob_relative(&relative_path).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            24,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?
+                } else {
+                    raw_json.clone()
+                };
+                if blake3::hash(materialized_raw.as_bytes()).to_hex().as_str() != stored_raw_hash {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        24,
+                        rusqlite::types::Type::Text,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "blob content hash does not match raw event",
+                        )
+                        .into(),
+                    ));
+                }
+                let raw: Value = serde_json::from_str(&materialized_raw).unwrap_or(Value::Null);
                 let durability: String = row.get(14)?;
                 let method: String = row.get(12)?;
                 let phase: String = row.get(13)?;
@@ -467,6 +838,15 @@ impl Database {
                         summary_text(&raw),
                     )
                 };
+                let payload = if blob_id.is_some() && item_type.is_some() {
+                    serde_json::from_str::<Value>(&raw_json)
+                        .ok()
+                        .and_then(|stub| stub.get("blobRef").cloned())
+                        .map(|blob_ref| json!({"blobRefs":[blob_ref]}))
+                        .unwrap_or(payload)
+                } else {
+                    payload
+                };
                 Ok((
                     row.get::<_, i64>(0)?,
                     NormalizedEvent {
@@ -483,12 +863,13 @@ impl Database {
                         turn_id: row.get(10)?,
                         item_id: row.get(11)?,
                         request_id: row.get(21)?,
+                        blob_id,
                         method,
                         phase: phase.clone(),
                         durability,
                         projectable: !row.get::<_, String>(8)?.is_empty(),
                         source_fingerprint: row.get(15)?,
-                        stored_raw_hash: row.get(16)?,
+                        stored_raw_hash,
                         raw_json,
                         redaction_json: row.get(18)?,
                         decode_status: row.get(19)?,
@@ -512,6 +893,25 @@ impl Database {
         };
         for (seq, event) in &events {
             project_event(&transaction, event, *seq)?;
+            let reference_key = projection_reference_key(event);
+            if let Some(blob_id) = event
+                .blob_id
+                .as_deref()
+                .filter(|_| event.item_type.is_some())
+            {
+                transaction.execute(
+                    "INSERT INTO blob_references(reference_kind,reference_key,blob_id,event_seq)
+                     VALUES ('projection',?1,?2,?3)
+                     ON CONFLICT(reference_kind,reference_key) DO UPDATE SET
+                       blob_id=excluded.blob_id,event_seq=excluded.event_seq",
+                    params![reference_key, blob_id, seq],
+                )?;
+            } else {
+                transaction.execute(
+                    "DELETE FROM blob_references WHERE reference_kind='projection' AND reference_key=?1",
+                    [reference_key],
+                )?;
+            }
         }
         transaction.commit()?;
         Ok(events.len())
@@ -749,6 +1149,21 @@ fn project_event(
         }
     }
     Ok(())
+}
+
+fn projection_reference_key(event: &NormalizedEvent) -> String {
+    if let Some(item_id) = event.item_id.as_deref() {
+        let turn_scope = event
+            .turn_id
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("@unassigned:{}:{}", event.source_id, event.epoch_id));
+        format!("item:{}:{turn_scope}:{item_id}", event.thread_key)
+    } else if let Some(turn_id) = event.turn_id.as_deref() {
+        format!("turn:{}:{turn_id}", event.thread_key)
+    } else {
+        format!("thread:{}", event.thread_key)
+    }
 }
 
 fn project_live_lifecycle(
@@ -1077,4 +1492,81 @@ pub fn now_ms() -> i64 {
 
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn version_four_database(temp: &TempDir) -> Result<Database> {
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        connection.execute_batch(MIGRATION_1)?;
+        connection.execute_batch(MIGRATION_2)?;
+        connection.execute_batch(MIGRATION_3)?;
+        connection.execute_batch(MIGRATION_4)?;
+        drop(connection);
+        Ok(database)
+    }
+
+    #[test]
+    fn migration_five_upgrades_version_four_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = version_four_database(&temp)?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let blob_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='blobs')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 5);
+        assert!(blob_table);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_five_rolls_back_all_ddl_on_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = version_four_database(&temp)?;
+        database
+            .connect()?
+            .execute("CREATE TABLE blobs(conflict INTEGER)", [])?;
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let blob_column: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('raw_events') WHERE name='blob_id')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 4);
+        assert!(!blob_column);
+        Ok(())
+    }
+
+    #[test]
+    fn orphan_sweeper_removes_only_files_without_database_rows() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        let orphan = temp.path().join("blobs/orphan.json");
+        fs::write(&orphan, "orphan")?;
+        assert_eq!(database.sweep_orphan_blobs(0)?, 1);
+        assert!(!orphan.exists());
+
+        let referenced = temp.path().join("blobs/referenced.json");
+        fs::write(&referenced, "referenced")?;
+        database.connect()?.execute(
+            "INSERT INTO blobs(blob_id,stored_hash,media_type,size_bytes,relative_path,created_event_seq,created_at_ms)
+             VALUES ('blob_ref','hash','application/json',10,'referenced.json',1,0)",
+            [],
+        )?;
+        assert_eq!(database.sweep_orphan_blobs(0)?, 0);
+        assert!(referenced.exists());
+        Ok(())
+    }
 }

@@ -6,6 +6,7 @@ allowed_origins = ["http://127.0.0.1:4767"]
 
 [storage]
 database = "../target/live-observer-data/observer.sqlite"
+blob_dir = "../target/live-observer-data/blobs"
 fingerprint_key_file = "../target/live-observer-data/fingerprint.key"
 raw_event_retention_days = 30
 delta_retention_days = 7
@@ -20,5 +21,6 @@ scan_interval_seconds = 30
 
 [capture]
 max_raw_event_bytes = 67108864
+inline_blob_bytes = 262144
 keep_reasoning = true
 keep_raw_json = true

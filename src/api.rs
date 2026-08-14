@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -17,8 +18,9 @@ use futures_util::StreamExt;
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -39,6 +41,7 @@ struct ApiState {
     strict_origin: bool,
     allowed_origins: Arc<Vec<String>>,
     live_modes: Arc<Vec<String>>,
+    blob_downloads: Arc<Semaphore>,
 }
 
 pub async fn serve(
@@ -60,6 +63,7 @@ pub async fn serve(
                 .map(|source| source.live_mode.clone())
                 .collect(),
         ),
+        blob_downloads: Arc::new(Semaphore::new(4)),
     };
     let protected = Router::new()
         .route("/health", get(health))
@@ -70,6 +74,7 @@ pub async fn serve(
         .route("/threads/{thread_key}/items", get(items))
         .route("/threads/{thread_key}/events", get(thread_events))
         .route("/events", get(events))
+        .route("/blobs/{blob_id}", get(blob))
         .route("/search", get(search))
         .route("/meta/capabilities", get(capabilities))
         .route("/stream", get(sse_stream))
@@ -214,6 +219,156 @@ async fn sources(State(state): State<ApiState>) -> Response {
     )
 }
 
+async fn blob(
+    State(state): State<ApiState>,
+    Path(blob_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let record = match state.database.blob_record(&blob_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "BLOB_NOT_FOUND", "blob not found"),
+        Err(error) => {
+            tracing::error!(error = %error, "blob lookup failed");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "blob lookup failed",
+            );
+        }
+    };
+    let range = match parse_byte_range(
+        headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok()),
+        record.size_bytes,
+    ) {
+        Ok(range) => range,
+        Err(()) => {
+            let mut response = api_error(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "RANGE_NOT_SATISFIABLE",
+                "only one satisfiable byte range is supported",
+            );
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", record.size_bytes)) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            return response;
+        }
+    };
+    let file = match state.database.open_blob(&record) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::error!(blob_id = %record.blob_id, error = %error, "open blob failed");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "blob storage is unavailable",
+            );
+        }
+    };
+    let permit = match state.blob_downloads.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "INTERNAL_ERROR",
+                "blob service is shutting down",
+            );
+        }
+    };
+    let (start, end, status) = range
+        .map(|(start, end)| (start, end, StatusCode::PARTIAL_CONTENT))
+        .unwrap_or((0, record.size_bytes.saturating_sub(1), StatusCode::OK));
+    let content_length = if record.size_bytes == 0 {
+        0
+    } else {
+        end - start + 1
+    };
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut file = tokio::fs::File::from_std(file);
+        if let Err(error) = file.seek(std::io::SeekFrom::Start(start)).await {
+            yield Err::<Bytes, std::io::Error>(error);
+            return;
+        }
+        let mut remaining = content_length;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        while remaining > 0 {
+            let read_size = remaining.min(buffer.len() as u64) as usize;
+            let read = match file.read(&mut buffer[..read_size]).await {
+                Ok(read) => read,
+                Err(error) => {
+                    yield Err::<Bytes, std::io::Error>(error);
+                    return;
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            remaining -= read as u64;
+            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buffer[..read]));
+        }
+    };
+    let content_type = if record.media_type == "application/json" {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    };
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, content_length)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"observer-blob.json\"",
+        );
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{}", record.size_bytes),
+        );
+    }
+    builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "failed to build blob response",
+        )
+    })
+}
+
+fn parse_byte_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    let value = header.strip_prefix("bytes=").ok_or(())?;
+    if value.contains(',') || size == 0 {
+        return Err(());
+    }
+    let (start, end) = value.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok(Some((size.saturating_sub(suffix.min(size)), size - 1)));
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= size {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(size - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
+
 async fn threads(State(state): State<ApiState>, Query(query): Query<ThreadQuery>) -> Response {
     match query_threads(&state, query) {
         Ok(response) => response,
@@ -340,7 +495,7 @@ fn event_query(
     let method_param = method.as_deref();
     envelope_query(state,
         "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
-          turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash
+          turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash,blob_id
           FROM raw_events WHERE event_seq>?1 AND (?2 IS NULL OR thread_key=?2) AND (?3 IS NULL OR source_id=?3)
           AND (?4 IS NULL OR method=?4) ORDER BY event_seq LIMIT ?5",
         &[&after,&thread_param,&source_param,&method_param,&limit], event_row)
@@ -422,7 +577,8 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
         seq,
         json!({
             "observerVersion":env!("CARGO_PKG_VERSION"),"apiVersion":"v1","readOnly":true,
-            "store":{"plainJsonl":true,"zstdJsonl":true,"incrementalRescan":true},
+            "store":{"plainJsonl":true,"zstdJsonl":true,"incrementalRescan":true,
+              "contentAddressedBlobs":true,"blobRangeRequests":true},
             "live":{"enabled":live_enabled,"modes":state.live_modes.as_ref(),
               "default":"off","transport":"websocket_over_unix_socket","readOnly":true,
               "serverRequests":"persist_without_response"},
@@ -450,7 +606,7 @@ async fn sse_stream(State(state): State<ApiState>, Query(query): Query<EventQuer
         loop {
             let rows = database.query_json(
                 "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
-                  turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash
+                  turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash,blob_id
                   FROM raw_events WHERE event_seq>?1 ORDER BY event_seq LIMIT 200",
                 &[&cursor], event_row,
             ).unwrap_or_default();
@@ -524,7 +680,7 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
     loop {
         let rows = database.query_json(
             "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
-              turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash
+              turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash,blob_id
               FROM raw_events WHERE event_seq>?1 ORDER BY event_seq LIMIT 200", &[&cursor], event_row,
         ).unwrap_or_default();
         for row in rows {
@@ -729,7 +885,8 @@ fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "turnId":row.get::<_,Option<String>>(9)?,"itemId":row.get::<_,Option<String>>(10)?,"method":row.get::<_,String>(11)?,
         "phase":row.get::<_,String>(12)?,"durability":row.get::<_,String>(13)?,"raw":parse_json(row.get::<_,String>(14)?),
         "redaction":parse_json(row.get::<_,String>(15)?),"decodeStatus":row.get::<_,String>(16)?,
-        "decodeError":row.get::<_,Option<String>>(17)?,"storedRawHash":row.get::<_,String>(18)?
+        "decodeError":row.get::<_,Option<String>>(17)?,"storedRawHash":row.get::<_,String>(18)?,
+        "blobId":row.get::<_,Option<String>>(19)?
     }))
 }
 
@@ -833,6 +990,7 @@ mod tests {
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
         };
         let first = query_threads(
             &state,
@@ -892,9 +1050,66 @@ mod tests {
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
         };
         let response = event_query(&state, 4, Some(10), None, None, None);
         assert_eq!(response.status(), StatusCode::GONE);
+        Ok(())
+    }
+
+    #[test]
+    fn byte_ranges_support_prefix_open_and_suffix_forms() {
+        assert_eq!(parse_byte_range(None, 10), Ok(None));
+        assert_eq!(parse_byte_range(Some("bytes=2-5"), 10), Ok(Some((2, 5))));
+        assert_eq!(parse_byte_range(Some("bytes=7-"), 10), Ok(Some((7, 9))));
+        assert_eq!(parse_byte_range(Some("bytes=-3"), 10), Ok(Some((7, 9))));
+        assert!(parse_byte_range(Some("bytes=10-"), 10).is_err());
+        assert!(parse_byte_range(Some("bytes=1-2,4-5"), 10).is_err());
+    }
+
+    #[tokio::test]
+    async fn blob_download_returns_safe_range_response() -> Result<()> {
+        let temp = TempDir::new()?;
+        let blob_dir = temp.path().join("blobs");
+        let database = Arc::new(Database::open_with_blobs(
+            &temp.path().join("observer.sqlite"),
+            &blob_dir,
+            1024,
+        )?);
+        database.migrate()?;
+        std::fs::create_dir_all(blob_dir.join("ab"))?;
+        std::fs::write(blob_dir.join("ab/blob.json"), b"0123456789")?;
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO blobs(blob_id,stored_hash,media_type,size_bytes,relative_path,created_event_seq,created_at_ms)
+             VALUES ('blob_test','hash','application/json',10,'ab/blob.json',1,0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO blob_references(reference_kind,reference_key,blob_id,event_seq)
+             VALUES ('projection','item:test','blob_test',1)",
+            [],
+        )?;
+        drop(connection);
+        let state = ApiState {
+            database,
+            token: Arc::new("token".into()),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
+        let response = blob(State(state), Path("blob_test".into()), headers).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"observer-blob.json\""
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16).await?;
+        assert_eq!(&body[..], b"2345");
         Ok(())
     }
 

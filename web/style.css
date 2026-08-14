@@ -65,6 +65,7 @@ button:hover { background: #2c573d; }
 .item-type { color: var(--muted); font: 600 11px/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
 .item-content { padding: 15px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .readonly-notice { margin: 0; padding: 12px 15px; border-top: 1px solid #69562f; color: var(--amber); font-size: 13px; }
+.blob-download { align-self: flex-start; margin: 8px 14px; }
 .item-raw { border-top: 1px solid var(--line); padding: 8px 14px; color: var(--muted); font-size: 12px; }
 .item-raw summary, .diagnostics summary { cursor: pointer; }
 pre { max-height: 520px; overflow: auto; padding: 14px; background: #090c0b; border-radius: 8px; color: #afbab4; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }

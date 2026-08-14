@@ -307,6 +307,7 @@ impl<'a> Importer<'a> {
             turn_id,
             item_id,
             request_id: None,
+            blob_id: None,
             method,
             phase,
             durability: "durable".into(),
@@ -472,8 +473,10 @@ fn file_identity(_path: &Path, metadata: &fs::Metadata) -> String {
 pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        validate_private_parent(parent, "fingerprint key")?;
     }
-    if path.exists() {
+    if fs::symlink_metadata(path).is_ok() {
+        validate_private_file(path, "fingerprint key")?;
         let bytes =
             fs::read(path).with_context(|| format!("read fingerprint key {}", path.display()))?;
         return bytes
@@ -500,8 +503,10 @@ pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
 pub fn load_or_create_token(path: &Path) -> Result<String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        validate_private_parent(parent, "bearer token")?;
     }
-    if path.exists() {
+    if fs::symlink_metadata(path).is_ok() {
+        validate_private_file(path, "bearer token")?;
         return Ok(fs::read_to_string(path)?.trim().to_string());
     }
     let mut bytes = [0_u8; 32];
@@ -518,6 +523,36 @@ pub fn load_or_create_token(path: &Path) -> Result<String> {
     writeln!(file, "{token}")?;
     file.sync_all()?;
     Ok(token)
+}
+
+fn validate_private_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("{label} must be a direct regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            anyhow::bail!("{label} must be owned by the current user with mode 0600");
+        }
+        validate_private_parent(path.parent().context("private file has no parent")?, label)?;
+    }
+    Ok(())
+}
+
+fn validate_private_parent(path: &Path, label: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+            anyhow::bail!("{label} directory must not be writable by group or other users");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, label);
+    Ok(())
 }
 
 fn parse_time_ms(value: &str) -> Option<i64> {
@@ -681,10 +716,10 @@ mod tests {
             .connect()?
             .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
 
-        let preview = database.run_retention(1, false)?;
+        let preview = database.run_retention(1, 1, false)?;
         assert_eq!(preview.candidate_raw_events, 12);
         assert_eq!(preview.deleted_raw_events, 0);
-        let applied = database.run_retention(1, true)?;
+        let applied = database.run_retention(1, 1, true)?;
         assert_eq!(applied.deleted_raw_events, 12);
         assert_eq!(applied.dedupe_tombstones_retained, 12);
         assert_eq!(database.max_event_seq()?, 12);
@@ -702,6 +737,109 @@ mod tests {
         assert_eq!(replay.events_inserted, 0);
         assert_eq!(replay.events_deduplicated, 12);
         assert!(database.rebuild_projections().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn large_raw_event_uses_rebuildable_blob_and_retention_keeps_references_consistent()
+    -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        config.storage.blob_dir = temp.path().join("blob-store");
+        config.capture.inline_blob_bytes = 1024;
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-thread-blob.jsonl");
+        let large_text = format!("large-marker-{}", "x".repeat(4096));
+        let records = [
+            json!({"timestamp":"2026-08-14T00:00:00Z","type":"session_meta","payload":{"id":"thread-blob"}}),
+            json!({"timestamp":"2026-08-14T00:00:01Z","type":"turn_context","payload":{"turn_id":"turn-blob"}}),
+            json!({"timestamp":"2026-08-14T00:00:02Z","type":"response_item","payload":{
+                "type":"message","id":"message-blob","role":"assistant","api_key":"fixture-secret",
+                "content":[{"type":"output_text","text":large_text}],
+                "internal_chat_message_metadata_passthrough":{"turn_id":"turn-blob"}}}),
+        ];
+        let mut contents = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        contents.push('\n');
+        fs::write(&rollout, contents)?;
+        let database = Database::open_with_blobs(
+            &config.storage.database,
+            &config.storage.blob_dir,
+            config.capture.inline_blob_bytes,
+        )?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        assert_eq!(importer.import_all()?.events_inserted, 3);
+
+        let (blob_id, raw_stub, projection): (String, String, String) =
+            database.connect()?.query_row(
+                "SELECT r.blob_id,r.raw_json,i.projection_json FROM raw_events r
+                 JOIN items i ON i.thread_key=r.thread_key AND i.item_id=r.item_id
+                 WHERE r.item_id='message-blob'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert!(raw_stub.contains("blobRef"));
+        assert!(projection.contains("blobRefs"));
+        assert!(!projection.contains("large-marker"));
+        let record = database.blob_record(&blob_id)?.context("blob record")?;
+        let blob_path = record.path.clone();
+        let mut materialized = String::new();
+        database
+            .open_blob(&record)?
+            .read_to_string(&mut materialized)?;
+        assert!(materialized.contains("large-marker"));
+        assert!(!materialized.contains("fixture-secret"));
+        assert_eq!(database.rebuild_projections()?, 3);
+        assert!(database.blob_record(&blob_id)?.is_some());
+
+        let inline = json!({"timestamp":"2026-08-14T00:00:03Z","type":"response_item","payload":{
+            "type":"message","id":"message-blob","role":"assistant",
+            "content":[{"type":"output_text","text":"small replacement"}],
+            "internal_chat_message_metadata_passthrough":{"turn_id":"turn-blob"}}});
+        let mut file = OpenOptions::new().append(true).open(&rollout)?;
+        writeln!(file, "{inline}")?;
+        assert_eq!(importer.import_all()?.events_inserted, 1);
+        let connection = database.connect()?;
+        connection.execute(
+            "UPDATE raw_events SET observed_at_ms=0 WHERE blob_id=?1",
+            [&blob_id],
+        )?;
+        connection.execute(
+            "UPDATE blobs SET created_at_ms=0 WHERE blob_id=?1",
+            [&blob_id],
+        )?;
+        drop(connection);
+        let preview = database.run_retention(1, 1, false)?;
+        assert_eq!(preview.candidate_blobs, 1);
+        let applied = database.run_retention(1, 1, true)?;
+        assert_eq!(applied.deleted_blobs, 1);
+        assert!(database.blob_record(&blob_id)?.is_none());
+        assert!(!blob_path.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_credentials_reject_symlinks_and_broad_permissions() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new()?;
+        let target = temp.path().join("target-token");
+        fs::write(&target, "secret")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        let link = temp.path().join("token-link");
+        symlink(&target, &link)?;
+        assert!(load_or_create_token(&link).is_err());
+
+        let broad = temp.path().join("broad-token");
+        fs::write(&broad, "secret")?;
+        fs::set_permissions(&broad, fs::Permissions::from_mode(0o644))?;
+        assert!(load_or_create_token(&broad).is_err());
         Ok(())
     }
 }

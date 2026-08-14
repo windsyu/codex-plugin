@@ -1,7 +1,7 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "observerVersion": "0.1.0",
-  "observerSchemaVersion": 4,
+  "observerSchemaVersion": 5,
   "liveMode": "opt_in_preview",
   "rolloutTopLevelTypes": [
     "session_meta",
@@ -28,6 +28,8 @@
     "plainJsonl": true,
     "zstdJsonl": true,
     "incrementalCompleteLines": true,
+    "contentAddressedBlobs": true,
+    "blobRangeRequests": true,
     "appServerProtocol": true,
     "appServerInitialize": true,
     "appServerObserveNew": true,
