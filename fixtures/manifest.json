@@ -4,6 +4,7 @@
   "containsPrivateData": false,
   "codexSourceBaseline": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "rolloutFiles": [
+    "codex-home/sessions/2025/12/01/rollout-2025-12-01T08-00-00-00000000-0000-7000-8000-000000000003.jsonl",
     "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl",
     "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-10-00-00000000-0000-7000-8000-000000000002.jsonl"
   ],
@@ -14,6 +15,7 @@
   ],
   "coverage": [
     "session_meta",
+    "legacy session shape",
     "turn_context",
     "turn lifecycle",
     "user and assistant messages",

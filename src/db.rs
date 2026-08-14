@@ -24,6 +24,9 @@ const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
 const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
 const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql");
 const MIGRATION_7: &str = include_str!("../migrations/0007_local_purge.sql");
+const MIGRATION_8: &str = include_str!("../migrations/0008_search_lookup_index.sql");
+const MIGRATION_9: &str = include_str!("../migrations/0009_unknown_rollout_status.sql");
+pub const LATEST_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug)]
 pub struct Database {
@@ -299,99 +302,25 @@ impl Database {
     pub fn migrate(&self) -> Result<()> {
         let connection = self.connect()?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == 0 {
-            connection
-                .execute_batch(MIGRATION_1)
-                .context("apply migration 0001")?;
-            connection
-                .execute_batch(MIGRATION_2)
-                .context("apply migration 0002")?;
-            connection
-                .execute_batch(MIGRATION_3)
-                .context("apply migration 0003")?;
-            connection
-                .execute_batch(MIGRATION_4)
-                .context("apply migration 0004")?;
-            connection
-                .execute_batch(MIGRATION_5)
-                .context("apply migration 0005")?;
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 1 {
-            connection
-                .execute_batch(MIGRATION_2)
-                .context("apply migration 0002")?;
-            connection
-                .execute_batch(MIGRATION_3)
-                .context("apply migration 0003")?;
-            connection
-                .execute_batch(MIGRATION_4)
-                .context("apply migration 0004")?;
-            connection
-                .execute_batch(MIGRATION_5)
-                .context("apply migration 0005")?;
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 2 {
-            connection
-                .execute_batch(MIGRATION_3)
-                .context("apply migration 0003")?;
-            connection
-                .execute_batch(MIGRATION_4)
-                .context("apply migration 0004")?;
-            connection
-                .execute_batch(MIGRATION_5)
-                .context("apply migration 0005")?;
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 3 {
-            connection
-                .execute_batch(MIGRATION_4)
-                .context("apply migration 0004")?;
-            connection
-                .execute_batch(MIGRATION_5)
-                .context("apply migration 0005")?;
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 4 {
-            connection
-                .execute_batch(MIGRATION_5)
-                .context("apply migration 0005")?;
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 5 {
-            connection
-                .execute_batch(MIGRATION_6)
-                .context("apply migration 0006")?;
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version == 6 {
-            connection
-                .execute_batch(MIGRATION_7)
-                .context("apply migration 0007")?;
-        } else if version != 7 {
+        if !(0..=LATEST_SCHEMA_VERSION).contains(&version) {
             anyhow::bail!("unsupported observer database schema version {version}");
+        }
+        for (target, migration) in [
+            (1, MIGRATION_1),
+            (2, MIGRATION_2),
+            (3, MIGRATION_3),
+            (4, MIGRATION_4),
+            (5, MIGRATION_5),
+            (6, MIGRATION_6),
+            (7, MIGRATION_7),
+            (8, MIGRATION_8),
+            (9, MIGRATION_9),
+        ] {
+            if version < target {
+                connection
+                    .execute_batch(migration)
+                    .with_context(|| format!("apply migration {target:04}"))?;
+            }
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
         Ok(())
@@ -1020,7 +949,7 @@ impl Database {
                     let version = connection
                         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                         .unwrap_or(-1);
-                    let healthy = integrity == "ok" && version == 7;
+                    let healthy = integrity == "ok" && version == LATEST_SCHEMA_VERSION;
                     (format!("{integrity}; schema_version={version}"), !healthy)
                 }
                 Err(error) => (format!("unreadable: {error}"), true),
@@ -1918,10 +1847,16 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 7);
+        let search_lookup_index: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='items_search_lookup')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 9);
         assert!(blob_table);
         assert!(relation_column);
         assert!(purge_table);
+        assert!(search_lookup_index);
         Ok(())
     }
 
@@ -1989,6 +1924,43 @@ mod tests {
     }
 
     #[test]
+    fn migration_nine_reclassifies_existing_unknown_rollout_events() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO sources(source_id,kind,stable_identity,config_json,status,created_at_ms,updated_at_ms)
+             VALUES ('source','rollout','source','{}','online',0,0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms) VALUES ('source','epoch',0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO raw_events(event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,
+               thread_key,codex_thread_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+               raw_json,redaction_json,decode_status,store_source_id)
+             VALUES ('event','source','epoch',1,'event',0,'thread','thread','rollout/future_variant',
+               'completed','durable','hash','hash','{}','{}','decoded','source')",
+            [],
+        )?;
+        connection.pragma_update(None, "user_version", 8)?;
+        drop(connection);
+        database.migrate()?;
+        let connection = database.connect()?;
+        let (status, version): (String, i64) = connection.query_row(
+            "SELECT decode_status,(SELECT user_version FROM pragma_user_version) FROM raw_events WHERE event_id='event'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "unknown");
+        assert_eq!(version, 9);
+        Ok(())
+    }
+
+    #[test]
     fn orphan_sweeper_removes_only_files_without_database_rows() -> Result<()> {
         let temp = TempDir::new()?;
         let database = Database::open(&temp.path().join("observer.sqlite"))?;
@@ -2027,7 +1999,7 @@ mod tests {
         database.migrate()?;
         let report = Database::doctor_read_only(&config)?;
         assert_eq!(report.status, "healthy");
-        assert_eq!(report.database, "ok; schema_version=7");
+        assert_eq!(report.database, "ok; schema_version=9");
         Ok(())
     }
 

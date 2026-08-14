@@ -26,7 +26,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{Database, LATEST_SCHEMA_VERSION};
 use crate::ingest::load_or_create_token;
 use crate::model::ApiEnvelope;
 
@@ -624,7 +624,8 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
     Json(ApiEnvelope::new(
         seq,
         json!({
-            "observerVersion":env!("CARGO_PKG_VERSION"),"apiVersion":"v1","readOnly":true,
+            "observerVersion":env!("CARGO_PKG_VERSION"),"observerSchemaVersion":LATEST_SCHEMA_VERSION,
+            "apiVersion":"v1","readOnly":true,
             "store":{"plainJsonl":true,"zstdJsonl":true,"incrementalRescan":true,
               "contentAddressedBlobs":true,"blobRangeRequests":true},
             "live":{"enabled":live_enabled,"modes":state.live_modes.as_ref(),
@@ -1128,7 +1129,8 @@ fn query_search(state: &ApiState, query: SearchQuery) -> Result<Response, Cursor
         "SELECT search_index.entity_key,search_index.thread_key,search_index.item_id,i.turn_id,
           snippet(search_index,3,'','', ' … ',20),bm25(search_index),i.last_event_seq
          FROM search_index JOIN items i
-           ON search_index.entity_key=i.thread_key || ':' || i.turn_scope || ':' || i.item_id
+           ON search_index.thread_key=i.thread_key AND search_index.item_id=i.item_id
+          AND search_index.entity_key=i.thread_key || ':' || i.turn_scope || ':' || i.item_id
          WHERE search_index MATCH ? AND i.last_event_seq<=?",
     );
     let mut parameters = vec![
@@ -1521,6 +1523,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ten_thousand_thread_and_search_queries_remain_bounded() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let mut connection = database.connect()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+                   capture_completeness,completeness_reasons_json,recency_at_ms,
+                   projection_json,provenance_json,last_event_seq)
+                 VALUES (?1,'scale-source',?1,0,'durable_complete','[]',?2,'{}','{}',0)",
+            )?;
+            for index in 0..10_000_i64 {
+                statement.execute(rusqlite::params![format!("thread-{index:05}"), index])?;
+            }
+        }
+        {
+            let mut item_statement = transaction.prepare(
+                "INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,started_at_ms,
+                   summary_text,projection_json,provenance_json,last_event_seq)
+                 VALUES ('thread-00000','turn-scale',?1,'turn-scale','message','completed',?2,?3,'{}','{}',0)",
+            )?;
+            let mut search_statement = transaction.prepare(
+                "INSERT INTO search_index(entity_key,thread_key,item_id,text)
+                 VALUES (?1,'thread-00000',?2,?3)",
+            )?;
+            for index in 0..10_000_i64 {
+                let item_id = format!("item-{index:05}");
+                let summary = format!("needle scale item {index}");
+                item_statement.execute(rusqlite::params![item_id, index, summary])?;
+                search_statement.execute(rusqlite::params![
+                    format!("thread-00000:turn-scale:item-{index:05}"),
+                    item_id,
+                    summary
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([6_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+
+        let started = std::time::Instant::now();
+        let response = query_threads(
+            &state,
+            ThreadQuery {
+                limit: Some(50),
+                ..ThreadQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let elapsed = started.elapsed();
+        let response: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(response["data"].as_array().unwrap().len(), 50);
+        assert!(response["nextCursor"].is_string());
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "thread query took {elapsed:?}"
+        );
+
+        let started = std::time::Instant::now();
+        let response = query_search(
+            &state,
+            SearchQuery {
+                q: "needle".into(),
+                cursor: None,
+                limit: Some(50),
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let elapsed = started.elapsed();
+        let response: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(response["data"].as_array().unwrap().len(), 50);
+        assert!(response["nextCursor"].is_string());
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "search query took {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn turn_item_and_search_cursors_page_and_bind_queries() -> Result<()> {
         let temp = TempDir::new()?;
         let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
@@ -1695,6 +1787,65 @@ mod tests {
         };
         let response = event_query(&state, 4, Some(10), None, None, None);
         assert_eq!(response.status(), StatusCode::GONE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshot_watermark_resumes_events_without_gap_or_duplicate() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO sources(source_id,kind,stable_identity,config_json,status,created_at_ms,updated_at_ms)
+             VALUES ('source','rollout','source','{}','online',0,0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms) VALUES ('source','epoch',0)",
+            [],
+        )?;
+        for sequence in 1..=2_i64 {
+            connection.execute(
+                "INSERT INTO raw_events(event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,
+                   thread_key,codex_thread_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+                   raw_json,redaction_json,decode_status,store_source_id)
+                 VALUES (?1,'source','epoch',?2,?1,?2,'thread','thread',?3,'completed','durable',?1,?1,'{}','{}','decoded','source')",
+                rusqlite::params![format!("event-{sequence}"), sequence, format!("event/{sequence}")],
+            )?;
+        }
+        connection.execute(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,capture_completeness,
+               completeness_reasons_json,recency_at_ms,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread','source','thread',0,'durable_complete','[]',2,'{}','{}',2)",
+            [],
+        )?;
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([5_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+        };
+        let snapshot = query_threads(&state, ThreadQuery::default()).map_err(cursor_test_error)?;
+        let snapshot: Value =
+            serde_json::from_slice(&axum::body::to_bytes(snapshot.into_body(), usize::MAX).await?)?;
+        assert_eq!(snapshot["asOfEventSeq"], 2);
+
+        state.database.connect()?.execute(
+            "INSERT INTO raw_events(event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,
+               thread_key,codex_thread_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+               raw_json,redaction_json,decode_status,store_source_id)
+             VALUES ('event-3','source','epoch',3,'event-3',3,'thread','thread','event/3','completed',
+               'durable','event-3','event-3','{}','{}','decoded','source')",
+            [],
+        )?;
+        let replay = event_query(&state, 2, Some(200), None, None, None);
+        let replay: Value =
+            serde_json::from_slice(&axum::body::to_bytes(replay.into_body(), usize::MAX).await?)?;
+        assert_eq!(replay["data"].as_array().unwrap().len(), 1);
+        assert_eq!(replay["data"][0]["eventSeq"], 3);
         Ok(())
     }
 

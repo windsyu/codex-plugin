@@ -13,6 +13,31 @@ async function api(path) {
   return body;
 }
 
+async function apiAll(path) {
+  const url = new URL(path, window.location.origin);
+  const data = [];
+  let envelope;
+  do {
+    envelope = await api(`${url.pathname}${url.search}`);
+    data.push(...envelope.data);
+    if (envelope.nextCursor) url.searchParams.set('cursor', envelope.nextCursor);
+  } while (envelope.nextCursor);
+  return { ...envelope, data };
+}
+
+async function apiAllEvents(path) {
+  const url = new URL(path, window.location.origin);
+  const data = [];
+  let envelope;
+  do {
+    envelope = await api(`${url.pathname}${url.search}`);
+    data.push(...envelope.data);
+    const last = envelope.data.at(-1);
+    if (last) url.searchParams.set('afterEventSeq', last.eventSeq);
+  } while (envelope.data.length === 200);
+  return { ...envelope, data };
+}
+
 function text(node, value) {
   node.textContent = value == null ? '' : String(value);
   return node;
@@ -37,7 +62,7 @@ async function connect() {
   state.token = $('token').value.trim();
   $('auth-error').textContent = '';
   try {
-    const [health, threads, sources] = await Promise.all([api('/v1/health'), api('/v1/threads?limit=200'), api('/v1/sources')]);
+    const [health, threads, sources] = await Promise.all([api('/v1/health'), apiAll('/v1/threads?limit=200'), api('/v1/sources')]);
     sessionStorage.setItem('observer-token', state.token);
     $('health').className = `health health-${health.data.status}`;
     $('health').textContent = `${health.data.status} · event ${health.asOfEventSeq}`;
@@ -76,8 +101,8 @@ async function selectThread(threadKey) {
   renderThreads(state.threads);
   const encoded = encodeURIComponent(threadKey);
   const [detail, turns, items, events] = await Promise.all([
-    api(`/v1/threads/${encoded}`), api(`/v1/threads/${encoded}/turns?limit=200`),
-    api(`/v1/threads/${encoded}/items?limit=200`), api(`/v1/threads/${encoded}/events?limit=200`)
+    api(`/v1/threads/${encoded}`), apiAll(`/v1/threads/${encoded}/turns?limit=200`),
+    apiAll(`/v1/threads/${encoded}/items?limit=200`), apiAllEvents(`/v1/threads/${encoded}/events?limit=200`)
   ]);
   $('empty').classList.add('hidden');
   $('thread-detail').classList.remove('hidden');
@@ -169,7 +194,7 @@ async function search() {
   const query = $('search').value.trim();
   if (!query) return renderThreads(state.threads);
   try {
-    const results = await api(`/v1/search?q=${encodeURIComponent(query)}&limit=100`);
+    const results = await apiAll(`/v1/search?q=${encodeURIComponent(query)}&limit=200`);
     const keys = new Set(results.data.map((result) => result.threadKey));
     renderThreads(state.threads.filter((thread) => keys.has(thread.threadKey)));
   } catch (error) {

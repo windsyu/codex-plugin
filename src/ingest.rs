@@ -285,7 +285,7 @@ impl<'a> Importer<'a> {
         } else {
             serde_json::from_slice::<Value>(trimmed).map_err(|error| error.to_string())
         };
-        let (raw, decode_status, decode_error) = match parsed {
+        let (raw, mut decode_status, decode_error) = match parsed {
             Ok(value) => (value, "decoded".to_string(), None),
             Err(error) => (
                 json!({"type":"decode_error","payload":{"byteLength":oversize_len.unwrap_or(trimmed.len()),"fingerprint":&fingerprint[..16]}}),
@@ -300,6 +300,9 @@ impl<'a> Importer<'a> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+        if decode_status == "decoded" && !is_known_rollout_top_type(&top_type) {
+            decode_status = "unknown".into();
+        }
         let payload = redacted.get("payload").cloned().unwrap_or(Value::Null);
         let nested_type = payload.get("type").and_then(Value::as_str);
         let turn_id =
@@ -556,6 +559,20 @@ fn extract_item_id(payload: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_string)
     })
+}
+
+fn is_known_rollout_top_type(top_type: &str) -> bool {
+    matches!(
+        top_type,
+        "session_meta"
+            | "response_item"
+            | "inter_agent_communication"
+            | "inter_agent_communication_metadata"
+            | "compacted"
+            | "turn_context"
+            | "world_state"
+            | "event_msg"
+    )
 }
 
 fn classify_phase(kind: &str) -> String {
@@ -830,7 +847,7 @@ mod tests {
         let database = Database::open(&config.storage.database)?;
         database.migrate()?;
         let report = Importer::new(&config, &database)?.import_all()?;
-        assert_eq!(report.events_inserted, 17);
+        assert_eq!(report.events_inserted, 21);
         let connection = database.connect()?;
         let threads: i64 =
             connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
@@ -872,9 +889,16 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!((threads, turns), (2, 2));
-        assert!(items >= 7);
-        assert_eq!(complete_threads, 2);
+        let unknown_events: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE decode_status='unknown'
+             AND method='rollout/future_observer_fixture_variant'
+             AND json_extract(raw_json,'$.payload.note')='unknown variants must remain queryable'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!((threads, turns), (3, 3));
+        assert!(items >= 8);
+        assert_eq!(complete_threads, 3);
         assert_eq!(
             relation,
             (
@@ -895,6 +919,7 @@ mod tests {
             )
         );
         assert_eq!(sub_agent_items, 1);
+        assert_eq!(unknown_events, 1);
         assert!(chinese_search_hits >= 1);
         assert!(!raw_mcp.contains("fixture-secret"));
         assert!(raw_mcp.contains("$redacted"));
@@ -940,19 +965,19 @@ mod tests {
         let database = Database::open(&config.storage.database)?;
         database.migrate()?;
         let importer = Importer::new(&config, &database)?;
-        assert_eq!(importer.import_all()?.events_inserted, 17);
+        assert_eq!(importer.import_all()?.events_inserted, 21);
         database
             .connect()?
             .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
 
         let preview = database.run_retention(1, 1, false)?;
-        assert_eq!(preview.candidate_raw_events, 17);
+        assert_eq!(preview.candidate_raw_events, 21);
         assert_eq!(preview.deleted_raw_events, 0);
         let applied = database.run_retention(1, 1, true)?;
-        assert_eq!(applied.deleted_raw_events, 17);
-        assert_eq!(applied.dedupe_tombstones_retained, 17);
-        assert_eq!(database.max_event_seq()?, 17);
-        assert_eq!(database.retention_low_watermark()?, 17);
+        assert_eq!(applied.deleted_raw_events, 21);
+        assert_eq!(applied.dedupe_tombstones_retained, 21);
+        assert_eq!(database.max_event_seq()?, 21);
+        assert_eq!(database.retention_low_watermark()?, 21);
 
         let connection = database.connect()?;
         let raw_count: i64 =
@@ -960,11 +985,11 @@ mod tests {
         let thread_count: i64 =
             connection.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
         assert_eq!(raw_count, 0);
-        assert_eq!(thread_count, 2);
+        assert_eq!(thread_count, 3);
         connection.execute("DELETE FROM source_checkpoints", [])?;
         let replay = importer.import_all()?;
         assert_eq!(replay.events_inserted, 0);
-        assert_eq!(replay.events_deduplicated, 17);
+        assert_eq!(replay.events_deduplicated, 21);
         assert!(database.rebuild_projections().is_err());
         Ok(())
     }
@@ -1103,6 +1128,41 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!((events, ordinal), (1201, 1201));
+        Ok(())
+    }
+
+    #[test]
+    fn identical_thread_ids_in_two_codex_homes_remain_isolated() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        let first_home = temp.path().join("codex-a");
+        let second_home = temp.path().join("codex-b");
+        let rollout = concat!(
+            "{\"timestamp\":\"2026-08-14T00:00:00Z\",\"type\":\"session_meta\",",
+            "\"payload\":{\"id\":\"same-thread-id\",\"cwd\":\"/fixture\"}}\n"
+        );
+        for home in [&first_home, &second_home] {
+            let sessions = home.join("sessions/2026/08/14");
+            fs::create_dir_all(&sessions)?;
+            fs::write(sessions.join("rollout-same-thread-id.jsonl"), rollout)?;
+        }
+        config.sources[0].name = "source-a".into();
+        config.sources[0].codex_home = first_home;
+        let mut second = config.sources[0].clone();
+        second.name = "source-b".into();
+        second.codex_home = second_home;
+        config.sources.push(second);
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let connection = database.connect()?;
+        let (threads, thread_keys, sources): (i64, i64, i64) = connection.query_row(
+            "SELECT COUNT(*),COUNT(DISTINCT thread_key),COUNT(DISTINCT store_source_id)
+             FROM threads WHERE codex_thread_id='same-thread-id'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!((threads, thread_keys, sources), (2, 2, 2));
         Ok(())
     }
 

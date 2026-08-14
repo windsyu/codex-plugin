@@ -14,6 +14,7 @@
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
+- Viewer 自动消费 Thread/Turn/Item/Search cursor 与 raw event sequence，不静默截断长时间线；
 - SSE 与 WebSocket committed-event 续传、Thread/source/method 过滤、心跳和慢消费者断开；SSE 支持 `Last-Event-ID`；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、严格只读 `doctor`、`rebuild-projections`；
@@ -24,9 +25,10 @@
 - 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
 - live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
-- 合成 fixture，不读取或提交真实用户 rollout。
+- 合成 fixture，不读取或提交真实用户 rollout；
+- 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
-`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。完整性能加固属于后续 V1 收口切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。更大数据集的容量规划与 SLA 冻结属于后续发布工程，不影响当前 V1 MVP 边界，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -39,6 +41,7 @@ cargo build --release
 ```
 
 测试只使用临时目录和 `fixtures/` 中的合成数据，不会写入 `~/.codex`。
+发布前自动化、release E2E、安全与容量冒烟结果见 [V1 验证记录](docs/v1-validation.md)。
 
 ## 配置
 

@@ -25,5 +25,5 @@ V1 需要在 macOS 本机以 read-only sidecar 方式导入 Codex rollout，形�
 - 首版可以离线、只读、可重放地验证历史浏览价值；
 - unknown variant 不阻塞导入，但其语义投影需要后续 compatibility fixture；
 - 当前不捕获 transient delta、approval 或 question；UI 必须显示 durable completeness；
-- cursor 签名、blob、retention、App Server Live Adapter 和性能门槛需要后续 V1 切片补齐；
+- 首个纵向切片未包含 cursor 签名、blob、retention、App Server Live Adapter 和性能门槛；前四项及 10k/10k 容量冒烟已在后续 V1 切片补齐，更大数据集 SLA 仍需按验证记录冻结；
 - SQLite 单 writer 和 projection rebuild 为后续加固保留了明确接口。
