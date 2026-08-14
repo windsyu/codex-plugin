@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": "v1",
+  "synthetic": true,
+  "containsPrivateData": false,
+  "codexSourceBaseline": "41ece455b7fa7166f4fc38522952afdaa2604e18",
+  "rolloutFiles": [
+    "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl"
+  ],
+  "coverage": [
+    "session_meta",
+    "turn_context",
+    "turn lifecycle",
+    "user and assistant messages",
+    "reasoning summary",
+    "shell lifecycle",
+    "MCP lifecycle",
+    "unknown top-level variant",
+    "secret redaction"
+  ]
+}

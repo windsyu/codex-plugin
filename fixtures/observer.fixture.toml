@@ -1,0 +1,20 @@
+[server]
+bind = "127.0.0.1:4766"
+bearer_token_file = "../target/fixture-observer-data/token"
+strict_origin = true
+allowed_origins = ["http://127.0.0.1:4766"]
+
+[storage]
+database = "../target/fixture-observer-data/observer.sqlite"
+fingerprint_key_file = "../target/fixture-observer-data/fingerprint.key"
+
+[[sources]]
+name = "synthetic-fixture"
+codex_home = "codex-home"
+live_mode = "off"
+scan_interval_seconds = 30
+
+[capture]
+max_raw_event_bytes = 67108864
+keep_reasoning = true
+keep_raw_json = true

@@ -1,0 +1,89 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone)]
+pub struct NormalizedEvent {
+    pub event_id: String,
+    pub source_id: String,
+    pub epoch_id: String,
+    pub source_seq: i64,
+    pub dedupe_key: String,
+    pub observed_at_ms: i64,
+    pub event_at_ms: Option<i64>,
+    pub thread_key: String,
+    pub codex_thread_id: String,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub method: String,
+    pub phase: String,
+    pub source_fingerprint: String,
+    pub stored_raw_hash: String,
+    pub raw_json: String,
+    pub redaction_json: String,
+    pub decode_status: String,
+    pub decode_error: Option<String>,
+    pub top_type: String,
+    pub item_type: Option<String>,
+    pub item_status: Option<String>,
+    pub summary_text: Option<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Checkpoint {
+    pub byte_offset: u64,
+    pub ordinal: u64,
+    pub epoch_id: Option<String>,
+    pub file_identity: Option<String>,
+    pub current_turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiEnvelope<T> {
+    pub api_version: &'static str,
+    pub as_of_event_seq: i64,
+    pub data: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+impl<T> ApiEnvelope<T> {
+    pub fn new(as_of_event_seq: i64, data: T) -> Self {
+        Self {
+            api_version: "v1",
+            as_of_event_seq,
+            data,
+            next_cursor: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    pub files_scanned: usize,
+    pub events_inserted: usize,
+    pub events_deduplicated: usize,
+    pub decode_errors: usize,
+    pub sources_degraded: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoctorReport {
+    pub status: String,
+    pub database: String,
+    pub sources: Vec<DoctorSource>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoctorSource {
+    pub name: String,
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Pagination {
+    pub limit: Option<usize>,
+}

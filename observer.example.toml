@@ -1,0 +1,21 @@
+[server]
+bind = "127.0.0.1:4765"
+bearer_token_file = "observer-data/token"
+strict_origin = true
+allowed_origins = ["http://127.0.0.1:4765"]
+
+[storage]
+database = "observer-data/observer.sqlite"
+fingerprint_key_file = "observer-data/fingerprint.key"
+
+[[sources]]
+name = "default"
+codex_home = "~/.codex"
+live_mode = "off"
+scan_interval_seconds = 30
+
+[capture]
+max_raw_event_bytes = 67108864
+keep_reasoning = true
+keep_raw_json = true
+

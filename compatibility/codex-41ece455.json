@@ -1,0 +1,23 @@
+{
+  "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
+  "observerVersion": "0.1.0",
+  "liveMode": "off",
+  "rolloutTopLevelTypes": [
+    "session_meta",
+    "response_item",
+    "inter_agent_communication",
+    "inter_agent_communication_metadata",
+    "compacted",
+    "turn_context",
+    "world_state",
+    "event_msg"
+  ],
+  "unknownVariantPolicy": "retain_redacted_raw_and_continue",
+  "fixtures": ["fixtures/manifest.json"],
+  "verified": {
+    "plainJsonl": true,
+    "zstdJsonl": true,
+    "incrementalCompleteLines": true,
+    "appServerProtocol": false
+  }
+}
