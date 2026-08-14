@@ -57,6 +57,15 @@ impl<T> ApiEnvelope<T> {
             next_cursor: None,
         }
     }
+
+    pub fn with_cursor(as_of_event_seq: i64, data: T, next_cursor: Option<String>) -> Self {
+        Self {
+            api_version: "v1",
+            as_of_event_seq,
+            data,
+            next_cursor,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

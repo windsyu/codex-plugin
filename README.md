@@ -11,13 +11,14 @@
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
 - 已知 secret key、credential prefix 和环境变量值入库前脱敏；
 - Thread、Turn、Item、event、search、health、source 和 capabilities REST API；
+- Thread 列表支持签名 keyset cursor、稳定 `asOfEventSeq`、筛选和普通文本查询；
 - SSE 与 WebSocket committed-event 续传；
 - bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、`doctor`、`rebuild-projections`；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、retention/purge/export、签名 cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、retention/purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 

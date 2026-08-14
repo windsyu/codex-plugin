@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
@@ -315,6 +316,19 @@ impl Database {
         let mut statement = connection.prepare(sql)?;
         Ok(statement
             .query_map(parameters, mapper)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn query_json_owned(
+        &self,
+        sql: &str,
+        parameters: Vec<SqlValue>,
+        mapper: fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>,
+    ) -> Result<Vec<Value>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(sql)?;
+        Ok(statement
+            .query_map(rusqlite::params_from_iter(parameters), mapper)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

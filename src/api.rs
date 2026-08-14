@@ -11,8 +11,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{Stream, StreamExt};
-use serde::Deserialize;
+use rusqlite::types::Value as SqlValue;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -180,13 +183,14 @@ async fn sources(State(state): State<ApiState>) -> Response {
     )
 }
 
-async fn threads(State(state): State<ApiState>, Query(page): Query<Pagination>) -> Response {
-    let limit = page.limit.unwrap_or(50).clamp(1, 200) as i64;
-    envelope_query(&state,
-        "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,runtime_status,
-          runtime_status_stale,capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,
-          recency_at_ms,last_message_preview,last_event_seq FROM threads ORDER BY recency_at_ms DESC,thread_key LIMIT ?1",
-        &[&limit], thread_row)
+async fn threads(State(state): State<ApiState>, Query(query): Query<ThreadQuery>) -> Response {
+    match query_threads(&state, query) {
+        Ok(response) => response,
+        Err(CursorFailure::Invalid(message)) => {
+            api_error(StatusCode::BAD_REQUEST, "CURSOR_INVALID", &message)
+        }
+        Err(CursorFailure::Internal(error)) => internal_error(error),
+    }
 }
 
 async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<String>) -> Response {
@@ -310,6 +314,40 @@ struct EventQuery {
     method: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+    source_id: Option<String>,
+    runtime_status: Option<String>,
+    capture_completeness: Option<String>,
+    archived: Option<bool>,
+    q: Option<String>,
+    sort: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadCursor {
+    endpoint: String,
+    query_fingerprint: String,
+    as_of_event_seq: i64,
+    last_recency_at_ms: i64,
+    last_thread_key: String,
+}
+
+enum CursorFailure {
+    Invalid(String),
+    Internal(anyhow::Error),
+}
+
+impl From<anyhow::Error> for CursorFailure {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Internal(value)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
     q: String,
@@ -324,7 +362,7 @@ async fn search(State(state): State<ApiState>, Query(query): Query<SearchQuery>)
             "search query must contain 1 to 256 characters",
         );
     }
-    let expression = format!("\"{}\"", query.q.replace('"', "\"\""));
+    let expression = search_expression(&query.q);
     let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
     envelope_query(&state,
         "SELECT entity_key,thread_key,item_id,snippet(search_index,3,'','', ' … ',20),bm25(search_index)
@@ -460,6 +498,149 @@ fn envelope_query(
     }
 }
 
+fn query_threads(state: &ApiState, query: ThreadQuery) -> Result<Response, CursorFailure> {
+    if query.sort.as_deref().unwrap_or("recency_desc") != "recency_desc" {
+        return Err(CursorFailure::Invalid(
+            "only sort=recency_desc is supported".into(),
+        ));
+    }
+    if query
+        .q
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty() || value.chars().count() > 256)
+    {
+        return Err(CursorFailure::Invalid(
+            "q must contain 1 to 256 characters".into(),
+        ));
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let fingerprint = thread_query_fingerprint(&query);
+    let decoded_cursor = if let Some(cursor) = query.cursor.as_deref() {
+        let decoded = decode_cursor(cursor, &state.token)
+            .map_err(|message| CursorFailure::Invalid(message.to_string()))?;
+        if decoded.endpoint != "threads" || decoded.query_fingerprint != fingerprint {
+            return Err(CursorFailure::Invalid(
+                "cursor does not match the current query".into(),
+            ));
+        }
+        Some(decoded)
+    } else {
+        None
+    };
+    let as_of = decoded_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_of_event_seq)
+        .unwrap_or(state.database.max_event_seq()?);
+
+    let mut sql = String::from(
+        "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,runtime_status,
+          runtime_status_stale,capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,
+          recency_at_ms,last_message_preview,last_event_seq FROM threads WHERE last_event_seq <= ?",
+    );
+    let mut parameters = vec![SqlValue::Integer(as_of)];
+    if let Some(source_id) = query.source_id {
+        sql.push_str(" AND store_source_id = ?");
+        parameters.push(SqlValue::Text(source_id));
+    }
+    if let Some(status) = query.runtime_status {
+        sql.push_str(" AND runtime_status = ?");
+        parameters.push(SqlValue::Text(status));
+    }
+    if let Some(completeness) = query.capture_completeness {
+        sql.push_str(" AND capture_completeness = ?");
+        parameters.push(SqlValue::Text(completeness));
+    }
+    if let Some(archived) = query.archived {
+        sql.push_str(" AND archived = ?");
+        parameters.push(SqlValue::Integer(i64::from(archived)));
+    }
+    if let Some(search) = query.q {
+        sql.push_str(
+            " AND thread_key IN (SELECT thread_key FROM search_index WHERE search_index MATCH ?)",
+        );
+        parameters.push(SqlValue::Text(search_expression(&search)));
+    }
+    if let Some(cursor) = &decoded_cursor {
+        sql.push_str(
+            " AND (COALESCE(recency_at_ms,0) < ? OR (COALESCE(recency_at_ms,0) = ? AND thread_key > ?))",
+        );
+        parameters.push(SqlValue::Integer(cursor.last_recency_at_ms));
+        parameters.push(SqlValue::Integer(cursor.last_recency_at_ms));
+        parameters.push(SqlValue::Text(cursor.last_thread_key.clone()));
+    }
+    sql.push_str(" ORDER BY COALESCE(recency_at_ms,0) DESC,thread_key ASC LIMIT ?");
+    parameters.push(SqlValue::Integer((limit + 1) as i64));
+    let mut rows = state
+        .database
+        .query_json_owned(&sql, parameters, thread_row)?;
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        let last = rows.last().expect("non-empty page at limit");
+        Some(encode_cursor(
+            &ThreadCursor {
+                endpoint: "threads".into(),
+                query_fingerprint: fingerprint,
+                as_of_event_seq: as_of,
+                last_recency_at_ms: last["recencyAtMs"].as_i64().unwrap_or(0),
+                last_thread_key: last["threadKey"].as_str().unwrap_or_default().to_string(),
+            },
+            &state.token,
+        )?)
+    } else {
+        None
+    };
+    Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
+}
+
+fn thread_query_fingerprint(query: &ThreadQuery) -> String {
+    let canonical = json!({
+        "sourceId":query.source_id,
+        "runtimeStatus":query.runtime_status,
+        "captureCompleteness":query.capture_completeness,
+        "archived":query.archived,
+        "q":query.q,
+        "sort":query.sort.as_deref().unwrap_or("recency_desc")
+    });
+    blake3::hash(canonical.to_string().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn cursor_key(token: &str) -> Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(token)?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("bearer token must decode to 32 bytes"))
+}
+
+fn encode_cursor(cursor: &ThreadCursor, token: &str) -> Result<String> {
+    let payload = serde_json::to_vec(cursor)?;
+    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(payload),
+        URL_SAFE_NO_PAD.encode(signature.as_bytes())
+    ))
+}
+
+fn decode_cursor(value: &str, token: &str) -> Result<ThreadCursor> {
+    let (payload, signature) = value
+        .split_once('.')
+        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
+    let payload = URL_SAFE_NO_PAD.decode(payload)?;
+    let signature = URL_SAFE_NO_PAD.decode(signature)?;
+    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
+    if !constant_time_eq(&signature, expected.as_bytes()) {
+        anyhow::bail!("cursor signature is invalid");
+    }
+    Ok(serde_json::from_slice(&payload)?)
+}
+
+fn search_expression(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,"storeSourceId":row.get::<_,String>(2)?,
@@ -533,11 +714,104 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn token_comparison_checks_length_and_content() {
         assert!(constant_time_eq(b"token", b"token"));
         assert!(!constant_time_eq(b"token", b"other"));
         assert!(!constant_time_eq(b"token", b"token-long"));
+    }
+
+    #[test]
+    fn cursor_round_trip_and_tamper_detection() -> Result<()> {
+        let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        let cursor = ThreadCursor {
+            endpoint: "threads".into(),
+            query_fingerprint: "query".into(),
+            as_of_event_seq: 42,
+            last_recency_at_ms: 10,
+            last_thread_key: "thread".into(),
+        };
+        let encoded = encode_cursor(&cursor, &token)?;
+        let decoded = decode_cursor(&encoded, &token)?;
+        assert_eq!(decoded.as_of_event_seq, 42);
+        assert_eq!(decoded.last_thread_key, "thread");
+
+        let mut tampered = encoded.into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert!(decode_cursor(std::str::from_utf8(&tampered)?, &token).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_cursor_pages_without_duplicates_and_binds_filters() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let connection = database.connect()?;
+        for index in 1..=3_i64 {
+            connection.execute(
+                "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+                   capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,
+                   recency_at_ms,projection_json,provenance_json,last_event_seq)
+                 VALUES (?1,'source',?1,0,'durable_complete','[]',?2,?2,?2,'{}','{}',?3)",
+                rusqlite::params![format!("thread-{index}"), index * 1000, 0],
+            )?;
+        }
+        let state = ApiState {
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+        };
+        let first = query_threads(
+            &state,
+            ThreadQuery {
+                limit: Some(2),
+                ..ThreadQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let first: Value =
+            serde_json::from_slice(&axum::body::to_bytes(first.into_body(), usize::MAX).await?)?;
+        assert_eq!(first["data"].as_array().unwrap().len(), 2);
+        let cursor = first["nextCursor"].as_str().unwrap().to_string();
+
+        let second = query_threads(
+            &state,
+            ThreadQuery {
+                cursor: Some(cursor.clone()),
+                limit: Some(2),
+                ..ThreadQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let second: Value =
+            serde_json::from_slice(&axum::body::to_bytes(second.into_body(), usize::MAX).await?)?;
+        assert_eq!(second["data"].as_array().unwrap().len(), 1);
+        assert_eq!(first["asOfEventSeq"], second["asOfEventSeq"]);
+        assert_ne!(
+            first["data"][1]["threadKey"],
+            second["data"][0]["threadKey"]
+        );
+
+        let mismatched = query_threads(
+            &state,
+            ThreadQuery {
+                cursor: Some(cursor),
+                archived: Some(false),
+                ..ThreadQuery::default()
+            },
+        );
+        assert!(matches!(mismatched, Err(CursorFailure::Invalid(_))));
+        Ok(())
+    }
+
+    fn cursor_test_error(error: CursorFailure) -> anyhow::Error {
+        match error {
+            CursorFailure::Invalid(message) => anyhow::anyhow!(message),
+            CursorFailure::Internal(error) => error,
+        }
     }
 }
