@@ -1,13 +1,13 @@
-const state = { token: '', threads: [], selected: null };
+const state = { token: '', threads: [], selected: null, sources: [], stream: null, refreshTimer: null };
 
 const $ = (id) => document.getElementById(id);
 
 function headers() {
-  return { Authorization: `Bearer ${state.token}` };
+  return state.token ? { Authorization: `Bearer ${state.token}` } : {};
 }
 
 async function api(path) {
-  const response = await fetch(path, { headers: headers(), cache: 'no-store' });
+  const response = await fetch(path, { headers: headers(), credentials: 'same-origin', cache: 'no-store' });
   const body = await response.json();
   if (!response.ok) throw new Error(body?.error?.message || `HTTP ${response.status}`);
   return body;
@@ -62,18 +62,82 @@ async function connect() {
   state.token = $('token').value.trim();
   $('auth-error').textContent = '';
   try {
-    const [health, threads, sources] = await Promise.all([api('/v1/health'), apiAll('/v1/threads?limit=200'), api('/v1/sources')]);
-    sessionStorage.setItem('observer-token', state.token);
+    const [health, threads, sources, settings] = await Promise.all([api('/v1/health'), apiAll('/v1/threads?limit=200'), api('/v1/sources'), api('/v1/meta/settings')]);
+    if (state.token) sessionStorage.setItem('observer-token', state.token);
     $('health').className = `health health-${health.data.status}`;
     const legacy = health.data.privacy?.legacyRedactionEvents || 0;
     $('health').textContent = `${health.data.status} · event ${health.asOfEventSeq}${legacy ? ` · ${legacy} legacy privacy records` : ''}`;
     $('auth').classList.add('hidden');
     $('workspace').classList.remove('hidden');
     state.threads = threads.data;
-    renderThreads(state.threads);
-    $('source-summary').textContent = `${sources.data.length} 个 source · ${state.threads.length} 个 Thread`;
+    state.sources = sources.data;
+    populateSourceFilter();
+    applyFilters();
+    renderSourceHealth(health.data, sources.data);
+    text($('settings'), JSON.stringify(settings.data, null, 2));
+    startStream();
   } catch (error) {
     $('auth-error').textContent = error.message;
+  }
+}
+
+function populateSourceFilter() {
+  const select = $('filter-source');
+  const current = select.value;
+  select.replaceChildren(new Option('全部 source', ''));
+  for (const source of state.sources) select.append(new Option(source.sourceId, source.sourceId));
+  select.value = current;
+}
+
+function applyFilters() {
+  const source = $('filter-source').value;
+  const status = $('filter-status').value;
+  const completeness = $('filter-completeness').value;
+  const archived = $('filter-archived').value;
+  const filtered = state.threads.filter((thread) =>
+    (!source || thread.storeSourceId === source) && (!status || thread.status === status) &&
+    (!completeness || thread.captureCompleteness === completeness) &&
+    (!archived || String(thread.archived) === archived));
+  renderThreads(filtered);
+  $('source-summary').textContent = `${state.sources.length} 个 source · ${filtered.length}/${state.threads.length} 个 Thread`;
+}
+
+function renderSourceHealth(health, sources) {
+  const panel = $('source-health');
+  panel.replaceChildren();
+  if (health.privacy?.legacyRedactionEvents) panel.append(element('p', 'warning strong-warning',
+    `隐私警告：${health.privacy.legacyRedactionEvents} 条历史事件使用旧脱敏规则，可能仍含敏感值。`));
+  for (const source of sources) {
+    const epoch = source.currentEpoch || {};
+    const stale = source.status !== 'ready' && source.status !== 'online';
+    panel.append(element('p', stale ? 'warning strong-warning' : 'source-line',
+      `${source.kind} · ${source.status}${stale ? ' · DISCONNECTED / STALE' : ''} · events ${epoch.eventCount || 0} · gaps ${epoch.sequenceGapCount || 0}`));
+  }
+}
+
+function startStream() {
+  if (state.stream) state.stream.close();
+  state.stream = new EventSource('/v1/stream');
+  state.stream.addEventListener('event', () => {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = setTimeout(refresh, 150);
+  });
+  state.stream.addEventListener('error', () => {
+    $('health').className = 'health health-degraded';
+    $('health').textContent = 'DISCONNECTED / STALE — 正在重连';
+  });
+}
+
+async function refresh() {
+  try {
+    const [health, threads, sources] = await Promise.all([api('/v1/health'), apiAll('/v1/threads?limit=200'), api('/v1/sources')]);
+    state.threads = threads.data; state.sources = sources.data;
+    applyFilters(); renderSourceHealth(health.data, sources.data);
+    $('health').className = `health health-${health.data.status}`;
+    $('health').textContent = `${health.data.status} · event ${health.asOfEventSeq}`;
+    if (state.selected) await selectThread(state.selected);
+  } catch (error) {
+    $('health').textContent = `DISCONNECTED / STALE — ${error.message}`;
   }
 }
 
@@ -110,7 +174,18 @@ async function selectThread(threadKey) {
   renderHeader(detail.data.thread, detail.data.relations);
   renderTimeline(turns.data, items.data);
   text($('diagnostics'), JSON.stringify(detail.data.diagnostics, null, 2));
+  renderPending(detail.data.pendingRequests || []);
+  text($('projection-conflicts'), JSON.stringify(detail.data.projectionConflicts || [], null, 2));
   text($('raw-events'), JSON.stringify(events.data, null, 2));
+}
+
+function renderPending(requests) {
+  const panel = $('pending-requests');
+  panel.replaceChildren();
+  for (const request of requests.filter((request) => request.state !== 'resolved')) {
+    panel.append(element('p', 'readonly-notice strong-warning',
+      `PENDING ${request.requestType} · ${request.state} — Observer 不会响应，请回到 Codex 客户端处理。`));
+  }
 }
 
 function renderHeader(thread, relations) {
@@ -176,7 +251,7 @@ function renderItem(item) {
 async function downloadBlob(blobId, button) {
   button.disabled = true;
   try {
-    const response = await fetch(`/v1/blobs/${encodeURIComponent(blobId)}`, { headers: headers(), cache: 'no-store' });
+    const response = await fetch(`/v1/blobs/${encodeURIComponent(blobId)}`, { headers: headers(), credentials: 'same-origin', cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
@@ -207,9 +282,26 @@ $('connect').addEventListener('click', connect);
 $('token').addEventListener('keydown', (event) => { if (event.key === 'Enter') connect(); });
 $('search-button').addEventListener('click', search);
 $('search').addEventListener('search', search);
+for (const id of ['filter-source', 'filter-status', 'filter-completeness', 'filter-archived']) $(id).addEventListener('change', applyFilters);
+
+async function pairFromFragment() {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const code = params.get('pair');
+  if (!code) return false;
+  history.replaceState(null, '', `${location.pathname}${location.search}`);
+  const response = await fetch('/v1/auth/pair', { method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body?.error?.message || `HTTP ${response.status}`);
+  state.token = '';
+  await connect();
+  return true;
+}
 
 const saved = sessionStorage.getItem('observer-token');
-if (saved) {
+pairFromFragment().catch((error) => { $('auth-error').textContent = error.message; }).then((paired) => {
+if (!paired && saved) {
   $('token').value = saved;
   connect();
-}
+} else if (!paired) connect();
+});

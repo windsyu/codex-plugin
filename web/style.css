@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { cursor: pointer; }
 .hidden { display: none !important; }
 .topbar { min-height: 112px; padding: 24px 32px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
@@ -28,6 +28,7 @@ h1 { margin-bottom: 0; font-size: 28px; letter-spacing: -0.04em; }
 .auth-panel label { display: block; margin-bottom: 10px; color: var(--muted); }
 .auth-row, .search-row { display: flex; gap: 8px; }
 input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: #0e1210; color: var(--text); padding: 10px 12px; outline: none; }
+select { min-width: 0; border: 1px solid var(--line); border-radius: 7px; background: #0e1210; color: var(--text); padding: 7px; }
 input:focus { border-color: #4f8964; box-shadow: 0 0 0 3px #2c5b3b55; }
 button { border: 1px solid #417354; border-radius: 8px; background: #244832; color: var(--text); padding: 9px 14px; }
 button:hover { background: #2c573d; }
@@ -36,6 +37,12 @@ button:hover { background: #2c573d; }
 .sidebar { overflow: auto; border-right: 1px solid var(--line); background: var(--panel); }
 .search-row { position: sticky; top: 0; z-index: 1; padding: 16px; background: #121715eb; backdrop-filter: blur(12px); }
 .source-summary { padding: 0 16px 12px; color: var(--muted); font-size: 12px; }
+.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 16px 12px; }
+.sidebar-panel { margin: 0 16px 12px; color: var(--muted); font-size: 12px; }
+.sidebar-panel summary { cursor: pointer; margin-bottom: 8px; }
+.sidebar-panel pre { max-height: 220px; }
+.source-line, .warning { margin: 6px 0; }
+.strong-warning { color: var(--red); font-weight: 650; }
 .thread-list { padding: 0 10px 18px; }
 .thread-row { width: 100%; margin-bottom: 6px; padding: 13px; text-align: left; background: transparent; border-color: transparent; }
 .thread-row:hover, .thread-row.selected { background: var(--panel-2); border-color: var(--line); }

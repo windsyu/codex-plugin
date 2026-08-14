@@ -54,6 +54,8 @@ pub struct CaptureConfig {
     pub inline_blob_bytes: usize,
     pub keep_reasoning: bool,
     pub keep_raw_json: bool,
+    pub ingest_queue_events: usize,
+    pub api_consumer_queue_events: usize,
 }
 
 impl Default for Config {
@@ -111,6 +113,8 @@ impl Default for CaptureConfig {
             inline_blob_bytes: 256 * 1024,
             keep_reasoning: true,
             keep_raw_json: true,
+            ingest_queue_events: 4096,
+            api_consumer_queue_events: 512,
         }
     }
 }
@@ -213,6 +217,12 @@ impl Config {
             || self.capture.inline_blob_bytes > self.capture.max_raw_event_bytes
         {
             bail!("inline_blob_bytes must be between 1024 and max_raw_event_bytes");
+        }
+        if self.capture.ingest_queue_events < 100 {
+            bail!("ingest_queue_events must be at least 100");
+        }
+        if self.capture.api_consumer_queue_events < 16 {
+            bail!("api_consumer_queue_events must be at least 16");
         }
         Ok(())
     }

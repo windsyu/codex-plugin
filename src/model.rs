@@ -34,6 +34,19 @@ pub struct NormalizedEvent {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct OwnedIngestBatch {
+    pub source_id: String,
+    pub epoch_id: String,
+    pub checkpoint_key: String,
+    pub file_identity: String,
+    pub byte_offset: u64,
+    pub ordinal: u64,
+    pub current_turn_id: Option<String>,
+    pub clean_eof: bool,
+    pub events: Vec<NormalizedEvent>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CoverageFlags {
@@ -138,15 +151,19 @@ pub struct PurgeReport {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
     pub status: String,
     pub database: String,
     pub sources: Vec<DoctorSource>,
+    pub checks: Value,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DoctorSource {
     pub name: String,
     pub path: String,
     pub status: String,
+    pub live_socket_status: String,
 }

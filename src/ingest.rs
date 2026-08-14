@@ -13,14 +13,16 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::config::{Config, SourceConfig};
-use crate::db::{Database, IngestBatch, classify_item, now_ms, summary_text};
-use crate::model::{ImportReport, NormalizedEvent};
+use crate::db::{Database, classify_item, now_ms, summary_text};
+use crate::model::{ImportReport, NormalizedEvent, OwnedIngestBatch};
 use crate::permissions::{prepare_private_dir, prepare_private_file};
 use crate::redact;
+use crate::writer::WriterHandle;
 
 pub struct Importer<'a> {
     config: &'a Config,
     database: &'a Database,
+    writer: Option<&'a WriterHandle>,
     fingerprint_key: [u8; 32],
 }
 
@@ -47,8 +49,19 @@ impl<'a> Importer<'a> {
         Ok(Self {
             config,
             database,
+            writer: None,
             fingerprint_key,
         })
+    }
+
+    pub fn new_with_writer(
+        config: &'a Config,
+        database: &'a Database,
+        writer: &'a WriterHandle,
+    ) -> Result<Self> {
+        let mut importer = Self::new(config, database)?;
+        importer.writer = Some(writer);
+        Ok(importer)
     }
 
     pub fn import_all(&self) -> Result<ImportReport> {
@@ -74,16 +87,19 @@ impl<'a> Importer<'a> {
     fn import_source(&self, source: &SourceConfig, report: &mut ImportReport) -> Result<()> {
         let stable_identity = source.codex_home.to_string_lossy().to_string();
         let source_id = stable_source_id(&stable_identity);
-        self.database.upsert_source(
-            &source_id,
-            &stable_identity,
-            &json!({"name":source.name,"codexHome":stable_identity,"liveMode":"off"}),
-            if source.codex_home.is_dir() {
-                "ready"
-            } else {
-                "degraded"
-            },
-        )?;
+        let source_config =
+            json!({"name":source.name,"codexHome":stable_identity,"liveMode":"off"});
+        let status = if source.codex_home.is_dir() {
+            "ready"
+        } else {
+            "degraded"
+        };
+        if let Some(writer) = self.writer {
+            writer.upsert_source(&source_id, &stable_identity, &source_config, status)?;
+        } else {
+            self.database
+                .upsert_source(&source_id, &stable_identity, &source_config, status)?;
+        }
         if !source.codex_home.is_dir() {
             anyhow::bail!("Codex home {} does not exist", source.codex_home.display());
         }
@@ -187,7 +203,7 @@ impl<'a> Importer<'a> {
             }
             update_current_turn(&event, &mut current_turn);
             events.push(event);
-            if events.len() >= 500 {
+            if events.len() >= 100 {
                 self.commit_batch(
                     source_id,
                     &epoch_id,
@@ -218,14 +234,25 @@ impl<'a> Importer<'a> {
             &mut events,
             report,
         )?;
-        self.database.mark_location(
-            source_id,
-            &thread_id,
-            path,
-            representation,
-            &identity,
-            archived,
-        )?;
+        if let Some(writer) = self.writer {
+            writer.mark_location(
+                source_id,
+                &thread_id,
+                path.to_path_buf(),
+                representation,
+                &identity,
+                archived,
+            )?;
+        } else {
+            self.database.mark_location(
+                source_id,
+                &thread_id,
+                path,
+                representation,
+                &identity,
+                archived,
+            )?;
+        }
 
         if let Some(meta) = session_meta {
             tracing::debug!(source_id, thread_id, session = ?meta.get("session_id"), "rollout identified");
@@ -250,17 +277,22 @@ impl<'a> Importer<'a> {
         if events.is_empty() && !clean_eof {
             return Ok(());
         }
-        let (inserted, deduplicated) = self.database.ingest_batch(IngestBatch {
-            source_id,
-            epoch_id,
-            checkpoint_key,
-            file_identity,
+        let batch = OwnedIngestBatch {
+            source_id: source_id.to_string(),
+            epoch_id: epoch_id.to_string(),
+            checkpoint_key: checkpoint_key.to_string(),
+            file_identity: file_identity.to_string(),
             byte_offset,
             ordinal,
-            current_turn_id,
+            current_turn_id: current_turn_id.map(str::to_string),
             clean_eof,
-            events,
-        })?;
+            events: events.clone(),
+        };
+        let (inserted, deduplicated) = if let Some(writer) = self.writer {
+            writer.ingest(batch)?
+        } else {
+            self.database.ingest_batch(&batch)?
+        };
         report.events_inserted += inserted;
         report.events_deduplicated += deduplicated;
         events.clear();
@@ -300,8 +332,7 @@ impl<'a> Importer<'a> {
                 Some(error),
             ),
         };
-        let (redacted, redaction_audit) = redact::redact(&raw, &self.fingerprint_key);
-        let stored = serde_json::to_string(&redacted).expect("JSON serialization cannot fail");
+        let (redacted, mut redaction_audit) = redact::redact(&raw, &self.fingerprint_key);
         let top_type = redacted
             .get("type")
             .and_then(Value::as_str)
@@ -310,7 +341,7 @@ impl<'a> Importer<'a> {
         if decode_status == "decoded" && !is_known_rollout_top_type(&top_type) {
             decode_status = "unknown".into();
         }
-        let payload = redacted.get("payload").cloned().unwrap_or(Value::Null);
+        let mut payload = redacted.get("payload").cloned().unwrap_or(Value::Null);
         let nested_type = payload.get("type").and_then(Value::as_str);
         let turn_id =
             extract_turn_id(&payload).or_else(|| context.current_turn.map(str::to_string));
@@ -328,7 +359,7 @@ impl<'a> Importer<'a> {
         };
         let phase = classify_phase(nested_type.unwrap_or(&top_type));
         let item_type = classify_item(&redacted);
-        let summary_text = summary_text(&redacted);
+        let mut summary_text = summary_text(&redacted);
         let item_status = item_type.as_ref().map(|_| {
             match phase.as_str() {
                 "started" => "started",
@@ -338,6 +369,22 @@ impl<'a> Importer<'a> {
             }
             .to_string()
         });
+        let reasoning = item_type.as_deref() == Some("reasoning")
+            || nested_type.is_some_and(|kind| kind.to_ascii_lowercase().contains("reasoning"));
+        let policy_marker = if reasoning && !self.config.capture.keep_reasoning {
+            payload = json!({"policy":"omitted","kind":"reasoning","retainedIdentity":true});
+            summary_text = Some("[reasoning omitted by capture policy]".into());
+            Some(payload.clone())
+        } else if !self.config.capture.keep_raw_json {
+            Some(json!({"policy":"omitted","kind":"raw_json","retainedIdentity":true}))
+        } else {
+            None
+        };
+        if let Some(marker) = policy_marker.as_ref() {
+            redaction_audit["capturePolicy"] = marker.clone();
+        }
+        let stored = serde_json::to_string(policy_marker.as_ref().unwrap_or(&redacted))
+            .expect("JSON serialization cannot fail");
         NormalizedEvent {
             event_id: Uuid::now_v7().to_string(),
             source_id: context.source_id.to_string(),
@@ -872,6 +919,51 @@ mod tests {
     }
 
     #[test]
+    fn capture_policy_omits_reasoning_and_raw_json_without_losing_projection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        config.capture.keep_reasoning = false;
+        config.capture.keep_raw_json = false;
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-policy.jsonl");
+        let mut file = File::create(&rollout)?;
+        for value in [
+            json!({"type":"session_meta","payload":{"id":"policy-thread"}}),
+            json!({"type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","turn_id":"turn-1","summary":[{"text":"private-reasoning-text"}]}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"turn-1","message":"visible-answer"}}),
+        ] {
+            writeln!(file, "{value}")?;
+        }
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let connection = database.connect()?;
+        let stored: String = connection.query_row(
+            "SELECT group_concat(raw_json,'') FROM raw_events",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!stored.contains("private-reasoning-text"));
+        assert!(!stored.contains("visible-answer"));
+        assert!(stored.contains("omitted"));
+        let projection: String = connection.query_row(
+            "SELECT summary_text FROM items WHERE summary_text='visible-answer'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(projection, "visible-answer");
+        let leaked_search: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_index WHERE text LIKE '%private-reasoning-text%'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leaked_search, 0);
+        Ok(())
+    }
+
+    #[test]
     fn bad_json_does_not_block_later_records() -> Result<()> {
         let temp = TempDir::new()?;
         let config = test_config(&temp);
@@ -1062,10 +1154,10 @@ mod tests {
             .connect()?
             .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
 
-        let preview = database.run_retention(1, 1, false)?;
+        let preview = database.run_retention(1, 1, 1, false)?;
         assert_eq!(preview.candidate_raw_events, 21);
         assert_eq!(preview.deleted_raw_events, 0);
-        let applied = database.run_retention(1, 1, true)?;
+        let applied = database.run_retention(1, 1, 1, true)?;
         assert_eq!(applied.deleted_raw_events, 21);
         assert_eq!(applied.dedupe_tombstones_retained, 21);
         assert_eq!(database.max_event_seq()?, 21);
@@ -1160,9 +1252,9 @@ mod tests {
             [&blob_id],
         )?;
         drop(connection);
-        let preview = database.run_retention(1, 1, false)?;
+        let preview = database.run_retention(1, 1, 1, false)?;
         assert_eq!(preview.candidate_blobs, 1);
-        let applied = database.run_retention(1, 1, true)?;
+        let applied = database.run_retention(1, 1, 1, true)?;
         assert_eq!(applied.deleted_blobs, 1);
         assert!(database.blob_record(&blob_id)?.is_none());
         assert!(!blob_path.exists());

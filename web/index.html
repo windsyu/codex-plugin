@@ -30,7 +30,15 @@
         <input id="search" type="search" placeholder="搜索消息和工具摘要">
         <button id="search-button" aria-label="搜索">搜索</button>
       </div>
+      <div class="filters" aria-label="Thread 筛选">
+        <select id="filter-source"><option value="">全部 source</option></select>
+        <select id="filter-status"><option value="">全部状态</option><option>active</option><option>idle</option><option>not_loaded</option></select>
+        <select id="filter-completeness"><option value="">全部完整性</option><option>durable_complete</option><option>durable_partial</option><option>live_complete</option><option>live_partial</option><option>metadata_only</option><option>ephemeral_lost</option></select>
+        <select id="filter-archived"><option value="">当前与归档</option><option value="false">仅当前</option><option value="true">仅归档</option></select>
+      </div>
       <div id="source-summary" class="source-summary"></div>
+      <details class="sidebar-panel" open><summary>Source Health</summary><div id="source-health"></div></details>
+      <details class="sidebar-panel"><summary>Settings（只读）</summary><pre id="settings"></pre></details>
       <div id="threads" class="thread-list" aria-live="polite"></div>
     </aside>
     <section class="detail">
@@ -42,10 +50,11 @@
       <div id="thread-detail" class="hidden">
         <div id="thread-header"></div>
         <div id="capture-banner" class="capture-banner"></div>
+        <div id="pending-requests"></div>
         <div id="timeline" class="timeline"></div>
         <details class="diagnostics">
           <summary>原始事件与诊断</summary>
-          <div id="diagnostics"></div>
+          <div id="diagnostics"></div><div id="projection-conflicts"></div>
           <pre id="raw-events"></pre>
         </details>
       </div>
