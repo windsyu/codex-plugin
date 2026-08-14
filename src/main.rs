@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod ingest;
 mod instance_lock;
+mod live;
 mod model;
 mod redact;
 mod watcher;
@@ -13,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::config::Config;
@@ -110,6 +112,9 @@ async fn main() -> Result<()> {
                 events = second.events_inserted,
                 "post-watcher reconciliation complete"
             );
+            let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+            let live_handles =
+                live::spawn_enabled(&config, database.clone(), shutdown_receiver.clone())?;
 
             let scan_config = config.clone();
             let scan_db = database.clone();
@@ -144,7 +149,17 @@ async fn main() -> Result<()> {
                     }
                 }
             });
-            api::serve(config, database).await?;
+            let signal_sender = shutdown_sender.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    let _ = signal_sender.send(true);
+                }
+            });
+            api::serve(config, database, shutdown_receiver).await?;
+            let _ = shutdown_sender.send(true);
+            for handle in live_handles {
+                let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            }
         }
     }
     Ok(())

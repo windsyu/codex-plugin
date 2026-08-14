@@ -40,6 +40,7 @@ pub struct StorageConfig {
 pub struct SourceConfig {
     pub name: String,
     pub codex_home: PathBuf,
+    pub app_server_socket: Option<PathBuf>,
     pub live_mode: String,
     pub scan_interval_seconds: u64,
 }
@@ -92,6 +93,7 @@ impl Default for SourceConfig {
         Self {
             name: "default".into(),
             codex_home: PathBuf::from("~/.codex"),
+            app_server_socket: None,
             live_mode: "off".into(),
             scan_interval_seconds: 30,
         }
@@ -136,7 +138,16 @@ impl Config {
             resolve_path(&base, &self.storage.fingerprint_key_file)?;
         self.server.bearer_token_file = resolve_path(&base, &self.server.bearer_token_file)?;
         for source in &mut self.sources {
-            source.codex_home = resolve_path(&base, &source.codex_home)?;
+            let resolved_home = resolve_path(&base, &source.codex_home)?;
+            source.codex_home = if resolved_home.exists() {
+                fs::canonicalize(resolved_home)?
+            } else {
+                resolved_home
+            };
+            if let Some(socket) = &source.app_server_socket {
+                let resolved = resolve_path(&base, socket)?;
+                source.app_server_socket = Some(canonicalize_parent(&resolved)?);
+            }
         }
         Ok(())
     }
@@ -151,10 +162,19 @@ impl Config {
             bail!("at least one source is required");
         }
         for source in &self.sources {
-            if source.live_mode != "off" {
+            if !matches!(
+                source.live_mode.as_str(),
+                "off" | "observe_new" | "attach_loaded"
+            ) {
                 bail!(
-                    "V1 MVP only supports live_mode=off; got {}",
+                    "live_mode must be off, observe_new, or attach_loaded; got {}",
                     source.live_mode
+                );
+            }
+            if source.live_mode != "off" && source.app_server_socket.is_none() {
+                bail!(
+                    "source {} enables live mode without app_server_socket",
+                    source.name
                 );
             }
             if source.scan_interval_seconds == 0 {
@@ -180,6 +200,18 @@ impl Config {
     }
 }
 
+fn canonicalize_parent(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().context("configured path has no parent")?;
+    let name = path
+        .file_name()
+        .context("configured path has no file name")?;
+    Ok(if parent.exists() {
+        fs::canonicalize(parent)?.join(name)
+    } else {
+        path.to_path_buf()
+    })
+}
+
 fn resolve_path(base: &Path, value: &Path) -> Result<PathBuf> {
     let expanded = if let Some(text) = value.to_str() {
         if text == "~" || text.starts_with("~/") {
@@ -196,4 +228,22 @@ fn resolve_path(base: &Path, value: &Path) -> Result<PathBuf> {
     } else {
         base.join(expanded)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn canonicalizes_existing_socket_parent() -> Result<()> {
+        let temp = TempDir::new()?;
+        let nested = temp.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        let represented = nested.join("..").join("nested").join("control.sock");
+        let normalized = canonicalize_parent(&represented)?;
+        assert_eq!(normalized, fs::canonicalize(&nested)?.join("control.sock"));
+        assert!(!normalized.to_string_lossy().contains(".."));
+        Ok(())
+    }
 }

@@ -126,6 +126,9 @@ function renderItem(item) {
   heading.append(element('span', 'item-type', item.itemType.replaceAll('_', ' ')), badge(item.status));
   card.append(heading);
   if (item.summaryText) card.append(element('div', 'item-content', item.summaryText));
+  if (item.itemType === 'approval' || item.itemType === 'user_question') {
+    card.append(element('p', 'readonly-notice', 'Observer V1 为只读模式，请在原 Codex 客户端中处理该请求。'));
+  }
   const details = element('details', 'item-raw');
   details.append(element('summary', '', '已脱敏 JSON / provenance'));
   details.append(element('pre', '', JSON.stringify({ raw: item.raw, provenance: item.provenance }, null, 2)));

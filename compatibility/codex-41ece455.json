@@ -1,8 +1,8 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "observerVersion": "0.1.0",
-  "observerSchemaVersion": 3,
-  "liveMode": "off",
+  "observerSchemaVersion": 4,
+  "liveMode": "opt_in_preview",
   "rolloutTopLevelTypes": [
     "session_meta",
     "response_item",
@@ -15,10 +15,23 @@
   ],
   "unknownVariantPolicy": "retain_redacted_raw_and_continue",
   "fixtures": ["fixtures/manifest.json"],
+  "appServer": {
+    "testedCodexCliVersion": "0.146.1",
+    "transport": "websocket_over_unix_socket",
+    "protocolSchemaSha256": "1a193fc005458d9a06642adf81350fc6280f64f50558ab34cdd0b75e20d164d9",
+    "observeNew": true,
+    "attachLoaded": true,
+    "serverRequestPolicy": "persist_without_response",
+    "defaultEnabled": false
+  },
   "verified": {
     "plainJsonl": true,
     "zstdJsonl": true,
     "incrementalCompleteLines": true,
-    "appServerProtocol": false
+    "appServerProtocol": true,
+    "appServerInitialize": true,
+    "appServerObserveNew": true,
+    "appServerAttachLoaded": true,
+    "appServerUnsubscribeAndClose": true
   }
 }

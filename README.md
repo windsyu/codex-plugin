@@ -17,9 +17,12 @@
 - `serve`、`import`、`doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
 - Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
+- 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
+- live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
+- live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
 - 合成 fixture，不读取或提交真实用户 rollout。
 
-当前 `live_mode` 强制为 `off`。App Server Live Adapter、blob 外置、purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。blob 外置、purge/export、Turn/Item/Search cursor 和完整性能加固属于后续 V1 切片，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
 
 ## 构建与测试
 
@@ -48,7 +51,16 @@ cp observer.example.toml observer.toml
 - Observer 数据：`./observer-data`；
 - Live Adapter：关闭。
 
-所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind 和非 `off` live mode。
+所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind；live 仅支持当前用户拥有、权限不宽于 `0600` 且位于私有目录中的直接 Unix socket。
+
+需要显式启用 live preview 时，在对应 source 中配置：
+
+```toml
+app_server_socket = "~/.codex/app-server-control/app-server-control.sock"
+live_mode = "observe_new" # 或 attach_loaded
+```
+
+`observe_new` 只观察连接后出现的 Thread；`attach_loaded` 还会分页读取 loaded Thread 并逐一调用 `thread/resume`。两种模式都不会发送 approval、question、turn 或其他控制响应。
 
 ## 使用
 
@@ -117,8 +129,9 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 - Web Viewer 仅渲染已脱敏副本，JSON 使用 `textContent`，不执行 Markdown、HTML、SVG 或 ANSI；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
 - API Router 不存在 POST/PUT/PATCH/DELETE 业务路由；
-- 当前 completeness 仅声明 durable coverage，不声称恢复未连接时的 transient event。
+- Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；
+- App Server transport 仍为官方实验能力，因此默认关闭，协议不兼容时退回 store-only。
 
 ## 项目状态
 
-本目录尚未初始化 Git。根据项目工作流，后续应初始化仓库、创建首个 Issue 和 feature branch，再提交此纵向切片；远程仓库、push 和 PR 需要用户明确授权。
+本地 Git 已初始化，当前 V1 开发在 feature branch 以逻辑提交维护。仓库尚未配置 remote；创建远程仓库、push 和 PR 仍需单独授权。

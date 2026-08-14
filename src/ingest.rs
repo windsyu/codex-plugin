@@ -293,6 +293,7 @@ impl<'a> Importer<'a> {
         NormalizedEvent {
             event_id: Uuid::now_v7().to_string(),
             source_id: context.source_id.to_string(),
+            store_source_id: context.source_id.to_string(),
             epoch_id: context.epoch_id.to_string(),
             source_seq: context.source_seq,
             dedupe_key: format!(
@@ -305,8 +306,11 @@ impl<'a> Importer<'a> {
             codex_thread_id: context.thread_id.to_string(),
             turn_id,
             item_id,
+            request_id: None,
             method,
             phase,
+            durability: "durable".into(),
+            projectable: true,
             source_fingerprint: fingerprint,
             stored_raw_hash: blake3::hash(stored.as_bytes()).to_hex().to_string(),
             raw_json: stored,
@@ -438,12 +442,12 @@ fn classify_phase(kind: &str) -> String {
     .to_string()
 }
 
-fn stable_source_id(identity: &str) -> String {
+pub(crate) fn stable_source_id(identity: &str) -> String {
     URL_SAFE_NO_PAD
         .encode(blake3::hash(format!("store\0{identity}\0{identity}").as_bytes()).as_bytes())
 }
 
-fn thread_key(source_id: &str, thread_id: &str) -> String {
+pub(crate) fn thread_key(source_id: &str, thread_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{source_id}\0{thread_id}"))
 }
 
@@ -465,7 +469,7 @@ fn file_identity(_path: &Path, metadata: &fs::Metadata) -> String {
     }
 }
 
-fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
+pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

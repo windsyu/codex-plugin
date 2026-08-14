@@ -13,6 +13,7 @@ use crate::model::{Checkpoint, DoctorReport, DoctorSource, NormalizedEvent, Rete
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
+const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
 
 #[derive(Debug)]
 pub struct Database {
@@ -72,6 +73,9 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_3)
                 .context("apply migration 0003")?;
+            connection
+                .execute_batch(MIGRATION_4)
+                .context("apply migration 0004")?;
         } else if version == 1 {
             connection
                 .execute_batch(MIGRATION_2)
@@ -79,11 +83,21 @@ impl Database {
             connection
                 .execute_batch(MIGRATION_3)
                 .context("apply migration 0003")?;
+            connection
+                .execute_batch(MIGRATION_4)
+                .context("apply migration 0004")?;
         } else if version == 2 {
             connection
                 .execute_batch(MIGRATION_3)
                 .context("apply migration 0003")?;
-        } else if version != 3 {
+            connection
+                .execute_batch(MIGRATION_4)
+                .context("apply migration 0004")?;
+        } else if version == 3 {
+            connection
+                .execute_batch(MIGRATION_4)
+                .context("apply migration 0004")?;
+        } else if version != 4 {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
         connection.execute_batch("PRAGMA integrity_check;")?;
@@ -97,13 +111,24 @@ impl Database {
         config: &Value,
         status: &str,
     ) -> Result<()> {
+        self.upsert_source_kind(source_id, "rollout", stable_identity, config, status)
+    }
+
+    pub fn upsert_source_kind(
+        &self,
+        source_id: &str,
+        kind: &str,
+        stable_identity: &str,
+        config: &Value,
+        status: &str,
+    ) -> Result<()> {
         let now = now_ms();
         self.connect()?.execute(
             "INSERT INTO sources(source_id, kind, stable_identity, config_json, status, last_seen_at_ms, created_at_ms, updated_at_ms)
-             VALUES (?1, 'rollout', ?2, ?3, ?4, ?5, ?5, ?5)
-             ON CONFLICT(source_id) DO UPDATE SET config_json=excluded.config_json, status=excluded.status,
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+             ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind,config_json=excluded.config_json,status=excluded.status,
                 last_seen_at_ms=excluded.last_seen_at_ms, updated_at_ms=excluded.updated_at_ms",
-            params![source_id, stable_identity, config.to_string(), status, now],
+            params![source_id, kind, stable_identity, config.to_string(), status, now],
         )?;
         Ok(())
     }
@@ -164,14 +189,15 @@ impl Database {
                 "INSERT INTO raw_events(
                    event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
                    thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,
-                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'durable',?14,?15,?16,?17,?18,?19)",
+                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
                 params![
                     event.event_id, event.source_id, event.epoch_id, event.source_seq,
                     event.dedupe_key, event.observed_at_ms, event.event_at_ms,
                     event.thread_key, event.codex_thread_id, event.turn_id, event.item_id,
-                    event.method, event.phase, event.source_fingerprint, event.stored_raw_hash,
+                    event.method, event.phase, event.durability, event.source_fingerprint, event.stored_raw_hash,
                     event.raw_json, event.redaction_json, event.decode_status, event.decode_error,
+                    event.request_id, event.store_source_id,
                 ],
             )?;
             let event_seq = transaction.last_insert_rowid();
@@ -182,7 +208,9 @@ impl Database {
             )?;
             last_event_seq = Some(event_seq);
             inserted += 1;
-            project_event(&transaction, event, event_seq)?;
+            if event.projectable {
+                project_event(&transaction, event, event_seq)?;
+            }
         }
 
         transaction.execute(
@@ -219,6 +247,66 @@ impl Database {
             "UPDATE threads SET archived=?1 WHERE store_source_id=?2 AND codex_thread_id=?3",
             params![archived, source_id, thread_id],
         )?;
+        Ok(())
+    }
+
+    pub fn record_live_capabilities(
+        &self,
+        source_id: &str,
+        epoch_id: &str,
+        capabilities: &Value,
+    ) -> Result<()> {
+        let capability_json = capabilities.to_string();
+        let capability_hash = blake3::hash(capability_json.as_bytes())
+            .to_hex()
+            .to_string();
+        self.connect()?.execute(
+            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms,capability_json,capability_hash)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(source_id,epoch_id) DO UPDATE SET capability_json=excluded.capability_json,
+               capability_hash=excluded.capability_hash",
+            params![source_id, epoch_id, now_ms(), capability_json, capability_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_source_status(
+        &self,
+        source_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.connect()?.execute(
+            "UPDATE sources SET status=?1,last_error_json=?2,updated_at_ms=?3 WHERE source_id=?4",
+            params![
+                status,
+                error.map(|message| json!({"message":message}).to_string()),
+                now_ms(),
+                source_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_live_epoch(&self, source_id: &str, epoch_id: &str, reason: &str) -> Result<()> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE source_epochs SET closed_at_ms=?1,close_reason=?2 WHERE source_id=?3 AND epoch_id=?4",
+            params![now_ms(), reason, source_id, epoch_id],
+        )?;
+        transaction.execute(
+            "UPDATE threads SET runtime_status_stale=1,
+               completeness_reasons_json='[\"source_disconnected\"]'
+             WHERE thread_key IN (SELECT DISTINCT thread_key FROM raw_events WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'')",
+            params![source_id, epoch_id],
+        )?;
+        transaction.execute(
+            "UPDATE pending_requests SET state='source_disconnected'
+             WHERE source_id=?1 AND epoch_id=?2 AND state='pending'",
+            params![source_id, epoch_id],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -341,23 +429,50 @@ impl Database {
         let events = {
             let mut statement = transaction.prepare(
                 "SELECT event_seq,event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
-                 thread_key,codex_thread_id,turn_id,item_id,method,phase,source_fingerprint,stored_raw_hash,
-                 raw_json,redaction_json,decode_status,decode_error FROM raw_events ORDER BY event_seq"
+                 thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+                 raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id FROM raw_events ORDER BY event_seq"
             )?;
             let rows = statement.query_map([], |row| {
-                let raw_json: String = row.get(16)?;
+                let raw_json: String = row.get(17)?;
                 let raw: Value = serde_json::from_str(&raw_json).unwrap_or(Value::Null);
-                let top_type = raw
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let payload = raw.get("payload").cloned().unwrap_or(Value::Null);
+                let durability: String = row.get(14)?;
+                let method: String = row.get(12)?;
+                let phase: String = row.get(13)?;
+                let (top_type, payload, item_type, event_summary) = if durability == "transient" {
+                    let params = raw
+                        .get("params")
+                        .or_else(|| raw.get("result"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let item = params.get("item").cloned();
+                    let payload = item
+                        .clone()
+                        .or_else(|| params.get("turn").cloned())
+                        .or_else(|| params.get("thread").cloned())
+                        .unwrap_or_else(|| params.clone());
+                    (
+                        "app_server".to_string(),
+                        payload,
+                        classify_live_item(&method, item.as_ref()),
+                        live_summary(&params, item.as_ref()),
+                    )
+                } else {
+                    (
+                        raw.get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        raw.get("payload").cloned().unwrap_or(Value::Null),
+                        classify_item(&raw),
+                        summary_text(&raw),
+                    )
+                };
                 Ok((
                     row.get::<_, i64>(0)?,
                     NormalizedEvent {
                         event_id: row.get(1)?,
                         source_id: row.get(2)?,
+                        store_source_id: row.get(22)?,
                         epoch_id: row.get(3)?,
                         source_seq: row.get(4)?,
                         dedupe_key: row.get(5)?,
@@ -367,18 +482,28 @@ impl Database {
                         codex_thread_id: row.get(9)?,
                         turn_id: row.get(10)?,
                         item_id: row.get(11)?,
-                        method: row.get(12)?,
-                        phase: row.get(13)?,
-                        source_fingerprint: row.get(14)?,
-                        stored_raw_hash: row.get(15)?,
+                        request_id: row.get(21)?,
+                        method,
+                        phase: phase.clone(),
+                        durability,
+                        projectable: !row.get::<_, String>(8)?.is_empty(),
+                        source_fingerprint: row.get(15)?,
+                        stored_raw_hash: row.get(16)?,
                         raw_json,
-                        redaction_json: row.get(17)?,
-                        decode_status: row.get(18)?,
-                        decode_error: row.get(19)?,
+                        redaction_json: row.get(18)?,
+                        decode_status: row.get(19)?,
+                        decode_error: row.get(20)?,
                         top_type,
-                        item_type: classify_item(&raw),
-                        item_status: Some("completed".into()),
-                        summary_text: summary_text(&raw),
+                        item_type,
+                        item_status: Some(
+                            match phase.as_str() {
+                                "started" | "request" => "started",
+                                "delta" => "streaming",
+                                _ => "completed",
+                            }
+                            .into(),
+                        ),
+                        summary_text: event_summary,
                         payload,
                     },
                 ))
@@ -432,9 +557,13 @@ fn project_event(
          VALUES (?1,?2,?3,'metadata_only','[]',?4,?4,?4,'{}',?5,?6)
          ON CONFLICT(thread_key) DO UPDATE SET updated_at_ms=MAX(COALESCE(threads.updated_at_ms,0),excluded.updated_at_ms),
            recency_at_ms=MAX(COALESCE(threads.recency_at_ms,0),excluded.recency_at_ms),last_event_seq=MAX(threads.last_event_seq,excluded.last_event_seq)",
-        params![event.thread_key, event.source_id, event.codex_thread_id, time,
+        params![event.thread_key, event.store_source_id, event.codex_thread_id, time,
                 json!({"lastEventSeq":event_seq,"sourceId":event.source_id}).to_string(), event_seq],
     )?;
+
+    if event.durability == "transient" {
+        project_live_lifecycle(transaction, event, event_seq, time)?;
+    }
 
     match event.top_type.as_str() {
         "session_meta" => {
@@ -536,12 +665,33 @@ fn project_event(
         _ => {}
     }
 
-    if event.top_type != "session_meta" {
+    if event.top_type != "session_meta" && event.durability == "durable" {
         transaction.execute(
             "UPDATE threads SET capture_completeness=CASE WHEN capture_completeness='durable_complete' THEN capture_completeness ELSE 'durable_partial' END,
                completeness_reasons_json=CASE WHEN capture_completeness='durable_complete' THEN completeness_reasons_json ELSE '[\"durable_rollout_may_still_be_growing\"]' END
              WHERE thread_key=?1",
             [&event.thread_key],
+        )?;
+    }
+
+    if event.phase == "request"
+        && let Some(request_id) = event.request_id.as_deref()
+    {
+        let method = event.method.to_ascii_lowercase();
+        let request_type = if method.contains("approval") {
+            "approval"
+        } else if method.contains("userinput") || method.contains("user_input") {
+            "user_input"
+        } else if method.contains("elicitation") {
+            "mcp_elicitation"
+        } else {
+            "unknown"
+        };
+        transaction.execute(
+            "INSERT INTO pending_requests(source_id,epoch_id,request_id,thread_key,request_type,state,
+               request_event_seq,payload_json) VALUES (?1,?2,?3,?4,?5,'pending',?6,?7)
+             ON CONFLICT(source_id,epoch_id,request_id) DO NOTHING",
+            params![event.source_id,event.epoch_id,request_id,event.thread_key,request_type,event_seq,event.payload.to_string()],
         )?;
     }
 
@@ -553,23 +703,36 @@ fn project_event(
             .map(str::to_string)
             .unwrap_or_else(|| format!("@unassigned:{}:{}", event.source_id, event.epoch_id));
         let status = event.item_status.as_deref().unwrap_or("completed");
+        let append_delta = event.durability == "transient" && event.phase == "delta";
+        let provenance_source = if event.durability == "transient" {
+            "app_server"
+        } else {
+            "rollout"
+        };
         transaction.execute(
             "INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,
                summary_text,projection_json,provenance_json,last_event_seq)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-             ON CONFLICT(thread_key,turn_scope,item_id) DO UPDATE SET status=excluded.status,
+             ON CONFLICT(thread_key,turn_scope,item_id) DO UPDATE SET
+               status=CASE WHEN items.status IN ('completed','failed') AND excluded.status NOT IN ('completed','failed')
+                 THEN items.status ELSE excluded.status END,
                completed_at_ms=COALESCE(excluded.completed_at_ms,items.completed_at_ms),
-               summary_text=COALESCE(excluded.summary_text,items.summary_text),projection_json=excluded.projection_json,
+               summary_text=CASE WHEN ?13 THEN COALESCE(items.summary_text,'') || COALESCE(excluded.summary_text,'')
+                 ELSE COALESCE(excluded.summary_text,items.summary_text) END,projection_json=excluded.projection_json,
                provenance_json=excluded.provenance_json,last_event_seq=excluded.last_event_seq",
             params![event.thread_key, turn_scope, item_id, event.turn_id, item_type, status, time,
                     if status == "completed" || status == "failed" { Some(time) } else { None }, event.summary_text,
-                    projection, json!({"eventSeq":event_seq,"source":"rollout"}).to_string(), event_seq],
+                    projection, json!({"eventSeq":event_seq,"source":provenance_source,"epoch":event.epoch_id}).to_string(), event_seq,
+                    append_delta],
         )?;
-        if let Some(summary) = event
-            .summary_text
-            .as_deref()
-            .filter(|text| !text.trim().is_empty())
-        {
+        let indexed_summary = transaction
+            .query_row(
+                "SELECT summary_text FROM items WHERE thread_key=?1 AND turn_scope=?2 AND item_id=?3",
+                params![event.thread_key, turn_scope, item_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .filter(|text| !text.trim().is_empty());
+        if let Some(summary) = indexed_summary.as_deref() {
             let entity_key = format!("{}:{}:{}", event.thread_key, turn_scope, item_id);
             transaction.execute(
                 "DELETE FROM search_index WHERE entity_key=?1",
@@ -585,6 +748,129 @@ fn project_event(
             )?;
         }
     }
+    Ok(())
+}
+
+fn project_live_lifecycle(
+    tx: &Transaction<'_>,
+    event: &NormalizedEvent,
+    event_seq: i64,
+    time: i64,
+) -> Result<()> {
+    match event.method.as_str() {
+        "thread/started" => {
+            tx.execute(
+                "UPDATE threads SET runtime_status=COALESCE(?1,runtime_status),runtime_status_stale=0,
+                   projection_json=?2,last_event_seq=?3 WHERE thread_key=?4",
+                params![live_status(event.payload.get("status")),event.payload.to_string(),event_seq,event.thread_key],
+            )?;
+        }
+        "thread/status/changed" => {
+            tx.execute(
+                "UPDATE threads SET runtime_status=?1,runtime_status_stale=0,last_event_seq=?2 WHERE thread_key=?3",
+                params![live_status(event.payload.get("status")),event_seq,event.thread_key],
+            )?;
+        }
+        "turn/started" => {
+            if let Some(turn_id) = event.turn_id.as_deref() {
+                upsert_live_turn(
+                    tx, event, event_seq, turn_id, "running", time, None, true, false,
+                )?;
+                tx.execute(
+                    "UPDATE threads SET runtime_status='active',runtime_status_stale=0,
+                       capture_completeness='live_partial',completeness_reasons_json='[\"live_turn_not_terminal\"]'
+                     WHERE thread_key=?1",
+                    [&event.thread_key],
+                )?;
+            }
+        }
+        "turn/completed" => {
+            if let Some(turn_id) = event.turn_id.as_deref() {
+                let live_started = tx
+                    .query_row(
+                        "SELECT coverage_json FROM turns WHERE thread_key=?1 AND turn_id=?2",
+                        params![event.thread_key, turn_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .and_then(|coverage| serde_json::from_str::<Value>(&coverage).ok())
+                    .and_then(|coverage| coverage.get("liveStarted").and_then(Value::as_bool))
+                    .unwrap_or(false);
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(|status| status.get("type").unwrap_or(status).as_str())
+                    .unwrap_or("completed");
+                upsert_live_turn(
+                    tx,
+                    event,
+                    event_seq,
+                    turn_id,
+                    status,
+                    time,
+                    Some(time),
+                    live_started,
+                    true,
+                )?;
+                tx.execute(
+                    "UPDATE threads SET runtime_status='idle',runtime_status_stale=0,
+                       capture_completeness=?1,completeness_reasons_json=?2 WHERE thread_key=?3",
+                    params![
+                        if live_started {
+                            "live_complete"
+                        } else {
+                            "live_partial"
+                        },
+                        if live_started {
+                            "[]"
+                        } else {
+                            "[\"attached_after_turn_started\"]"
+                        },
+                        event.thread_key
+                    ],
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_live_turn(
+    tx: &Transaction<'_>,
+    event: &NormalizedEvent,
+    seq: i64,
+    turn_id: &str,
+    status: &str,
+    started: i64,
+    completed: Option<i64>,
+    live_started: bool,
+    live_terminal: bool,
+) -> Result<()> {
+    let complete = live_started && live_terminal;
+    let coverage = json!({
+        "liveStarted":live_started,"liveTerminal":live_terminal,"liveEpochContiguous":complete,
+        "durableStarted":false,"durableTerminal":false,"durableEofReached":false,
+        "decodeErrorCount":0,"unknownEventCount":0,"sourceDisconnectCount":0
+    });
+    tx.execute(
+        "INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
+           started_at_ms,completed_at_ms,projection_json,provenance_json,last_event_seq)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(thread_key,turn_id) DO UPDATE SET
+           status=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.status ELSE excluded.status END,
+           capture_completeness=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.capture_completeness ELSE excluded.capture_completeness END,
+           completeness_reasons_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.completeness_reasons_json ELSE excluded.completeness_reasons_json END,
+           coverage_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.coverage_json ELSE excluded.coverage_json END,
+           completed_at_ms=COALESCE(excluded.completed_at_ms,turns.completed_at_ms),
+           projection_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.projection_json ELSE excluded.projection_json END,
+           provenance_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.provenance_json ELSE excluded.provenance_json END,
+           last_event_seq=excluded.last_event_seq",
+        params![event.thread_key,turn_id,status,if complete {"live_complete"} else {"live_partial"},
+            if complete {"[]"} else {"[\"live_epoch_incomplete\"]"},coverage.to_string(),started,completed,
+            event.payload.to_string(),json!({"eventSeq":seq,"source":"app_server","epoch":event.epoch_id}).to_string(),seq],
+    )?;
     Ok(())
 }
 
@@ -668,6 +954,50 @@ pub fn classify_item(raw: &Value) -> Option<String> {
     }
 }
 
+pub fn classify_live_item(method: &str, item: Option<&Value>) -> Option<String> {
+    if method.contains("requestApproval") {
+        return Some("approval".into());
+    }
+    if method.contains("requestUserInput") || method.contains("elicitation/request") {
+        return Some("user_question".into());
+    }
+    let kind = item
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            method
+                .strip_prefix("item/")
+                .and_then(|rest| rest.split('/').next())
+        })?;
+    Some(
+        match kind {
+            "userMessage" => "user_message",
+            "agentMessage" => "agent_message",
+            "reasoning" => "reasoning",
+            "commandExecution" => "command_execution",
+            "fileChange" => "file_change",
+            "mcpToolCall" => "mcp_tool_call",
+            "collabAgentToolCall" => "sub_agent",
+            "webSearch" => "web_search",
+            "imageGeneration" => "image_generation",
+            "plan" => "plan",
+            "error" => "error",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+pub fn live_summary(params: &Value, item: Option<&Value>) -> Option<String> {
+    params
+        .get("delta")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            item.and_then(|item| summary_text(&json!({"type":"response_item","payload":item})))
+        })
+}
+
 pub fn summary_text(raw: &Value) -> Option<String> {
     let payload = raw.get("payload")?;
     if let Some(text) = payload
@@ -714,6 +1044,25 @@ fn value_as_string(value: Option<&Value>) -> Option<String> {
             .map(str::to_string)
             .unwrap_or_else(|| value.to_string())
     })
+}
+
+fn live_status(value: Option<&Value>) -> Option<String> {
+    value
+        .map(|value| value.get("type").unwrap_or(value))
+        .and_then(value_as_string_ref)
+}
+
+fn value_as_string_ref(value: &Value) -> Option<String> {
+    if value.is_null() {
+        None
+    } else {
+        Some(
+            value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string()),
+        )
+    }
 }
 
 fn parse_time_ms(value: &str) -> Option<i64> {

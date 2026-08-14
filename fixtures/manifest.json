@@ -6,6 +6,11 @@
   "rolloutFiles": [
     "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl"
   ],
+  "liveFixtures": [
+    "live-observer.fixture.toml",
+    "live-attach-observer.fixture.toml",
+    "live-probe.mjs"
+  ],
   "coverage": [
     "session_meta",
     "turn_context",
@@ -15,6 +20,7 @@
     "shell lifecycle",
     "MCP lifecycle",
     "unknown top-level variant",
-    "secret redaction"
+    "secret redaction",
+    "App Server observe_new and attach_loaded probe"
   ]
 }

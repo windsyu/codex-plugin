@@ -18,6 +18,7 @@ use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -37,15 +38,28 @@ struct ApiState {
     token: Arc<String>,
     strict_origin: bool,
     allowed_origins: Arc<Vec<String>>,
+    live_modes: Arc<Vec<String>>,
 }
 
-pub async fn serve(config: Config, database: Arc<Database>) -> Result<()> {
+pub async fn serve(
+    config: Config,
+    database: Arc<Database>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     let token = load_or_create_token(&config.server.bearer_token_file)?;
     let state = ApiState {
         database,
         token: Arc::new(token),
         strict_origin: config.server.strict_origin,
         allowed_origins: Arc::new(config.server.allowed_origins.clone()),
+        live_modes: Arc::new(
+            config
+                .sources
+                .iter()
+                .filter(|source| source.live_mode != "off")
+                .map(|source| source.live_mode.clone())
+                .collect(),
+        ),
     };
     let protected = Router::new()
         .route("/health", get(health))
@@ -76,7 +90,15 @@ pub async fn serve(config: Config, database: Arc<Database>) -> Result<()> {
 
     let listener = TcpListener::bind(config.server.bind).await?;
     tracing::info!(address = %config.server.bind, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            while !*shutdown.borrow() {
+                if shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await?;
     Ok(())
 }
 
@@ -162,22 +184,31 @@ async fn health(State(state): State<ApiState>) -> Response {
             "lastError":row.get::<_,Option<String>>(4)?
         })),
     ).unwrap_or_default();
+    let live_enabled = !state.live_modes.is_empty();
     Json(ApiEnvelope::new(seq, json!({
         "status": if sources.iter().any(|source| source["status"] == "degraded") { "degraded" } else { "healthy" },
         "ready":true,"database":{"migration":"ok","wal":"ok"},"ingest":{"projectionLag":0},
-        "sources":sources,"liveMode":"off"
+        "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()}
     }))).into_response()
 }
 
 async fn sources(State(state): State<ApiState>) -> Response {
     envelope_query(
         &state,
-        "SELECT source_id,kind,stable_identity,status,last_seen_at_ms FROM sources ORDER BY source_id",
+        "SELECT s.source_id,s.kind,s.stable_identity,s.status,s.last_seen_at_ms,
+          e.epoch_id,e.opened_at_ms,e.closed_at_ms,e.capability_json,e.capability_hash,e.schema_hash,e.close_reason
+         FROM sources s LEFT JOIN source_epochs e ON e.rowid=(
+           SELECT e2.rowid FROM source_epochs e2 WHERE e2.source_id=s.source_id ORDER BY e2.opened_at_ms DESC LIMIT 1)
+         ORDER BY s.source_id",
         &[],
         |row| {
             Ok(
                 json!({"sourceId":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,
-            "stableIdentity":row.get::<_,String>(2)?,"status":row.get::<_,String>(3)?,"lastSeenAtMs":row.get::<_,Option<i64>>(4)?}),
+            "stableIdentity":row.get::<_,String>(2)?,"status":row.get::<_,String>(3)?,"lastSeenAtMs":row.get::<_,Option<i64>>(4)?,
+            "currentEpoch":{"epochId":row.get::<_,Option<String>>(5)?,"openedAtMs":row.get::<_,Option<i64>>(6)?,
+              "closedAtMs":row.get::<_,Option<i64>>(7)?,"capabilities":parse_optional_json(row.get::<_,Option<String>>(8)?),
+              "capabilityHash":row.get::<_,Option<String>>(9)?,"schemaHash":row.get::<_,Option<String>>(10)?,
+              "closeReason":row.get::<_,Option<String>>(11)?}}),
             )
         },
     )
@@ -386,12 +417,15 @@ async fn search(State(state): State<ApiState>, Query(query): Query<SearchQuery>)
 
 async fn capabilities(State(state): State<ApiState>) -> Response {
     let seq = state.database.max_event_seq().unwrap_or(0);
+    let live_enabled = !state.live_modes.is_empty();
     Json(ApiEnvelope::new(
         seq,
         json!({
             "observerVersion":env!("CARGO_PKG_VERSION"),"apiVersion":"v1","readOnly":true,
             "store":{"plainJsonl":true,"zstdJsonl":true,"incrementalRescan":true},
-            "live":{"enabled":false,"reason":"live_mode_off"},
+            "live":{"enabled":live_enabled,"modes":state.live_modes.as_ref(),
+              "default":"off","transport":"websocket_over_unix_socket","readOnly":true,
+              "serverRequests":"persist_without_response"},
             "streams":{"sse":true,"webSocket":true},"mutationRoutes":[]
         }),
     ))
@@ -798,6 +832,7 @@ mod tests {
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
         };
         let first = query_threads(
             &state,
@@ -856,6 +891,7 @@ mod tests {
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
         };
         let response = event_query(&state, 4, Some(10), None, None, None);
         assert_eq!(response.status(), StatusCode::GONE);

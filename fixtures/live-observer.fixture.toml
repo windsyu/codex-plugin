@@ -1,0 +1,24 @@
+[server]
+bind = "127.0.0.1:4767"
+bearer_token_file = "../target/live-observer-data/token"
+strict_origin = true
+allowed_origins = ["http://127.0.0.1:4767"]
+
+[storage]
+database = "../target/live-observer-data/observer.sqlite"
+fingerprint_key_file = "../target/live-observer-data/fingerprint.key"
+raw_event_retention_days = 30
+delta_retention_days = 7
+blob_retention_days = 14
+
+[[sources]]
+name = "live-fixture"
+codex_home = "../target/live-codex-home"
+app_server_socket = "../target/live-codex-home/app-server-control/test-observer.sock"
+live_mode = "observe_new"
+scan_interval_seconds = 30
+
+[capture]
+max_raw_event_bytes = 67108864
+keep_reasoning = true
+keep_raw_json = true
