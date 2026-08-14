@@ -862,8 +862,15 @@ CREATE TABLE source_epochs (
   opened_at_ms INTEGER NOT NULL,
   closed_at_ms INTEGER,
   capability_json TEXT,
+  capability_hash TEXT,
   schema_hash TEXT,
   close_reason TEXT,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  sequence_gap_count INTEGER NOT NULL DEFAULT 0,
+  decode_error_count INTEGER NOT NULL DEFAULT 0,
+  unknown_event_count INTEGER NOT NULL DEFAULT 0,
+  last_source_seq INTEGER,
+  last_event_at_ms INTEGER,
   PRIMARY KEY (source_id, epoch_id),
   FOREIGN KEY (source_id) REFERENCES sources(source_id)
 );
@@ -1001,14 +1008,17 @@ CREATE TABLE blobs (
 
 CREATE TABLE projection_conflicts (
   conflict_id TEXT PRIMARY KEY,
-  thread_key TEXT,
-  turn_id TEXT,
-  item_id TEXT,
-  field_path TEXT NOT NULL,
-  winner_event_seq INTEGER NOT NULL,
-  candidates_json TEXT NOT NULL,
-  rule_version TEXT NOT NULL,
-  resolved INTEGER NOT NULL DEFAULT 0
+  thread_key TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_key TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  live_event_seq INTEGER NOT NULL,
+  durable_event_seq INTEGER NOT NULL,
+  live_value_json TEXT NOT NULL,
+  durable_value_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  detected_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER
 );
 
 CREATE TABLE ingest_errors (
@@ -1446,6 +1456,8 @@ codex-observerd purge --thread <threadKey> --observer-copy-only --yes
 - 若未来允许 LAN，必须显式启用 TLS 与独立认证方案，不复用 loopback 默认；
 - bearer token 至少 256 bit，由 daemon 首次生成；
 - token 文件仅当前用户可读；
+- `codex-observerd open` 只打印五分钟有效、fragment 携带的单次配对链接；`POST /v1/auth/pair` 兑换 30 天签名 `observer_session` Cookie；
+- Cookie 使用 `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` 并绑定当前 bearer secret。V1 loopback HTTP 不设置 `Secure`；token 轮换立即失效；
 - 严格校验 `Origin`，无 Origin 的非浏览器客户端按配置处理；
 - 所有 response 设置安全 header 和 `Cache-Control: no-store`。
 

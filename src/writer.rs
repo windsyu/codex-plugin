@@ -569,16 +569,62 @@ mod tests {
         let temp = TempDir::new()?;
         let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
         database.migrate()?;
-        let writer = WriterHandle::start(database, 100, 16, 16)?;
+        let writer = WriterHandle::start(database.clone(), 100, 16, 16)?;
         writer.upsert_source("source", "fixture", &json!({}), "ready")?;
         let mut committed = writer.subscribe();
         assert_eq!(writer.ingest(batch("source", "ok"))?, (1, 0));
         assert_eq!(committed.try_recv()?, 1);
-        assert!(writer.ingest(batch("missing-source", "rollback")).is_err());
-        assert!(matches!(
-            committed.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
+        for (kind, event_id) in [("disk_full", "rollback-full"), ("io_error", "rollback-io")] {
+            database.fail_next_ingest_for_test(kind);
+            assert!(writer.ingest(batch("source", event_id)).is_err());
+            assert!(matches!(
+                committed.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+        assert_eq!(database.max_event_seq()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn committed_bus_fans_out_to_one_hundred_consumers() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let writer = WriterHandle::start(database, 100, 16, 512)?;
+        writer.upsert_source("source", "fanout-fixture", &json!({}), "ready")?;
+        let mut consumers = (0..100).map(|_| writer.subscribe()).collect::<Vec<_>>();
+        writer.ingest(batch("source", "fanout"))?;
+        for consumer in &mut consumers {
+            assert_eq!(consumer.try_recv()?, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "explicit 2M-event capacity test; set OBSERVER_RUN_CAPACITY=1"]
+    fn two_million_event_capacity_path() -> Result<()> {
+        anyhow::ensure!(
+            std::env::var("OBSERVER_RUN_CAPACITY").as_deref() == Ok("1"),
+            "set OBSERVER_RUN_CAPACITY=1 to run the explicit capacity test"
+        );
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let writer = WriterHandle::start(database, 4096, 128, 512)?;
+        writer.upsert_source("capacity", "fixture-capacity", &json!({}), "ready")?;
+        for batch_index in 0..20_000_u64 {
+            let mut ingest = batch("capacity", &format!("capacity-{batch_index}-0"));
+            ingest.events = (0..100)
+                .map(|offset| {
+                    let mut event = event("capacity", &format!("capacity-{batch_index}-{offset}"));
+                    event.source_seq = (batch_index * 100 + offset + 1) as i64;
+                    event
+                })
+                .collect();
+            ingest.ordinal = (batch_index + 1) * 100;
+            writer.ingest(ingest)?;
+        }
         Ok(())
     }
 }

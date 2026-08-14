@@ -356,4 +356,16 @@ mod tests {
         assert!(config.validate().is_err());
         Ok(())
     }
+
+    #[test]
+    fn validates_effective_queue_capacities() {
+        let mut config = Config::default();
+        config.capture.ingest_queue_events = 99;
+        assert!(config.validate().is_err());
+        config.capture.ingest_queue_events = 4096;
+        config.capture.api_consumer_queue_events = 15;
+        assert!(config.validate().is_err());
+        config.capture.api_consumer_queue_events = 512;
+        assert!(config.validate().is_ok());
+    }
 }

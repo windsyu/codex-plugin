@@ -264,10 +264,11 @@ fn print_doctor(report: crate::model::DoctorReport, json: bool) -> Result<()> {
         println!("database: {}", report.database);
         for source in report.sources {
             println!(
-                "source {}: {} ({})",
-                source.name, source.status, source.path
+                "source {}: {} ({}; live={})",
+                source.name, source.status, source.path, source.live_socket_status
             );
         }
+        println!("checks: {}", serde_json::to_string(&report.checks)?);
     }
     Ok(())
 }

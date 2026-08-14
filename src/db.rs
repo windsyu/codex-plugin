@@ -4,6 +4,8 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
@@ -42,6 +44,8 @@ pub struct Database {
     blob_dir: PathBuf,
     inline_blob_bytes: usize,
     read_pool: ReadPool,
+    #[cfg(test)]
+    fail_before_commit: AtomicU8,
 }
 
 struct ReadPool {
@@ -176,6 +180,8 @@ impl Database {
             blob_dir: blob_dir.to_path_buf(),
             inline_blob_bytes,
             read_pool: ReadPool::new(path.to_path_buf(), 8),
+            #[cfg(test)]
+            fail_before_commit: AtomicU8::new(0),
         };
         database.initialize_blob_dir()?;
         let _ = database.connect()?;
@@ -205,6 +211,8 @@ impl Database {
             blob_dir: blob_dir.to_path_buf(),
             inline_blob_bytes,
             read_pool: ReadPool::new(path.to_path_buf(), 8),
+            #[cfg(test)]
+            fail_before_commit: AtomicU8::new(0),
         };
         let connection = database.connect_read_only()?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -536,8 +544,24 @@ impl Database {
         for batch in batches {
             results.push(self.ingest_batch_transaction(&transaction, batch)?);
         }
+        #[cfg(test)]
+        match self.fail_before_commit.swap(0, Ordering::SeqCst) {
+            1 => anyhow::bail!("injected SQLITE_FULL before commit"),
+            2 => anyhow::bail!("injected SQLITE_IOERR before commit"),
+            _ => {}
+        }
         transaction.commit()?;
         Ok(results)
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_ingest_for_test(&self, kind: &str) {
+        let code = match kind {
+            "disk_full" => 1,
+            "io_error" => 2,
+            _ => panic!("unknown ingest failpoint"),
+        };
+        self.fail_before_commit.store(code, Ordering::SeqCst);
     }
 
     fn ingest_batch_transaction(

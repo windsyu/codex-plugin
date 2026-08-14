@@ -1671,6 +1671,27 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"token-long"));
     }
 
+    #[tokio::test]
+    async fn errors_use_stable_non_leaking_contract() -> Result<()> {
+        let response = api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OBSERVER_BUSY",
+            "retry later",
+        );
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["apiVersion"], "v1");
+        assert_eq!(body["error"]["code"], "OBSERVER_BUSY");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(
+            body["error"]["requestId"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(body["error"]["details"], json!({}));
+        Ok(())
+    }
+
     #[test]
     fn cursor_round_trip_and_tamper_detection() -> Result<()> {
         let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);

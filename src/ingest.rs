@@ -802,6 +802,26 @@ mod tests {
     }
 
     #[test]
+    fn periodic_rescan_recovers_when_watcher_hint_is_lost() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        assert_eq!(importer.import_all()?.events_inserted, 0);
+        fs::write(
+            sessions.join("rollout-rescan.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"rescan-thread\"}}\n",
+        )?;
+        let recovered = importer.import_all()?;
+        assert_eq!(recovered.events_inserted, 1);
+        assert_eq!(database.max_event_seq()?, 1);
+        Ok(())
+    }
+
+    #[test]
     fn thread_completeness_aggregates_every_turn_and_clean_eof() -> Result<()> {
         let temp = TempDir::new()?;
         let config = test_config(&temp);
