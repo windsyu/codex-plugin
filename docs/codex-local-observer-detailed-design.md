@@ -397,6 +397,31 @@ interface ThreadProjection {
   agentNickname?: string;
   agentRole?: string;
   agentPath?: string;
+  project?: {
+    key: string;
+    name: string;
+    path: string;
+  };
+  context?: {
+    session: {
+      baseInstructions?: unknown;
+      dynamicTools?: unknown;
+      selectedCapabilityRoots?: unknown;
+      memoryMode?: string;
+      subagentHistoryStartOrdinal?: number;
+      multiAgentVersion?: string;
+      contextWindow?: unknown;
+    };
+    runtime: {
+      cwd?: string;
+      model?: string;
+      reasoningEffort?: string;
+      approvalPolicy?: string;
+      approvalsReviewer?: unknown;
+      sandbox?: unknown;
+      activePermissionProfile?: unknown;
+    };
+  };
 
   name?: string;
   source?: string;
@@ -601,7 +626,7 @@ world_state
 event_msg
 ```
 
-未知 `type` 仍以 `rollout/unknown` 入库。SessionMeta 至少抽取：id、session_id、parent/fork、cwd、originator、cli_version、source、thread_source、agent metadata、model_provider、history_mode、history_base。
+未知 `type` 仍以 `rollout/unknown` 入库。SessionMeta 至少抽取：id、session_id、parent/fork、cwd、originator、cli_version、source、thread_source、agent metadata、model_provider、history_mode、history_base；项目上下文额外抽取 `base_instructions`、`dynamic_tools`、`selected_capability_roots`、`memory_mode`、`subagent_history_start_ordinal`、`multi_agent_version`、`context_window`。
 
 ### 9.7 持久化能力边界
 
@@ -1141,6 +1166,7 @@ DbWriter 对 batch 中每条事件执行：
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/v1/sources` | source 状态、epoch、capabilities |
+| GET | `/v1/projects` | 按规范化 cwd 聚合的项目快照 |
 | GET | `/v1/threads` | Thread 分页、筛选、搜索 |
 | GET | `/v1/threads/{threadKey}` | Thread 详情 |
 | GET | `/v1/threads/{threadKey}/turns` | Turn 分页 |
@@ -1163,6 +1189,7 @@ GET /v1/threads
   ?cursor=
   &limit=50
   &sourceId=
+  &project=
   &runtimeStatus=
   &captureCompleteness=
   &archived=
@@ -1315,10 +1342,15 @@ stream event 默认只携带 projection delta 与 raw metadata。大于 inline �
 
 ```text
 Source Health
-Thread List / Search
+Project Tree
+  Thread List / Search
 Thread Detail
   Thread Header
   Capture & Provenance Banner
+  Background Context Panel
+    Session Instructions
+    Session Metadata
+    Runtime Context
   Turn Timeline
     Item Cards
       rendered content

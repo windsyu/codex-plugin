@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod api;
 mod auth;
 mod config;
@@ -7,6 +9,7 @@ mod instance_lock;
 mod live;
 mod model;
 mod permissions;
+mod project;
 mod redact;
 mod watcher;
 mod writer;

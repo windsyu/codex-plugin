@@ -10,7 +10,9 @@
 - EOF 半行保留、坏 JSON 审计占位、unknown variant 无损保存；
 - 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
-- SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；
+- SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；SessionMeta `base_instructions`、dynamic tools、capability roots、memory mode 与 context window 也作为线程背景上下文保存；
+- Web Viewer 按规范化 `cwd` 聚合项目，并将背景上下文折叠在对话时间线之上，与 user/agent/tool 内容清晰区分；
+- Web Viewer 使用 Vite + Preact，Markdown 经 DOMPurify 清洗后渲染，代码块使用 highlight.js，脚本和本地文件链接默认不作为可执行内容；
 - redaction v2 在入库前处理 secret/header/MCP auth、URL token/signature，并以不可还原 marker 丢弃 image/audio base64 正文；
 - Thread completeness 从全部 Turn coverage 聚合，clean EOF、decode/unknown/disconnect 计数不会再被后续事件清零；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
@@ -37,12 +39,18 @@
 需要 Rust 1.95 或兼容版本：
 
 ```bash
+cd web
+npm install
+npm test
+npm run build
+cd ..
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
 测试只使用临时目录和 `fixtures/` 中的合成数据，不会写入 `~/.codex`。
+`cargo build` 会检查 `web/dist/index.html` 是否已生成；缺失时会提示先完成前端构建。
 发布前自动化、release E2E、安全与容量冒烟结果见 [V1 验证记录](docs/v1-validation.md)。
 
 ## 配置
@@ -126,6 +134,7 @@ V1 业务查询接口为 `GET`；唯一 POST 是本机 Viewer 的一次性配对
 ```text
 /v1/health
 /v1/sources
+/v1/projects
 /v1/threads
 /v1/threads/{threadKey}
 /v1/threads/{threadKey}/turns
@@ -141,7 +150,7 @@ V1 业务查询接口为 `GET`；唯一 POST 是本机 Viewer 的一次性配对
 /v1/auth/pair (POST)
 ```
 
-`/v1/threads`、`/turns`、`/items` 与 `/search` 使用不透明的签名 `cursor`；客户端应原样传回响应中的 `nextCursor`。`items` 还支持 `turnId`、`itemType` 筛选。游标不能跨端点、Thread 或筛选条件复用。
+`/v1/threads`、`/turns`、`/items` 与 `/search` 使用不透明的签名 `cursor`；客户端应原样传回响应中的 `nextCursor`。`items` 还支持 `turnId`、`itemType` 筛选，`threads` 支持 `project=<projectKey>` 项目筛选。游标不能跨端点、Thread 或筛选条件复用。
 
 WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 
@@ -154,7 +163,7 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 ## 安全边界
 
 - Observer 只读打开 Codex rollout，不修改 Codex SQLite、rollout 或 writer lock；
-- Web Viewer 仅渲染已脱敏副本，JSON 使用 `textContent`，不执行 Markdown、HTML、SVG 或 ANSI；
+- Web Viewer 仅渲染已脱敏副本；Markdown 经过 DOMPurify 清洗，禁止脚本/iframe/style 与本地文件链接，JSON 仍使用纯文本展示；
 - blob 路径完全由服务端生成，下载强制 attachment，单 Range、并发上限 4；文件使用 `O_NOFOLLOW` 打开；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
 - redaction v2 不自动重写历史 v1 记录；health、Viewer 和 export 会报告 legacy record 警告；

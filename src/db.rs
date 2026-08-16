@@ -23,6 +23,7 @@ use crate::model::{
 use crate::permissions::{
     create_private_file, prepare_database_files, prepare_private_dir, prepare_private_file,
 };
+use crate::project::{project_key, project_name};
 
 const COMPATIBILITY_MANIFEST: &str = include_str!("../compatibility/codex-41ece455.json");
 
@@ -37,7 +38,55 @@ const MIGRATION_8: &str = include_str!("../migrations/0008_search_lookup_index.s
 const MIGRATION_9: &str = include_str!("../migrations/0009_unknown_rollout_status.sql");
 const MIGRATION_10: &str = include_str!("../migrations/0010_completeness_v2.sql");
 const MIGRATION_11: &str = include_str!("../migrations/0011_writer_conflicts.sql");
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+const MIGRATION_12: &str = include_str!("../migrations/0012_context_project.sql");
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
+
+struct SessionContextBackfill {
+    base_instructions: Option<String>,
+    dynamic_tools: Option<String>,
+    selected_capability_roots: Option<String>,
+    memory_mode: Option<String>,
+    subagent_history_start_ordinal: Option<i64>,
+    multi_agent_version: Option<String>,
+    context_window: Option<String>,
+}
+
+fn session_context_from_raw(raw_json: &str) -> Option<SessionContextBackfill> {
+    let value: Value = serde_json::from_str(raw_json).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    Some(SessionContextBackfill {
+        base_instructions: payload
+            .get("base_instructions")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        dynamic_tools: payload
+            .get("dynamic_tools")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        selected_capability_roots: payload
+            .get("selected_capability_roots")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        memory_mode: payload
+            .get("memory_mode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        subagent_history_start_ordinal: payload
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_i64),
+        multi_agent_version: payload
+            .get("multi_agent_version")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        context_window: payload
+            .get("context_window")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+    })
+}
 
 pub struct Database {
     path: PathBuf,
@@ -424,7 +473,7 @@ impl Database {
     }
 
     pub fn migrate(&self) -> Result<()> {
-        let connection = self.connect()?;
+        let mut connection = self.connect()?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if !(0..=LATEST_SCHEMA_VERSION).contains(&version) {
             anyhow::bail!("unsupported observer database schema version {version}");
@@ -441,6 +490,7 @@ impl Database {
             (9, MIGRATION_9),
             (10, MIGRATION_10),
             (11, MIGRATION_11),
+            (12, MIGRATION_12),
         ] {
             if version < target {
                 connection
@@ -448,9 +498,77 @@ impl Database {
                     .with_context(|| format!("apply migration {target:04}"))?;
             }
         }
+        Self::backfill_project_and_context(&mut connection)?;
         recompute_all_completeness(&connection)?;
         connection.execute_batch("PRAGMA integrity_check;")?;
         prepare_database_files(&self.path)?;
+        Ok(())
+    }
+
+    fn backfill_project_and_context(connection: &mut Connection) -> Result<()> {
+        let transaction = connection.transaction()?;
+        let thread_rows = {
+            let mut statement =
+                transaction.prepare("SELECT thread_key,cwd,project_key FROM threads")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (thread_key_value, cwd, existing_project_key) in thread_rows {
+            if existing_project_key.is_none()
+                && let Some(cwd_value) = cwd.as_deref()
+            {
+                let key = project_key(cwd_value);
+                transaction.execute(
+                    "UPDATE threads SET project_key=?1 WHERE thread_key=?2 AND project_key IS NULL",
+                    params![key, thread_key_value],
+                )?;
+            }
+
+            let raw_json: Option<String> = transaction
+                .query_row(
+                    "SELECT raw_json FROM raw_events WHERE thread_key=?1 AND method='rollout/session_meta'
+                     ORDER BY event_seq DESC LIMIT 1",
+                    [&thread_key_value],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let Some(raw_json) = raw_json else {
+                continue;
+            };
+            let Some(context) = session_context_from_raw(&raw_json) else {
+                continue;
+            };
+            transaction.execute(
+                "UPDATE threads SET
+                   base_instructions_json=COALESCE(base_instructions_json,?1),
+                   dynamic_tools_json=COALESCE(dynamic_tools_json,?2),
+                   selected_capability_roots_json=COALESCE(selected_capability_roots_json,?3),
+                   memory_mode=COALESCE(memory_mode,?4),
+                   subagent_history_start_ordinal=COALESCE(subagent_history_start_ordinal,?5),
+                   multi_agent_version=COALESCE(multi_agent_version,?6),
+                   context_window_json=COALESCE(context_window_json,?7)
+                 WHERE thread_key=?8",
+                params![
+                    context.base_instructions,
+                    context.dynamic_tools,
+                    context.selected_capability_roots,
+                    context.memory_mode,
+                    context.subagent_history_start_ordinal,
+                    context.multi_agent_version,
+                    context.context_window,
+                    thread_key_value,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1052,13 +1170,22 @@ impl Database {
             .query_row(
                 "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,
                    capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,recency_at_ms,
-                   projection_json,provenance_json,last_event_seq FROM threads WHERE thread_key=?1",
+                   projection_json,provenance_json,last_event_seq,project_key,base_instructions_json,
+                   dynamic_tools_json,selected_capability_roots_json,memory_mode,
+                   subagent_history_start_ordinal,multi_agent_version,context_window_json
+                 FROM threads WHERE thread_key=?1",
                 [thread_key],
                 |row| {
+                    let cwd: Option<String> = row.get(4)?;
+                    let project_key_value: Option<String> = row.get(16)?;
+                    let key = project_key_value
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| cwd.as_deref().map(project_key))
+                        .unwrap_or_else(|| "unknown".to_string());
                     Ok(json!({
                         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,
                         "storeSourceId":row.get::<_,String>(2)?,"name":row.get::<_,Option<String>>(3)?,
-                        "cwd":row.get::<_,Option<String>>(4)?,"source":row.get::<_,Option<String>>(5)?,
+                        "cwd":cwd,"source":row.get::<_,Option<String>>(5)?,
                         "model":row.get::<_,Option<String>>(6)?,"archived":row.get::<_,bool>(7)?,
                         "captureCompleteness":row.get::<_,String>(8)?,
                         "completenessReasons":parse_stored_json(row.get::<_,String>(9)?),
@@ -1066,7 +1193,25 @@ impl Database {
                         "recencyAtMs":row.get::<_,Option<i64>>(12)?,
                         "projection":parse_stored_json(row.get::<_,String>(13)?),
                         "provenance":parse_stored_json(row.get::<_,String>(14)?),
-                        "lastEventSeq":row.get::<_,i64>(15)?
+                        "lastEventSeq":row.get::<_,i64>(15)?,
+                        "project":{"key":key,"name":project_name(&key),
+                          "path":row.get::<_,Option<String>>(4)?.unwrap_or_else(|| key.clone())},
+                        "context":{
+                            "session":{
+                                "baseInstructions":parse_stored_json(row.get::<_,Option<String>>(17)?.unwrap_or_default()),
+                                "dynamicTools":parse_stored_json(row.get::<_,Option<String>>(18)?.unwrap_or_default()),
+                                "selectedCapabilityRoots":parse_stored_json(row.get::<_,Option<String>>(19)?.unwrap_or_default()),
+                                "memoryMode":row.get::<_,Option<String>>(20)?,
+                                "subagentHistoryStartOrdinal":row.get::<_,Option<i64>>(21)?,
+                                "multiAgentVersion":row.get::<_,Option<String>>(22)?,
+                                "contextWindow":parse_stored_json(row.get::<_,Option<String>>(23)?.unwrap_or_default())
+                            },
+                            "runtime":{
+                                "cwd":row.get::<_,Option<String>>(4)?,
+                                "source":row.get::<_,Option<String>>(5)?,
+                                "model":row.get::<_,Option<String>>(6)?
+                            }
+                        }
                     }))
                 },
             )
@@ -1900,13 +2045,45 @@ fn project_event(
                 .as_deref()
                 .map(|id| thread_key(&event.store_source_id, id));
             let history_base = p.get("history_base").filter(|value| !value.is_null());
+            let project_key_value = p.get("cwd").and_then(Value::as_str).map(project_key);
+            let base_instructions = p
+                .get("base_instructions")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let dynamic_tools = p
+                .get("dynamic_tools")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let selected_capability_roots = p
+                .get("selected_capability_roots")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let memory_mode = p
+                .get("memory_mode")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let subagent_history_start_ordinal = p
+                .get("subagent_history_start_ordinal")
+                .and_then(Value::as_i64);
+            let multi_agent_version = p
+                .get("multi_agent_version")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let context_window = p
+                .get("context_window")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
             let session_projection = json!({
                 "sessionId":p.get("session_id").or_else(|| p.get("id")),
                 "parentThreadId":parent_thread_id,"forkedFromId":forked_from_id,
                 "cwd":p.get("cwd"),"source":p.get("source"),"threadSource":p.get("thread_source"),
                 "originator":p.get("originator"),"cliVersion":p.get("cli_version"),
                 "agentNickname":p.get("agent_nickname"),"agentRole":p.get("agent_role"),"agentPath":p.get("agent_path"),
-                "modelProvider":p.get("model_provider"),"historyMode":p.get("history_mode"),"historyBase":history_base
+                "modelProvider":p.get("model_provider"),"historyMode":p.get("history_mode"),"historyBase":history_base,
+                "baseInstructions":p.get("base_instructions"),"dynamicTools":p.get("dynamic_tools"),
+                "selectedCapabilityRoots":p.get("selected_capability_roots"),"memoryMode":p.get("memory_mode"),
+                "subagentHistoryStartOrdinal":p.get("subagent_history_start_ordinal"),
+                "multiAgentVersion":p.get("multi_agent_version"),"contextWindow":p.get("context_window")
             });
             transaction.execute(
                 "UPDATE threads SET session_id=COALESCE(?1,session_id),cwd=COALESCE(?2,cwd),source=COALESCE(?3,source),
@@ -1914,7 +2091,15 @@ fn project_event(
                    parent_thread_id=?6,parent_thread_key=?7,forked_from_id=?8,forked_from_thread_key=?9,
                    agent_nickname=?10,agent_role=?11,agent_path=?12,originator=?13,cli_version=?14,
                    thread_source=?15,history_mode=?16,history_base_json=?17,
-                   projection_json=?18,provenance_json=?19,last_event_seq=?20 WHERE thread_key=?21",
+                   project_key=COALESCE(?18,project_key),
+                   base_instructions_json=COALESCE(?19,base_instructions_json),
+                   dynamic_tools_json=COALESCE(?20,dynamic_tools_json),
+                   selected_capability_roots_json=COALESCE(?21,selected_capability_roots_json),
+                   memory_mode=COALESCE(?22,memory_mode),
+                   subagent_history_start_ordinal=COALESCE(?23,subagent_history_start_ordinal),
+                   multi_agent_version=COALESCE(?24,multi_agent_version),
+                   context_window_json=COALESCE(?25,context_window_json),
+                   projection_json=?26,provenance_json=?27,last_event_seq=?28 WHERE thread_key=?29",
                 params![
                     p.get("session_id").or_else(|| p.get("id")).and_then(Value::as_str),
                     p.get("cwd").and_then(Value::as_str),value_as_string(p.get("source")),
@@ -1925,6 +2110,8 @@ fn project_event(
                     p.get("agent_path").and_then(Value::as_str),p.get("originator").and_then(Value::as_str),
                     p.get("cli_version").and_then(Value::as_str),value_as_string(p.get("thread_source")),
                     value_as_string(p.get("history_mode")),history_base.map(Value::to_string),
+                    project_key_value,base_instructions,dynamic_tools,selected_capability_roots,
+                    memory_mode,subagent_history_start_ordinal,multi_agent_version,context_window,
                     session_projection.to_string(),
                     json!({"sessionMeta":{"eventSeq":event_seq,"source":"rollout"}}).to_string(), event_seq, event.thread_key,
                 ],
@@ -1948,12 +2135,13 @@ fn project_event(
             transaction.execute(
                 "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),reasoning_effort=?3,
                    approval_policy=?4,approvals_reviewer_json=?5,sandbox_json=?6,active_permission_profile_json=?7,
-                   projection_json=?8 WHERE thread_key=?9",
+                   project_key=COALESCE(?8,project_key),projection_json=?9 WHERE thread_key=?10",
                 params![event.payload.get("cwd").and_then(Value::as_str), event.payload.get("model").and_then(Value::as_str),
                     value_as_string(event.payload.get("effort")),value_as_string(event.payload.get("approval_policy")),
                     event.payload.get("approvals_reviewer").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("sandbox_policy").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("permission_profile").filter(|value| !value.is_null()).map(Value::to_string),
+                    event.payload.get("cwd").and_then(Value::as_str).map(project_key),
                     projection,event.thread_key],
             )?;
         }
@@ -2954,6 +3142,58 @@ mod tests {
             |row| row.get(0),
         )?;
         assert!(!thread_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_twelve_backfills_project_and_context_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "UPDATE threads SET project_key=NULL,base_instructions_json=NULL,
+             dynamic_tools_json=NULL,selected_capability_roots_json=NULL,memory_mode=NULL,
+             subagent_history_start_ordinal=NULL,multi_agent_version=NULL,context_window_json=NULL",
+            [],
+        )?;
+        drop(connection);
+
+        database.migrate()?;
+        let connection = database.connect()?;
+        let project_key_value: String = connection.query_row(
+            "SELECT project_key FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+        let base_instructions: Option<String> = connection.query_row(
+            "SELECT base_instructions_json FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(project_key_value, "/demo/local-observer");
+        assert!(
+            base_instructions
+                .unwrap_or_default()
+                .contains("Keep changes read-only.")
+        );
+        drop(connection);
+
+        database.migrate()?;
+        let connection = database.connect()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'
+             AND project_key='/demo/local-observer'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
         Ok(())
     }
 }

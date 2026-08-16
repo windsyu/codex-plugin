@@ -1,8 +1,9 @@
 /target/
 /observer-data/
+/web/node_modules/
+/web/dist/
 observer.toml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 .DS_Store
-

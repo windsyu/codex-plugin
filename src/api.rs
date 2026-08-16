@@ -10,13 +10,14 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::types::Value as SqlValue;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -31,11 +32,13 @@ use crate::config::Config;
 use crate::db::{Database, LATEST_SCHEMA_VERSION};
 use crate::ingest::load_or_create_token;
 use crate::model::ApiEnvelope;
+use crate::project::{project_key, project_name};
 use crate::writer::WriterHandle;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+#[derive(RustEmbed)]
+#[folder = "web/dist"]
+struct WebAssets;
+
 static ACTIVE_CONSUMERS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CONSUMERS: AtomicU64 = AtomicU64::new(0);
 static SLOW_CONSUMER_DROPS: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +108,7 @@ pub async fn serve(
     let protected = Router::new()
         .route("/health", get(health))
         .route("/sources", get(sources))
+        .route("/projects", get(projects))
         .route("/threads", get(threads))
         .route("/threads/{thread_key}", get(thread_detail))
         .route("/threads/{thread_key}/turns", get(turns))
@@ -121,8 +125,7 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/style.css", get(style_css))
+        .route("/assets/{*path}", get(web_asset))
         .route("/v1/auth/pair", post(pair_auth))
         .nest("/v1", protected)
         .with_state(state)
@@ -282,25 +285,43 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> Response {
+    match WebAssets::get("index.html") {
+        Some(file) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WEB_ASSET_MISSING",
+            "embedded web viewer index is missing",
+        ),
+    }
 }
 
-async fn app_js() -> Response {
+async fn web_asset(Path(path): Path<String>) -> Response {
+    let asset_path = format!("assets/{path}");
+    let Some(file) = WebAssets::get(&asset_path) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "ROUTE_NOT_FOUND",
+            "route was not found",
+        );
+    };
+    let content_type = match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    };
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        APP_JS,
-    )
-        .into_response()
-}
-
-async fn style_css() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        STYLE_CSS,
+        [(header::CONTENT_TYPE, content_type)],
+        file.data.into_owned(),
     )
         .into_response()
 }
@@ -378,6 +399,38 @@ async fn sources(State(state): State<ApiState>) -> Response {
             )
         },
     )
+}
+
+async fn projects(State(state): State<ApiState>) -> Response {
+    let seq = state.database.max_event_seq().unwrap_or(0);
+    let rows = state.database.query_json(
+        "SELECT project_key,MIN(cwd),COUNT(*),SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END),
+              MAX(COALESCE(recency_at_ms,0)) FROM threads
+             GROUP BY project_key
+             ORDER BY MAX(COALESCE(recency_at_ms,0)) DESC,project_key",
+        &[],
+        |row| {
+            let key = match row.get::<_, Option<String>>(0)? {
+                Some(key) if !key.is_empty() => key,
+                _ => row
+                    .get::<_, Option<String>>(1)?
+                    .as_deref()
+                    .map(project_key)
+                    .unwrap_or_else(|| "unknown".to_string()),
+            };
+            Ok(json!({
+                "project":{"key":key,"name":project_name(&key),
+                  "path":row.get::<_,Option<String>>(1)?.unwrap_or_else(|| key.clone())},
+                "threadCount":row.get::<_,i64>(2)?,
+                "currentThreadCount":row.get::<_,i64>(3)?,
+                "lastRecencyAtMs":row.get::<_,i64>(4)?
+            }))
+        },
+    );
+    match rows {
+        Ok(rows) => Json(ApiEnvelope::new(seq, rows)).into_response(),
+        Err(error) => internal_error(error),
+    }
 }
 
 async fn blob(
@@ -548,7 +601,9 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
           recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
           forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
           history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
-          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE thread_key=?1",
+          sandbox_json,active_permission_profile_json,rule_version,project_key,base_instructions_json,dynamic_tools_json,
+          selected_capability_roots_json,memory_mode,subagent_history_start_ordinal,multi_agent_version,
+          context_window_json FROM threads WHERE thread_key=?1",
         &[&thread_key], thread_row,
     );
     match rows {
@@ -716,6 +771,7 @@ struct ThreadQuery {
     cursor: Option<String>,
     limit: Option<usize>,
     source_id: Option<String>,
+    project: Option<String>,
     runtime_status: Option<String>,
     capture_completeness: Option<String>,
     archived: Option<bool>,
@@ -1124,12 +1180,18 @@ fn query_threads(state: &ApiState, query: ThreadQuery) -> Result<Response, Curso
           recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
           forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
           history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
-          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE last_event_seq <= ?",
+          sandbox_json,active_permission_profile_json,rule_version,project_key,base_instructions_json,dynamic_tools_json,
+          selected_capability_roots_json,memory_mode,subagent_history_start_ordinal,multi_agent_version,
+          context_window_json FROM threads WHERE last_event_seq <= ?",
     );
     let mut parameters = vec![SqlValue::Integer(as_of)];
     if let Some(source_id) = query.source_id {
         sql.push_str(" AND store_source_id = ?");
         parameters.push(SqlValue::Text(source_id));
+    }
+    if let Some(project) = query.project {
+        sql.push_str(" AND project_key = ?");
+        parameters.push(SqlValue::Text(project));
     }
     if let Some(status) = query.runtime_status {
         sql.push_str(" AND runtime_status = ?");
@@ -1410,6 +1472,7 @@ fn query_fingerprint(value: &Value) -> String {
 fn thread_query_fingerprint(query: &ThreadQuery) -> String {
     let canonical = json!({
         "sourceId":query.source_id,
+        "project":query.project,
         "runtimeStatus":query.runtime_status,
         "captureCompleteness":query.capture_completeness,
         "archived":query.archived,
@@ -1479,6 +1542,23 @@ fn search_expression(value: &str) -> String {
 }
 
 fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let cwd: Option<String> = row.get(4)?;
+    let project_key_value: Option<String> = row.get(36)?;
+    let key = project_key_value
+        .filter(|value| !value.is_empty())
+        .or_else(|| cwd.as_deref().map(project_key))
+        .unwrap_or_else(|| "unknown".to_string());
+    let name = project_name(&key);
+    let path = cwd.clone().unwrap_or_else(|| key.clone());
+
+    let base_instructions = parse_optional_json(row.get(37)?);
+    let dynamic_tools = parse_optional_json(row.get(38)?);
+    let selected_capability_roots = parse_optional_json(row.get(39)?);
+    let memory_mode: Option<String> = row.get(40)?;
+    let subagent_history_start_ordinal: Option<i64> = row.get(41)?;
+    let multi_agent_version: Option<String> = row.get(42)?;
+    let context_window = parse_optional_json(row.get(43)?);
+
     Ok(json!({
         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,"storeSourceId":row.get::<_,String>(2)?,
         "name":row.get::<_,Option<String>>(3)?,"cwdDisplay":row.get::<_,Option<String>>(4)?,"source":row.get::<_,Option<String>>(5)?,
@@ -1496,18 +1576,71 @@ fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "modelProvider":row.get::<_,Option<String>>(29)?,"reasoningEffort":row.get::<_,Option<String>>(30)?,
         "approvalPolicy":row.get::<_,Option<String>>(31)?,"approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
         "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
-        "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?
+        "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?,
+        "project":{"key":key,"name":name,"path":path},
+        "context":{
+            "session":{
+                "baseInstructions":base_instructions,
+                "dynamicTools":dynamic_tools,
+                "selectedCapabilityRoots":selected_capability_roots,
+                "memoryMode":memory_mode,
+                "subagentHistoryStartOrdinal":subagent_history_start_ordinal,
+                "multiAgentVersion":multi_agent_version,
+                "contextWindow":context_window,
+                "agentNickname":row.get::<_,Option<String>>(21)?,
+                "agentRole":row.get::<_,Option<String>>(22)?,
+                "agentPath":row.get::<_,Option<String>>(23)?,
+                "originator":row.get::<_,Option<String>>(24)?,
+                "cliVersion":row.get::<_,Option<String>>(25)?,
+                "threadSource":row.get::<_,Option<String>>(26)?,
+                "historyMode":row.get::<_,Option<String>>(27)?,
+                "historyBase":parse_optional_json(row.get::<_,Option<String>>(28)?),
+                "modelProvider":row.get::<_,Option<String>>(29)?
+            },
+            "runtime":{
+                "cwd":cwd,
+                "source":row.get::<_,Option<String>>(5)?,
+                "model":row.get::<_,Option<String>>(6)?,
+                "reasoningEffort":row.get::<_,Option<String>>(30)?,
+                "approvalPolicy":row.get::<_,Option<String>>(31)?,
+                "approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
+                "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
+                "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?)
+            }
+        }
     }))
 }
 
 fn turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let execution_context = parse_optional_json(row.get::<_, Option<String>>(7)?);
+    let context = turn_context_view(&execution_context);
     Ok(json!({
         "turnId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,
         "captureCompleteness":row.get::<_,String>(2)?,"completenessReasons":parse_json(row.get::<_,String>(3)?),
         "coverage":parse_json(row.get::<_,String>(4)?),"startedAtMs":row.get::<_,Option<i64>>(5)?,
-        "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":parse_optional_json(row.get::<_,Option<String>>(7)?),
+        "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":execution_context,
+        "context":context,
         "raw":parse_json(row.get::<_,String>(8)?),"lastEventSeq":row.get::<_,i64>(9)?
     }))
+}
+
+fn turn_context_view(raw: &Value) -> Value {
+    json!({
+        "cwd":raw.get("cwd"),
+        "workspaceRoots":raw.get("workspace_roots"),
+        "currentDate":raw.get("current_date"),
+        "timezone":raw.get("timezone"),
+        "approvalPolicy":raw.get("approval_policy"),
+        "approvalsReviewer":raw.get("approvals_reviewer"),
+        "sandbox":raw.get("sandbox_policy"),
+        "permissionProfile":raw.get("permission_profile"),
+        "network":raw.get("network"),
+        "model":raw.get("model"),
+        "effort":raw.get("effort"),
+        "personality":raw.get("personality"),
+        "collaborationMode":raw.get("collaboration_mode"),
+        "multiAgentVersion":raw.get("multi_agent_version")
+    })
 }
 
 fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -2289,6 +2422,73 @@ mod tests {
             1
         );
         assert_eq!(parent["data"]["coverageSummary"]["turns"][0]["count"], 1);
+        assert_eq!(
+            parent["data"]["thread"]["project"]["key"],
+            "/demo/local-observer"
+        );
+        assert_eq!(
+            parent["data"]["thread"]["project"]["name"],
+            "local-observer"
+        );
+        assert_eq!(
+            parent["data"]["thread"]["context"]["session"]["baseInstructions"]["text"],
+            "# Project AGENTS.md\n\nKeep changes read-only."
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projects_group_threads_by_cwd_and_context_is_exposed() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Arc::new(Database::open(&config.storage.database)?);
+        database.migrate()?;
+        Importer::new(&config, database.as_ref())?.import_all()?;
+        let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
+        };
+        let response = projects(State(state.clone())).await;
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        let projects = body["data"].as_array().unwrap();
+        assert_eq!(projects.len(), 2);
+        let local = projects
+            .iter()
+            .find(|project| project["project"]["key"] == "/demo/local-observer")
+            .unwrap();
+        assert_eq!(local["threadCount"], 2);
+        assert_eq!(local["currentThreadCount"], 2);
+
+        let filtered = query_threads(
+            &state,
+            ThreadQuery {
+                project: Some("/demo/local-observer".into()),
+                ..ThreadQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let filtered: Value =
+            serde_json::from_slice(&axum::body::to_bytes(filtered.into_body(), usize::MAX).await?)?;
+        assert_eq!(filtered["data"].as_array().unwrap().len(), 2);
+        assert!(
+            filtered["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|thread| thread["project"]["key"] == "/demo/local-observer")
+        );
         Ok(())
     }
 
