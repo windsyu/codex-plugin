@@ -3,72 +3,101 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
+use crate::clock::now_ms;
 use crate::config::Config;
-use crate::ingest::thread_key;
-use crate::model::{
-    Checkpoint, DoctorReport, DoctorSource, ExportReport, NormalizedEvent, PurgeReport,
-    RetentionReport,
+use crate::domain::classify::{classify_item, summary_text};
+use crate::domain::identity::thread_key;
+use crate::domain::live::{classify_live_item, live_summary};
+use crate::domain::model::{
+    Checkpoint, CoverageFlags, DoctorReport, DoctorSource, ExportReport, NormalizedEvent,
+    OwnedIngestBatch, PurgeReport, RetentionReport,
+};
+use crate::domain::normalize::parse_time_ms;
+use crate::domain::project::{project_key, project_name};
+use crate::permissions::{
+    create_private_file, prepare_database_files, prepare_private_dir, prepare_private_file,
 };
 
-const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
-const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
-const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
-const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
-const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
-const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql");
-const MIGRATION_7: &str = include_str!("../migrations/0007_local_purge.sql");
-const MIGRATION_8: &str = include_str!("../migrations/0008_search_lookup_index.sql");
-const MIGRATION_9: &str = include_str!("../migrations/0009_unknown_rollout_status.sql");
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+mod blob;
+mod maintenance;
+mod pool;
+mod projection;
+mod query;
+mod schema;
+mod write;
 
-#[derive(Debug)]
+pub use blob::BlobRecord;
+use blob::PreparedBlob;
+use maintenance::{read_only_mode, socket_status, write_private_new};
+use pool::{ReadConnection, ReadPool};
+use projection::{projection_reference_key, truncate};
+use query::query_json_connection;
+pub use schema::LATEST_SCHEMA_VERSION;
+use schema::*;
+use write::TurnUpdate;
+
+struct SessionContextBackfill {
+    base_instructions: Option<String>,
+    dynamic_tools: Option<String>,
+    selected_capability_roots: Option<String>,
+    memory_mode: Option<String>,
+    subagent_history_start_ordinal: Option<i64>,
+    multi_agent_version: Option<String>,
+    context_window: Option<String>,
+}
+
+fn session_context_from_raw(raw_json: &str) -> Option<SessionContextBackfill> {
+    let value: Value = serde_json::from_str(raw_json).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    Some(SessionContextBackfill {
+        base_instructions: payload
+            .get("base_instructions")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        dynamic_tools: payload
+            .get("dynamic_tools")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        selected_capability_roots: payload
+            .get("selected_capability_roots")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        memory_mode: payload
+            .get("memory_mode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        subagent_history_start_ordinal: payload
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_i64),
+        multi_agent_version: payload
+            .get("multi_agent_version")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+        context_window: payload
+            .get("context_window")
+            .filter(|value| !value.is_null())
+            .map(Value::to_string),
+    })
+}
+
 pub struct Database {
     path: PathBuf,
     blob_dir: PathBuf,
     inline_blob_bytes: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct BlobRecord {
-    pub blob_id: String,
-    pub media_type: String,
-    pub size_bytes: u64,
-    pub path: PathBuf,
-}
-
-struct PreparedBlob {
-    blob_id: String,
-    stored_hash: String,
-    media_type: &'static str,
-    size_bytes: usize,
-    relative_path: String,
-    redaction_json: String,
-}
-
-pub struct IngestBatch<'a> {
-    pub source_id: &'a str,
-    pub epoch_id: &'a str,
-    pub checkpoint_key: &'a str,
-    pub file_identity: &'a str,
-    pub byte_offset: u64,
-    pub ordinal: u64,
-    pub current_turn_id: Option<&'a str>,
-    pub events: &'a [NormalizedEvent],
-}
-
-struct TurnUpdate<'a> {
-    turn_id: &'a str,
-    status: &'a str,
-    started: i64,
-    completed: Option<i64>,
-    durable_started: bool,
+    read_pool: ReadPool,
+    #[cfg(test)]
+    fail_before_commit: AtomicU8,
 }
 
 impl Database {
@@ -83,16 +112,59 @@ impl Database {
 
     pub fn open_with_blobs(path: &Path, blob_dir: &Path, inline_blob_bytes: usize) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create database directory {}", parent.display()))?;
+            prepare_private_dir(parent, "Observer data")?;
+        }
+        if fs::symlink_metadata(path).is_ok() {
+            prepare_private_file(path, "Observer database")?;
+        } else {
+            drop(create_private_file(path, "Observer database")?);
         }
         let database = Self {
             path: path.to_path_buf(),
             blob_dir: blob_dir.to_path_buf(),
             inline_blob_bytes,
+            read_pool: ReadPool::new(path.to_path_buf(), 8),
+            #[cfg(test)]
+            fail_before_commit: AtomicU8::new(0),
         };
         database.initialize_blob_dir()?;
         let _ = database.connect()?;
+        prepare_database_files(path)?;
+        Ok(database)
+    }
+
+    pub fn open_read_only_with_blobs(
+        path: &Path,
+        blob_dir: &Path,
+        inline_blob_bytes: usize,
+    ) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| "Observer database does not exist or is not readable")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!("Observer database must be a direct regular file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != unsafe { libc::geteuid() } {
+                anyhow::bail!("Observer database must be owned by the current user");
+            }
+        }
+        let database = Self {
+            path: path.to_path_buf(),
+            blob_dir: blob_dir.to_path_buf(),
+            inline_blob_bytes,
+            read_pool: ReadPool::new(path.to_path_buf(), 8),
+            #[cfg(test)]
+            fail_before_commit: AtomicU8::new(0),
+        };
+        let connection = database.connect_read_only()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != LATEST_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Observer export requires schema version {LATEST_SCHEMA_VERSION}; found {version}"
+            );
+        }
         Ok(database)
     }
 
@@ -104,29 +176,23 @@ impl Database {
         Ok(connection)
     }
 
+    pub fn connect_read_only(&self) -> Result<Connection> {
+        let connection = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .with_context(|| "open Observer database read-only")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", true)?;
+        Ok(connection)
+    }
+
+    fn read_connection(&self) -> Result<ReadConnection<'_>> {
+        self.read_pool.get()
+    }
+
     fn initialize_blob_dir(&self) -> Result<()> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&self.blob_dir)
-            .with_context(|| format!("create blob directory {}", self.blob_dir.display()))?;
-        let metadata = fs::symlink_metadata(&self.blob_dir)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!("blob_dir must be a direct directory");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                anyhow::bail!("blob_dir must be owned by the current user with mode 0700");
-            }
-        }
-        Ok(())
+        prepare_private_dir(&self.blob_dir, "blob")
     }
 
     fn prepare_blob(&self, event: &NormalizedEvent) -> Result<Option<PreparedBlob>> {
@@ -147,6 +213,7 @@ impl Database {
             builder.mode(0o700);
         }
         builder.create(parent)?;
+        prepare_private_dir(parent, "blob shard")?;
         if !final_path.exists() {
             let temp_path = parent.join(format!(".{stored_hash}.{}.tmp", uuid::Uuid::new_v4()));
             let mut options = OpenOptions::new();
@@ -175,6 +242,7 @@ impl Database {
         {
             anyhow::bail!("existing content-addressed blob does not match expected file");
         }
+        prepare_private_file(&final_path, "Observer blob")?;
         let mut verified = Vec::with_capacity(bytes.len());
         self.open_blob_path(&relative_path)?
             .read_to_end(&mut verified)?;
@@ -230,7 +298,7 @@ impl Database {
 
     pub fn blob_record(&self, blob_id: &str) -> Result<Option<BlobRecord>> {
         let record = self
-            .connect()?
+            .read_connection()?
             .query_row(
                 "SELECT b.blob_id,b.media_type,b.size_bytes,b.relative_path
                  FROM blobs b WHERE b.blob_id=?1
@@ -271,7 +339,7 @@ impl Database {
     }
 
     pub fn sweep_orphan_blobs(&self, grace_ms: u64) -> Result<usize> {
-        let connection = self.connect()?;
+        let connection = self.read_connection()?;
         let cutoff = std::time::SystemTime::now()
             .checked_sub(std::time::Duration::from_millis(grace_ms))
             .unwrap_or(std::time::UNIX_EPOCH);
@@ -300,29 +368,89 @@ impl Database {
     }
 
     pub fn migrate(&self) -> Result<()> {
-        let connection = self.connect()?;
+        let mut connection = self.connect()?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if !(0..=LATEST_SCHEMA_VERSION).contains(&version) {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
-        for (target, migration) in [
-            (1, MIGRATION_1),
-            (2, MIGRATION_2),
-            (3, MIGRATION_3),
-            (4, MIGRATION_4),
-            (5, MIGRATION_5),
-            (6, MIGRATION_6),
-            (7, MIGRATION_7),
-            (8, MIGRATION_8),
-            (9, MIGRATION_9),
-        ] {
+        for (target, migration) in schema::migrations() {
             if version < target {
                 connection
                     .execute_batch(migration)
                     .with_context(|| format!("apply migration {target:04}"))?;
             }
         }
+        Self::backfill_project_and_context(&mut connection)?;
+        recompute_all_completeness(&connection)?;
         connection.execute_batch("PRAGMA integrity_check;")?;
+        prepare_database_files(&self.path)?;
+        Ok(())
+    }
+
+    fn backfill_project_and_context(connection: &mut Connection) -> Result<()> {
+        let transaction = connection.transaction()?;
+        let thread_rows = {
+            let mut statement =
+                transaction.prepare("SELECT thread_key,cwd,project_key FROM threads")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (thread_key_value, cwd, existing_project_key) in thread_rows {
+            if existing_project_key.is_none()
+                && let Some(cwd_value) = cwd.as_deref()
+            {
+                let key = project_key(cwd_value);
+                transaction.execute(
+                    "UPDATE threads SET project_key=?1 WHERE thread_key=?2 AND project_key IS NULL",
+                    params![key, thread_key_value],
+                )?;
+            }
+
+            let raw_json: Option<String> = transaction
+                .query_row(
+                    "SELECT raw_json FROM raw_events WHERE thread_key=?1 AND method='rollout/session_meta'
+                     ORDER BY event_seq DESC LIMIT 1",
+                    [&thread_key_value],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let Some(raw_json) = raw_json else {
+                continue;
+            };
+            let Some(context) = session_context_from_raw(&raw_json) else {
+                continue;
+            };
+            transaction.execute(
+                "UPDATE threads SET
+                   base_instructions_json=COALESCE(base_instructions_json,?1),
+                   dynamic_tools_json=COALESCE(dynamic_tools_json,?2),
+                   selected_capability_roots_json=COALESCE(selected_capability_roots_json,?3),
+                   memory_mode=COALESCE(memory_mode,?4),
+                   subagent_history_start_ordinal=COALESCE(subagent_history_start_ordinal,?5),
+                   multi_agent_version=COALESCE(multi_agent_version,?6),
+                   context_window_json=COALESCE(context_window_json,?7)
+                 WHERE thread_key=?8",
+                params![
+                    context.base_instructions,
+                    context.dynamic_tools,
+                    context.selected_capability_roots,
+                    context.memory_mode,
+                    context.subagent_history_start_ordinal,
+                    context.multi_agent_version,
+                    context.context_window,
+                    thread_key_value,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -344,8 +472,27 @@ impl Database {
         config: &Value,
         status: &str,
     ) -> Result<()> {
+        self.upsert_source_kind_on(
+            &self.connect()?,
+            source_id,
+            kind,
+            stable_identity,
+            config,
+            status,
+        )
+    }
+
+    pub(crate) fn upsert_source_kind_on(
+        &self,
+        connection: &Connection,
+        source_id: &str,
+        kind: &str,
+        stable_identity: &str,
+        config: &Value,
+        status: &str,
+    ) -> Result<()> {
         let now = now_ms();
-        self.connect()?.execute(
+        connection.execute(
             "INSERT INTO sources(source_id, kind, stable_identity, config_json, status, last_seen_at_ms, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
              ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind,config_json=excluded.config_json,status=excluded.status,
@@ -376,9 +523,52 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn ingest_batch(&self, batch: IngestBatch<'_>) -> Result<(usize, usize)> {
+    pub fn ingest_batch(&self, batch: &OwnedIngestBatch) -> Result<(usize, usize)> {
+        self.ingest_batches(std::slice::from_ref(batch))?
+            .pop()
+            .context("ingest group returned no result")
+    }
+
+    pub fn ingest_batches(&self, batches: &[OwnedIngestBatch]) -> Result<Vec<(usize, usize)>> {
         let mut connection = self.connect()?;
+        self.ingest_batches_on(&mut connection, batches)
+    }
+
+    pub(crate) fn ingest_batches_on(
+        &self,
+        connection: &mut Connection,
+        batches: &[OwnedIngestBatch],
+    ) -> Result<Vec<(usize, usize)>> {
         let transaction = connection.transaction()?;
+        let mut results = Vec::with_capacity(batches.len());
+        for batch in batches {
+            results.push(self.ingest_batch_transaction(&transaction, batch)?);
+        }
+        #[cfg(test)]
+        match self.fail_before_commit.swap(0, Ordering::SeqCst) {
+            1 => anyhow::bail!("injected SQLITE_FULL before commit"),
+            2 => anyhow::bail!("injected SQLITE_IOERR before commit"),
+            _ => {}
+        }
+        transaction.commit()?;
+        Ok(results)
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_ingest_for_test(&self, kind: &str) {
+        let code = match kind {
+            "disk_full" => 1,
+            "io_error" => 2,
+            _ => panic!("unknown ingest failpoint"),
+        };
+        self.fail_before_commit.store(code, Ordering::SeqCst);
+    }
+
+    fn ingest_batch_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        batch: &OwnedIngestBatch,
+    ) -> Result<(usize, usize)> {
         transaction.execute(
             "INSERT OR IGNORE INTO source_epochs(source_id, epoch_id, opened_at_ms) VALUES (?1, ?2, ?3)",
             params![batch.source_id, batch.epoch_id, now_ms()],
@@ -392,8 +582,17 @@ impl Database {
 
         let mut inserted = 0;
         let mut deduplicated = 0;
+        let mut decode_errors = 0_i64;
+        let mut unknown_events = 0_i64;
+        let mut sequence_gaps = 0_i64;
+        let mut last_source_seq: Option<i64> = transaction.query_row(
+            "SELECT last_source_seq FROM source_epochs WHERE source_id=?1 AND epoch_id=?2",
+            params![batch.source_id, batch.epoch_id],
+            |row| row.get(0),
+        )?;
         let mut last_event_seq: Option<i64> = None;
-        for event in batch.events {
+        let mut touched_threads = HashSet::new();
+        for event in &batch.events {
             if purged_threads.contains(&event.thread_key) {
                 deduplicated += 1;
                 continue;
@@ -447,6 +646,17 @@ impl Database {
                 ],
             )?;
             let event_seq = transaction.last_insert_rowid();
+            if let Some(previous) = last_source_seq
+                && event.source_seq > previous.saturating_add(1)
+            {
+                sequence_gaps = sequence_gaps
+                    .saturating_add(event.source_seq.saturating_sub(previous).saturating_sub(1));
+            }
+            last_source_seq = Some(
+                last_source_seq.map_or(event.source_seq, |previous| previous.max(event.source_seq)),
+            );
+            decode_errors += i64::from(event.decode_status == "error");
+            unknown_events += i64::from(event.decode_status == "unknown");
             if let Some(blob) = prepared_blob.as_ref() {
                 transaction.execute(
                     "INSERT INTO blobs(blob_id,stored_hash,media_type,size_bytes,relative_path,redaction_json,created_event_seq,created_at_ms)
@@ -468,7 +678,9 @@ impl Database {
             last_event_seq = Some(event_seq);
             inserted += 1;
             if stored_event.projectable {
-                project_event(&transaction, &stored_event, event_seq)?;
+                project_event(transaction, &stored_event, event_seq)?;
+                update_event_coverage(transaction, &stored_event)?;
+                touched_threads.insert(stored_event.thread_key.clone());
                 let reference_key = projection_reference_key(&stored_event);
                 if let Some(blob) = prepared_blob
                     .as_ref()
@@ -491,6 +703,23 @@ impl Database {
         }
 
         transaction.execute(
+            "UPDATE source_epochs SET event_count=event_count+?1,
+               sequence_gap_count=sequence_gap_count+?2,decode_error_count=decode_error_count+?3,
+               unknown_event_count=unknown_event_count+?4,last_source_seq=?5,last_event_at_ms=?6
+             WHERE source_id=?7 AND epoch_id=?8",
+            params![
+                inserted as i64,
+                sequence_gaps,
+                decode_errors,
+                unknown_events,
+                last_source_seq,
+                now_ms(),
+                batch.source_id,
+                batch.epoch_id
+            ],
+        )?;
+
+        transaction.execute(
             "INSERT INTO source_checkpoints(checkpoint_key,source_id,epoch_id,file_identity,byte_offset,ordinal,current_turn_id,updated_event_seq,updated_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(checkpoint_key) DO UPDATE SET epoch_id=excluded.epoch_id,file_identity=excluded.file_identity,
@@ -500,7 +729,28 @@ impl Database {
                     batch.byte_offset as i64, batch.ordinal as i64, batch.current_turn_id,
                     last_event_seq, now_ms()],
         )?;
-        transaction.commit()?;
+        if batch.clean_eof {
+            let turn_keys = {
+                let mut statement = transaction.prepare(
+                    "SELECT DISTINCT thread_key,turn_id FROM raw_events
+                     WHERE source_id=?1 AND epoch_id=?2 AND turn_id IS NOT NULL",
+                )?;
+                statement
+                    .query_map(params![batch.source_id, batch.epoch_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (thread_key, turn_id) in turn_keys {
+                let mut coverage = load_coverage(transaction, &thread_key, &turn_id)?;
+                coverage.durable_eof_reached = true;
+                store_coverage(transaction, &thread_key, &turn_id, &coverage)?;
+                touched_threads.insert(thread_key);
+            }
+        }
+        for thread_key in touched_threads {
+            recompute_thread_completeness(transaction, &thread_key)?;
+        }
         Ok((inserted, deduplicated))
     }
 
@@ -513,7 +763,28 @@ impl Database {
         identity: &str,
         archived: bool,
     ) -> Result<()> {
-        let connection = self.connect()?;
+        self.mark_location_on(
+            &self.connect()?,
+            source_id,
+            thread_id,
+            path,
+            representation,
+            identity,
+            archived,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mark_location_on(
+        &self,
+        connection: &Connection,
+        source_id: &str,
+        thread_id: &str,
+        path: &Path,
+        representation: &str,
+        identity: &str,
+        archived: bool,
+    ) -> Result<()> {
         let purged: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM purged_threads WHERE store_source_id=?1 AND codex_thread_id=?2)",
             params![source_id, thread_id],
@@ -536,8 +807,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn record_live_capabilities(
+    pub(crate) fn record_live_capabilities_on(
         &self,
+        connection: &Connection,
         source_id: &str,
         epoch_id: &str,
         capabilities: &Value,
@@ -546,23 +818,29 @@ impl Database {
         let capability_hash = blake3::hash(capability_json.as_bytes())
             .to_hex()
             .to_string();
-        self.connect()?.execute(
-            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms,capability_json,capability_hash)
-             VALUES (?1,?2,?3,?4,?5)
+        let schema_hash = serde_json::from_str::<Value>(COMPATIBILITY_MANIFEST)?
+            .pointer("/appServer/protocolSchemaSha256")
+            .and_then(Value::as_str)
+            .context("compatibility manifest lacks protocol schema hash")?
+            .to_string();
+        connection.execute(
+            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms,capability_json,capability_hash,schema_hash)
+             VALUES (?1,?2,?3,?4,?5,?6)
              ON CONFLICT(source_id,epoch_id) DO UPDATE SET capability_json=excluded.capability_json,
-               capability_hash=excluded.capability_hash",
-            params![source_id, epoch_id, now_ms(), capability_json, capability_hash],
+               capability_hash=excluded.capability_hash,schema_hash=excluded.schema_hash",
+            params![source_id, epoch_id, now_ms(), capability_json, capability_hash, schema_hash],
         )?;
         Ok(())
     }
 
-    pub fn update_source_status(
+    pub(crate) fn update_source_status_on(
         &self,
+        connection: &Connection,
         source_id: &str,
         status: &str,
         error: Option<&str>,
     ) -> Result<()> {
-        self.connect()?.execute(
+        connection.execute(
             "UPDATE sources SET status=?1,last_error_json=?2,updated_at_ms=?3 WHERE source_id=?4",
             params![
                 status,
@@ -574,16 +852,39 @@ impl Database {
         Ok(())
     }
 
-    pub fn close_live_epoch(&self, source_id: &str, epoch_id: &str, reason: &str) -> Result<()> {
-        let mut connection = self.connect()?;
+    pub(crate) fn close_live_epoch_on(
+        &self,
+        connection: &mut Connection,
+        source_id: &str,
+        epoch_id: &str,
+        reason: &str,
+    ) -> Result<()> {
         let transaction = connection.transaction()?;
         transaction.execute(
             "UPDATE source_epochs SET closed_at_ms=?1,close_reason=?2 WHERE source_id=?3 AND epoch_id=?4",
             params![now_ms(), reason, source_id, epoch_id],
         )?;
+        let turn_keys = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT thread_key,turn_id FROM raw_events
+                 WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'' AND turn_id IS NOT NULL",
+            )?;
+            statement
+                .query_map(params![source_id, epoch_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut thread_keys = HashSet::new();
+        for (thread_key, turn_id) in turn_keys {
+            let mut coverage = load_coverage(&transaction, &thread_key, &turn_id)?;
+            coverage.source_disconnect_count = coverage.source_disconnect_count.saturating_add(1);
+            coverage.live_epoch_contiguous = false;
+            store_coverage(&transaction, &thread_key, &turn_id, &coverage)?;
+            thread_keys.insert(thread_key);
+        }
         transaction.execute(
-            "UPDATE threads SET runtime_status_stale=1,
-               completeness_reasons_json='[\"source_disconnected\"]'
+            "UPDATE threads SET runtime_status_stale=1
              WHERE thread_key IN (SELECT DISTINCT thread_key FROM raw_events WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'')",
             params![source_id, epoch_id],
         )?;
@@ -592,20 +893,31 @@ impl Database {
              WHERE source_id=?1 AND epoch_id=?2 AND state='pending'",
             params![source_id, epoch_id],
         )?;
+        for thread_key in thread_keys {
+            recompute_thread_completeness(&transaction, &thread_key)?;
+        }
         transaction.commit()?;
         Ok(())
     }
 
     pub fn max_event_seq(&self) -> Result<i64> {
-        Ok(self.connect()?.query_row(
+        Ok(self.read_connection()?.query_row(
             "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='raw_events'),0)",
             [],
             |row| row.get(0),
         )?)
     }
 
+    pub fn legacy_redaction_event_count(&self) -> Result<i64> {
+        Ok(self.read_connection()?.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE redaction_json NOT LIKE '%known-secrets-v2%'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn retention_low_watermark(&self) -> Result<i64> {
-        Ok(self.connect()?.query_row(
+        Ok(self.read_connection()?.query_row(
             "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
             [],
             |row| row.get(0),
@@ -615,6 +927,7 @@ impl Database {
     pub fn run_retention(
         &self,
         retention_days: u64,
+        delta_retention_days: u64,
         blob_retention_days: u64,
         apply: bool,
     ) -> Result<RetentionReport> {
@@ -622,6 +935,10 @@ impl Database {
             .checked_mul(86_400_000)
             .context("raw retention duration overflow")? as i64;
         let cutoff = now_ms().saturating_sub(retention_ms);
+        let delta_retention_ms = delta_retention_days
+            .checked_mul(86_400_000)
+            .context("delta retention duration overflow")? as i64;
+        let delta_cutoff = now_ms().saturating_sub(delta_retention_ms);
         let blob_retention_ms = blob_retention_days
             .checked_mul(86_400_000)
             .context("blob retention duration overflow")? as i64;
@@ -633,19 +950,21 @@ impl Database {
             |row| row.get(0),
         )?;
         let (candidates, max_candidate): (i64, Option<i64>) = connection.query_row(
-            "SELECT COUNT(*),MAX(event_seq) FROM raw_events WHERE observed_at_ms < ?1",
-            [cutoff],
+            "SELECT COUNT(*),MAX(event_seq) FROM raw_events WHERE observed_at_ms < ?1
+             OR (durability='transient' AND phase='delta' AND observed_at_ms < ?2)",
+            params![cutoff, delta_cutoff],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let candidate_blobs: i64 = connection.query_row(
             "SELECT COUNT(*) FROM blobs b WHERE b.created_at_ms < ?1 AND NOT EXISTS (
                SELECT 1 FROM blob_references r WHERE r.blob_id=b.blob_id AND (
                  r.reference_kind='projection' OR (r.reference_kind='raw_event' AND EXISTS (
-                   SELECT 1 FROM raw_events e WHERE e.event_seq=r.event_seq AND e.observed_at_ms>=?2
+                   SELECT 1 FROM raw_events e WHERE e.event_seq=r.event_seq AND NOT
+                     (e.observed_at_ms<?2 OR (e.durability='transient' AND e.phase='delta' AND e.observed_at_ms<?3))
                  ))
                )
              )",
-            params![blob_cutoff, cutoff],
+            params![blob_cutoff, cutoff, delta_cutoff],
             |row| row.get(0),
         )?;
         if !apply || (candidates == 0 && candidate_blobs == 0) {
@@ -665,18 +984,23 @@ impl Database {
         let transaction = connection.transaction()?;
         let tombstones = transaction.execute(
             "UPDATE event_dedupes SET retained=0 WHERE retained=1 AND original_event_seq IN
-             (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1)",
-            [cutoff],
+             (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1
+                OR (durability='transient' AND phase='delta' AND observed_at_ms < ?2))",
+            params![cutoff, delta_cutoff],
         )?;
         transaction.execute(
             "DELETE FROM blob_references WHERE reference_kind='raw_event' AND (
-               event_seq IN (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1)
+               event_seq IN (SELECT event_seq FROM raw_events WHERE observed_at_ms < ?1
+                 OR (durability='transient' AND phase='delta' AND observed_at_ms < ?2))
                OR NOT EXISTS (SELECT 1 FROM raw_events e WHERE e.event_seq=blob_references.event_seq)
              )",
-            [cutoff],
+            params![cutoff,delta_cutoff],
         )?;
-        let deleted =
-            transaction.execute("DELETE FROM raw_events WHERE observed_at_ms < ?1", [cutoff])?;
+        let deleted = transaction.execute(
+            "DELETE FROM raw_events WHERE observed_at_ms < ?1
+             OR (durability='transient' AND phase='delta' AND observed_at_ms < ?2)",
+            params![cutoff, delta_cutoff],
+        )?;
         let blob_paths = {
             let mut statement = transaction.prepare(
                 "SELECT relative_path FROM blobs b WHERE b.created_at_ms < ?1
@@ -722,18 +1046,28 @@ impl Database {
     }
 
     pub fn export_thread(&self, thread_key: &str, output: &Path) -> Result<ExportReport> {
-        let connection = self.connect()?;
+        let connection = self.connect_read_only()?;
+        connection.execute_batch("BEGIN")?;
         let thread = connection
             .query_row(
                 "SELECT thread_key,codex_thread_id,store_source_id,name,cwd,source,model,archived,
                    capture_completeness,completeness_reasons_json,created_at_ms,updated_at_ms,recency_at_ms,
-                   projection_json,provenance_json,last_event_seq FROM threads WHERE thread_key=?1",
+                   projection_json,provenance_json,last_event_seq,project_key,base_instructions_json,
+                   dynamic_tools_json,selected_capability_roots_json,memory_mode,
+                   subagent_history_start_ordinal,multi_agent_version,context_window_json
+                 FROM threads WHERE thread_key=?1",
                 [thread_key],
                 |row| {
+                    let cwd: Option<String> = row.get(4)?;
+                    let project_key_value: Option<String> = row.get(16)?;
+                    let key = project_key_value
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| cwd.as_deref().map(project_key))
+                        .unwrap_or_else(|| "unknown".to_string());
                     Ok(json!({
                         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,
                         "storeSourceId":row.get::<_,String>(2)?,"name":row.get::<_,Option<String>>(3)?,
-                        "cwd":row.get::<_,Option<String>>(4)?,"source":row.get::<_,Option<String>>(5)?,
+                        "cwd":cwd,"source":row.get::<_,Option<String>>(5)?,
                         "model":row.get::<_,Option<String>>(6)?,"archived":row.get::<_,bool>(7)?,
                         "captureCompleteness":row.get::<_,String>(8)?,
                         "completenessReasons":parse_stored_json(row.get::<_,String>(9)?),
@@ -741,13 +1075,32 @@ impl Database {
                         "recencyAtMs":row.get::<_,Option<i64>>(12)?,
                         "projection":parse_stored_json(row.get::<_,String>(13)?),
                         "provenance":parse_stored_json(row.get::<_,String>(14)?),
-                        "lastEventSeq":row.get::<_,i64>(15)?
+                        "lastEventSeq":row.get::<_,i64>(15)?,
+                        "project":{"key":key,"name":project_name(&key),
+                          "path":row.get::<_,Option<String>>(4)?.unwrap_or_else(|| key.clone())},
+                        "context":{
+                            "session":{
+                                "baseInstructions":parse_stored_json(row.get::<_,Option<String>>(17)?.unwrap_or_default()),
+                                "dynamicTools":parse_stored_json(row.get::<_,Option<String>>(18)?.unwrap_or_default()),
+                                "selectedCapabilityRoots":parse_stored_json(row.get::<_,Option<String>>(19)?.unwrap_or_default()),
+                                "memoryMode":row.get::<_,Option<String>>(20)?,
+                                "subagentHistoryStartOrdinal":row.get::<_,Option<i64>>(21)?,
+                                "multiAgentVersion":row.get::<_,Option<String>>(22)?,
+                                "contextWindow":parse_stored_json(row.get::<_,Option<String>>(23)?.unwrap_or_default())
+                            },
+                            "runtime":{
+                                "cwd":row.get::<_,Option<String>>(4)?,
+                                "source":row.get::<_,Option<String>>(5)?,
+                                "model":row.get::<_,Option<String>>(6)?
+                            }
+                        }
                     }))
                 },
             )
             .optional()?
             .with_context(|| format!("thread {thread_key} was not found"))?;
-        let turns = self.query_json(
+        let turns = query_json_connection(
+            &connection,
             "SELECT turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
                started_at_ms,completed_at_ms,execution_context_json,projection_json,provenance_json,last_event_seq
              FROM turns WHERE thread_key=?1 ORDER BY COALESCE(started_at_ms,0),turn_id",
@@ -765,7 +1118,8 @@ impl Database {
                 }))
             },
         )?;
-        let items = self.query_json(
+        let items = query_json_connection(
+            &connection,
             "SELECT turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,summary_text,
                projection_json,provenance_json,last_event_seq FROM items WHERE thread_key=?1
              ORDER BY COALESCE(started_at_ms,0),turn_scope,item_id",
@@ -781,7 +1135,8 @@ impl Database {
                 }))
             },
         )?;
-        let mut events = self.query_json(
+        let mut events = query_json_connection(
+            &connection,
             "SELECT e.event_seq,e.event_id,e.source_id,e.epoch_id,e.source_seq,e.observed_at_ms,e.event_at_ms,
                e.turn_id,e.item_id,e.method,e.phase,e.durability,e.raw_json,e.redaction_json,e.decode_status,
                e.decode_error,e.stored_raw_hash,e.blob_id,b.relative_path
@@ -815,8 +1170,15 @@ impl Database {
                 .as_object_mut()
                 .map(|event| event.remove("blobRelativePath"));
         }
+        connection.execute_batch("COMMIT")?;
+        let legacy_redaction_events = events
+            .iter()
+            .filter(|event| event["redaction"]["ruleVersion"] != "known-secrets-v2")
+            .count();
         let export = json!({
             "format":"codex-local-observer-export-v1","exportedAtMs":now_ms(),
+            "privacy":{"legacyRedactionEvents":legacy_redaction_events,
+              "warning":if legacy_redaction_events > 0 { Some("legacy redaction records were not reprocessed") } else { None }},
             "thread":thread,"turns":turns,"items":items,"rawEvents":events
         });
         write_private_new(output, &serde_json::to_vec_pretty(&export)?)?;
@@ -826,6 +1188,7 @@ impl Database {
             turns: turns.len(),
             items: items.len(),
             raw_events: events.len(),
+            legacy_redaction_events,
         })
     }
 
@@ -939,7 +1302,17 @@ impl Database {
 
     pub fn doctor_read_only(config: &Config) -> Result<DoctorReport> {
         let database_path = config.database_path();
-        let (database, mut degraded) = if database_path.is_file() {
+        let metadata = fs::symlink_metadata(database_path).ok();
+        let direct_file = metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        let mut checks = json!({"permissions":{
+            "database":read_only_mode(database_path),
+            "token":read_only_mode(&config.server.bearer_token_file),
+            "fingerprintKey":read_only_mode(&config.storage.fingerprint_key_file)},
+            "schema":null,"wal":null,"quickCheck":null,"checkpoints":0,"retentionLowWatermark":0,
+            "unknownEvents":0,"decodeErrors":0,"oversizeErrors":0});
+        let (database, mut degraded) = if direct_file {
             match Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 Ok(connection) => {
                     connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -949,7 +1322,27 @@ impl Database {
                     let version = connection
                         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                         .unwrap_or(-1);
-                    let healthy = integrity == "ok" && version == LATEST_SCHEMA_VERSION;
+                    let wal = connection
+                        .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                        .unwrap_or_else(|_| "unknown".into());
+                    let stats = connection.query_row(
+                        "SELECT (SELECT COUNT(*) FROM source_checkpoints),
+                          (SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'),
+                          (SELECT COUNT(*) FROM raw_events WHERE decode_status='unknown'),
+                          (SELECT COUNT(*) FROM raw_events WHERE decode_status='error'),
+                          (SELECT COUNT(*) FROM raw_events WHERE decode_error LIKE '%max_raw_event_bytes%')",
+                        [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,row.get::<_,i64>(4)?)),
+                    ).unwrap_or_default();
+                    checks["schema"] = json!(version);
+                    checks["wal"] = json!(wal);
+                    checks["quickCheck"] = json!(integrity);
+                    checks["checkpoints"] = json!(stats.0);
+                    checks["retentionLowWatermark"] = json!(stats.1);
+                    checks["unknownEvents"] = json!(stats.2);
+                    checks["decodeErrors"] = json!(stats.3);
+                    checks["oversizeErrors"] = json!(stats.4);
+                    let healthy =
+                        integrity == "ok" && version == LATEST_SCHEMA_VERSION && wal == "wal";
                     (format!("{integrity}; schema_version={version}"), !healthy)
                 }
                 Err(error) => (format!("unreadable: {error}"), true),
@@ -980,6 +1373,10 @@ impl Database {
                     } else {
                         "archive_unreadable".into()
                     },
+                    live_socket_status: source
+                        .app_server_socket
+                        .as_ref()
+                        .map_or_else(|| "not_configured".into(), |socket| socket_status(socket)),
                 }
             })
             .collect();
@@ -991,6 +1388,7 @@ impl Database {
             },
             database,
             sources,
+            checks,
         })
     }
 
@@ -1001,10 +1399,21 @@ impl Database {
                 "projection rebuild is unsafe after raw retention (low watermark {low_watermark})"
             );
         }
+        let policy_omissions: i64 = self.read_connection()?.query_row(
+            "SELECT COUNT(*) FROM raw_events WHERE json_extract(raw_json,'$.policy')='omitted'",
+            [],
+            |row| row.get(0),
+        )?;
+        if policy_omissions > 0 {
+            anyhow::bail!(
+                "projection rebuild is unavailable because {policy_omissions} raw events were intentionally omitted by capture policy"
+            );
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute_batch(
             "DELETE FROM blob_references WHERE reference_kind='projection';
+             DELETE FROM projection_conflicts; DELETE FROM pending_requests;
              DELETE FROM search_index; DELETE FROM items; DELETE FROM turns; DELETE FROM threads;",
         )?;
         let events = {
@@ -1130,6 +1539,7 @@ impl Database {
         };
         for (seq, event) in &events {
             project_event(&transaction, event, *seq)?;
+            update_event_coverage(&transaction, event)?;
             let reference_key = projection_reference_key(event);
             if let Some(blob_id) = event
                 .blob_id
@@ -1150,6 +1560,7 @@ impl Database {
                 )?;
             }
         }
+        recompute_all_completeness(&transaction)?;
         transaction.commit()?;
         Ok(events.len())
     }
@@ -1160,7 +1571,7 @@ impl Database {
         parameters: &[&dyn rusqlite::ToSql],
         mapper: fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>,
     ) -> Result<Vec<Value>> {
-        let connection = self.connect()?;
+        let connection = self.read_connection()?;
         let mut statement = connection.prepare(sql)?;
         Ok(statement
             .query_map(parameters, mapper)?
@@ -1173,12 +1584,258 @@ impl Database {
         parameters: Vec<SqlValue>,
         mapper: fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>,
     ) -> Result<Vec<Value>> {
-        let connection = self.connect()?;
+        let connection = self.read_connection()?;
         let mut statement = connection.prepare(sql)?;
         Ok(statement
             .query_map(rusqlite::params_from_iter(parameters), mapper)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn load_coverage(
+    connection: &Connection,
+    thread_key: &str,
+    turn_id: &str,
+) -> Result<CoverageFlags> {
+    let stored = connection
+        .query_row(
+            "SELECT coverage_json FROM turns WHERE thread_key=?1 AND turn_id=?2",
+            params![thread_key, turn_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default())
+}
+
+fn coverage_state(coverage: &CoverageFlags) -> (&'static str, Vec<&'static str>) {
+    let durable_any =
+        coverage.durable_started || coverage.durable_terminal || coverage.durable_eof_reached;
+    let live_any = coverage.live_started
+        || coverage.live_terminal
+        || coverage.live_epoch_id.is_some()
+        || coverage.source_disconnect_count > 0;
+    if coverage.coverage_evidence_retained_incomplete {
+        return (
+            if durable_any {
+                "durable_partial"
+            } else if live_any {
+                "live_partial"
+            } else {
+                "metadata_only"
+            },
+            vec!["coverage_evidence_retained_incomplete"],
+        );
+    }
+    if durable_any {
+        if coverage.durable_started && coverage.durable_terminal && coverage.durable_eof_reached {
+            return ("durable_complete", Vec::new());
+        }
+        let mut reasons = Vec::new();
+        if !coverage.durable_started {
+            reasons.push("durable_turn_start_missing");
+        }
+        if !coverage.durable_terminal {
+            reasons.push("durable_turn_not_terminal");
+        }
+        if !coverage.durable_eof_reached {
+            reasons.push("durable_eof_not_reached");
+        }
+        return ("durable_partial", reasons);
+    }
+    if live_any {
+        if coverage.live_started
+            && coverage.live_terminal
+            && coverage.live_epoch_contiguous
+            && coverage.source_disconnect_count == 0
+            && coverage.decode_error_count == 0
+        {
+            return ("live_complete", Vec::new());
+        }
+        let mut reasons = Vec::new();
+        if !coverage.live_started {
+            reasons.push("attached_after_turn_started");
+        }
+        if !coverage.live_terminal {
+            reasons.push("live_turn_not_terminal");
+        }
+        if !coverage.live_epoch_contiguous {
+            reasons.push("live_epoch_incomplete");
+        }
+        if coverage.source_disconnect_count > 0 {
+            reasons.push("source_disconnected");
+        }
+        if coverage.decode_error_count > 0 {
+            reasons.push("live_decode_error");
+        }
+        return ("live_partial", reasons);
+    }
+    ("metadata_only", Vec::new())
+}
+
+fn store_coverage(
+    connection: &Connection,
+    thread_key: &str,
+    turn_id: &str,
+    coverage: &CoverageFlags,
+) -> Result<()> {
+    let (state, reasons) = coverage_state(coverage);
+    connection.execute(
+        "UPDATE turns SET coverage_json=?1,capture_completeness=?2,completeness_reasons_json=?3
+         WHERE thread_key=?4 AND turn_id=?5",
+        params![
+            serde_json::to_string(coverage)?,
+            state,
+            serde_json::to_string(&reasons)?,
+            thread_key,
+            turn_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_event_coverage(connection: &Connection, event: &NormalizedEvent) -> Result<()> {
+    let Some(turn_id) = event.turn_id.as_deref() else {
+        return Ok(());
+    };
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turns WHERE thread_key=?1 AND turn_id=?2)",
+        params![event.thread_key, turn_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let mut coverage = load_coverage(connection, &event.thread_key, turn_id)?;
+    if event.decode_status == "error" {
+        coverage.decode_error_count = coverage.decode_error_count.saturating_add(1);
+        if event.durability == "transient" {
+            coverage.live_epoch_contiguous = false;
+        }
+    } else if event.decode_status == "unknown" {
+        coverage.unknown_event_count = coverage.unknown_event_count.saturating_add(1);
+    }
+    store_coverage(connection, &event.thread_key, turn_id, &coverage)
+}
+
+fn recompute_thread_completeness(connection: &Connection, thread_key: &str) -> Result<()> {
+    let turns = {
+        let mut statement = connection.prepare(
+            "SELECT capture_completeness,completeness_reasons_json,coverage_json
+             FROM turns WHERE thread_key=?1",
+        )?;
+        statement
+            .query_map([thread_key], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let (state, reasons) = if turns.is_empty() {
+        ("metadata_only", Vec::<String>::new())
+    } else {
+        let mut reasons = std::collections::BTreeSet::new();
+        let mut has_ephemeral_lost = false;
+        let mut has_partial = false;
+        let mut has_durable_evidence = false;
+        let mut all_durable_complete = true;
+        let mut has_live_only_complete = false;
+        for (turn_state, turn_reasons, coverage_json) in &turns {
+            let coverage: CoverageFlags = serde_json::from_str(coverage_json).unwrap_or_default();
+            has_durable_evidence |= coverage.durable_started
+                || coverage.durable_terminal
+                || coverage.durable_eof_reached;
+            has_ephemeral_lost |= turn_state == "ephemeral_lost";
+            has_partial |= turn_state.ends_with("_partial");
+            all_durable_complete &= turn_state == "durable_complete";
+            has_live_only_complete |= turn_state == "live_complete";
+            if let Ok(values) = serde_json::from_str::<Vec<String>>(turn_reasons) {
+                reasons.extend(values);
+            }
+        }
+        let state = if has_ephemeral_lost {
+            "ephemeral_lost"
+        } else if has_partial {
+            if has_durable_evidence {
+                "durable_partial"
+            } else {
+                "live_partial"
+            }
+        } else if all_durable_complete {
+            "durable_complete"
+        } else if has_live_only_complete {
+            reasons.insert("contains_live_only_turns".into());
+            "live_complete"
+        } else {
+            "metadata_only"
+        };
+        (state, reasons.into_iter().collect())
+    };
+    connection.execute(
+        "UPDATE threads SET capture_completeness=?1,completeness_reasons_json=?2 WHERE thread_key=?3",
+        params![state, serde_json::to_string(&reasons)?, thread_key],
+    )?;
+    Ok(())
+}
+
+fn recompute_all_completeness(connection: &Connection) -> Result<()> {
+    let retained_incomplete = connection
+        .query_row(
+            "SELECT COALESCE(value_integer,0) FROM retention_state WHERE key='raw_low_watermark'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        > 0;
+    let turn_keys = {
+        let mut statement = connection.prepare("SELECT thread_key,turn_id FROM turns")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (thread_key, turn_id) in &turn_keys {
+        let mut coverage = load_coverage(connection, thread_key, turn_id)?;
+        let (decode_errors, unknown_events, durable_started, durable_terminal):
+            (Option<i64>, Option<i64>, Option<i64>, Option<i64>) = connection.query_row(
+            "SELECT
+               SUM(CASE WHEN decode_status='error' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN decode_status='unknown' THEN 1 ELSE 0 END),
+               MAX(CASE WHEN durability='durable' AND method IN ('event/task_started','event/turn_started') THEN 1 ELSE 0 END),
+               MAX(CASE WHEN durability='durable' AND method IN ('event/task_complete','event/turn_complete') THEN 1 ELSE 0 END)
+             FROM raw_events WHERE thread_key=?1 AND turn_id=?2",
+            params![thread_key, turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        coverage.decode_error_count = coverage
+            .decode_error_count
+            .max(decode_errors.unwrap_or(0).max(0) as u64);
+        coverage.unknown_event_count = coverage
+            .unknown_event_count
+            .max(unknown_events.unwrap_or(0).max(0) as u64);
+        coverage.durable_started |= durable_started.unwrap_or(0) > 0;
+        coverage.durable_terminal |= durable_terminal.unwrap_or(0) > 0;
+        coverage.durable_eof_reached |= coverage.durable_terminal;
+        coverage.coverage_evidence_retained_incomplete |= retained_incomplete;
+        store_coverage(connection, thread_key, turn_id, &coverage)?;
+    }
+    let thread_keys = {
+        let mut statement = connection.prepare("SELECT thread_key FROM threads")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for thread_key in thread_keys {
+        recompute_thread_completeness(connection, &thread_key)?;
+    }
+    Ok(())
 }
 
 fn project_event(
@@ -1205,6 +1862,7 @@ fn project_event(
     match event.top_type.as_str() {
         "session_meta" => {
             let p = &event.payload;
+            record_thread_conflicts(transaction, event, event_seq)?;
             let parent_thread_id = p
                 .get("parent_thread_id")
                 .and_then(Value::as_str)
@@ -1220,20 +1878,61 @@ fn project_event(
                 .as_deref()
                 .map(|id| thread_key(&event.store_source_id, id));
             let history_base = p.get("history_base").filter(|value| !value.is_null());
+            let project_key_value = p.get("cwd").and_then(Value::as_str).map(project_key);
+            let base_instructions = p
+                .get("base_instructions")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let dynamic_tools = p
+                .get("dynamic_tools")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let selected_capability_roots = p
+                .get("selected_capability_roots")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let memory_mode = p
+                .get("memory_mode")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let subagent_history_start_ordinal = p
+                .get("subagent_history_start_ordinal")
+                .and_then(Value::as_i64);
+            let multi_agent_version = p
+                .get("multi_agent_version")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
+            let context_window = p
+                .get("context_window")
+                .filter(|value| !value.is_null())
+                .map(Value::to_string);
             let session_projection = json!({
                 "sessionId":p.get("session_id").or_else(|| p.get("id")),
                 "parentThreadId":parent_thread_id,"forkedFromId":forked_from_id,
                 "cwd":p.get("cwd"),"source":p.get("source"),"threadSource":p.get("thread_source"),
                 "originator":p.get("originator"),"cliVersion":p.get("cli_version"),
                 "agentNickname":p.get("agent_nickname"),"agentRole":p.get("agent_role"),"agentPath":p.get("agent_path"),
-                "modelProvider":p.get("model_provider"),"historyMode":p.get("history_mode"),"historyBase":history_base
+                "modelProvider":p.get("model_provider"),"historyMode":p.get("history_mode"),"historyBase":history_base,
+                "baseInstructions":p.get("base_instructions"),"dynamicTools":p.get("dynamic_tools"),
+                "selectedCapabilityRoots":p.get("selected_capability_roots"),"memoryMode":p.get("memory_mode"),
+                "subagentHistoryStartOrdinal":p.get("subagent_history_start_ordinal"),
+                "multiAgentVersion":p.get("multi_agent_version"),"contextWindow":p.get("context_window")
             });
             transaction.execute(
-                "UPDATE threads SET session_id=?1,cwd=?2,source=?3,model_provider=?4,created_at_ms=COALESCE(?5,created_at_ms),
+                "UPDATE threads SET session_id=COALESCE(?1,session_id),cwd=COALESCE(?2,cwd),source=COALESCE(?3,source),
+                   model_provider=COALESCE(?4,model_provider),created_at_ms=COALESCE(?5,created_at_ms),
                    parent_thread_id=?6,parent_thread_key=?7,forked_from_id=?8,forked_from_thread_key=?9,
                    agent_nickname=?10,agent_role=?11,agent_path=?12,originator=?13,cli_version=?14,
                    thread_source=?15,history_mode=?16,history_base_json=?17,
-                   projection_json=?18,provenance_json=?19,last_event_seq=?20 WHERE thread_key=?21",
+                   project_key=COALESCE(?18,project_key),
+                   base_instructions_json=COALESCE(?19,base_instructions_json),
+                   dynamic_tools_json=COALESCE(?20,dynamic_tools_json),
+                   selected_capability_roots_json=COALESCE(?21,selected_capability_roots_json),
+                   memory_mode=COALESCE(?22,memory_mode),
+                   subagent_history_start_ordinal=COALESCE(?23,subagent_history_start_ordinal),
+                   multi_agent_version=COALESCE(?24,multi_agent_version),
+                   context_window_json=COALESCE(?25,context_window_json),
+                   projection_json=?26,provenance_json=?27,last_event_seq=?28 WHERE thread_key=?29",
                 params![
                     p.get("session_id").or_else(|| p.get("id")).and_then(Value::as_str),
                     p.get("cwd").and_then(Value::as_str),value_as_string(p.get("source")),
@@ -1244,6 +1943,8 @@ fn project_event(
                     p.get("agent_path").and_then(Value::as_str),p.get("originator").and_then(Value::as_str),
                     p.get("cli_version").and_then(Value::as_str),value_as_string(p.get("thread_source")),
                     value_as_string(p.get("history_mode")),history_base.map(Value::to_string),
+                    project_key_value,base_instructions,dynamic_tools,selected_capability_roots,
+                    memory_mode,subagent_history_start_ordinal,multi_agent_version,context_window,
                     session_projection.to_string(),
                     json!({"sessionMeta":{"eventSeq":event_seq,"source":"rollout"}}).to_string(), event_seq, event.thread_key,
                 ],
@@ -1267,12 +1968,13 @@ fn project_event(
             transaction.execute(
                 "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),reasoning_effort=?3,
                    approval_policy=?4,approvals_reviewer_json=?5,sandbox_json=?6,active_permission_profile_json=?7,
-                   projection_json=?8 WHERE thread_key=?9",
+                   project_key=COALESCE(?8,project_key),projection_json=?9 WHERE thread_key=?10",
                 params![event.payload.get("cwd").and_then(Value::as_str), event.payload.get("model").and_then(Value::as_str),
                     value_as_string(event.payload.get("effort")),value_as_string(event.payload.get("approval_policy")),
                     event.payload.get("approvals_reviewer").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("sandbox_policy").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("permission_profile").filter(|value| !value.is_null()).map(Value::to_string),
+                    event.payload.get("cwd").and_then(Value::as_str).map(project_key),
                     projection,event.thread_key],
             )?;
         }
@@ -1334,21 +2036,12 @@ fn project_event(
                     },
                 )?;
                 transaction.execute(
-                        "UPDATE threads SET capture_completeness='durable_complete',completeness_reasons_json='[]',runtime_status='idle' WHERE thread_key=?1",
-                        [&event.thread_key],
-                    )?;
+                    "UPDATE threads SET runtime_status='idle' WHERE thread_key=?1",
+                    [&event.thread_key],
+                )?;
             }
         }
         _ => {}
-    }
-
-    if event.top_type != "session_meta" && event.durability == "durable" {
-        transaction.execute(
-            "UPDATE threads SET capture_completeness=CASE WHEN capture_completeness='durable_complete' THEN capture_completeness ELSE 'durable_partial' END,
-               completeness_reasons_json=CASE WHEN capture_completeness='durable_complete' THEN completeness_reasons_json ELSE '[\"durable_rollout_may_still_be_growing\"]' END
-             WHERE thread_key=?1",
-            [&event.thread_key],
-        )?;
     }
 
     if event.phase == "request"
@@ -1371,6 +2064,15 @@ fn project_event(
             params![event.source_id,event.epoch_id,request_id,event.thread_key,request_type,event_seq,event.payload.to_string()],
         )?;
     }
+    if event.phase == "resolved"
+        && let Some(request_id) = event.request_id.as_deref()
+    {
+        transaction.execute(
+            "UPDATE pending_requests SET state='resolved',resolved_event_seq=?1
+             WHERE source_id=?2 AND epoch_id=?3 AND request_id=?4 AND state='pending'",
+            params![event_seq, event.source_id, event.epoch_id, request_id],
+        )?;
+    }
 
     if let Some(item_type) = event.item_type.as_deref() {
         let item_id = event.item_id.as_deref().unwrap_or(&event.event_id);
@@ -1386,6 +2088,18 @@ fn project_event(
         } else {
             "rollout"
         };
+        if event.durability == "durable" {
+            record_item_conflicts(
+                transaction,
+                event,
+                event_seq,
+                &turn_scope,
+                item_id,
+                status,
+                event.summary_text.as_deref(),
+                &projection,
+            )?;
+        }
         transaction.execute(
             "INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,started_at_ms,completed_at_ms,
                summary_text,projection_json,provenance_json,last_event_seq)
@@ -1428,19 +2142,167 @@ fn project_event(
     Ok(())
 }
 
-fn projection_reference_key(event: &NormalizedEvent) -> String {
-    if let Some(item_id) = event.item_id.as_deref() {
-        let turn_scope = event
-            .turn_id
-            .as_deref()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("@unassigned:{}:{}", event.source_id, event.epoch_id));
-        format!("item:{}:{turn_scope}:{item_id}", event.thread_key)
-    } else if let Some(turn_id) = event.turn_id.as_deref() {
-        format!("turn:{}:{turn_id}", event.thread_key)
-    } else {
-        format!("thread:{}", event.thread_key)
+#[allow(clippy::too_many_arguments)]
+fn record_item_conflicts(
+    transaction: &Transaction<'_>,
+    event: &NormalizedEvent,
+    durable_event_seq: i64,
+    turn_scope: &str,
+    item_id: &str,
+    durable_status: &str,
+    durable_summary: Option<&str>,
+    durable_projection: &str,
+) -> Result<()> {
+    let existing = transaction
+        .query_row(
+            "SELECT status,summary_text,projection_json,provenance_json,last_event_seq
+             FROM items WHERE thread_key=?1 AND turn_scope=?2 AND item_id=?3",
+            params![event.thread_key, turn_scope, item_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((live_status, live_summary, live_projection, provenance, live_event_seq)) = existing
+    else {
+        return Ok(());
+    };
+    if serde_json::from_str::<Value>(&provenance)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("source")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        != Some("app_server")
+    {
+        return Ok(());
     }
+    let entity_key = format!("{turn_scope}:{item_id}");
+    for (field, live, durable) in [
+        ("status", json!(live_status), json!(durable_status)),
+        ("summary_text", json!(live_summary), json!(durable_summary)),
+        (
+            "projection_json",
+            parse_stored_json(live_projection),
+            parse_stored_json(durable_projection.to_string()),
+        ),
+    ] {
+        if live == durable {
+            transaction.execute(
+                "UPDATE projection_conflicts SET status='resolved',resolved_at_ms=?1
+                 WHERE thread_key=?2 AND entity_type='item' AND entity_key=?3 AND field_name=?4 AND status='active'",
+                params![now_ms(),event.thread_key,entity_key,field],
+            )?;
+            continue;
+        }
+        let conflict_id = blake3::hash(
+            format!(
+                "{}\0item\0{}\0{}\0{}\0{}",
+                event.thread_key, entity_key, field, live_event_seq, durable_event_seq
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        transaction.execute(
+            "INSERT INTO projection_conflicts(conflict_id,thread_key,entity_type,entity_key,field_name,
+               live_event_seq,durable_event_seq,live_value_json,durable_value_json,status,detected_at_ms)
+             VALUES (?1,?2,'item',?3,?4,?5,?6,?7,?8,'active',?9)
+             ON CONFLICT(conflict_id) DO UPDATE SET status='active',resolved_at_ms=NULL",
+            params![conflict_id,event.thread_key,entity_key,field,live_event_seq,durable_event_seq,
+                live.to_string(),durable.to_string(),now_ms()],
+        )?;
+    }
+    Ok(())
+}
+
+fn record_thread_conflicts(
+    transaction: &Transaction<'_>,
+    event: &NormalizedEvent,
+    durable_event_seq: i64,
+) -> Result<()> {
+    let existing = transaction.query_row(
+        "SELECT cwd,source,model_provider,provenance_json,last_event_seq FROM threads WHERE thread_key=?1",
+        [&event.thread_key],
+        |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?,
+            row.get::<_,String>(3)?,row.get::<_,i64>(4)?)),
+    ).optional()?;
+    let Some((live_cwd, live_source, live_model_provider, provenance, live_event_seq)) = existing
+    else {
+        return Ok(());
+    };
+    if serde_json::from_str::<Value>(&provenance)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("source")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        != Some("app_server")
+    {
+        return Ok(());
+    }
+    let durable = [
+        (
+            "cwd",
+            event
+                .payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            live_cwd,
+        ),
+        (
+            "source",
+            value_as_string(event.payload.get("source")),
+            live_source,
+        ),
+        (
+            "model_provider",
+            event
+                .payload
+                .get("model_provider")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            live_model_provider,
+        ),
+    ];
+    for (field, durable_value, live_value) in durable {
+        let (Some(durable_value), Some(live_value)) = (durable_value, live_value) else {
+            continue;
+        };
+        if durable_value == live_value {
+            continue;
+        }
+        let conflict_id = blake3::hash(
+            format!(
+                "{}\0thread\0{}\0{}\0{}",
+                event.thread_key, field, live_event_seq, durable_event_seq
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        transaction.execute(
+            "INSERT INTO projection_conflicts(conflict_id,thread_key,entity_type,entity_key,field_name,
+               live_event_seq,durable_event_seq,live_value_json,durable_value_json,status,detected_at_ms)
+             VALUES (?1,?2,'thread',?2,?3,?4,?5,?6,?7,'active',?8)
+             ON CONFLICT(conflict_id) DO UPDATE SET status='active',resolved_at_ms=NULL",
+            params![conflict_id,event.thread_key,field,live_event_seq,durable_event_seq,json!(live_value).to_string(),json!(durable_value).to_string(),now_ms()],
+        )?;
+    }
+    Ok(())
 }
 
 fn project_live_lifecycle(
@@ -1463,14 +2325,26 @@ fn project_live_lifecycle(
                 params![live_status(event.payload.get("status")),event_seq,event.thread_key],
             )?;
         }
+        "thread/read/response" => {
+            tx.execute(
+                "UPDATE threads SET name=COALESCE(?1,name),cwd=COALESCE(?2,cwd),source=COALESCE(?3,source),
+                   model=COALESCE(?4,model),archived=COALESCE(?5,archived),runtime_status=COALESCE(?6,runtime_status),
+                   runtime_status_stale=0,projection_json=?7,provenance_json=?8,last_event_seq=?9 WHERE thread_key=?10",
+                params![event.payload.get("name").or_else(|| event.payload.get("title")).and_then(Value::as_str),
+                    event.payload.get("cwd").and_then(Value::as_str),value_as_string(event.payload.get("source")),
+                    event.payload.get("model").and_then(Value::as_str),event.payload.get("archived").and_then(Value::as_bool),
+                    live_status(event.payload.get("status")),event.payload.to_string(),
+                    json!({"eventSeq":event_seq,"source":"app_server","epoch":event.epoch_id,"method":"thread/read"}).to_string(),
+                    event_seq,event.thread_key],
+            )?;
+        }
         "turn/started" => {
             if let Some(turn_id) = event.turn_id.as_deref() {
                 upsert_live_turn(
                     tx, event, event_seq, turn_id, "running", time, None, true, false,
                 )?;
                 tx.execute(
-                    "UPDATE threads SET runtime_status='active',runtime_status_stale=0,
-                       capture_completeness='live_partial',completeness_reasons_json='[\"live_turn_not_terminal\"]'
+                    "UPDATE threads SET runtime_status='active',runtime_status_stale=0
                      WHERE thread_key=?1",
                     [&event.thread_key],
                 )?;
@@ -1505,21 +2379,8 @@ fn project_live_lifecycle(
                     true,
                 )?;
                 tx.execute(
-                    "UPDATE threads SET runtime_status='idle',runtime_status_stale=0,
-                       capture_completeness=?1,completeness_reasons_json=?2 WHERE thread_key=?3",
-                    params![
-                        if live_started {
-                            "live_complete"
-                        } else {
-                            "live_partial"
-                        },
-                        if live_started {
-                            "[]"
-                        } else {
-                            "[\"attached_after_turn_started\"]"
-                        },
-                        event.thread_key
-                    ],
+                    "UPDATE threads SET runtime_status='idle',runtime_status_stale=0 WHERE thread_key=?1",
+                    [&event.thread_key],
                 )?;
             }
         }
@@ -1540,12 +2401,23 @@ fn upsert_live_turn(
     live_started: bool,
     live_terminal: bool,
 ) -> Result<()> {
-    let complete = live_started && live_terminal;
-    let coverage = json!({
-        "liveStarted":live_started,"liveTerminal":live_terminal,"liveEpochContiguous":complete,
-        "durableStarted":false,"durableTerminal":false,"durableEofReached":false,
-        "decodeErrorCount":0,"unknownEventCount":0,"sourceDisconnectCount":0
-    });
+    let mut coverage = load_coverage(tx, &event.thread_key, turn_id)?;
+    if live_started {
+        if coverage.live_epoch_id.as_deref() != Some(event.epoch_id.as_str()) {
+            coverage.live_epoch_id = Some(event.epoch_id.clone());
+            coverage.live_started = true;
+            coverage.live_terminal = false;
+            coverage.live_epoch_contiguous = true;
+        } else {
+            coverage.live_started = true;
+        }
+    }
+    if live_terminal {
+        coverage.live_terminal = true;
+        coverage.live_epoch_contiguous &= coverage.live_started
+            && coverage.live_epoch_id.as_deref() == Some(event.epoch_id.as_str());
+    }
+    let (completeness, reasons) = coverage_state(&coverage);
     tx.execute(
         "INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
            started_at_ms,completed_at_ms,projection_json,provenance_json,last_event_seq)
@@ -1559,10 +2431,11 @@ fn upsert_live_turn(
            projection_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.projection_json ELSE excluded.projection_json END,
            provenance_json=CASE WHEN turns.capture_completeness='durable_complete' THEN turns.provenance_json ELSE excluded.provenance_json END,
            last_event_seq=excluded.last_event_seq",
-        params![event.thread_key,turn_id,status,if complete {"live_complete"} else {"live_partial"},
-            if complete {"[]"} else {"[\"live_epoch_incomplete\"]"},coverage.to_string(),started,completed,
+        params![event.thread_key,turn_id,status,completeness,
+            serde_json::to_string(&reasons)?,serde_json::to_string(&coverage)?,started,completed,
             event.payload.to_string(),json!({"eventSeq":seq,"source":"app_server","epoch":event.epoch_id}).to_string(),seq],
     )?;
+    store_coverage(tx, &event.thread_key, turn_id, &coverage)?;
     Ok(())
 }
 
@@ -1573,21 +2446,10 @@ fn upsert_turn(
     update: TurnUpdate<'_>,
 ) -> Result<()> {
     let terminal = matches!(update.status, "completed" | "failed" | "interrupted");
-    let completeness = if terminal {
-        "durable_complete"
-    } else {
-        "durable_partial"
-    };
-    let reasons = if terminal {
-        "[]"
-    } else {
-        "[\"durable_turn_not_terminal\"]"
-    };
-    let coverage = json!({
-        "liveStarted":false,"liveTerminal":false,"liveEpochContiguous":false,
-        "durableStarted":update.durable_started,"durableTerminal":terminal,"durableEofReached":terminal,
-        "decodeErrorCount":0,"unknownEventCount":0,"sourceDisconnectCount":0
-    });
+    let mut coverage = load_coverage(tx, &event.thread_key, update.turn_id)?;
+    coverage.durable_started |= update.durable_started;
+    coverage.durable_terminal |= terminal;
+    let (completeness, reasons) = coverage_state(&coverage);
     tx.execute(
         "INSERT INTO turns(thread_key,turn_id,status,capture_completeness,completeness_reasons_json,coverage_json,
            started_at_ms,completed_at_ms,execution_context_json,projection_json,provenance_json,last_event_seq)
@@ -1598,139 +2460,12 @@ fn upsert_turn(
            completed_at_ms=COALESCE(excluded.completed_at_ms,turns.completed_at_ms),
            execution_context_json=COALESCE(excluded.execution_context_json,turns.execution_context_json),
            projection_json=excluded.projection_json,provenance_json=excluded.provenance_json,last_event_seq=excluded.last_event_seq",
-        params![event.thread_key, update.turn_id, update.status, completeness, reasons, coverage.to_string(), update.started, update.completed,
+        params![event.thread_key, update.turn_id, update.status, completeness, serde_json::to_string(&reasons)?, serde_json::to_string(&coverage)?, update.started, update.completed,
                 if event.top_type == "turn_context" { Some(event.payload.to_string()) } else { None },
                 event.payload.to_string(), json!({"eventSeq":seq}).to_string(), seq],
     )?;
+    store_coverage(tx, &event.thread_key, update.turn_id, &coverage)?;
     Ok(())
-}
-
-pub fn classify_item(raw: &Value) -> Option<String> {
-    let top = raw.get("type")?.as_str()?;
-    let payload = raw.get("payload")?;
-    let kind = payload.get("type").and_then(Value::as_str).unwrap_or(top);
-    match top {
-        "response_item" => Some(
-            match kind {
-                "message" => match payload.get("role").and_then(Value::as_str) {
-                    Some("user") => "user_message",
-                    _ => "agent_message",
-                },
-                "reasoning" => "reasoning",
-                "local_shell_call" => "command_execution",
-                "function_call" | "custom_tool_call" | "tool_search_call" => "tool_call",
-                "function_call_output" | "custom_tool_call_output" => "tool_output",
-                other => other,
-            }
-            .to_string(),
-        ),
-        "compacted" => Some("reasoning".into()),
-        "inter_agent_communication" | "inter_agent_communication_metadata" => {
-            Some("sub_agent".into())
-        }
-        "event_msg" => match kind {
-            "user_message" => Some("user_message".into()),
-            "agent_message" => Some("agent_message".into()),
-            "agent_reasoning" => Some("reasoning".into()),
-            "exec_command_begin" | "exec_command_end" | "exec_command_output_delta" => {
-                Some("command_execution".into())
-            }
-            "mcp_tool_call_begin" | "mcp_tool_call_end" => Some("mcp_tool_call".into()),
-            "turn_diff" | "patch_apply_begin" | "patch_apply_end" => Some("file_change".into()),
-            "plan_update" => Some("plan".into()),
-            "error" | "warning" | "stream_error" => Some("error".into()),
-            "token_count" => Some("usage".into()),
-            _ => None,
-        },
-        other if !matches!(other, "session_meta" | "turn_context" | "world_state") => {
-            Some("unknown".into())
-        }
-        _ => None,
-    }
-}
-
-pub fn classify_live_item(method: &str, item: Option<&Value>) -> Option<String> {
-    if method.contains("requestApproval") {
-        return Some("approval".into());
-    }
-    if method.contains("requestUserInput") || method.contains("elicitation/request") {
-        return Some("user_question".into());
-    }
-    let kind = item
-        .and_then(|item| item.get("type"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            method
-                .strip_prefix("item/")
-                .and_then(|rest| rest.split('/').next())
-        })?;
-    Some(
-        match kind {
-            "userMessage" => "user_message",
-            "agentMessage" => "agent_message",
-            "reasoning" => "reasoning",
-            "commandExecution" => "command_execution",
-            "fileChange" => "file_change",
-            "mcpToolCall" => "mcp_tool_call",
-            "collabAgentToolCall" => "sub_agent",
-            "webSearch" => "web_search",
-            "imageGeneration" => "image_generation",
-            "plan" => "plan",
-            "error" => "error",
-            other => other,
-        }
-        .to_string(),
-    )
-}
-
-pub fn live_summary(params: &Value, item: Option<&Value>) -> Option<String> {
-    params
-        .get("delta")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            item.and_then(|item| summary_text(&json!({"type":"response_item","payload":item})))
-        })
-}
-
-pub fn summary_text(raw: &Value) -> Option<String> {
-    let payload = raw.get("payload")?;
-    if let Some(text) = payload
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("content").and_then(Value::as_str))
-        .or_else(|| payload.get("text").and_then(Value::as_str))
-        .or_else(|| payload.get("name").and_then(Value::as_str))
-        .or_else(|| payload.get("call_id").and_then(Value::as_str))
-    {
-        return Some(truncate(text, 16_000));
-    }
-    if let Some(content) = payload.get("content").and_then(Value::as_array) {
-        let joined = content
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.get("input_text").and_then(Value::as_str))
-                    .or_else(|| item.get("output_text").and_then(Value::as_str))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !joined.is_empty() {
-            return Some(truncate(&joined, 16_000));
-        }
-    }
-    if let Some(summary) = payload.get("summary").and_then(Value::as_array) {
-        let joined = summary
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !joined.is_empty() {
-            return Some(truncate(&joined, 16_000));
-        }
-    }
-    None
 }
 
 fn value_as_string(value: Option<&Value>) -> Option<String> {
@@ -1761,50 +2496,8 @@ fn value_as_string_ref(value: &Value) -> Option<String> {
     }
 }
 
-fn parse_time_ms(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| time.timestamp_millis())
-}
-
-pub fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
-}
-
 fn parse_stored_json(value: String) -> Value {
     serde_json::from_str(&value).unwrap_or(Value::Null)
-}
-
-fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("export output must have a parent directory")?;
-    if !parent.is_dir() {
-        anyhow::bail!("export output directory does not exist");
-    }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| -> Result<()> {
-        let mut file = options
-            .open(path)
-            .with_context(|| format!("create export output {}", path.display()))?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
-}
-
-fn truncate(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
 }
 
 #[cfg(test)]
@@ -1812,6 +2505,29 @@ mod tests {
     use super::*;
     use crate::ingest::Importer;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_data_directory_are_private_on_disk() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = TempDir::new()?;
+        let data = temp.path().join("observer-data");
+        fs::create_dir(&data)?;
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755))?;
+        let path = data.join("custom.database");
+        let database = Database::open(&path)?;
+        database.migrate()?;
+        assert_eq!(fs::metadata(&data)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+
+        let target = temp.path().join("target.sqlite");
+        fs::write(&target, b"")?;
+        let link = data.join("linked.sqlite");
+        symlink(&target, &link)?;
+        assert!(Database::open(&link).is_err());
+        Ok(())
+    }
 
     fn version_four_database(temp: &TempDir) -> Result<Database> {
         let database = Database::open(&temp.path().join("observer.sqlite"))?;
@@ -1852,7 +2568,7 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 9);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
         assert!(blob_table);
         assert!(relation_column);
         assert!(purge_table);
@@ -1927,8 +2643,19 @@ mod tests {
     fn migration_nine_reclassifies_existing_unknown_rollout_events() -> Result<()> {
         let temp = TempDir::new()?;
         let database = Database::open(&temp.path().join("observer.sqlite"))?;
-        database.migrate()?;
         let connection = database.connect()?;
+        for migration in [
+            MIGRATION_1,
+            MIGRATION_2,
+            MIGRATION_3,
+            MIGRATION_4,
+            MIGRATION_5,
+            MIGRATION_6,
+            MIGRATION_7,
+            MIGRATION_8,
+        ] {
+            connection.execute_batch(migration)?;
+        }
         connection.execute(
             "INSERT INTO sources(source_id,kind,stable_identity,config_json,status,created_at_ms,updated_at_ms)
              VALUES ('source','rollout','source','{}','online',0,0)",
@@ -1946,7 +2673,6 @@ mod tests {
                'completed','durable','hash','hash','{}','{}','decoded','source')",
             [],
         )?;
-        connection.pragma_update(None, "user_version", 8)?;
         drop(connection);
         database.migrate()?;
         let connection = database.connect()?;
@@ -1956,7 +2682,7 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(status, "unknown");
-        assert_eq!(version, 9);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
         Ok(())
     }
 
@@ -1999,7 +2725,10 @@ mod tests {
         database.migrate()?;
         let report = Database::doctor_read_only(&config)?;
         assert_eq!(report.status, "healthy");
-        assert_eq!(report.database, "ok; schema_version=9");
+        assert_eq!(
+            report.database,
+            format!("ok; schema_version={LATEST_SCHEMA_VERSION}")
+        );
         Ok(())
     }
 
@@ -2061,6 +2790,58 @@ mod tests {
             |row| row.get(0),
         )?;
         assert!(!thread_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_twelve_backfills_project_and_context_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "UPDATE threads SET project_key=NULL,base_instructions_json=NULL,
+             dynamic_tools_json=NULL,selected_capability_roots_json=NULL,memory_mode=NULL,
+             subagent_history_start_ordinal=NULL,multi_agent_version=NULL,context_window_json=NULL",
+            [],
+        )?;
+        drop(connection);
+
+        database.migrate()?;
+        let connection = database.connect()?;
+        let project_key_value: String = connection.query_row(
+            "SELECT project_key FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+        let base_instructions: Option<String> = connection.query_row(
+            "SELECT base_instructions_json FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(project_key_value, "/demo/local-observer");
+        assert!(
+            base_instructions
+                .unwrap_or_default()
+                .contains("Keep changes read-only.")
+        );
+        drop(connection);
+
+        database.migrate()?;
+        let connection = database.connect()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM threads WHERE codex_thread_id='00000000-0000-7000-8000-000000000001'
+             AND project_key='/demo/local-observer'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
         Ok(())
     }
 }

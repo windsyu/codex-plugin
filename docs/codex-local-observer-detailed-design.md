@@ -397,6 +397,31 @@ interface ThreadProjection {
   agentNickname?: string;
   agentRole?: string;
   agentPath?: string;
+  project?: {
+    key: string;
+    name: string;
+    path: string;
+  };
+  context?: {
+    session: {
+      baseInstructions?: unknown;
+      dynamicTools?: unknown;
+      selectedCapabilityRoots?: unknown;
+      memoryMode?: string;
+      subagentHistoryStartOrdinal?: number;
+      multiAgentVersion?: string;
+      contextWindow?: unknown;
+    };
+    runtime: {
+      cwd?: string;
+      model?: string;
+      reasoningEffort?: string;
+      approvalPolicy?: string;
+      approvalsReviewer?: unknown;
+      sandbox?: unknown;
+      activePermissionProfile?: unknown;
+    };
+  };
 
   name?: string;
   source?: string;
@@ -601,7 +626,7 @@ world_state
 event_msg
 ```
 
-未知 `type` 仍以 `rollout/unknown` 入库。SessionMeta 至少抽取：id、session_id、parent/fork、cwd、originator、cli_version、source、thread_source、agent metadata、model_provider、history_mode、history_base。
+未知 `type` 仍以 `rollout/unknown` 入库。SessionMeta 至少抽取：id、session_id、parent/fork、cwd、originator、cli_version、source、thread_source、agent metadata、model_provider、history_mode、history_base；项目上下文额外抽取 `base_instructions`、`dynamic_tools`、`selected_capability_roots`、`memory_mode`、`subagent_history_start_ordinal`、`multi_agent_version`、`context_window`。
 
 ### 9.7 持久化能力边界
 
@@ -862,8 +887,15 @@ CREATE TABLE source_epochs (
   opened_at_ms INTEGER NOT NULL,
   closed_at_ms INTEGER,
   capability_json TEXT,
+  capability_hash TEXT,
   schema_hash TEXT,
   close_reason TEXT,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  sequence_gap_count INTEGER NOT NULL DEFAULT 0,
+  decode_error_count INTEGER NOT NULL DEFAULT 0,
+  unknown_event_count INTEGER NOT NULL DEFAULT 0,
+  last_source_seq INTEGER,
+  last_event_at_ms INTEGER,
   PRIMARY KEY (source_id, epoch_id),
   FOREIGN KEY (source_id) REFERENCES sources(source_id)
 );
@@ -1001,14 +1033,17 @@ CREATE TABLE blobs (
 
 CREATE TABLE projection_conflicts (
   conflict_id TEXT PRIMARY KEY,
-  thread_key TEXT,
-  turn_id TEXT,
-  item_id TEXT,
-  field_path TEXT NOT NULL,
-  winner_event_seq INTEGER NOT NULL,
-  candidates_json TEXT NOT NULL,
-  rule_version TEXT NOT NULL,
-  resolved INTEGER NOT NULL DEFAULT 0
+  thread_key TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_key TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  live_event_seq INTEGER NOT NULL,
+  durable_event_seq INTEGER NOT NULL,
+  live_value_json TEXT NOT NULL,
+  durable_value_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  detected_at_ms INTEGER NOT NULL,
+  resolved_at_ms INTEGER
 );
 
 CREATE TABLE ingest_errors (
@@ -1131,6 +1166,7 @@ DbWriter 对 batch 中每条事件执行：
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/v1/sources` | source 状态、epoch、capabilities |
+| GET | `/v1/projects` | 按规范化 cwd 聚合的项目快照 |
 | GET | `/v1/threads` | Thread 分页、筛选、搜索 |
 | GET | `/v1/threads/{threadKey}` | Thread 详情 |
 | GET | `/v1/threads/{threadKey}/turns` | Turn 分页 |
@@ -1153,6 +1189,7 @@ GET /v1/threads
   ?cursor=
   &limit=50
   &sourceId=
+  &project=
   &runtimeStatus=
   &captureCompleteness=
   &archived=
@@ -1305,35 +1342,41 @@ stream event 默认只携带 projection delta 与 raw metadata。大于 inline �
 
 ```text
 Source Health
-Thread List / Search
+Project Tree
+  Thread List / Search
 Thread Detail
   Thread Header
-  Capture & Provenance Banner
+  Capture Warning (only when incomplete)
+  Background Context Panel
+    Session Instructions
+    Session Metadata
+    Runtime Context
   Turn Timeline
-    Item Cards
-      rendered content
-      live delta / final state
+    User / Assistant Dialogue
+    Process & Diagnostics (collapsed per Turn)
+      command / tool / file / status summary
       request state
-      raw/provenance drawer
+      redacted raw/provenance drawer
   Diagnostics
 Settings (read-only view in V1)
 ```
 
 ### 17.2 Thread List
 
-列表支持 source、status、completeness、archived 筛选。每行必须区分：
+列表默认只显示搜索、项目和 Thread；source、status、completeness、archived 筛选收进单一折叠入口。每行只显示标题、消息预览、相对时间和具有 Thread 级证据的必要状态，并区分：
 
 - active 与 last-known stale；
 - live complete / live partial / durable complete / durable partial；
-- source disconnected；
-- unknown schema / decode error；
+- 具有 Thread 级证据的 source disconnected、unknown schema / decode error；
 - sub-agent、fork、parent relation。
 
-不得仅用绿色/红色表达状态，文字和图标需同时存在。
+source epoch 级 unknown/decode/disconnected 统计不得复制到每个 Thread 行，应在列表顶部聚合提示一次。不得仅用绿色/红色表达状态，文字和图标需同时存在。
 
 ### 17.3 Timeline 渲染
 
-Item 使用可扩展 renderer registry：
+Viewer 使用集中式 presentation registry，结合规范化 `itemType` 与已脱敏 payload type 组织主阅读流。用户和助手消息直接渲染为安全 Markdown；其余 Item 按 Turn 汇总进默认折叠的“过程与诊断”，相同 `call_id`（无则 `itemId`）的开始/完成或调用/输出合并展示，失败、等待处理和中断不得隐藏。
+
+registry 覆盖：
 
 ```text
 user_message
@@ -1352,7 +1395,7 @@ error / interrupt / completion
 unknown
 ```
 
-unknown renderer 显示 method、phase、size、时间与安全 JSON tree，不能空白或导致页面崩溃。
+同时兼容官方 `additional_tools`、`tool_search_output`、`web_search_call`、`image_generation_call`、`compaction` 与 `context_compaction` 等原始类型。只有真正未知的 variant 进入诊断；unknown renderer 显示 method、phase、size、时间与安全 JSON tree，不能空白或导致页面崩溃。
 
 ### 17.4 Raw JSON Inspector
 
@@ -1371,6 +1414,19 @@ unknown renderer 显示 method、phase、size、时间与安全 JSON tree，不�
 > Observer V1 为只读模式，请在原 Codex 客户端中处理该请求。
 
 不渲染可误解为可提交的 Accept / Deny / Answer 按钮。
+
+### 17.6 下一步 Viewer 改进基线
+
+当前 Preact Viewer 已完成项目分组、背景上下文、响应式列表/详情导航、认证模式感知的 SSE/轮询、独立加载与错误状态、搜索定位、对话优先 Timeline、折叠过程/诊断摘要和按需 Raw Inspector。P0/P1 加固于 2026-08-22 完成，对话优先体验重构于 2026-08-24 完成。
+
+后续 P2 Viewer 工作仍以
+[`codex-local-observer-web-viewer-improvements.md`](codex-local-observer-web-viewer-improvements.md)
+为需求与验收基线，重点为：
+
+1. URL state、刷新及前进/后退恢复；
+2. 10,000 Thread/Item 下的渐进加载或虚拟化与可复现性能基线。
+
+这些改进保持 V1 本地、单用户、store-first、read-only 边界，不引入任何 Codex 控制操作。
 
 ## 18. 脱敏与隐私
 
@@ -1411,6 +1467,8 @@ raw input bytes
 
 `redaction_json` 保存规则版本和被修改 JSON Pointer。
 
+V1 schema 10 起采用 `known-secrets-v2`：除上述字段外，递归处理 HTTP/MCP auth、URL query token/signature 与常见 credential/JWT 形态；image/audio data URI 或带明确 media type 的 base64 正文只保存 media type、估算大小和 keyed fingerprint marker。升级不会自动重写 schema 9 及更早版本已持久化的 raw/blob/projection，health、Viewer 与 export 必须持续显示 legacy redaction 数量和风险，直到用户显式 purge/reimport。
+
 ### 18.3 Retention
 
 默认建议：
@@ -1444,6 +1502,8 @@ codex-observerd purge --thread <threadKey> --observer-copy-only --yes
 - 若未来允许 LAN，必须显式启用 TLS 与独立认证方案，不复用 loopback 默认；
 - bearer token 至少 256 bit，由 daemon 首次生成；
 - token 文件仅当前用户可读；
+- `codex-observerd serve` 成功绑定 loopback 后直接打印五分钟有效、fragment 携带的单次配对链接；`open` 可重新生成，二者都不自动打开浏览器；`POST /v1/auth/pair` 兑换 30 天签名 `observer_session` Cookie；
+- Cookie 使用 `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` 并绑定当前 bearer secret。V1 loopback HTTP 不设置 `Secure`；token 轮换立即失效；
 - 严格校验 `Origin`，无 Origin 的非浏览器客户端按配置处理；
 - 所有 response 设置安全 header 和 `Cache-Control: no-store`。
 

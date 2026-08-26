@@ -43,6 +43,7 @@ V1 的默认边界：
 
 - `docs/codex-local-observer-research.md`：需求调研、源码研究和技术事实；
 - `docs/codex-local-observer-detailed-design.md`：V1 完整详细设计；
+- `docs/codex-local-observer-web-viewer-improvements.md`：V1 Viewer 当前问题、下一步改进需求和验收基线；
 - `docs/codex-local-observer-future-design.md`：V2/V3 未来设计。
 
 Codex 官方源码的本地参考路径：

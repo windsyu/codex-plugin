@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -7,32 +8,71 @@ use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::middleware::{self as axum_middleware, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(test)]
 use base64::Engine;
+#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::types::Value as SqlValue;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, broadcast, watch};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::config::Config;
-use crate::db::{Database, LATEST_SCHEMA_VERSION};
-use crate::ingest::load_or_create_token;
-use crate::model::ApiEnvelope;
+mod auth;
+mod cursor;
+mod handlers;
+mod middleware;
+mod query;
+mod router;
+mod stream;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+use crate::config::Config;
+use crate::credentials::load_or_create_token;
+use crate::domain::model::ApiEnvelope;
+use crate::domain::project::{project_key, project_name};
+use crate::store::{Database, LATEST_SCHEMA_VERSION};
+use crate::writer::WriterHandle;
+pub use auth::generate_pairing_url;
+use auth::{PairingNonceStore, redeem_pair_code, verify_session};
+use cursor::*;
+use handlers::parse_byte_range;
+use middleware::{constant_time_eq, cookie_value};
+use query::{parse_json, parse_optional_json, search_expression};
+use router::settings_snapshot;
+use stream::{StreamFilters, WsSubscribe};
+
+#[derive(RustEmbed)]
+#[folder = "web/dist"]
+struct WebAssets;
+
+static ACTIVE_CONSUMERS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_CONSUMERS: AtomicU64 = AtomicU64::new(0);
+static SLOW_CONSUMER_DROPS: AtomicU64 = AtomicU64::new(0);
+
+struct ConsumerGuard;
+impl ConsumerGuard {
+    fn new() -> Self {
+        ACTIVE_CONSUMERS.fetch_add(1, Ordering::Relaxed);
+        TOTAL_CONSUMERS.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+impl Drop for ConsumerGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONSUMERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Clone)]
 struct ApiState {
@@ -42,14 +82,20 @@ struct ApiState {
     allowed_origins: Arc<Vec<String>>,
     live_modes: Arc<Vec<String>>,
     blob_downloads: Arc<Semaphore>,
+    writer: WriterHandle,
+    pairing_nonces: Arc<PairingNonceStore>,
+    settings: Arc<Value>,
 }
 
 pub async fn serve(
     config: Config,
     database: Arc<Database>,
+    writer: WriterHandle,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let token = load_or_create_token(&config.server.bearer_token_file)?;
+    let pairing_token = token.clone();
+    let settings_snapshot = settings_snapshot(&config);
     let state = ApiState {
         database,
         token: Arc::new(token),
@@ -64,10 +110,14 @@ pub async fn serve(
                 .collect(),
         ),
         blob_downloads: Arc::new(Semaphore::new(4)),
+        writer,
+        pairing_nonces: Arc::new(PairingNonceStore::default()),
+        settings: Arc::new(settings_snapshot),
     };
     let protected = Router::new()
         .route("/health", get(health))
         .route("/sources", get(sources))
+        .route("/projects", get(projects))
         .route("/threads", get(threads))
         .route("/threads/{thread_key}", get(thread_detail))
         .route("/threads/{thread_key}/turns", get(turns))
@@ -77,24 +127,37 @@ pub async fn serve(
         .route("/blobs/{blob_id}", get(blob))
         .route("/search", get(search))
         .route("/meta/capabilities", get(capabilities))
+        .route("/meta/settings", get(settings))
         .route("/stream", get(sse_stream))
         .route("/stream/ws", get(ws_stream))
-        .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
+        .route_layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            authorize,
+        ));
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/style.css", get(style_css))
+        .route("/assets/{*path}", get(web_asset))
+        .route("/v1/auth/pair", post(pair_auth))
         .nest("/v1", protected)
         .with_state(state)
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(CatchPanicLayer::new())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn(security_headers));
+        .layer(axum_middleware::from_fn(security_headers));
 
     let listener = TcpListener::bind(config.server.bind).await?;
-    tracing::info!(address = %config.server.bind, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready");
+    let bound_address = listener.local_addr()?;
+    let viewer_url = generate_pairing_url(
+        bound_address,
+        &pairing_token,
+        chrono::Utc::now().timestamp(),
+    )?;
+    println!("Viewer: {viewer_url}");
+    tracing::info!(address = %bound_address, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready; open the printed single-use Viewer URL");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             while !*shutdown.borrow() {
@@ -107,13 +170,36 @@ pub async fn serve(
     Ok(())
 }
 
+async fn not_found() -> Response {
+    api_error(
+        StatusCode::NOT_FOUND,
+        "ROUTE_NOT_FOUND",
+        "route was not found",
+    )
+}
+
+async fn method_not_allowed() -> Response {
+    api_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "METHOD_NOT_ALLOWED",
+        "method is not allowed",
+    )
+}
+
 async fn authorize(State(state): State<ApiState>, request: Request, next: Next) -> Response {
-    let authorized = request
+    let bearer_authorized = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| constant_time_eq(token.as_bytes(), state.token.as_bytes()));
+    let cookie_authorized = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| cookie_value(cookies, "observer_session"))
+        .is_some_and(|cookie| verify_session(&state.token, cookie, chrono::Utc::now().timestamp()));
+    let authorized = bearer_authorized || cookie_authorized;
     if !authorized {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -140,6 +226,61 @@ async fn authorize(State(state): State<ApiState>, request: Request, next: Next) 
     next.run(request).await
 }
 
+#[derive(Deserialize)]
+struct PairRequest {
+    code: String,
+}
+
+async fn pair_auth(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PairRequest>,
+) -> Response {
+    if state.strict_origin {
+        let origin = headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok());
+        if !origin.is_some_and(|origin| {
+            state
+                .allowed_origins
+                .iter()
+                .any(|allowed| allowed == origin)
+        }) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "request origin is not allowed",
+            );
+        }
+    }
+    let session = match redeem_pair_code(
+        &state.token,
+        &request.code,
+        &state.pairing_nonces,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(session) => session,
+        Err(_) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "PAIR_INVALID",
+                "pairing code is invalid, expired, or already used",
+            );
+        }
+    };
+    let mut response =
+        Json(json!({"apiVersion":"v1","data":{"paired":true,"expiresInSeconds":2592000}}))
+            .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "observer_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+        ))
+        .expect("session cookie contains only base64url characters"),
+    );
+    response
+}
+
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -156,31 +297,50 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> Response {
+    match WebAssets::get("index.html") {
+        Some(file) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WEB_ASSET_MISSING",
+            "embedded web viewer index is missing",
+        ),
+    }
 }
 
-async fn app_js() -> Response {
+async fn web_asset(Path(path): Path<String>) -> Response {
+    let asset_path = format!("assets/{path}");
+    let Some(file) = WebAssets::get(&asset_path) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "ROUTE_NOT_FOUND",
+            "route was not found",
+        );
+    };
+    let content_type = match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    };
     (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        APP_JS,
-    )
-        .into_response()
-}
-
-async fn style_css() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        STYLE_CSS,
+        [(header::CONTENT_TYPE, content_type)],
+        file.data.into_owned(),
     )
         .into_response()
 }
 
 async fn health(State(state): State<ApiState>) -> Response {
     let seq = state.database.max_event_seq().unwrap_or(0);
+    let legacy_redaction_events = state.database.legacy_redaction_event_count().unwrap_or(0);
     let sources = state.database.query_json(
         "SELECT source_id,kind,status,last_seen_at_ms,last_error_json FROM sources ORDER BY source_id", &[],
         |row| Ok(json!({
@@ -190,10 +350,36 @@ async fn health(State(state): State<ApiState>) -> Response {
         })),
     ).unwrap_or_default();
     let live_enabled = !state.live_modes.is_empty();
+    let writer = state.writer.metrics();
+    let database_state = state.database.query_json(
+        "SELECT (SELECT user_version FROM pragma_user_version),
+          (SELECT journal_mode FROM pragma_journal_mode),
+          (SELECT COALESCE(MAX(event_seq),0) FROM raw_events WHERE thread_key<>''),
+          (SELECT COALESCE(MAX(last_event_seq),0) FROM threads)",
+        &[], |row| Ok(json!({"schemaVersion":row.get::<_,i64>(0)?,"journalMode":row.get::<_,String>(1)?,
+          "maxEventSeq":row.get::<_,i64>(2)?,"maxProjectedEventSeq":row.get::<_,i64>(3)?})),
+    ).ok().and_then(|mut rows| rows.pop()).unwrap_or_else(|| json!({}));
+    let continuity = state.database.query_json(
+        "SELECT COALESCE(SUM(event_count),0),COALESCE(SUM(sequence_gap_count),0),
+          COALESCE(SUM(decode_error_count),0),COALESCE(SUM(unknown_event_count),0) FROM source_epochs",
+        &[], |row| Ok(json!({"eventCount":row.get::<_,i64>(0)?,"sequenceGapCount":row.get::<_,i64>(1)?,
+          "decodeErrorCount":row.get::<_,i64>(2)?,"unknownEventCount":row.get::<_,i64>(3)?})),
+    ).ok().and_then(|mut rows| rows.pop()).unwrap_or_else(|| json!({}));
+    let projection_lag = database_state["maxEventSeq"]
+        .as_i64()
+        .unwrap_or(0)
+        .saturating_sub(database_state["maxProjectedEventSeq"].as_i64().unwrap_or(0));
     Json(ApiEnvelope::new(seq, json!({
-        "status": if sources.iter().any(|source| source["status"] == "degraded") { "degraded" } else { "healthy" },
-        "ready":true,"database":{"migration":"ok","wal":"ok"},"ingest":{"projectionLag":0},
-        "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()}
+        "status": if writer.failures > 0 || sources.iter().any(|source| matches!(source["status"].as_str(),Some("degraded"|"incompatible"))) { "degraded" } else { "healthy" },
+        "ready":writer.ready,"database":{"migration":if database_state["schemaVersion"] == LATEST_SCHEMA_VERSION {"ok"} else {"mismatch"},
+          "wal":database_state["journalMode"],"schemaVersion":database_state["schemaVersion"]},
+        "writer":{"ready":writer.ready,"commits":writer.commits,"failures":writer.failures,"commitP95Ms":writer.commit_p95_ms},
+        "ingest":{"queueDepthEvents":writer.queue_depth_events,"projectionLag":projection_lag},
+        "consumers":{"active":ACTIVE_CONSUMERS.load(Ordering::Relaxed),"total":TOTAL_CONSUMERS.load(Ordering::Relaxed),
+          "slowDrops":SLOW_CONSUMER_DROPS.load(Ordering::Relaxed)},"continuity":continuity,
+        "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()},
+        "privacy":{"redactionRuleVersion":"known-secrets-v2","legacyRedactionEvents":legacy_redaction_events,
+          "warning":if legacy_redaction_events > 0 { Some("legacy records may contain values not covered by redaction v2") } else { None }}
     }))).into_response()
 }
 
@@ -201,11 +387,14 @@ async fn sources(State(state): State<ApiState>) -> Response {
     envelope_query(
         &state,
         "SELECT s.source_id,s.kind,s.stable_identity,s.status,s.last_seen_at_ms,
-          e.epoch_id,e.opened_at_ms,e.closed_at_ms,e.capability_json,e.capability_hash,e.schema_hash,e.close_reason
+          e.epoch_id,e.opened_at_ms,e.closed_at_ms,e.capability_json,e.capability_hash,e.schema_hash,e.close_reason,
+          e.event_count,e.sequence_gap_count,e.decode_error_count,e.unknown_event_count,e.last_source_seq,e.last_event_at_ms,
+          (SELECT CASE WHEN COUNT(*)>0 THEN COUNT(*)-1 ELSE 0 END FROM source_epochs ex WHERE ex.source_id=s.source_id),
+          (SELECT COALESCE(SUM(COALESCE(ex.closed_at_ms,?1)-ex.opened_at_ms),0) FROM source_epochs ex WHERE ex.source_id=s.source_id)
          FROM sources s LEFT JOIN source_epochs e ON e.rowid=(
            SELECT e2.rowid FROM source_epochs e2 WHERE e2.source_id=s.source_id ORDER BY e2.opened_at_ms DESC LIMIT 1)
          ORDER BY s.source_id",
-        &[],
+        &[&chrono::Utc::now().timestamp_millis()],
         |row| {
             Ok(
                 json!({"sourceId":row.get::<_,String>(0)?,"kind":row.get::<_,String>(1)?,
@@ -213,10 +402,47 @@ async fn sources(State(state): State<ApiState>) -> Response {
             "currentEpoch":{"epochId":row.get::<_,Option<String>>(5)?,"openedAtMs":row.get::<_,Option<i64>>(6)?,
               "closedAtMs":row.get::<_,Option<i64>>(7)?,"capabilities":parse_optional_json(row.get::<_,Option<String>>(8)?),
               "capabilityHash":row.get::<_,Option<String>>(9)?,"schemaHash":row.get::<_,Option<String>>(10)?,
-              "closeReason":row.get::<_,Option<String>>(11)?}}),
+              "closeReason":row.get::<_,Option<String>>(11)?,"eventCount":row.get::<_,Option<i64>>(12)?.unwrap_or(0),
+              "sequenceGapCount":row.get::<_,Option<i64>>(13)?.unwrap_or(0),"decodeErrorCount":row.get::<_,Option<i64>>(14)?.unwrap_or(0),
+              "unknownEventCount":row.get::<_,Option<i64>>(15)?.unwrap_or(0),"lastSourceSeq":row.get::<_,Option<i64>>(16)?,
+              "lastEventAtMs":row.get::<_,Option<i64>>(17)?,
+              "connectionDurationMs":match (row.get::<_,Option<i64>>(6)?,row.get::<_,Option<i64>>(7)?) { (Some(open),Some(close)) => Some(close.saturating_sub(open)), _ => None }},
+              "reconnectCount":row.get::<_,i64>(18)?,"totalConnectionDurationMs":row.get::<_,i64>(19)?}),
             )
         },
     )
+}
+
+async fn projects(State(state): State<ApiState>) -> Response {
+    let seq = state.database.max_event_seq().unwrap_or(0);
+    let rows = state.database.query_json(
+        "SELECT project_key,MIN(cwd),COUNT(*),SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END),
+              MAX(COALESCE(recency_at_ms,0)) FROM threads
+             GROUP BY project_key
+             ORDER BY MAX(COALESCE(recency_at_ms,0)) DESC,project_key",
+        &[],
+        |row| {
+            let key = match row.get::<_, Option<String>>(0)? {
+                Some(key) if !key.is_empty() => key,
+                _ => row
+                    .get::<_, Option<String>>(1)?
+                    .as_deref()
+                    .map(project_key)
+                    .unwrap_or_else(|| "unknown".to_string()),
+            };
+            Ok(json!({
+                "project":{"key":key,"name":project_name(&key),
+                  "path":row.get::<_,Option<String>>(1)?.unwrap_or_else(|| key.clone())},
+                "threadCount":row.get::<_,i64>(2)?,
+                "currentThreadCount":row.get::<_,i64>(3)?,
+                "lastRecencyAtMs":row.get::<_,i64>(4)?
+            }))
+        },
+    );
+    match rows {
+        Ok(rows) => Json(ApiEnvelope::new(seq, rows)).into_response(),
+        Err(error) => internal_error(error),
+    }
 }
 
 async fn blob(
@@ -285,6 +511,7 @@ async fn blob(
         end - start + 1
     };
     let stream = async_stream::stream! {
+        let _guard = ConsumerGuard::new();
         let _permit = permit;
         let mut file = tokio::fs::File::from_std(file);
         if let Err(error) = file.seek(std::io::SeekFrom::Start(start)).await {
@@ -338,37 +565,6 @@ async fn blob(
     })
 }
 
-fn parse_byte_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, ()> {
-    let Some(header) = header else {
-        return Ok(None);
-    };
-    let value = header.strip_prefix("bytes=").ok_or(())?;
-    if value.contains(',') || size == 0 {
-        return Err(());
-    }
-    let (start, end) = value.split_once('-').ok_or(())?;
-    if start.is_empty() {
-        let suffix = end.parse::<u64>().map_err(|_| ())?;
-        if suffix == 0 {
-            return Err(());
-        }
-        return Ok(Some((size.saturating_sub(suffix.min(size)), size - 1)));
-    }
-    let start = start.parse::<u64>().map_err(|_| ())?;
-    if start >= size {
-        return Err(());
-    }
-    let end = if end.is_empty() {
-        size - 1
-    } else {
-        end.parse::<u64>().map_err(|_| ())?.min(size - 1)
-    };
-    if end < start {
-        return Err(());
-    }
-    Ok(Some((start, end)))
-}
-
 async fn threads(State(state): State<ApiState>, Query(query): Query<ThreadQuery>) -> Response {
     match query_threads(&state, query) {
         Ok(response) => response,
@@ -386,7 +582,9 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
           recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
           forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
           history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
-          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE thread_key=?1",
+          sandbox_json,active_permission_profile_json,rule_version,project_key,base_instructions_json,dynamic_tools_json,
+          selected_capability_roots_json,memory_mode,subagent_history_start_ordinal,multi_agent_version,
+          context_window_json FROM threads WHERE thread_key=?1",
         &[&thread_key], thread_row,
     );
     match rows {
@@ -418,10 +616,26 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
                 })),
             ).unwrap_or_default();
             let coverage_summary = turn_coverage_summary(&state.database, &thread_key);
+            let pending_requests = state.database.query_json(
+                "SELECT source_id,epoch_id,request_id,request_type,state,request_event_seq,resolved_event_seq
+                 FROM pending_requests WHERE thread_key=?1 ORDER BY request_event_seq DESC LIMIT 100",
+                &[&thread_key], |row| Ok(json!({"sourceId":row.get::<_,String>(0)?,"epochId":row.get::<_,String>(1)?,
+                    "requestId":row.get::<_,String>(2)?,"requestType":row.get::<_,String>(3)?,"state":row.get::<_,String>(4)?,
+                    "requestEventSeq":row.get::<_,i64>(5)?,"resolvedEventSeq":row.get::<_,Option<i64>>(6)?})),
+            ).unwrap_or_default();
+            let projection_conflicts = state.database.query_json(
+                "SELECT conflict_id,entity_type,entity_key,field_name,live_event_seq,durable_event_seq,status,detected_at_ms,resolved_at_ms
+                 FROM projection_conflicts WHERE thread_key=?1 ORDER BY detected_at_ms DESC LIMIT 100",
+                &[&thread_key], |row| Ok(json!({"conflictId":row.get::<_,String>(0)?,"entityType":row.get::<_,String>(1)?,
+                    "entityKey":row.get::<_,String>(2)?,"fieldName":row.get::<_,String>(3)?,"liveEventSeq":row.get::<_,i64>(4)?,
+                    "durableEventSeq":row.get::<_,i64>(5)?,"status":row.get::<_,String>(6)?,
+                    "detectedAtMs":row.get::<_,i64>(7)?,"resolvedAtMs":row.get::<_,Option<i64>>(8)?})),
+            ).unwrap_or_default();
             Json(ApiEnvelope::new(
                 seq,
                 json!({
                     "thread":thread,"sources":sources,"coverageSummary":coverage_summary,
+                    "pendingRequests":pending_requests,"projectionConflicts":projection_conflicts,
                     "relations":{"parent":parent,"forkedFrom":forked_from,"children":children},
                     "diagnostics":diagnostics(&state.database,&thread_key)
                 }),
@@ -538,21 +752,12 @@ struct ThreadQuery {
     cursor: Option<String>,
     limit: Option<usize>,
     source_id: Option<String>,
+    project: Option<String>,
     runtime_status: Option<String>,
     capture_completeness: Option<String>,
     archived: Option<bool>,
     q: Option<String>,
     sort: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ThreadCursor {
-    endpoint: String,
-    query_fingerprint: String,
-    as_of_event_seq: i64,
-    last_recency_at_ms: i64,
-    last_thread_key: String,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -569,28 +774,6 @@ struct ItemQuery {
     limit: Option<usize>,
     turn_id: Option<String>,
     item_type: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PageCursor {
-    endpoint: String,
-    query_fingerprint: String,
-    as_of_event_seq: i64,
-    last_sort: i64,
-    last_key: String,
-    last_secondary: Option<String>,
-}
-
-enum CursorFailure {
-    Invalid(String),
-    Internal(anyhow::Error),
-}
-
-impl From<anyhow::Error> for CursorFailure {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Internal(value)
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -632,7 +815,16 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
               "default":"off","transport":"websocket_over_unix_socket","readOnly":true,
               "serverRequests":"persist_without_response"},
             "streams":{"sse":true,"webSocket":true},"mutationRoutes":[]
+            ,"effectiveCapture":state.settings["capture"],"effectiveStorage":state.settings["storage"]
         }),
+    ))
+    .into_response()
+}
+
+async fn settings(State(state): State<ApiState>) -> Response {
+    Json(ApiEnvelope::new(
+        state.database.max_event_seq().unwrap_or(0),
+        state.settings.as_ref().clone(),
     ))
     .into_response()
 }
@@ -670,6 +862,7 @@ async fn sse_stream(
         _ => {}
     }
     let database = state.database.clone();
+    let mut committed = state.writer.subscribe();
     let filters = StreamFilters {
         thread_keys: query.thread_key.into_iter().collect(),
         source_ids: query.source_id.into_iter().collect(),
@@ -684,8 +877,15 @@ async fn sse_stream(
                 &[&cursor], event_row,
             ).unwrap_or_default();
             if rows.is_empty() {
-                tokio::time::sleep(Duration::from_millis(750)).await;
-                continue;
+                match committed.recv().await {
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        SLOW_CONSUMER_DROPS.fetch_add(1, Ordering::Relaxed);
+                        yield Ok::<Event, Infallible>(Event::default().event("error").json_data(json!({"code":"SLOW_CONSUMER","lastEventSeq":cursor})).unwrap());
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
             for row in rows {
                 cursor = row["eventSeq"].as_i64().unwrap_or(cursor);
@@ -705,11 +905,17 @@ async fn sse_stream(
 }
 
 async fn ws_stream(ws: WebSocketUpgrade, State(state): State<ApiState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.database))
+    let committed = state.writer.subscribe();
+    ws.on_upgrade(move |socket| handle_socket(socket, state.database, committed))
         .into_response()
 }
 
-async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    database: Arc<Database>,
+    mut committed: broadcast::Receiver<i64>,
+) {
+    let _guard = ConsumerGuard::new();
     let Ok(Some(Ok(Message::Text(text)))) =
         tokio::time::timeout(Duration::from_secs(5), socket.next()).await
     else {
@@ -752,7 +958,8 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
     {
         return;
     }
-    let mut last_heartbeat = tokio::time::Instant::now();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    heartbeat.tick().await;
     loop {
         let rows = database.query_json(
             "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
@@ -770,15 +977,24 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
                 return;
             }
         }
-        if last_heartbeat.elapsed() >= Duration::from_secs(15) {
-            if !send_ws_value(&mut socket, json!({"type":"heartbeat","eventSeq":cursor})).await {
-                close_slow_consumer(&mut socket, cursor).await;
-                return;
-            }
-            last_heartbeat = tokio::time::Instant::now();
-        }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(750)) => {},
+            event = committed.recv() => {
+                match event {
+                    Ok(_) => {},
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        SLOW_CONSUMER_DROPS.fetch_add(1, Ordering::Relaxed);
+                        close_slow_consumer(&mut socket, cursor).await;
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            },
+            _ = heartbeat.tick() => {
+                if !send_ws_value(&mut socket, json!({"type":"heartbeat","eventSeq":cursor})).await {
+                    close_slow_consumer(&mut socket, cursor).await;
+                    return;
+                }
+            },
             incoming = socket.next() => {
                 match incoming {
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
@@ -787,50 +1003,6 @@ async fn handle_socket(mut socket: WebSocket, database: Arc<Database>) {
             }
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WsSubscribe {
-    #[serde(rename = "type")]
-    kind: String,
-    after_event_seq: Option<i64>,
-    #[serde(default)]
-    filters: StreamFilters,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamFilters {
-    #[serde(default)]
-    thread_keys: Vec<String>,
-    #[serde(default)]
-    source_ids: Vec<String>,
-    #[serde(default)]
-    methods: Vec<String>,
-}
-
-impl StreamFilters {
-    fn is_valid(&self) -> bool {
-        [&self.thread_keys, &self.source_ids, &self.methods]
-            .into_iter()
-            .all(|values| {
-                values.len() <= 100
-                    && values
-                        .iter()
-                        .all(|value| !value.is_empty() && value.len() <= 256)
-            })
-    }
-
-    fn matches(&self, event: &Value) -> bool {
-        matches_filter(&self.thread_keys, event["threadKey"].as_str())
-            && matches_filter(&self.source_ids, event["sourceId"].as_str())
-            && matches_filter(&self.methods, event["method"].as_str())
-    }
-}
-
-fn matches_filter(values: &[String], actual: Option<&str>) -> bool {
-    values.is_empty() || actual.is_some_and(|actual| values.iter().any(|value| value == actual))
 }
 
 async fn send_ws_value(socket: &mut WebSocket, value: Value) -> bool {
@@ -913,12 +1085,18 @@ fn query_threads(state: &ApiState, query: ThreadQuery) -> Result<Response, Curso
           recency_at_ms,last_message_preview,last_event_seq,parent_thread_id,parent_thread_key,forked_from_id,
           forked_from_thread_key,agent_nickname,agent_role,agent_path,originator,cli_version,thread_source,
           history_mode,history_base_json,model_provider,reasoning_effort,approval_policy,approvals_reviewer_json,
-          sandbox_json,active_permission_profile_json,rule_version FROM threads WHERE last_event_seq <= ?",
+          sandbox_json,active_permission_profile_json,rule_version,project_key,base_instructions_json,dynamic_tools_json,
+          selected_capability_roots_json,memory_mode,subagent_history_start_ordinal,multi_agent_version,
+          context_window_json FROM threads WHERE last_event_seq <= ?",
     );
     let mut parameters = vec![SqlValue::Integer(as_of)];
     if let Some(source_id) = query.source_id {
         sql.push_str(" AND store_source_id = ?");
         parameters.push(SqlValue::Text(source_id));
+    }
+    if let Some(project) = query.project {
+        sql.push_str(" AND project_key = ?");
+        parameters.push(SqlValue::Text(project));
     }
     if let Some(status) = query.runtime_status {
         sql.push_str(" AND runtime_status = ?");
@@ -1171,103 +1349,24 @@ fn query_search(state: &ApiState, query: SearchQuery) -> Result<Response, Cursor
     Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
 }
 
-fn decode_bound_page_cursor(
-    encoded: Option<&str>,
-    endpoint: &str,
-    fingerprint: &str,
-    token: &str,
-) -> Result<Option<PageCursor>, CursorFailure> {
-    let Some(encoded) = encoded else {
-        return Ok(None);
-    };
-    let cursor = decode_page_cursor(encoded, token)
-        .map_err(|error| CursorFailure::Invalid(error.to_string()))?;
-    if cursor.endpoint != endpoint || cursor.query_fingerprint != fingerprint {
-        return Err(CursorFailure::Invalid(
-            "cursor does not match the current query".into(),
-        ));
-    }
-    Ok(Some(cursor))
-}
-
-fn query_fingerprint(value: &Value) -> String {
-    blake3::hash(value.to_string().as_bytes())
-        .to_hex()
-        .to_string()
-}
-
-fn thread_query_fingerprint(query: &ThreadQuery) -> String {
-    let canonical = json!({
-        "sourceId":query.source_id,
-        "runtimeStatus":query.runtime_status,
-        "captureCompleteness":query.capture_completeness,
-        "archived":query.archived,
-        "q":query.q,
-        "sort":query.sort.as_deref().unwrap_or("recency_desc")
-    });
-    blake3::hash(canonical.to_string().as_bytes())
-        .to_hex()
-        .to_string()
-}
-
-fn cursor_key(token: &str) -> Result<[u8; 32]> {
-    let bytes = URL_SAFE_NO_PAD.decode(token)?;
-    bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("bearer token must decode to 32 bytes"))
-}
-
-fn encode_cursor(cursor: &ThreadCursor, token: &str) -> Result<String> {
-    let payload = serde_json::to_vec(cursor)?;
-    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    Ok(format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(payload),
-        URL_SAFE_NO_PAD.encode(signature.as_bytes())
-    ))
-}
-
-fn decode_cursor(value: &str, token: &str) -> Result<ThreadCursor> {
-    let (payload, signature) = value
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
-    let payload = URL_SAFE_NO_PAD.decode(payload)?;
-    let signature = URL_SAFE_NO_PAD.decode(signature)?;
-    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    if !constant_time_eq(&signature, expected.as_bytes()) {
-        anyhow::bail!("cursor signature is invalid");
-    }
-    Ok(serde_json::from_slice(&payload)?)
-}
-
-fn encode_page_cursor(cursor: &PageCursor, token: &str) -> Result<String> {
-    let payload = serde_json::to_vec(cursor)?;
-    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    Ok(format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(payload),
-        URL_SAFE_NO_PAD.encode(signature.as_bytes())
-    ))
-}
-
-fn decode_page_cursor(value: &str, token: &str) -> Result<PageCursor> {
-    let (payload, signature) = value
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
-    let payload = URL_SAFE_NO_PAD.decode(payload)?;
-    let signature = URL_SAFE_NO_PAD.decode(signature)?;
-    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    if !constant_time_eq(&signature, expected.as_bytes()) {
-        anyhow::bail!("cursor signature is invalid");
-    }
-    Ok(serde_json::from_slice(&payload)?)
-}
-
-fn search_expression(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
 fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let cwd: Option<String> = row.get(4)?;
+    let project_key_value: Option<String> = row.get(36)?;
+    let key = project_key_value
+        .filter(|value| !value.is_empty())
+        .or_else(|| cwd.as_deref().map(project_key))
+        .unwrap_or_else(|| "unknown".to_string());
+    let name = project_name(&key);
+    let path = cwd.clone().unwrap_or_else(|| key.clone());
+
+    let base_instructions = parse_optional_json(row.get(37)?);
+    let dynamic_tools = parse_optional_json(row.get(38)?);
+    let selected_capability_roots = parse_optional_json(row.get(39)?);
+    let memory_mode: Option<String> = row.get(40)?;
+    let subagent_history_start_ordinal: Option<i64> = row.get(41)?;
+    let multi_agent_version: Option<String> = row.get(42)?;
+    let context_window = parse_optional_json(row.get(43)?);
+
     Ok(json!({
         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,"storeSourceId":row.get::<_,String>(2)?,
         "name":row.get::<_,Option<String>>(3)?,"cwdDisplay":row.get::<_,Option<String>>(4)?,"source":row.get::<_,Option<String>>(5)?,
@@ -1285,18 +1384,71 @@ fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "modelProvider":row.get::<_,Option<String>>(29)?,"reasoningEffort":row.get::<_,Option<String>>(30)?,
         "approvalPolicy":row.get::<_,Option<String>>(31)?,"approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
         "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
-        "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?
+        "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?,
+        "project":{"key":key,"name":name,"path":path},
+        "context":{
+            "session":{
+                "baseInstructions":base_instructions,
+                "dynamicTools":dynamic_tools,
+                "selectedCapabilityRoots":selected_capability_roots,
+                "memoryMode":memory_mode,
+                "subagentHistoryStartOrdinal":subagent_history_start_ordinal,
+                "multiAgentVersion":multi_agent_version,
+                "contextWindow":context_window,
+                "agentNickname":row.get::<_,Option<String>>(21)?,
+                "agentRole":row.get::<_,Option<String>>(22)?,
+                "agentPath":row.get::<_,Option<String>>(23)?,
+                "originator":row.get::<_,Option<String>>(24)?,
+                "cliVersion":row.get::<_,Option<String>>(25)?,
+                "threadSource":row.get::<_,Option<String>>(26)?,
+                "historyMode":row.get::<_,Option<String>>(27)?,
+                "historyBase":parse_optional_json(row.get::<_,Option<String>>(28)?),
+                "modelProvider":row.get::<_,Option<String>>(29)?
+            },
+            "runtime":{
+                "cwd":cwd,
+                "source":row.get::<_,Option<String>>(5)?,
+                "model":row.get::<_,Option<String>>(6)?,
+                "reasoningEffort":row.get::<_,Option<String>>(30)?,
+                "approvalPolicy":row.get::<_,Option<String>>(31)?,
+                "approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
+                "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
+                "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?)
+            }
+        }
     }))
 }
 
 fn turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let execution_context = parse_optional_json(row.get::<_, Option<String>>(7)?);
+    let context = turn_context_view(&execution_context);
     Ok(json!({
         "turnId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,
         "captureCompleteness":row.get::<_,String>(2)?,"completenessReasons":parse_json(row.get::<_,String>(3)?),
         "coverage":parse_json(row.get::<_,String>(4)?),"startedAtMs":row.get::<_,Option<i64>>(5)?,
-        "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":parse_optional_json(row.get::<_,Option<String>>(7)?),
+        "completedAtMs":row.get::<_,Option<i64>>(6)?,"executionContext":execution_context,
+        "context":context,
         "raw":parse_json(row.get::<_,String>(8)?),"lastEventSeq":row.get::<_,i64>(9)?
     }))
+}
+
+fn turn_context_view(raw: &Value) -> Value {
+    json!({
+        "cwd":raw.get("cwd"),
+        "workspaceRoots":raw.get("workspace_roots"),
+        "currentDate":raw.get("current_date"),
+        "timezone":raw.get("timezone"),
+        "approvalPolicy":raw.get("approval_policy"),
+        "approvalsReviewer":raw.get("approvals_reviewer"),
+        "sandbox":raw.get("sandbox_policy"),
+        "permissionProfile":raw.get("permission_profile"),
+        "network":raw.get("network"),
+        "model":raw.get("model"),
+        "effort":raw.get("effort"),
+        "personality":raw.get("personality"),
+        "collaborationMode":raw.get("collaboration_mode"),
+        "multiAgentVersion":raw.get("multi_agent_version")
+    })
 }
 
 fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -1379,47 +1531,55 @@ fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
 fn diagnostics(database: &Database, thread_key: &str) -> Value {
     let rows = database.query_json(
         "SELECT SUM(CASE WHEN decode_status='error' THEN 1 ELSE 0 END),
-          SUM(CASE WHEN decode_status='unknown' THEN 1 ELSE 0 END) FROM raw_events WHERE thread_key=?1",
+          SUM(CASE WHEN decode_status='unknown' THEN 1 ELSE 0 END),
+          (SELECT COUNT(*) FROM projection_conflicts c WHERE c.thread_key=?1 AND c.status='active')
+          FROM raw_events WHERE thread_key=?1",
         &[&thread_key], |row| Ok(json!({"decodeErrors":row.get::<_,Option<i64>>(0)?.unwrap_or(0),
-            "unknownVariants":row.get::<_,Option<i64>>(1)?.unwrap_or(0),"conflicts":0})),
+            "unknownVariants":row.get::<_,Option<i64>>(1)?.unwrap_or(0),"conflicts":row.get::<_,i64>(2)?})),
     ).unwrap_or_default();
     rows.into_iter()
         .next()
         .unwrap_or_else(|| json!({"decodeErrors":0,"unknownVariants":0,"conflicts":0}))
 }
 
-fn parse_json(value: String) -> Value {
-    serde_json::from_str(&value).unwrap_or(Value::Null)
-}
-fn parse_optional_json(value: Option<String>) -> Value {
-    value.map(parse_json).unwrap_or(Value::Null)
-}
-
 fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
+    let retryable = matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    );
     (
         status,
-        Json(json!({"apiVersion":"v1","error":{"code":code,"message":message,"details":{}}})),
+        Json(
+            json!({"apiVersion":"v1","error":{"code":code,"message":message,"details":{},
+          "requestId":uuid::Uuid::now_v7().to_string(),"retryable":retryable}}),
+        ),
     )
         .into_response()
 }
 
 fn internal_error(error: anyhow::Error) -> Response {
     tracing::error!(error = %error, "API query failed");
+    let busy = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(error,
+            rusqlite::Error::SqliteFailure(code, _) if matches!(code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+            })
+    });
+    if busy {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OBSERVER_BUSY",
+            "Observer database is busy; retry later",
+        );
+    }
     api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_ERROR",
         "internal query error",
     )
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
 }
 
 #[cfg(test)]
@@ -1433,6 +1593,27 @@ mod tests {
         assert!(constant_time_eq(b"token", b"token"));
         assert!(!constant_time_eq(b"token", b"other"));
         assert!(!constant_time_eq(b"token", b"token-long"));
+    }
+
+    #[tokio::test]
+    async fn errors_use_stable_non_leaking_contract() -> Result<()> {
+        let response = api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OBSERVER_BUSY",
+            "retry later",
+        );
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["apiVersion"], "v1");
+        assert_eq!(body["error"]["code"], "OBSERVER_BUSY");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(
+            body["error"]["requestId"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(body["error"]["details"], json!({}));
+        Ok(())
     }
 
     #[test]
@@ -1472,12 +1653,15 @@ mod tests {
             )?;
         }
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let first = query_threads(
             &state,
@@ -1563,12 +1747,15 @@ mod tests {
         }
         transaction.commit()?;
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([6_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
 
         let started = std::time::Instant::now();
@@ -1640,12 +1827,15 @@ mod tests {
         )?;
         drop(connection);
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([8_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
 
         let first = query_turns(
@@ -1778,12 +1968,15 @@ mod tests {
             [],
         )?;
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let response = event_query(&state, 4, Some(10), None, None, None);
         assert_eq!(response.status(), StatusCode::GONE);
@@ -1821,12 +2014,15 @@ mod tests {
             [],
         )?;
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([5_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let snapshot = query_threads(&state, ThreadQuery::default()).map_err(cursor_test_error)?;
         let snapshot: Value =
@@ -1887,12 +2083,15 @@ mod tests {
         let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
         database.migrate()?;
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new("token".into()),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let mut headers = HeaderMap::new();
         headers.insert("last-event-id", HeaderValue::from_static("not-an-integer"));
@@ -1937,12 +2136,15 @@ mod tests {
         )?;
         drop(connection);
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new("token".into()),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
@@ -1982,12 +2184,15 @@ mod tests {
         )?;
         drop(connection);
         let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
         };
         let child = thread_detail(State(state.clone()), Path(child_key)).await;
         let child: Value =
@@ -2008,6 +2213,73 @@ mod tests {
             1
         );
         assert_eq!(parent["data"]["coverageSummary"]["turns"][0]["count"], 1);
+        assert_eq!(
+            parent["data"]["thread"]["project"]["key"],
+            "/demo/local-observer"
+        );
+        assert_eq!(
+            parent["data"]["thread"]["project"]["name"],
+            "local-observer"
+        );
+        assert_eq!(
+            parent["data"]["thread"]["context"]["session"]["baseInstructions"]["text"],
+            "# Project AGENTS.md\n\nKeep changes read-only."
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projects_group_threads_by_cwd_and_context_is_exposed() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = Config::default();
+        config.sources[0].codex_home =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex-home");
+        config.storage.database = temp.path().join("observer.sqlite");
+        config.storage.fingerprint_key_file = temp.path().join("fingerprint.key");
+        let database = Arc::new(Database::open(&config.storage.database)?);
+        database.migrate()?;
+        Importer::new(&config, database.as_ref())?.import_all()?;
+        let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            database,
+            token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            strict_origin: true,
+            allowed_origins: Arc::new(Vec::new()),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+            pairing_nonces: Arc::new(PairingNonceStore::default()),
+            settings: Arc::new(json!({})),
+        };
+        let response = projects(State(state.clone())).await;
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        let projects = body["data"].as_array().unwrap();
+        assert_eq!(projects.len(), 2);
+        let local = projects
+            .iter()
+            .find(|project| project["project"]["key"] == "/demo/local-observer")
+            .unwrap();
+        assert_eq!(local["threadCount"], 2);
+        assert_eq!(local["currentThreadCount"], 2);
+
+        let filtered = query_threads(
+            &state,
+            ThreadQuery {
+                project: Some("/demo/local-observer".into()),
+                ..ThreadQuery::default()
+            },
+        )
+        .map_err(cursor_test_error)?;
+        let filtered: Value =
+            serde_json::from_slice(&axum::body::to_bytes(filtered.into_body(), usize::MAX).await?)?;
+        assert_eq!(filtered["data"].as_array().unwrap().len(), 2);
+        assert!(
+            filtered["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|thread| thread["project"]["key"] == "/demo/local-observer")
+        );
         Ok(())
     }
 

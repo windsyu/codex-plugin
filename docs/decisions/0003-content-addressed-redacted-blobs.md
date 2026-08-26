@@ -21,6 +21,8 @@ Rollout 和 App Server event 可能包含大型命令输出、diff、工具结�
 
 ## Consequences
 
+Schema 10 起使用 `known-secrets-v2`。除结构化 secret 外，URL token/signature、HTTP/MCP auth 与 credential/JWT/PAT 形态在 blob 决策前统一脱敏；明确的 image/audio base64 正文只留下 media type、估算大小和 keyed fingerprint marker。历史 v1 raw/blob/projection 不自动重写，health、Viewer 与 export 必须持续警告 legacy 数量。
+
 - blob rename 后 DB commit 前 crash 可能留下 orphan，但不会留下已提交的悬空引用；
 - projection rebuild 需要读取并校验 blob hash，缺失或篡改会 fail closed；
 - raw retention 后，只要 projection 仍引用 blob，文件继续保留；

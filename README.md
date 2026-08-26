@@ -4,27 +4,31 @@
 
 ## 已实现
 
-- plain `.jsonl` 从 checkpoint byte offset 流式续读，cold `.jsonl.zst` 按 logical ordinal 流式重放；每 500 条事务提交；
+- plain `.jsonl` 从 checkpoint byte offset 流式续读，cold `.jsonl.zst` 按 logical ordinal 流式重放；专用 DbWriter 按最多 100 event / 50ms 合并事务；
 - 文件系统 watcher 触发 200ms debounce rescan，并保留周期全量扫描兜底；
 - active / archived rollout 发现和重复导入幂等；
 - EOF 半行保留、坏 JSON 审计占位、unknown variant 无损保存；
 - 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
-- SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；
-- 已知 secret key、credential prefix 和环境变量值入库前脱敏；
+- SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；SessionMeta `base_instructions`、dynamic tools、capability roots、memory mode 与 context window 也作为线程背景上下文保存；
+- Web Viewer 按规范化 `cwd` 聚合项目，使用对话优先 Timeline；用户/助手消息保持主阅读流，命令、工具、文件、reasoning、usage 与兼容诊断按 Turn 折叠汇总；
+- Web Viewer 使用 Vite + Preact；Cookie 模式使用 SSE，bearer 模式安全降级为轮询；Markdown 经 DOMPurify 清洗，代码块按需注册 highlight.js 语言，脚本和本地文件链接不作为可执行内容；
+- redaction v2 在入库前处理 secret/header/MCP auth、URL token/signature，并以不可还原 marker 丢弃 image/audio base64 正文；
+- Thread completeness 从全部 Turn coverage 聚合，clean EOF、decode/unknown/disconnect 计数不会再被后续事件清零；
 - Thread、Turn、Item、relation、event、search、health、source 和 capabilities REST API；
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
 - Viewer 自动消费 Thread/Turn/Item/Search cursor 与 raw event sequence，不静默截断长时间线；
-- SSE 与 WebSocket committed-event 续传、Thread/source/method 过滤、心跳和慢消费者断开；SSE 支持 `Last-Event-ID`；
-- bearer token、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
+- 4096-event 有界 ingest 背压、512-slot CommittedEventBus，以及 SSE/WebSocket 的 DB replay → live 无缝切换和慢消费者隔离；
+- `serve` 就绪时打印五分钟单次配对 URL，兑换 HttpOnly Cookie；同时保留 API bearer、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
 - `serve`、`import`、严格只读 `doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
-- `export` 输出独占创建的 `0600` 脱敏 JSON；`purge --observer-copy-only --yes` 删除并持续抑制本地副本，写入无正文审计；
+- `export` 在 writer lock 前分流，用只读 WAL snapshot 输出独占创建的 `0600` 脱敏 JSON；daemon 运行中也可导出；
 - 超过 `inline_blob_bytes` 的已脱敏 raw JSON 使用内容寻址 blob 原子落盘；投影保存引用，支持 orphan sweep、引用感知 retention 和安全 Range 下载；
-- Observer 数据库 writer 使用进程级 advisory lock，拒绝并发写实例；
-- 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、`observe_new` / `attach_loaded`、断线抖动退避重连；
+- Observer 数据库 writer 使用进程级 advisory lock，持有唯一写 connection；查询使用最多 8 条 read-only connection；
+- Observer 数据目录为 `0700`，数据库/WAL/SHM、lock、token、key 和 blob 为 `0600`；当前用户拥有的旧宽松 mode 会自动收紧；
+- 可选 App Server Live Adapter：Unix WebSocket、稳定版 initialize、周期 archived/non-archived list/read 对账、`observe_new` / `attach_loaded`、断线抖动退避重连；破坏性协议不兼容会 fail closed 到 store-only；
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
-- live epoch、capability fingerprint、pending request 和断线 stale 状态持久化；关闭时对已附着 Thread 执行 unsubscribe 和 WebSocket close handshake；
+- live epoch 连续性/连接统计、capability/schema fingerprint、pending/resolved request 和断线 stale 状态持久化；durable/live 不一致会写入 `projection_conflicts`；
 - 合成 fixture，不读取或提交真实用户 rollout；
 - 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
@@ -35,12 +39,19 @@
 需要 Rust 1.95 或兼容版本：
 
 ```bash
+cd web
+npm install
+npm test
+npm run test:e2e
+npm run build
+cd ..
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
 测试只使用临时目录和 `fixtures/` 中的合成数据，不会写入 `~/.codex`。
+`cargo build` 会检查 `web/dist/index.html` 是否已生成；缺失时会提示先完成前端构建。
 发布前自动化、release E2E、安全与容量冒烟结果见 [V1 验证记录](docs/v1-validation.md)。
 
 ## 配置
@@ -60,6 +71,8 @@ cp observer.example.toml observer.toml
 
 所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind；live 仅支持当前用户拥有、权限不宽于 `0600` 且位于私有目录中的直接 Unix socket。
 
+`capture.ingest_queue_events` 与 `capture.api_consumer_queue_events` 默认分别为 4096 和 512。`keep_reasoning=false` 会只保留 reasoning 身份与 policy marker；`keep_raw_json=false` 会保留 raw event 行与 checkpoint，但不持久化 raw 正文，projection 仍使用入库前的已脱敏内存结构。`delta_retention_days` 独立控制 transient delta，不再沿用普通 raw retention。
+
 需要显式启用 live preview 时，在对应 source 中配置：
 
 ```toml
@@ -67,7 +80,7 @@ app_server_socket = "~/.codex/app-server-control/app-server-control.sock"
 live_mode = "observe_new" # 或 attach_loaded
 ```
 
-`observe_new` 只观察连接后出现的 Thread；`attach_loaded` 还会分页读取 loaded Thread 并逐一调用 `thread/resume`。两种模式都不会发送 approval、question、turn 或其他控制响应。
+两种模式每 `max(scan_interval_seconds, 30s)` 分别对 archived/non-archived Thread 做 list/read 对账；`attach_loaded` 还会复查 loaded 集合，并且只对该连接首次发现的 loaded Thread 调用 `thread/resume`。两种模式都不会发送 approval、question、turn 或其他控制响应。
 
 ## 使用
 
@@ -90,7 +103,15 @@ cargo run -- purge --thread '<threadKey>' --observer-copy-only --yes
 cargo run -- serve
 ```
 
-然后打开 `http://127.0.0.1:4765`，粘贴 `observer-data/token` 中的 bearer token。token 和 fingerprint key 首次运行时生成，Unix 权限为 `0600`。
+服务成功监听后会直接打印 `Viewer: http://127.0.0.1:4765/#pair=...`。打开后，Viewer 将五分钟有效、单次使用的配对码兑换为 30 天 `HttpOnly; SameSite=Strict` Cookie，并立即清除 fragment；URL 不包含长期 bearer token。
+
+如果启动链接已经过期，可在另一个终端重新生成（命令只打印，不自动打开）：
+
+```bash
+cargo run -- open
+```
+
+Bearer token 仍保留给 CLI/API 和 Viewer 高级故障恢复；token 轮换会立即令既有 Cookie 失效。token 和 fingerprint key 首次运行时生成，Unix 权限为 `0600`。
 
 使用 API：
 
@@ -111,11 +132,12 @@ cargo run -- --config fixtures/observer.fixture.toml serve
 
 ## API
 
-V1 当前注册的接口全部为 `GET`：
+V1 业务查询接口为 `GET`；唯一 POST 是本机 Viewer 的一次性配对兑换：
 
 ```text
 /v1/health
 /v1/sources
+/v1/projects
 /v1/threads
 /v1/threads/{threadKey}
 /v1/threads/{threadKey}/turns
@@ -125,11 +147,13 @@ V1 当前注册的接口全部为 `GET`：
 /v1/blobs/{blobId}
 /v1/search?q=...
 /v1/meta/capabilities
+/v1/meta/settings
 /v1/stream
 /v1/stream/ws
+/v1/auth/pair (POST)
 ```
 
-`/v1/threads`、`/turns`、`/items` 与 `/search` 使用不透明的签名 `cursor`；客户端应原样传回响应中的 `nextCursor`。`items` 还支持 `turnId`、`itemType` 筛选。游标不能跨端点、Thread 或筛选条件复用。
+`/v1/threads`、`/turns`、`/items` 与 `/search` 使用不透明的签名 `cursor`；客户端应原样传回响应中的 `nextCursor`。`items` 还支持 `turnId`、`itemType` 筛选，`threads` 支持 `project=<projectKey>` 项目筛选。游标不能跨端点、Thread 或筛选条件复用。
 
 WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 
@@ -142,10 +166,11 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 ## 安全边界
 
 - Observer 只读打开 Codex rollout，不修改 Codex SQLite、rollout 或 writer lock；
-- Web Viewer 仅渲染已脱敏副本，JSON 使用 `textContent`，不执行 Markdown、HTML、SVG 或 ANSI；
+- Web Viewer 仅渲染已脱敏副本；Markdown 经过 DOMPurify 清洗，禁止脚本/iframe/style 与本地文件链接，JSON 仍使用纯文本展示；
 - blob 路径完全由服务端生成，下载强制 attachment，单 Range、并发上限 4；文件使用 `O_NOFOLLOW` 打开；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
-- API Router 不存在 POST/PUT/PATCH/DELETE 业务路由；
+- redaction v2 不自动重写历史 v1 记录；health、Viewer 和 export 会报告 legacy record 警告；
+- API 不存在控制 Codex 的 mutation 路由；`POST /v1/auth/pair` 只兑换 Observer 会话 Cookie；
 - Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；
 - App Server transport 仍为官方实验能力，因此默认关闭，协议不兼容时退回 store-only。
 

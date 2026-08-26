@@ -1,12 +1,19 @@
-mod api;
+#![recursion_limit = "256"]
+
+#[cfg(test)]
+mod architecture;
+mod clock;
 mod config;
-mod db;
+mod credentials;
+mod domain;
+mod http;
 mod ingest;
 mod instance_lock;
 mod live;
-mod model;
-mod redact;
+mod permissions;
+mod store;
 mod watcher;
+mod writer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +25,11 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::credentials::load_or_create_token;
 use crate::ingest::Importer;
 use crate::instance_lock::InstanceLock;
+use crate::store::Database;
+use crate::writer::WriterHandle;
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-observerd", version, about)]
@@ -57,6 +66,8 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Print a five-minute, single-use Viewer pairing link.
+    Open,
     /// Permanently suppress and delete one local Observer thread copy.
     Purge {
         #[arg(long)]
@@ -72,6 +83,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    permissions::set_private_umask();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -83,8 +95,36 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config)?;
     config.validate()?;
     if let Command::Doctor { json } = &cli.command {
-        let report = Database::doctor_read_only(&config)?;
+        let mut report = Database::doctor_read_only(&config)?;
+        for (source, diagnosis) in config.sources.iter().zip(report.sources.iter_mut()) {
+            diagnosis.live_socket_status = live::doctor_probe(source).await;
+            if diagnosis
+                .live_socket_status
+                .starts_with("incompatible_or_unreachable")
+            {
+                report.status = "degraded".into();
+            }
+        }
         print_doctor(report, *json)?;
+        return Ok(());
+    }
+    if matches!(cli.command, Command::Open) {
+        let token = load_or_create_token(&config.server.bearer_token_file)?;
+        println!(
+            "{}",
+            http::generate_pairing_url(config.server.bind, &token, chrono::Utc::now().timestamp(),)?
+        );
+        return Ok(());
+    }
+    if let Command::Export { thread, output } = &cli.command {
+        let output = safe_export_output(&config, output)?;
+        let database = Database::open_read_only_with_blobs(
+            config.database_path(),
+            &config.storage.blob_dir,
+            config.capture.inline_blob_bytes,
+        )?;
+        let report = database.export_thread(thread, &output)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     if let Command::Purge {
@@ -110,6 +150,12 @@ async fn main() -> Result<()> {
         config.capture.inline_blob_bytes,
     )?);
     database.migrate()?;
+    let writer = WriterHandle::start(
+        database.clone(),
+        config.capture.ingest_queue_events,
+        128,
+        config.capture.api_consumer_queue_events,
+    )?;
     let swept = database.sweep_orphan_blobs(60 * 60 * 1000)?;
     if swept > 0 {
         info!(files = swept, "removed orphan blob files");
@@ -117,7 +163,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Import => {
-            let report = Importer::new(&config, database.as_ref())?.import_all()?;
+            let report =
+                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Doctor { .. } => unreachable!("doctor exits before writer initialization"),
@@ -128,16 +175,14 @@ async fn main() -> Result<()> {
         Command::Retention { apply } => {
             let report = database.run_retention(
                 config.storage.raw_event_retention_days,
+                config.storage.delta_retention_days,
                 config.storage.blob_retention_days,
                 apply,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Export { thread, output } => {
-            let output = safe_export_output(&config, &output)?;
-            let report = database.export_thread(&thread, &output)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
+        Command::Export { .. } => unreachable!("export exits before writer initialization"),
+        Command::Open => unreachable!("open exits before writer initialization"),
         Command::Purge {
             thread,
             observer_copy_only: _,
@@ -147,7 +192,8 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {
-            let initial = Importer::new(&config, database.as_ref())?.import_all()?;
+            let initial =
+                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
             info!(
                 files = initial.files_scanned,
                 events = initial.events_inserted,
@@ -155,7 +201,8 @@ async fn main() -> Result<()> {
             );
 
             let (_watcher, mut rescan_hints) = watcher::RolloutWatcher::start(&config)?;
-            let second = Importer::new(&config, database.as_ref())?.import_all()?;
+            let second =
+                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
             info!(
                 files = second.files_scanned,
                 events = second.events_inserted,
@@ -163,10 +210,11 @@ async fn main() -> Result<()> {
             );
             let (shutdown_sender, shutdown_receiver) = watch::channel(false);
             let live_handles =
-                live::spawn_enabled(&config, database.clone(), shutdown_receiver.clone())?;
+                live::spawn_enabled(&config, writer.clone(), shutdown_receiver.clone())?;
 
             let scan_config = config.clone();
             let scan_db = database.clone();
+            let scan_writer = writer.clone();
             tokio::spawn(async move {
                 let interval = scan_config.minimum_scan_interval();
                 let mut ticker = tokio::time::interval(Duration::from_secs(interval));
@@ -183,8 +231,9 @@ async fn main() -> Result<()> {
                     }
                     let cfg = scan_config.clone();
                     let db = scan_db.clone();
+                    let writer = scan_writer.clone();
                     match tokio::task::spawn_blocking(move || {
-                        Importer::new(&cfg, db.as_ref())?.import_all()
+                        Importer::new_with_writer(&cfg, db.as_ref(), &writer)?.import_all()
                     })
                     .await
                     {
@@ -204,7 +253,7 @@ async fn main() -> Result<()> {
                     let _ = signal_sender.send(true);
                 }
             });
-            api::serve(config, database, shutdown_receiver).await?;
+            http::serve(config, database, writer, shutdown_receiver).await?;
             let _ = shutdown_sender.send(true);
             for handle in live_handles {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -214,7 +263,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_doctor(report: crate::model::DoctorReport, json: bool) -> Result<()> {
+fn print_doctor(report: crate::domain::model::DoctorReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -222,10 +271,11 @@ fn print_doctor(report: crate::model::DoctorReport, json: bool) -> Result<()> {
         println!("database: {}", report.database);
         for source in report.sources {
             println!(
-                "source {}: {} ({})",
-                source.name, source.status, source.path
+                "source {}: {} ({}; live={})",
+                source.name, source.status, source.path, source.live_socket_status
             );
         }
+        println!("checks: {}", serde_json::to_string(&report.checks)?);
     }
     Ok(())
 }
