@@ -8,12 +8,14 @@ use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::middleware::{self as axum_middleware, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(test)]
 use base64::Engine;
+#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::types::Value as SqlValue;
@@ -27,13 +29,28 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::auth::{PairingNonceStore, redeem_pair_code, verify_session};
+mod auth;
+mod cursor;
+mod handlers;
+mod middleware;
+mod query;
+mod router;
+mod stream;
+
 use crate::config::Config;
-use crate::db::{Database, LATEST_SCHEMA_VERSION};
-use crate::ingest::load_or_create_token;
-use crate::model::ApiEnvelope;
-use crate::project::{project_key, project_name};
+use crate::credentials::load_or_create_token;
+use crate::domain::model::ApiEnvelope;
+use crate::domain::project::{project_key, project_name};
+use crate::store::{Database, LATEST_SCHEMA_VERSION};
 use crate::writer::WriterHandle;
+pub use auth::generate_pairing_url;
+use auth::{PairingNonceStore, redeem_pair_code, verify_session};
+use cursor::*;
+use handlers::parse_byte_range;
+use middleware::{constant_time_eq, cookie_value};
+use query::{parse_json, parse_optional_json, search_expression};
+use router::settings_snapshot;
+use stream::{StreamFilters, WsSubscribe};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -77,16 +94,8 @@ pub async fn serve(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let token = load_or_create_token(&config.server.bearer_token_file)?;
-    let settings_snapshot = json!({
-        "server":{"bind":config.server.bind.to_string(),"transport":"loopback_http","strictOrigin":config.server.strict_origin},
-        "capture":{"maxRawEventBytes":config.capture.max_raw_event_bytes,"inlineBlobBytes":config.capture.inline_blob_bytes,
-          "keepReasoning":config.capture.keep_reasoning,"keepRawJson":config.capture.keep_raw_json,
-          "ingestQueueEvents":config.capture.ingest_queue_events,"apiConsumerQueueEvents":config.capture.api_consumer_queue_events},
-        "storage":{"rawEventRetentionDays":config.storage.raw_event_retention_days,"deltaRetentionDays":config.storage.delta_retention_days,
-          "blobRetentionDays":config.storage.blob_retention_days},
-        "sources":config.sources.iter().map(|source| json!({"name":source.name,"liveMode":source.live_mode,
-          "scanIntervalSeconds":source.scan_interval_seconds})).collect::<Vec<_>>()
-    });
+    let pairing_token = token.clone();
+    let settings_snapshot = settings_snapshot(&config);
     let state = ApiState {
         database,
         token: Arc::new(token),
@@ -121,7 +130,10 @@ pub async fn serve(
         .route("/meta/settings", get(settings))
         .route("/stream", get(sse_stream))
         .route("/stream/ws", get(ws_stream))
-        .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
+        .route_layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            authorize,
+        ));
 
     let app = Router::new()
         .route("/", get(index))
@@ -135,10 +147,17 @@ pub async fn serve(
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn(security_headers));
+        .layer(axum_middleware::from_fn(security_headers));
 
     let listener = TcpListener::bind(config.server.bind).await?;
-    tracing::info!(address = %config.server.bind, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready");
+    let bound_address = listener.local_addr()?;
+    let viewer_url = generate_pairing_url(
+        bound_address,
+        &pairing_token,
+        chrono::Utc::now().timestamp(),
+    )?;
+    println!("Viewer: {viewer_url}");
+    tracing::info!(address = %bound_address, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready; open the printed single-use Viewer URL");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             while !*shutdown.borrow() {
@@ -260,13 +279,6 @@ async fn pair_auth(
         .expect("session cookie contains only base64url characters"),
     );
     response
-}
-
-fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
-    cookies.split(';').find_map(|cookie| {
-        let (key, value) = cookie.trim().split_once('=')?;
-        (key == name).then_some(value)
-    })
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
@@ -553,37 +565,6 @@ async fn blob(
     })
 }
 
-fn parse_byte_range(header: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, ()> {
-    let Some(header) = header else {
-        return Ok(None);
-    };
-    let value = header.strip_prefix("bytes=").ok_or(())?;
-    if value.contains(',') || size == 0 {
-        return Err(());
-    }
-    let (start, end) = value.split_once('-').ok_or(())?;
-    if start.is_empty() {
-        let suffix = end.parse::<u64>().map_err(|_| ())?;
-        if suffix == 0 {
-            return Err(());
-        }
-        return Ok(Some((size.saturating_sub(suffix.min(size)), size - 1)));
-    }
-    let start = start.parse::<u64>().map_err(|_| ())?;
-    if start >= size {
-        return Err(());
-    }
-    let end = if end.is_empty() {
-        size - 1
-    } else {
-        end.parse::<u64>().map_err(|_| ())?.min(size - 1)
-    };
-    if end < start {
-        return Err(());
-    }
-    Ok(Some((start, end)))
-}
-
 async fn threads(State(state): State<ApiState>, Query(query): Query<ThreadQuery>) -> Response {
     match query_threads(&state, query) {
         Ok(response) => response,
@@ -779,16 +760,6 @@ struct ThreadQuery {
     sort: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ThreadCursor {
-    endpoint: String,
-    query_fingerprint: String,
-    as_of_event_seq: i64,
-    last_recency_at_ms: i64,
-    last_thread_key: String,
-}
-
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnQuery {
@@ -803,28 +774,6 @@ struct ItemQuery {
     limit: Option<usize>,
     turn_id: Option<String>,
     item_type: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PageCursor {
-    endpoint: String,
-    query_fingerprint: String,
-    as_of_event_seq: i64,
-    last_sort: i64,
-    last_key: String,
-    last_secondary: Option<String>,
-}
-
-enum CursorFailure {
-    Invalid(String),
-    Internal(anyhow::Error),
-}
-
-impl From<anyhow::Error> for CursorFailure {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Internal(value)
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1054,50 +1003,6 @@ async fn handle_socket(
             }
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WsSubscribe {
-    #[serde(rename = "type")]
-    kind: String,
-    after_event_seq: Option<i64>,
-    #[serde(default)]
-    filters: StreamFilters,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamFilters {
-    #[serde(default)]
-    thread_keys: Vec<String>,
-    #[serde(default)]
-    source_ids: Vec<String>,
-    #[serde(default)]
-    methods: Vec<String>,
-}
-
-impl StreamFilters {
-    fn is_valid(&self) -> bool {
-        [&self.thread_keys, &self.source_ids, &self.methods]
-            .into_iter()
-            .all(|values| {
-                values.len() <= 100
-                    && values
-                        .iter()
-                        .all(|value| !value.is_empty() && value.len() <= 256)
-            })
-    }
-
-    fn matches(&self, event: &Value) -> bool {
-        matches_filter(&self.thread_keys, event["threadKey"].as_str())
-            && matches_filter(&self.source_ids, event["sourceId"].as_str())
-            && matches_filter(&self.methods, event["method"].as_str())
-    }
-}
-
-fn matches_filter(values: &[String], actual: Option<&str>) -> bool {
-    values.is_empty() || actual.is_some_and(|actual| values.iter().any(|value| value == actual))
 }
 
 async fn send_ws_value(socket: &mut WebSocket, value: Value) -> bool {
@@ -1444,103 +1349,6 @@ fn query_search(state: &ApiState, query: SearchQuery) -> Result<Response, Cursor
     Ok(Json(ApiEnvelope::with_cursor(as_of, rows, next_cursor)).into_response())
 }
 
-fn decode_bound_page_cursor(
-    encoded: Option<&str>,
-    endpoint: &str,
-    fingerprint: &str,
-    token: &str,
-) -> Result<Option<PageCursor>, CursorFailure> {
-    let Some(encoded) = encoded else {
-        return Ok(None);
-    };
-    let cursor = decode_page_cursor(encoded, token)
-        .map_err(|error| CursorFailure::Invalid(error.to_string()))?;
-    if cursor.endpoint != endpoint || cursor.query_fingerprint != fingerprint {
-        return Err(CursorFailure::Invalid(
-            "cursor does not match the current query".into(),
-        ));
-    }
-    Ok(Some(cursor))
-}
-
-fn query_fingerprint(value: &Value) -> String {
-    blake3::hash(value.to_string().as_bytes())
-        .to_hex()
-        .to_string()
-}
-
-fn thread_query_fingerprint(query: &ThreadQuery) -> String {
-    let canonical = json!({
-        "sourceId":query.source_id,
-        "project":query.project,
-        "runtimeStatus":query.runtime_status,
-        "captureCompleteness":query.capture_completeness,
-        "archived":query.archived,
-        "q":query.q,
-        "sort":query.sort.as_deref().unwrap_or("recency_desc")
-    });
-    blake3::hash(canonical.to_string().as_bytes())
-        .to_hex()
-        .to_string()
-}
-
-fn cursor_key(token: &str) -> Result<[u8; 32]> {
-    let bytes = URL_SAFE_NO_PAD.decode(token)?;
-    bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("bearer token must decode to 32 bytes"))
-}
-
-fn encode_cursor(cursor: &ThreadCursor, token: &str) -> Result<String> {
-    let payload = serde_json::to_vec(cursor)?;
-    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    Ok(format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(payload),
-        URL_SAFE_NO_PAD.encode(signature.as_bytes())
-    ))
-}
-
-fn decode_cursor(value: &str, token: &str) -> Result<ThreadCursor> {
-    let (payload, signature) = value
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
-    let payload = URL_SAFE_NO_PAD.decode(payload)?;
-    let signature = URL_SAFE_NO_PAD.decode(signature)?;
-    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    if !constant_time_eq(&signature, expected.as_bytes()) {
-        anyhow::bail!("cursor signature is invalid");
-    }
-    Ok(serde_json::from_slice(&payload)?)
-}
-
-fn encode_page_cursor(cursor: &PageCursor, token: &str) -> Result<String> {
-    let payload = serde_json::to_vec(cursor)?;
-    let signature = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    Ok(format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(payload),
-        URL_SAFE_NO_PAD.encode(signature.as_bytes())
-    ))
-}
-
-fn decode_page_cursor(value: &str, token: &str) -> Result<PageCursor> {
-    let (payload, signature) = value
-        .split_once('.')
-        .ok_or_else(|| anyhow::anyhow!("cursor has an invalid envelope"))?;
-    let payload = URL_SAFE_NO_PAD.decode(payload)?;
-    let signature = URL_SAFE_NO_PAD.decode(signature)?;
-    let expected = blake3::keyed_hash(&cursor_key(token)?, &payload);
-    if !constant_time_eq(&signature, expected.as_bytes()) {
-        anyhow::bail!("cursor signature is invalid");
-    }
-    Ok(serde_json::from_slice(&payload)?)
-}
-
-fn search_expression(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
 fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let cwd: Option<String> = row.get(4)?;
     let project_key_value: Option<String> = row.get(36)?;
@@ -1734,13 +1542,6 @@ fn diagnostics(database: &Database, thread_key: &str) -> Value {
         .unwrap_or_else(|| json!({"decodeErrors":0,"unknownVariants":0,"conflicts":0}))
 }
 
-fn parse_json(value: String) -> Value {
-    serde_json::from_str(&value).unwrap_or(Value::Null)
-}
-fn parse_optional_json(value: Option<String>) -> Value {
-    value.map(parse_json).unwrap_or(Value::Null)
-}
-
 fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
     let retryable = matches!(
         status,
@@ -1779,16 +1580,6 @@ fn internal_error(error: anyhow::Error) -> Response {
         "INTERNAL_ERROR",
         "internal query error",
     )
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
 }
 
 #[cfg(test)]

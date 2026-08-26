@@ -15,11 +15,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, client_async};
 use uuid::Uuid;
 
+use crate::clock::now_ms;
 use crate::config::{Config, SourceConfig};
-use crate::db::{Database, classify_live_item, live_summary, now_ms};
-use crate::ingest::{load_or_create_key, stable_source_id, thread_key};
-use crate::model::{NormalizedEvent, OwnedIngestBatch};
-use crate::redact;
+use crate::credentials::load_or_create_key;
+use crate::domain::identity::{stable_source_id, thread_key};
+use crate::domain::live::{classify_live_item, live_summary};
+use crate::domain::model::{NormalizedEvent, OwnedIngestBatch};
+use crate::domain::redact;
+use crate::store::Database;
 use crate::writer::WriterHandle;
 
 trait LiveIngest {

@@ -1,22 +1,25 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::DateTime;
-use rand::RngCore;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::clock::now_ms;
 use crate::config::{Config, SourceConfig};
-use crate::db::{Database, classify_item, now_ms, summary_text};
-use crate::model::{ImportReport, NormalizedEvent, OwnedIngestBatch};
-use crate::permissions::{prepare_private_dir, prepare_private_file};
-use crate::redact;
+use crate::domain::classify::{classify_item, summary_text};
+use crate::domain::identity::{stable_source_id, thread_key};
+use crate::domain::model::{ImportReport, NormalizedEvent, OwnedIngestBatch};
+use crate::domain::normalize::parse_time_ms;
+use crate::domain::redact;
+use crate::ingest::io::thread_id_from_filename;
+use crate::ingest::keys::load_or_create_key;
+use crate::store::Database;
 use crate::writer::WriterHandle;
 
 pub struct Importer<'a> {
@@ -553,23 +556,6 @@ fn find_thread_identity(path: &Path, compressed: bool) -> Option<(String, Option
     None
 }
 
-fn thread_id_from_filename(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name
-        .strip_suffix(".zst")
-        .unwrap_or(name)
-        .strip_suffix(".jsonl")?;
-    for start in (0..stem.len()).rev() {
-        let Some(candidate) = stem.get(start..start.saturating_add(36)) else {
-            continue;
-        };
-        if Uuid::parse_str(candidate).is_ok() {
-            return Some(candidate.to_string());
-        }
-    }
-    stem.strip_prefix("rollout-").map(str::to_string)
-}
-
 fn update_current_turn_from_line(line: &[u8], current: &mut Option<String>) {
     if let Ok(raw) = serde_json::from_slice::<Value>(line)
         && let Some(payload) = raw.get("payload")
@@ -649,15 +635,6 @@ fn classify_phase(kind: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn stable_source_id(identity: &str) -> String {
-    URL_SAFE_NO_PAD
-        .encode(blake3::hash(format!("store\0{identity}\0{identity}").as_bytes()).as_bytes())
-}
-
-pub(crate) fn thread_key(source_id: &str, thread_id: &str) -> String {
-    URL_SAFE_NO_PAD.encode(format!("{source_id}\0{thread_id}"))
-}
-
 fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Result<String> {
     let mut identity = {
         #[cfg(unix)]
@@ -693,68 +670,12 @@ fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Resu
     Ok(identity)
 }
 
-pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
-    if let Some(parent) = path.parent() {
-        prepare_private_dir(parent, "fingerprint key")?;
-    }
-    if fs::symlink_metadata(path).is_ok() {
-        prepare_private_file(path, "fingerprint key")?;
-        let bytes =
-            fs::read(path).with_context(|| format!("read fingerprint key {}", path.display()))?;
-        return bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("fingerprint key must contain exactly 32 bytes"));
-    }
-    let mut key = [0_u8; 32];
-    rand::rng().fill_bytes(&mut key);
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("create fingerprint key {}", path.display()))?;
-    file.write_all(&key)?;
-    file.sync_all()?;
-    Ok(key)
-}
-
-pub fn load_or_create_token(path: &Path) -> Result<String> {
-    if let Some(parent) = path.parent() {
-        prepare_private_dir(parent, "bearer token")?;
-    }
-    if fs::symlink_metadata(path).is_ok() {
-        prepare_private_file(path, "bearer token")?;
-        return Ok(fs::read_to_string(path)?.trim().to_string());
-    }
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let token = URL_SAFE_NO_PAD.encode(bytes);
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    writeln!(file, "{token}")?;
-    file.sync_all()?;
-    Ok(token)
-}
-
-fn parse_time_ms(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| time.timestamp_millis())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    use crate::credentials::load_or_create_token;
     use tempfile::TempDir;
 
     fn test_config(temp: &TempDir) -> Config {

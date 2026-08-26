@@ -2,44 +2,47 @@ use std::collections::HashSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 
+use crate::clock::now_ms;
 use crate::config::Config;
-use crate::ingest::thread_key;
-use crate::model::{
+use crate::domain::classify::{classify_item, summary_text};
+use crate::domain::identity::thread_key;
+use crate::domain::live::{classify_live_item, live_summary};
+use crate::domain::model::{
     Checkpoint, CoverageFlags, DoctorReport, DoctorSource, ExportReport, NormalizedEvent,
     OwnedIngestBatch, PurgeReport, RetentionReport,
 };
+use crate::domain::normalize::parse_time_ms;
+use crate::domain::project::{project_key, project_name};
 use crate::permissions::{
     create_private_file, prepare_database_files, prepare_private_dir, prepare_private_file,
 };
-use crate::project::{project_key, project_name};
 
-const COMPATIBILITY_MANIFEST: &str = include_str!("../compatibility/codex-41ece455.json");
+mod blob;
+mod maintenance;
+mod pool;
+mod projection;
+mod query;
+mod schema;
+mod write;
 
-const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
-const MIGRATION_2: &str = include_str!("../migrations/0002_fts_trigram.sql");
-const MIGRATION_3: &str = include_str!("../migrations/0003_retention.sql");
-const MIGRATION_4: &str = include_str!("../migrations/0004_live_sources.sql");
-const MIGRATION_5: &str = include_str!("../migrations/0005_blobs.sql");
-const MIGRATION_6: &str = include_str!("../migrations/0006_thread_metadata.sql");
-const MIGRATION_7: &str = include_str!("../migrations/0007_local_purge.sql");
-const MIGRATION_8: &str = include_str!("../migrations/0008_search_lookup_index.sql");
-const MIGRATION_9: &str = include_str!("../migrations/0009_unknown_rollout_status.sql");
-const MIGRATION_10: &str = include_str!("../migrations/0010_completeness_v2.sql");
-const MIGRATION_11: &str = include_str!("../migrations/0011_writer_conflicts.sql");
-const MIGRATION_12: &str = include_str!("../migrations/0012_context_project.sql");
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub use blob::BlobRecord;
+use blob::PreparedBlob;
+use maintenance::{read_only_mode, socket_status, write_private_new};
+use pool::{ReadConnection, ReadPool};
+use projection::{projection_reference_key, truncate};
+use query::query_json_connection;
+pub use schema::LATEST_SCHEMA_VERSION;
+use schema::*;
+use write::TurnUpdate;
 
 struct SessionContextBackfill {
     base_instructions: Option<String>,
@@ -95,114 +98,6 @@ pub struct Database {
     read_pool: ReadPool,
     #[cfg(test)]
     fail_before_commit: AtomicU8,
-}
-
-struct ReadPool {
-    path: PathBuf,
-    max: usize,
-    state: Mutex<ReadPoolState>,
-    available: Condvar,
-}
-
-struct ReadPoolState {
-    idle: Vec<Connection>,
-    total: usize,
-}
-
-struct ReadConnection<'a> {
-    pool: &'a ReadPool,
-    connection: Option<Connection>,
-}
-
-impl ReadPool {
-    fn new(path: PathBuf, max: usize) -> Self {
-        Self {
-            path,
-            max,
-            state: Mutex::new(ReadPoolState {
-                idle: Vec::new(),
-                total: 0,
-            }),
-            available: Condvar::new(),
-        }
-    }
-
-    fn get(&self) -> Result<ReadConnection<'_>> {
-        loop {
-            let mut state = self.state.lock().expect("read pool poisoned");
-            if let Some(connection) = state.idle.pop() {
-                return Ok(ReadConnection {
-                    pool: self,
-                    connection: Some(connection),
-                });
-            }
-            if state.total < self.max {
-                state.total += 1;
-                drop(state);
-                match Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-                    Ok(connection) => {
-                        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-                        connection.pragma_update(None, "query_only", true)?;
-                        return Ok(ReadConnection {
-                            pool: self,
-                            connection: Some(connection),
-                        });
-                    }
-                    Err(error) => {
-                        let mut state = self.state.lock().expect("read pool poisoned");
-                        state.total = state.total.saturating_sub(1);
-                        self.available.notify_one();
-                        return Err(error.into());
-                    }
-                }
-            }
-            drop(self.available.wait(state).expect("read pool poisoned"));
-        }
-    }
-}
-
-impl Deref for ReadConnection<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
-        self.connection
-            .as_ref()
-            .expect("read connection returned once")
-    }
-}
-
-impl Drop for ReadConnection<'_> {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.take() {
-            let mut state = self.pool.state.lock().expect("read pool poisoned");
-            state.idle.push(connection);
-            self.pool.available.notify_one();
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BlobRecord {
-    pub blob_id: String,
-    pub media_type: String,
-    pub size_bytes: u64,
-    pub path: PathBuf,
-}
-
-struct PreparedBlob {
-    blob_id: String,
-    stored_hash: String,
-    media_type: &'static str,
-    size_bytes: usize,
-    relative_path: String,
-    redaction_json: String,
-}
-
-struct TurnUpdate<'a> {
-    turn_id: &'a str,
-    status: &'a str,
-    started: i64,
-    completed: Option<i64>,
-    durable_started: bool,
 }
 
 impl Database {
@@ -478,20 +373,7 @@ impl Database {
         if !(0..=LATEST_SCHEMA_VERSION).contains(&version) {
             anyhow::bail!("unsupported observer database schema version {version}");
         }
-        for (target, migration) in [
-            (1, MIGRATION_1),
-            (2, MIGRATION_2),
-            (3, MIGRATION_3),
-            (4, MIGRATION_4),
-            (5, MIGRATION_5),
-            (6, MIGRATION_6),
-            (7, MIGRATION_7),
-            (8, MIGRATION_8),
-            (9, MIGRATION_9),
-            (10, MIGRATION_10),
-            (11, MIGRATION_11),
-            (12, MIGRATION_12),
-        ] {
+        for (target, migration) in schema::migrations() {
             if version < target {
                 connection
                     .execute_batch(migration)
@@ -1710,55 +1592,6 @@ impl Database {
     }
 }
 
-fn query_json_connection(
-    connection: &Connection,
-    sql: &str,
-    parameters: &[&dyn rusqlite::ToSql],
-    mapper: fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>,
-) -> Result<Vec<Value>> {
-    let mut statement = connection.prepare(sql)?;
-    Ok(statement
-        .query_map(parameters, mapper)?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-#[cfg(unix)]
-fn read_only_mode(path: &Path) -> Value {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return json!({"status":"missing"});
-    };
-    use std::os::unix::fs::MetadataExt;
-    json!({"status":if metadata.file_type().is_symlink() {"symlink"} else {"present"},
-        "mode":format!("{:04o}",metadata.mode() & 0o777),"ownerIsCurrentUser":metadata.uid() == unsafe { libc::geteuid() }})
-}
-
-#[cfg(not(unix))]
-fn read_only_mode(path: &Path) -> Value {
-    json!({"status":if fs::symlink_metadata(path).is_ok() {"present"} else {"missing"}})
-}
-
-fn socket_status(path: &Path) -> String {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return "missing".into();
-    };
-    if metadata.file_type().is_symlink() {
-        return "symlink_rejected".into();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if metadata.file_type().is_socket() {
-            "socket_present_unprobed".into()
-        } else {
-            "not_a_socket".into()
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        "unsupported_platform".into()
-    }
-}
-
 fn load_coverage(
     connection: &Connection,
     thread_key: &str,
@@ -2472,21 +2305,6 @@ fn record_thread_conflicts(
     Ok(())
 }
 
-fn projection_reference_key(event: &NormalizedEvent) -> String {
-    if let Some(item_id) = event.item_id.as_deref() {
-        let turn_scope = event
-            .turn_id
-            .as_deref()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("@unassigned:{}:{}", event.source_id, event.epoch_id));
-        format!("item:{}:{turn_scope}:{item_id}", event.thread_key)
-    } else if let Some(turn_id) = event.turn_id.as_deref() {
-        format!("turn:{}:{turn_id}", event.thread_key)
-    } else {
-        format!("thread:{}", event.thread_key)
-    }
-}
-
 fn project_live_lifecycle(
     tx: &Transaction<'_>,
     event: &NormalizedEvent,
@@ -2650,134 +2468,6 @@ fn upsert_turn(
     Ok(())
 }
 
-pub fn classify_item(raw: &Value) -> Option<String> {
-    let top = raw.get("type")?.as_str()?;
-    let payload = raw.get("payload")?;
-    let kind = payload.get("type").and_then(Value::as_str).unwrap_or(top);
-    match top {
-        "response_item" => Some(
-            match kind {
-                "message" => match payload.get("role").and_then(Value::as_str) {
-                    Some("user") => "user_message",
-                    _ => "agent_message",
-                },
-                "reasoning" => "reasoning",
-                "local_shell_call" => "command_execution",
-                "function_call" | "custom_tool_call" | "tool_search_call" => "tool_call",
-                "function_call_output" | "custom_tool_call_output" => "tool_output",
-                other => other,
-            }
-            .to_string(),
-        ),
-        "compacted" => Some("reasoning".into()),
-        "inter_agent_communication" | "inter_agent_communication_metadata" => {
-            Some("sub_agent".into())
-        }
-        "event_msg" => match kind {
-            "user_message" => Some("user_message".into()),
-            "agent_message" => Some("agent_message".into()),
-            "agent_reasoning" => Some("reasoning".into()),
-            "exec_command_begin" | "exec_command_end" | "exec_command_output_delta" => {
-                Some("command_execution".into())
-            }
-            "mcp_tool_call_begin" | "mcp_tool_call_end" => Some("mcp_tool_call".into()),
-            "turn_diff" | "patch_apply_begin" | "patch_apply_end" => Some("file_change".into()),
-            "plan_update" => Some("plan".into()),
-            "error" | "warning" | "stream_error" => Some("error".into()),
-            "token_count" => Some("usage".into()),
-            _ => None,
-        },
-        other if !matches!(other, "session_meta" | "turn_context" | "world_state") => {
-            Some("unknown".into())
-        }
-        _ => None,
-    }
-}
-
-pub fn classify_live_item(method: &str, item: Option<&Value>) -> Option<String> {
-    if method.contains("requestApproval") {
-        return Some("approval".into());
-    }
-    if method.contains("requestUserInput") || method.contains("elicitation/request") {
-        return Some("user_question".into());
-    }
-    let kind = item
-        .and_then(|item| item.get("type"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            method
-                .strip_prefix("item/")
-                .and_then(|rest| rest.split('/').next())
-        })?;
-    Some(
-        match kind {
-            "userMessage" => "user_message",
-            "agentMessage" => "agent_message",
-            "reasoning" => "reasoning",
-            "commandExecution" => "command_execution",
-            "fileChange" => "file_change",
-            "mcpToolCall" => "mcp_tool_call",
-            "collabAgentToolCall" => "sub_agent",
-            "webSearch" => "web_search",
-            "imageGeneration" => "image_generation",
-            "plan" => "plan",
-            "error" => "error",
-            other => other,
-        }
-        .to_string(),
-    )
-}
-
-pub fn live_summary(params: &Value, item: Option<&Value>) -> Option<String> {
-    params
-        .get("delta")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            item.and_then(|item| summary_text(&json!({"type":"response_item","payload":item})))
-        })
-}
-
-pub fn summary_text(raw: &Value) -> Option<String> {
-    let payload = raw.get("payload")?;
-    if let Some(text) = payload
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("content").and_then(Value::as_str))
-        .or_else(|| payload.get("text").and_then(Value::as_str))
-        .or_else(|| payload.get("name").and_then(Value::as_str))
-        .or_else(|| payload.get("call_id").and_then(Value::as_str))
-    {
-        return Some(truncate(text, 16_000));
-    }
-    if let Some(content) = payload.get("content").and_then(Value::as_array) {
-        let joined = content
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.get("input_text").and_then(Value::as_str))
-                    .or_else(|| item.get("output_text").and_then(Value::as_str))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !joined.is_empty() {
-            return Some(truncate(&joined, 16_000));
-        }
-    }
-    if let Some(summary) = payload.get("summary").and_then(Value::as_array) {
-        let joined = summary
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !joined.is_empty() {
-            return Some(truncate(&joined, 16_000));
-        }
-    }
-    None
-}
-
 fn value_as_string(value: Option<&Value>) -> Option<String> {
     value.map(|value| {
         value
@@ -2806,50 +2496,8 @@ fn value_as_string_ref(value: &Value) -> Option<String> {
     }
 }
 
-fn parse_time_ms(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| time.timestamp_millis())
-}
-
-pub fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
-}
-
 fn parse_stored_json(value: String) -> Value {
     serde_json::from_str(&value).unwrap_or(Value::Null)
-}
-
-fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("export output must have a parent directory")?;
-    if !parent.is_dir() {
-        anyhow::bail!("export output directory does not exist");
-    }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| -> Result<()> {
-        let mut file = options
-            .open(path)
-            .with_context(|| format!("create export output {}", path.display()))?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(path);
-    }
-    result
-}
-
-fn truncate(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
 }
 
 #[cfg(test)]

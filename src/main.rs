@@ -1,16 +1,17 @@
 #![recursion_limit = "256"]
 
-mod api;
-mod auth;
+#[cfg(test)]
+mod architecture;
+mod clock;
 mod config;
-mod db;
+mod credentials;
+mod domain;
+mod http;
 mod ingest;
 mod instance_lock;
 mod live;
-mod model;
 mod permissions;
-mod project;
-mod redact;
+mod store;
 mod watcher;
 mod writer;
 
@@ -24,9 +25,10 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::credentials::load_or_create_token;
 use crate::ingest::Importer;
 use crate::instance_lock::InstanceLock;
+use crate::store::Database;
 use crate::writer::WriterHandle;
 
 #[derive(Debug, Parser)]
@@ -107,9 +109,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Open) {
-        let token = ingest::load_or_create_token(&config.server.bearer_token_file)?;
-        let code = auth::generate_pair_code(&token, chrono::Utc::now().timestamp())?;
-        println!("http://{}/#pair={code}", config.server.bind);
+        let token = load_or_create_token(&config.server.bearer_token_file)?;
+        println!(
+            "{}",
+            http::generate_pairing_url(config.server.bind, &token, chrono::Utc::now().timestamp(),)?
+        );
         return Ok(());
     }
     if let Command::Export { thread, output } = &cli.command {
@@ -249,7 +253,7 @@ async fn main() -> Result<()> {
                     let _ = signal_sender.send(true);
                 }
             });
-            api::serve(config, database, writer, shutdown_receiver).await?;
+            http::serve(config, database, writer, shutdown_receiver).await?;
             let _ = shutdown_sender.send(true);
             for handle in live_handles {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -259,7 +263,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_doctor(report: crate::model::DoctorReport, json: bool) -> Result<()> {
+fn print_doctor(report: crate::domain::model::DoctorReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

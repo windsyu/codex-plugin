@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -51,6 +52,13 @@ pub fn generate_pair_code(token: &str, now: i64) -> Result<String> {
             exp: now.saturating_add(PAIR_TTL_SECONDS),
         },
     )
+}
+
+pub fn generate_pairing_url(bind: SocketAddr, token: &str, now: i64) -> Result<String> {
+    Ok(format!(
+        "http://{bind}/#pair={}",
+        generate_pair_code(token, now)?
+    ))
 }
 
 pub fn redeem_pair_code(
@@ -139,6 +147,20 @@ mod tests {
         assert!(redeem_pair_code(&token, &pair, &store, 102).is_err());
         let expired = generate_pair_code(&token, 100)?;
         assert!(redeem_pair_code(&token, &expired, &store, 401).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pairing_url_contains_only_a_short_lived_code() -> Result<()> {
+        let token = URL_SAFE_NO_PAD.encode([9_u8; 32]);
+        let bind = "127.0.0.1:4765".parse()?;
+        let url = generate_pairing_url(bind, &token, 100)?;
+        assert!(url.starts_with("http://127.0.0.1:4765/#pair="));
+        assert!(!url.contains(&token));
+
+        let code = url.split("#pair=").nth(1).expect("pairing fragment");
+        let session = redeem_pair_code(&token, code, &PairingNonceStore::default(), 101)?;
+        assert!(verify_session(&token, &session, 102));
         Ok(())
     }
 }

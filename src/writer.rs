@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-use crate::db::Database;
-use crate::model::OwnedIngestBatch;
+use crate::domain::model::OwnedIngestBatch;
+use crate::store::Database;
 
 #[derive(Debug, Clone, Default)]
 pub struct WriterMetrics {
@@ -516,8 +516,8 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    fn event(source: &str, id: &str) -> crate::model::NormalizedEvent {
-        crate::model::NormalizedEvent {
+    fn event(source: &str, id: &str) -> crate::domain::model::NormalizedEvent {
+        crate::domain::model::NormalizedEvent {
             event_id: id.into(),
             source_id: source.into(),
             store_source_id: source.into(),
