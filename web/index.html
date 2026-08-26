@@ -1,56 +1,12 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Codex Local Observer</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">LOCAL · READ ONLY</p>
-      <h1>Codex Observer</h1>
-    </div>
-    <div id="health" class="health">等待认证</div>
-  </header>
-
-  <section id="auth" class="auth-panel">
-    <label for="token">Bearer token（见配置中的 token 文件）</label>
-    <div class="auth-row">
-      <input id="token" type="password" autocomplete="off" placeholder="粘贴本机 token">
-      <button id="connect">连接</button>
-    </div>
-    <p id="auth-error" class="error" role="alert"></p>
-  </section>
-
-  <main id="workspace" class="workspace hidden">
-    <aside class="sidebar">
-      <div class="search-row">
-        <input id="search" type="search" placeholder="搜索消息和工具摘要">
-        <button id="search-button" aria-label="搜索">搜索</button>
-      </div>
-      <div id="source-summary" class="source-summary"></div>
-      <div id="threads" class="thread-list" aria-live="polite"></div>
-    </aside>
-    <section class="detail">
-      <div id="empty" class="empty-state">
-        <p class="eyebrow">THREAD → TURN → ITEM</p>
-        <h2>选择一个 Thread</h2>
-        <p>查看持久化时间线、完整性说明和已脱敏原始事件。</p>
-      </div>
-      <div id="thread-detail" class="hidden">
-        <div id="thread-header"></div>
-        <div id="capture-banner" class="capture-banner"></div>
-        <div id="timeline" class="timeline"></div>
-        <details class="diagnostics">
-          <summary>原始事件与诊断</summary>
-          <div id="diagnostics"></div>
-          <pre id="raw-events"></pre>
-        </details>
-      </div>
-    </section>
-  </main>
-  <script src="/app.js" defer></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Local Observer</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

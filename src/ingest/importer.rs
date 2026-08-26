@@ -1,25 +1,31 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::DateTime;
-use rand::RngCore;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::clock::now_ms;
 use crate::config::{Config, SourceConfig};
-use crate::db::{Database, IngestBatch, classify_item, now_ms, summary_text};
-use crate::model::{ImportReport, NormalizedEvent};
-use crate::redact;
+use crate::domain::classify::{classify_item, summary_text};
+use crate::domain::identity::{stable_source_id, thread_key};
+use crate::domain::model::{ImportReport, NormalizedEvent, OwnedIngestBatch};
+use crate::domain::normalize::parse_time_ms;
+use crate::domain::redact;
+use crate::ingest::io::thread_id_from_filename;
+use crate::ingest::keys::load_or_create_key;
+use crate::store::Database;
+use crate::writer::WriterHandle;
 
 pub struct Importer<'a> {
     config: &'a Config,
     database: &'a Database,
+    writer: Option<&'a WriterHandle>,
     fingerprint_key: [u8; 32],
 }
 
@@ -46,8 +52,19 @@ impl<'a> Importer<'a> {
         Ok(Self {
             config,
             database,
+            writer: None,
             fingerprint_key,
         })
+    }
+
+    pub fn new_with_writer(
+        config: &'a Config,
+        database: &'a Database,
+        writer: &'a WriterHandle,
+    ) -> Result<Self> {
+        let mut importer = Self::new(config, database)?;
+        importer.writer = Some(writer);
+        Ok(importer)
     }
 
     pub fn import_all(&self) -> Result<ImportReport> {
@@ -73,16 +90,19 @@ impl<'a> Importer<'a> {
     fn import_source(&self, source: &SourceConfig, report: &mut ImportReport) -> Result<()> {
         let stable_identity = source.codex_home.to_string_lossy().to_string();
         let source_id = stable_source_id(&stable_identity);
-        self.database.upsert_source(
-            &source_id,
-            &stable_identity,
-            &json!({"name":source.name,"codexHome":stable_identity,"liveMode":"off"}),
-            if source.codex_home.is_dir() {
-                "ready"
-            } else {
-                "degraded"
-            },
-        )?;
+        let source_config =
+            json!({"name":source.name,"codexHome":stable_identity,"liveMode":"off"});
+        let status = if source.codex_home.is_dir() {
+            "ready"
+        } else {
+            "degraded"
+        };
+        if let Some(writer) = self.writer {
+            writer.upsert_source(&source_id, &stable_identity, &source_config, status)?;
+        } else {
+            self.database
+                .upsert_source(&source_id, &stable_identity, &source_config, status)?;
+        }
         if !source.codex_home.is_dir() {
             anyhow::bail!("Codex home {} does not exist", source.codex_home.display());
         }
@@ -141,6 +161,7 @@ impl<'a> Importer<'a> {
             checkpoint.byte_offset
         };
         let mut logical_ordinal = if compressed { 0 } else { start_ordinal };
+        let mut clean_eof = true;
         let mut reader = open_rollout_reader(
             path,
             compressed,
@@ -156,6 +177,7 @@ impl<'a> Importer<'a> {
             self.config.capture.max_raw_event_bytes,
         )? {
             if !record.terminated && !compressed {
+                clean_eof = false;
                 break;
             }
             consumed_bytes += record.bytes_read;
@@ -184,7 +206,7 @@ impl<'a> Importer<'a> {
             }
             update_current_turn(&event, &mut current_turn);
             events.push(event);
-            if events.len() >= 500 {
+            if events.len() >= 100 {
                 self.commit_batch(
                     source_id,
                     &epoch_id,
@@ -193,6 +215,7 @@ impl<'a> Importer<'a> {
                     if compressed { 0 } else { consumed_bytes },
                     logical_ordinal,
                     current_turn.as_deref(),
+                    false,
                     &mut events,
                     report,
                 )?;
@@ -210,17 +233,29 @@ impl<'a> Importer<'a> {
             },
             logical_ordinal,
             current_turn.as_deref(),
+            clean_eof,
             &mut events,
             report,
         )?;
-        self.database.mark_location(
-            source_id,
-            &thread_id,
-            path,
-            representation,
-            &identity,
-            archived,
-        )?;
+        if let Some(writer) = self.writer {
+            writer.mark_location(
+                source_id,
+                &thread_id,
+                path.to_path_buf(),
+                representation,
+                &identity,
+                archived,
+            )?;
+        } else {
+            self.database.mark_location(
+                source_id,
+                &thread_id,
+                path,
+                representation,
+                &identity,
+                archived,
+            )?;
+        }
 
         if let Some(meta) = session_meta {
             tracing::debug!(source_id, thread_id, session = ?meta.get("session_id"), "rollout identified");
@@ -238,22 +273,29 @@ impl<'a> Importer<'a> {
         byte_offset: u64,
         ordinal: u64,
         current_turn_id: Option<&str>,
+        clean_eof: bool,
         events: &mut Vec<NormalizedEvent>,
         report: &mut ImportReport,
     ) -> Result<()> {
-        if events.is_empty() {
+        if events.is_empty() && !clean_eof {
             return Ok(());
         }
-        let (inserted, deduplicated) = self.database.ingest_batch(IngestBatch {
-            source_id,
-            epoch_id,
-            checkpoint_key,
-            file_identity,
+        let batch = OwnedIngestBatch {
+            source_id: source_id.to_string(),
+            epoch_id: epoch_id.to_string(),
+            checkpoint_key: checkpoint_key.to_string(),
+            file_identity: file_identity.to_string(),
             byte_offset,
             ordinal,
-            current_turn_id,
-            events,
-        })?;
+            current_turn_id: current_turn_id.map(str::to_string),
+            clean_eof,
+            events: events.clone(),
+        };
+        let (inserted, deduplicated) = if let Some(writer) = self.writer {
+            writer.ingest(batch)?
+        } else {
+            self.database.ingest_batch(&batch)?
+        };
         report.events_inserted += inserted;
         report.events_deduplicated += deduplicated;
         events.clear();
@@ -293,8 +335,7 @@ impl<'a> Importer<'a> {
                 Some(error),
             ),
         };
-        let (redacted, redaction_audit) = redact::redact(&raw);
-        let stored = serde_json::to_string(&redacted).expect("JSON serialization cannot fail");
+        let (redacted, mut redaction_audit) = redact::redact(&raw, &self.fingerprint_key);
         let top_type = redacted
             .get("type")
             .and_then(Value::as_str)
@@ -303,7 +344,7 @@ impl<'a> Importer<'a> {
         if decode_status == "decoded" && !is_known_rollout_top_type(&top_type) {
             decode_status = "unknown".into();
         }
-        let payload = redacted.get("payload").cloned().unwrap_or(Value::Null);
+        let mut payload = redacted.get("payload").cloned().unwrap_or(Value::Null);
         let nested_type = payload.get("type").and_then(Value::as_str);
         let turn_id =
             extract_turn_id(&payload).or_else(|| context.current_turn.map(str::to_string));
@@ -321,7 +362,7 @@ impl<'a> Importer<'a> {
         };
         let phase = classify_phase(nested_type.unwrap_or(&top_type));
         let item_type = classify_item(&redacted);
-        let summary_text = summary_text(&redacted);
+        let mut summary_text = summary_text(&redacted);
         let item_status = item_type.as_ref().map(|_| {
             match phase.as_str() {
                 "started" => "started",
@@ -331,6 +372,22 @@ impl<'a> Importer<'a> {
             }
             .to_string()
         });
+        let reasoning = item_type.as_deref() == Some("reasoning")
+            || nested_type.is_some_and(|kind| kind.to_ascii_lowercase().contains("reasoning"));
+        let policy_marker = if reasoning && !self.config.capture.keep_reasoning {
+            payload = json!({"policy":"omitted","kind":"reasoning","retainedIdentity":true});
+            summary_text = Some("[reasoning omitted by capture policy]".into());
+            Some(payload.clone())
+        } else if !self.config.capture.keep_raw_json {
+            Some(json!({"policy":"omitted","kind":"raw_json","retainedIdentity":true}))
+        } else {
+            None
+        };
+        if let Some(marker) = policy_marker.as_ref() {
+            redaction_audit["capturePolicy"] = marker.clone();
+        }
+        let stored = serde_json::to_string(policy_marker.as_ref().unwrap_or(&redacted))
+            .expect("JSON serialization cannot fail");
         NormalizedEvent {
             event_id: Uuid::now_v7().to_string(),
             source_id: context.source_id.to_string(),
@@ -499,23 +556,6 @@ fn find_thread_identity(path: &Path, compressed: bool) -> Option<(String, Option
     None
 }
 
-fn thread_id_from_filename(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name
-        .strip_suffix(".zst")
-        .unwrap_or(name)
-        .strip_suffix(".jsonl")?;
-    for start in (0..stem.len()).rev() {
-        let Some(candidate) = stem.get(start..start.saturating_add(36)) else {
-            continue;
-        };
-        if Uuid::parse_str(candidate).is_ok() {
-            return Some(candidate.to_string());
-        }
-    }
-    stem.strip_prefix("rollout-").map(str::to_string)
-}
-
 fn update_current_turn_from_line(line: &[u8], current: &mut Option<String>) {
     if let Ok(raw) = serde_json::from_slice::<Value>(line)
         && let Some(payload) = raw.get("payload")
@@ -595,15 +635,6 @@ fn classify_phase(kind: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn stable_source_id(identity: &str) -> String {
-    URL_SAFE_NO_PAD
-        .encode(blake3::hash(format!("store\0{identity}\0{identity}").as_bytes()).as_bytes())
-}
-
-pub(crate) fn thread_key(source_id: &str, thread_id: &str) -> String {
-    URL_SAFE_NO_PAD.encode(format!("{source_id}\0{thread_id}"))
-}
-
 fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Result<String> {
     let mut identity = {
         #[cfg(unix)]
@@ -639,100 +670,12 @@ fn file_identity(path: &Path, metadata: &fs::Metadata, compressed: bool) -> Resu
     Ok(identity)
 }
 
-pub(crate) fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        validate_private_parent(parent, "fingerprint key")?;
-    }
-    if fs::symlink_metadata(path).is_ok() {
-        validate_private_file(path, "fingerprint key")?;
-        let bytes =
-            fs::read(path).with_context(|| format!("read fingerprint key {}", path.display()))?;
-        return bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("fingerprint key must contain exactly 32 bytes"));
-    }
-    let mut key = [0_u8; 32];
-    rand::rng().fill_bytes(&mut key);
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("create fingerprint key {}", path.display()))?;
-    file.write_all(&key)?;
-    file.sync_all()?;
-    Ok(key)
-}
-
-pub fn load_or_create_token(path: &Path) -> Result<String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        validate_private_parent(parent, "bearer token")?;
-    }
-    if fs::symlink_metadata(path).is_ok() {
-        validate_private_file(path, "bearer token")?;
-        return Ok(fs::read_to_string(path)?.trim().to_string());
-    }
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let token = URL_SAFE_NO_PAD.encode(bytes);
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    writeln!(file, "{token}")?;
-    file.sync_all()?;
-    Ok(token)
-}
-
-fn validate_private_file(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("{label} must be a direct regular file");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            anyhow::bail!("{label} must be owned by the current user with mode 0600");
-        }
-        validate_private_parent(path.parent().context("private file has no parent")?, label)?;
-    }
-    Ok(())
-}
-
-fn validate_private_parent(path: &Path, label: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(path)?;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
-            anyhow::bail!("{label} directory must not be writable by group or other users");
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (path, label);
-    Ok(())
-}
-
-fn parse_time_ms(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| time.timestamp_millis())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    use crate::credentials::load_or_create_token;
     use tempfile::TempDir;
 
     fn test_config(temp: &TempDir) -> Config {
@@ -776,6 +719,188 @@ mod tests {
         let third = importer.import_all()?;
         assert_eq!(third.events_inserted, 1);
         assert_eq!(database.max_event_seq()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn periodic_rescan_recovers_when_watcher_hint_is_lost() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        assert_eq!(importer.import_all()?.events_inserted, 0);
+        fs::write(
+            sessions.join("rollout-rescan.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"rescan-thread\"}}\n",
+        )?;
+        let recovered = importer.import_all()?;
+        assert_eq!(recovered.events_inserted, 1);
+        assert_eq!(database.max_event_seq()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn thread_completeness_aggregates_every_turn_and_clean_eof() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-completeness-thread.jsonl");
+        let mut file = File::create(&rollout)?;
+        for value in [
+            json!({"type":"session_meta","payload":{"id":"completeness-thread"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}),
+        ] {
+            writeln!(file, "{value}")?;
+        }
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        let importer = Importer::new(&config, &database)?;
+        importer.import_all()?;
+        let connection = database.connect()?;
+        let thread_state: String = connection.query_row(
+            "SELECT capture_completeness FROM threads WHERE codex_thread_id='completeness-thread'",
+            [],
+            |row| row.get(0),
+        )?;
+        let turn_states = {
+            let mut statement = connection.prepare(
+                "SELECT turn_id,capture_completeness,json_extract(coverage_json,'$.durableEofReached')
+                 FROM turns ORDER BY turn_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        assert_eq!(thread_state, "durable_partial");
+        assert_eq!(
+            turn_states,
+            vec![
+                ("turn-1".into(), "durable_complete".into(), true),
+                ("turn-2".into(), "durable_partial".into(), true)
+            ]
+        );
+        drop(connection);
+
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}})
+        )?;
+        file.sync_all()?;
+        importer.import_all()?;
+        let complete: String = database.connect()?.query_row(
+            "SELECT capture_completeness FROM threads WHERE codex_thread_id='completeness-thread'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(complete, "durable_complete");
+        Ok(())
+    }
+
+    #[test]
+    fn redaction_v2_secrets_never_reach_database_or_export() -> Result<()> {
+        let temp = TempDir::new()?;
+        let config = test_config(&temp);
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-redaction-v2.jsonl");
+        let media = format!("data:image/png;base64,{}", "A".repeat(256));
+        let mut file = File::create(&rollout)?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"redaction-v2"}})
+        )?;
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"event_msg","payload":{"type":"mcp_tool_call_begin","turn_id":"turn-redact",
+              "url":"https://example.test/?token=url-secret&view=ok",
+              "auth":{"bearerToken":"mcp-secret"},"image":media}})
+        )?;
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let raw: String = database.connect()?.query_row(
+            "SELECT group_concat(raw_json,'') FROM raw_events",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!raw.contains("url-secret"));
+        assert!(!raw.contains("mcp-secret"));
+        assert!(!raw.contains(&"A".repeat(128)));
+        assert!(raw.contains("media_payload"));
+        let thread_key: String = database.connect()?.query_row(
+            "SELECT thread_key FROM threads WHERE codex_thread_id='redaction-v2'",
+            [],
+            |row| row.get(0),
+        )?;
+        let output = temp.path().join("redaction-export.json");
+        let report = database.export_thread(&thread_key, &output)?;
+        assert_eq!(report.legacy_redaction_events, 0);
+        let exported = fs::read_to_string(output)?;
+        assert!(!exported.contains("url-secret"));
+        assert!(!exported.contains("mcp-secret"));
+        assert!(!exported.contains(&"A".repeat(128)));
+        Ok(())
+    }
+
+    #[test]
+    fn capture_policy_omits_reasoning_and_raw_json_without_losing_projection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mut config = test_config(&temp);
+        config.capture.keep_reasoning = false;
+        config.capture.keep_raw_json = false;
+        let sessions = config.sources[0].codex_home.join("sessions");
+        fs::create_dir_all(&sessions)?;
+        let rollout = sessions.join("rollout-policy.jsonl");
+        let mut file = File::create(&rollout)?;
+        for value in [
+            json!({"type":"session_meta","payload":{"id":"policy-thread"}}),
+            json!({"type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","turn_id":"turn-1","summary":[{"text":"private-reasoning-text"}]}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","turn_id":"turn-1","message":"visible-answer"}}),
+        ] {
+            writeln!(file, "{value}")?;
+        }
+        file.sync_all()?;
+        let database = Database::open(&config.storage.database)?;
+        database.migrate()?;
+        Importer::new(&config, &database)?.import_all()?;
+        let connection = database.connect()?;
+        let stored: String = connection.query_row(
+            "SELECT group_concat(raw_json,'') FROM raw_events",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!stored.contains("private-reasoning-text"));
+        assert!(!stored.contains("visible-answer"));
+        assert!(stored.contains("omitted"));
+        let projection: String = connection.query_row(
+            "SELECT summary_text FROM items WHERE summary_text='visible-answer'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(projection, "visible-answer");
+        let leaked_search: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_index WHERE text LIKE '%private-reasoning-text%'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leaked_search, 0);
         Ok(())
     }
 
@@ -970,10 +1095,10 @@ mod tests {
             .connect()?
             .execute("UPDATE raw_events SET observed_at_ms=0", [])?;
 
-        let preview = database.run_retention(1, 1, false)?;
+        let preview = database.run_retention(1, 1, 1, false)?;
         assert_eq!(preview.candidate_raw_events, 21);
         assert_eq!(preview.deleted_raw_events, 0);
-        let applied = database.run_retention(1, 1, true)?;
+        let applied = database.run_retention(1, 1, 1, true)?;
         assert_eq!(applied.deleted_raw_events, 21);
         assert_eq!(applied.dedupe_tombstones_retained, 21);
         assert_eq!(database.max_event_seq()?, 21);
@@ -1068,9 +1193,9 @@ mod tests {
             [&blob_id],
         )?;
         drop(connection);
-        let preview = database.run_retention(1, 1, false)?;
+        let preview = database.run_retention(1, 1, 1, false)?;
         assert_eq!(preview.candidate_blobs, 1);
-        let applied = database.run_retention(1, 1, true)?;
+        let applied = database.run_retention(1, 1, 1, true)?;
         assert_eq!(applied.deleted_blobs, 1);
         assert!(database.blob_record(&blob_id)?.is_none());
         assert!(!blob_path.exists());
@@ -1079,7 +1204,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_credentials_reject_symlinks_and_broad_permissions() -> Result<()> {
+    fn private_credentials_reject_symlinks_and_repair_broad_permissions() -> Result<()> {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = TempDir::new()?;
@@ -1093,7 +1218,8 @@ mod tests {
         let broad = temp.path().join("broad-token");
         fs::write(&broad, "secret")?;
         fs::set_permissions(&broad, fs::Permissions::from_mode(0o644))?;
-        assert!(load_or_create_token(&broad).is_err());
+        assert_eq!(load_or_create_token(&broad)?, "secret");
+        assert_eq!(fs::metadata(&broad)?.permissions().mode() & 0o777, 0o600);
         Ok(())
     }
 
