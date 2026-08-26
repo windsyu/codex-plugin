@@ -2,6 +2,8 @@
 /observer-data/
 /web/node_modules/
 /web/dist/
+/web/playwright-report/
+/web/test-results/
 observer.toml
 *.sqlite
 *.sqlite-shm

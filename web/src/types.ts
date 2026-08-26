@@ -175,9 +175,9 @@ export interface Relation {
 export interface ThreadDetail {
   thread: Thread;
   sources: unknown[];
-  coverageSummary: unknown;
-  pendingRequests: unknown[];
-  projectionConflicts: unknown[];
+  coverageSummary: Record<string, number>;
+  pendingRequests: PendingRequest[];
+  projectionConflicts: ProjectionConflict[];
   relations: {
     parent?: Relation | null;
     forkedFrom?: Relation | null;
@@ -199,7 +199,29 @@ export interface Source {
   currentEpoch?: {
     eventCount?: number;
     sequenceGapCount?: number;
+    decodeErrorCount?: number;
+    unknownEventCount?: number;
   };
+}
+
+export interface PendingRequest {
+  sourceId?: string;
+  epochId?: string;
+  requestId?: string;
+  requestType?: string;
+  state?: string;
+  requestEventSeq?: number;
+  resolvedEventSeq?: number;
+}
+
+export interface ProjectionConflict {
+  conflictId?: string;
+  entityType?: string;
+  entityKey?: string;
+  fieldName?: string;
+  status?: string;
+  detectedAtMs?: number;
+  resolvedAtMs?: number;
 }
 
 export interface SearchResult {
@@ -225,5 +247,6 @@ export interface Health {
   live: unknown;
   privacy?: {
     legacyRedactionEvents?: number;
+    warning?: string | null;
   };
 }

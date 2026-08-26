@@ -9,6 +9,7 @@ export default defineConfig({
     emptyOutDir: true
   },
   test: {
-    environment: 'jsdom'
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}']
   }
 });

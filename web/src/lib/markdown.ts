@@ -1,5 +1,12 @@
 import DOMPurify from 'dompurify';
-import hljs from 'highlight.js';
+import hljs from 'highlight.js/lib/core';
+import bash from 'highlight.js/lib/languages/bash';
+import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import markdownLanguage from 'highlight.js/lib/languages/markdown';
+import python from 'highlight.js/lib/languages/python';
+import rust from 'highlight.js/lib/languages/rust';
+import typescript from 'highlight.js/lib/languages/typescript';
 import { marked } from 'marked';
 
 marked.setOptions({
@@ -7,6 +14,10 @@ marked.setOptions({
   breaks: true,
   async: false
 });
+
+for (const [name, language] of Object.entries({ bash, javascript, json, markdown: markdownLanguage, python, rust, typescript })) {
+  hljs.registerLanguage(name, language);
+}
 
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName === 'A') {

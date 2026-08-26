@@ -18,6 +18,40 @@ jq empty compatibility/*.json fixtures/*.json  passed
 git diff --check                                 passed
 ```
 
+### Viewer P0/P1 加固复核（2026-08-22）
+
+```text
+npm exec tsc -- --noEmit                       passed
+npm test                                       14 passed
+npm run test:e2e                               6 passed（本机 Chrome）
+npm run build                                  passed，主 JS 153.06 kB / gzip 52.08 kB
+cargo clippy --all-targets --all-features      passed（-D warnings）
+cargo test --all-targets                       67 passed，1 explicit capacity test ignored
+cargo build --all-targets                      passed
+git diff --check                               passed
+```
+
+Playwright E2E 使用合成 API 响应，不读取真实 `~/.codex`，覆盖 390、820、1280、1440px 无页面级横向滚动、窄屏列表/详情切换、Enter 搜索与精确 Item 定位、Raw Inspector 展开前零请求及分页首屏、恶意 Raw 文本不生成 DOM，以及乱序 Thread 响应不覆盖最后选择。
+
+Control In App Browser 使用五分钟一次性配对码检查仓库 fixture 的真实 Viewer：health 为 healthy，Cookie SSE 显示实时已连接；Raw Inspector 展开前为 0 个 event card，展开后显示 15 条真实脱敏事件且未生成不可信图片 DOM；`projection` 搜索返回 1 条 snippet 并打开对应子 Thread；390、820、1280、1440px 下 `documentElement.scrollWidth` 均等于 viewport，390/820px 详情隐藏 Sidebar，返回列表后搜索词和筛选状态保持；浏览器控制台无 error/warning。
+
+### Viewer 对话优先体验复核（2026-08-24）
+
+```text
+npm exec tsc -- --noEmit                       passed
+npm test                                       25 passed
+npm run test:e2e                               8 passed（本机 Chrome）
+npm run build                                  passed，主 JS 159.36 kB / gzip 54.20 kB
+cargo test --all-targets                       68 passed，1 explicit capacity test ignored
+cargo clippy --all-targets --all-features      passed（-D warnings）
+cargo build --all-targets                      passed
+git diff --check                               passed
+```
+
+新增 registry 表驱动测试覆盖官方已知原始类型与 future variant，组件测试覆盖对话/过程分离、`call_id` 合并、异常自动展开及 source 兼容风险只聚合一次。Playwright 新增默认折叠阅读路径与配对 fragment 兑换场景，确认 fragment 被清除且 bearer 不写入 session storage。
+
+使用内置浏览器与仓库合成 fixture 复核真实嵌入式 Viewer：Cookie SSE 实时连接、用户气泡与助手正文层级清晰，健康过程和真正 unknown 默认折叠，页面无横向溢出，控制台无 error/warning。`serve` 就绪输出单次配对 URL；单元测试同时确认 URL 不包含 bearer secret，并保持重放、过期和 token 轮换失效语义。
+
 覆盖的关键回归包括：
 
 - plain/zstd、半行、坏行、oversize、archive rename、representation sibling、content fingerprint；
