@@ -19,7 +19,7 @@
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
 - Viewer 自动消费 Thread/Turn/Item/Search cursor 与 raw event sequence，不静默截断长时间线；
 - 4096-event 有界 ingest 背压、512-slot CommittedEventBus，以及 SSE/WebSocket 的 DB replay → live 无缝切换和慢消费者隔离；
-- `serve` 就绪时打印五分钟本机配对 URL；可选在同一次启动中建立 Tailscale Serve HTTPS → loopback 转发并打印固定 Tailnet URL；
+- `serve` 每次启动轮换本机 token，并打印在该次运行期间稳定、可重复使用的本机配对 URL；可选在同一次启动中建立 Tailscale Serve HTTPS → loopback 转发并打印固定 Tailnet URL；
 - `serve`、`import`、严格只读 `doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
 - `export` 在 writer lock 前分流，用只读 WAL snapshot 输出独占创建的 `0600` 脱敏 JSON；daemon 运行中也可导出；
@@ -113,17 +113,17 @@ cargo run -- purge --thread '<threadKey>' --observer-copy-only --yes
 cargo run -- serve
 ```
 
-服务成功监听后会打印 `Local Viewer: http://127.0.0.1:4765/#pair=...`。打开后，Viewer 将五分钟有效、单次使用的配对码兑换为 30 天 `HttpOnly; SameSite=Strict` Cookie，并立即清除 fragment；URL 不包含长期 bearer token。
+服务成功监听后会打印 `Local Viewer: http://127.0.0.1:4765/#pair=...`。该配对 token 在本次 `serve` 运行期间保持不变，可由多个本机应用重复兑换；Viewer 兑换为 `HttpOnly; SameSite=Strict` Cookie 后立即清除 fragment，URL 不直接包含 bearer secret。下一次 `serve` 启动会轮换 token，使旧配对 URL、Bearer token、Cookie 和签名 cursor 失效。
 
 启用 Tailscale Serve 时还会打印固定的 `Tailscale Viewer: https://<machine>.<tailnet>.ts.net/`。远程浏览器不需要配对 token：Serve 先执行 Tailnet ACL，再向 loopback 后端注入已验证身份；Viewer、API、SSE、搜索和 Blob 下载继续走与本机完全相同的实现。
 
-如果启动链接已经过期，可在另一个终端重新生成（命令只打印，不自动打开）：
+需要再次复制当前启动的同一个链接时，可在 daemon 运行期间从另一个终端执行（命令只打印，不自动打开，也不轮换 token）：
 
 ```bash
 cargo run -- open
 ```
 
-Bearer token 仍保留给 CLI/API 和 Viewer 高级故障恢复；token 轮换会立即令既有 Cookie 失效。token 和 fingerprint key 首次运行时生成，Unix 权限为 `0600`。
+Bearer token 仍保留给其他本机应用、CLI/API 和 Viewer 高级故障恢复。`serve` 每次启动时原子替换 token 文件；fingerprint key 仍只在首次运行时生成。两者的 Unix 权限均为 `0600`。
 
 使用 API：
 
@@ -144,7 +144,7 @@ cargo run -- --config fixtures/observer.fixture.toml serve
 
 ## API
 
-V1 业务查询接口为 `GET`；唯一 POST 是本机 Viewer 的一次性配对兑换：
+V1 业务查询接口为 `GET`；唯一 POST 是本机 Viewer 的启动级 token 配对兑换：
 
 ```text
 /v1/health

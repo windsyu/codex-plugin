@@ -1501,10 +1501,10 @@ codex-observerd purge --thread <threadKey> --observer-copy-only --yes
 - 默认不支持 `0.0.0.0`；
 - 可选 Tailscale Serve 在启动时将 tailnet HTTPS 根路径转发到 Observer loopback；Observer 不直接监听 LAN、不管理证书，也不启用 Funnel；
 - Tailscale 请求必须来自 loopback proxy、匹配本机 MagicDNS Host 和 HTTPS forwarded proto，并携带 Serve 删除伪造值后注入的登录身份；其余 Viewer/API/SSE 路径与本机模式共用；
-- bearer token 至少 256 bit，由 daemon 首次生成；
+- bearer token 至少 256 bit；`serve` 成功绑定 loopback 并完成可选 Tailscale Serve 前置检查后，每次启动生成新值并原子替换 token 文件；
 - token 文件仅当前用户可读；
-- `codex-observerd serve` 成功绑定 loopback 后直接打印五分钟有效、fragment 携带的单次配对链接；`open` 可重新生成，二者都不自动打开浏览器；`POST /v1/auth/pair` 兑换 30 天签名 `observer_session` Cookie；
-- Cookie 使用 `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` 并绑定当前 bearer secret。V1 loopback HTTP 不设置 `Secure`；token 轮换立即失效；
+- `codex-observerd serve` 打印 fragment 携带的启动级配对链接；它在同一次启动内稳定且可重复兑换，daemon 重启后失效；`open` 只读取当前 token 文件并打印相同链接，二者都不自动打开浏览器；`POST /v1/auth/pair` 兑换签名 `observer_session` Cookie；
+- Cookie 使用 `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` 并绑定当前启动的 bearer secret。V1 loopback HTTP 不设置 `Secure`；每次启动轮换会令上一启动的配对 token、Bearer token、Cookie 和签名 cursor 立即失效；
 - 严格校验 `Origin`，无 Origin 的非浏览器客户端按配置处理；
 - 所有 response 设置安全 header 和 `Cache-Control: no-store`。
 

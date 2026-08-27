@@ -20,7 +20,7 @@ Cookie 与 bearer secret 绑定，token 轮换会立即失效。过期或重放 
 
 ## Status
 
-Accepted
+Superseded by [ADR 0011](0011-startup-scoped-reusable-local-token.md). The signed Cookie mechanism remains, but pairing is no longer time-limited or single-use.
 
 ## Date
 

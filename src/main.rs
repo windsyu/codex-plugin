@@ -67,7 +67,7 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Print a five-minute, single-use Viewer pairing link.
+    /// Print the reusable Viewer pairing link for the current server startup.
     Open,
     /// Permanently suppress and delete one local Observer thread copy.
     Purge {
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
         let token = load_or_create_token(&config.server.bearer_token_file)?;
         println!(
             "{}",
-            http::generate_pairing_url(config.server.bind, &token, chrono::Utc::now().timestamp(),)?
+            http::generate_pairing_url(config.server.bind, &token)?
         );
         return Ok(());
     }
