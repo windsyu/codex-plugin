@@ -56,6 +56,17 @@ git diff --check                               passed
 
 本机 Tailscale 1.96.4、MagicDNS 和 HTTPS capability 已启用。临时 Serve 将 tailnet HTTPS 8443 转发到 loopback header echo，系统信任 TLS 证书；后端收到真实 `Tailscale-User-Login`、`X-Forwarded-For` 和 `X-Forwarded-Proto=https`。客户端伪造身份头时，Serve 会删除并替换为真实登录身份。临时路由撤销后，release Observer 在同一次 `serve` 启动中建立正式 HTTPS 443 → `127.0.0.1:4765` 转发；无 token Tailnet health 返回 200，错误 Origin 返回 403，本机无认证返回 401，SSE 可持续读取事件，文本状态明确标记 `tailnet only`。
 
+### 启动级可复用 token 复核（2026-08-27）
+
+```text
+cargo test --all-targets                         74 passed，1 explicit capacity test ignored
+cargo clippy --all-targets --all-features        passed（-D warnings）
+cargo fmt --all -- --check                       passed
+git diff --check                                 passed
+```
+
+使用 `fixtures/observer.fixture.toml` 启动真实 daemon 后，同一次启动中两次执行 `open` 得到相同 URL，两个独立 `/v1/auth/pair` 请求均返回 200，当前 Bearer token 请求 health 返回 200。停止并重新启动后，token 文件 SHA-256 发生变化，上一次启动的配对 token 返回 401。单元测试同时覆盖 token 文件原子替换、`0600` mode、同一 token 重复兑换、URL 不直接包含 bearer secret，以及轮换令旧配对 token 和 Cookie 失效。
+
 覆盖的关键回归包括：
 
 - plain/zstd、半行、坏行、oversize、archive rename、representation sibling、content fingerprint；
@@ -67,7 +78,7 @@ git diff --check                               passed
 - export 不覆盖且只输出脱敏数据；purge 审计、抑制墓碑与强制重放不复活。
 - schema 10 私有文件 mode 自动收紧、redaction v2 与多 Turn completeness/clean EOF 聚合；
 - schema 11 单 DbWriter、有界队列/CommittedEventBus、epoch continuity、pending resolved 与可重建 projection conflict；
-- 一次性配对/重放/过期/token 轮换、运行中只读 snapshot export、capture policy 与独立 delta retention。
+- 启动级 token 稳定复用/重启轮换、旧配对 token 与 Cookie 失效、运行中只读 snapshot export、capture policy 与独立 delta retention。
 - `SQLITE_FULL` / `SQLITE_IOERR` commit 前 failpoint 会完整 rollback 且不发布，100 consumer fan-out 相互隔离；丢失 watcher hint 后周期 rescan 可恢复；统一错误体包含 requestId/retryable 且不含 payload/path。
 
 ## Release binary E2E

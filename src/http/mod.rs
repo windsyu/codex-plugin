@@ -39,14 +39,14 @@ mod router;
 mod stream;
 
 use crate::config::Config;
-use crate::credentials::load_or_create_token;
+use crate::credentials::rotate_token;
 use crate::domain::model::ApiEnvelope;
 use crate::domain::project::{project_key, project_name};
 use crate::store::{Database, LATEST_SCHEMA_VERSION};
 use crate::tailscale::{ServeAccess, ensure_serve};
 use crate::writer::WriterHandle;
 pub use auth::generate_pairing_url;
-use auth::{PairingNonceStore, redeem_pair_code, verify_session};
+use auth::{redeem_pair_code, verify_session};
 use cursor::*;
 use handlers::parse_byte_range;
 use middleware::{constant_time_eq, cookie_value};
@@ -85,7 +85,6 @@ struct ApiState {
     live_modes: Arc<Vec<String>>,
     blob_downloads: Arc<Semaphore>,
     writer: WriterHandle,
-    pairing_nonces: Arc<PairingNonceStore>,
     settings: Arc<Value>,
     tailscale: Option<Arc<ServeAccess>>,
 }
@@ -96,8 +95,6 @@ pub async fn serve(
     writer: WriterHandle,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let token = load_or_create_token(&config.server.bearer_token_file)?;
-    let pairing_token = token.clone();
     let settings_snapshot = settings_snapshot(&config);
     let listener = TcpListener::bind(config.server.bind).await?;
     let bound_address = listener.local_addr()?;
@@ -117,6 +114,8 @@ pub async fn serve(
     {
         allowed_origins.push(access.origin.clone());
     }
+    let token = rotate_token(&config.server.bearer_token_file)?;
+    let viewer_url = generate_pairing_url(bound_address, &token)?;
     let state = ApiState {
         database,
         token: Arc::new(token),
@@ -132,7 +131,6 @@ pub async fn serve(
         ),
         blob_downloads: Arc::new(Semaphore::new(4)),
         writer,
-        pairing_nonces: Arc::new(PairingNonceStore::default()),
         settings: Arc::new(settings_snapshot),
         tailscale: tailscale.clone(),
     };
@@ -171,11 +169,6 @@ pub async fn serve(
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(security_headers));
 
-    let viewer_url = generate_pairing_url(
-        bound_address,
-        &pairing_token,
-        chrono::Utc::now().timestamp(),
-    )?;
     println!("Local Viewer: {viewer_url}");
     if let Some(access) = &tailscale {
         println!("Tailscale Viewer: {}", access.viewer_url);
@@ -304,21 +297,17 @@ async fn pair_auth(
             );
         }
     }
-    let session = match redeem_pair_code(
-        &state.token,
-        &request.code,
-        &state.pairing_nonces,
-        chrono::Utc::now().timestamp(),
-    ) {
-        Ok(session) => session,
-        Err(_) => {
-            return api_error(
-                StatusCode::UNAUTHORIZED,
-                "PAIR_INVALID",
-                "pairing code is invalid, expired, or already used",
-            );
-        }
-    };
+    let session =
+        match redeem_pair_code(&state.token, &request.code, chrono::Utc::now().timestamp()) {
+            Ok(session) => session,
+            Err(_) => {
+                return api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "PAIR_INVALID",
+                    "pairing token is invalid for this server startup",
+                );
+            }
+        };
     let mut response =
         Json(json!({"apiVersion":"v1","data":{"paired":true,"expiresInSeconds":2592000}}))
             .into_response();
@@ -1763,7 +1752,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -1858,7 +1846,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -1939,7 +1926,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2081,7 +2067,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2128,7 +2113,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2198,7 +2182,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2252,7 +2235,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2301,7 +2283,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };
@@ -2358,7 +2339,6 @@ mod tests {
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
             blob_downloads: Arc::new(Semaphore::new(1)),
-            pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
             tailscale: None,
         };

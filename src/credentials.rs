@@ -42,6 +42,34 @@ pub fn load_or_create_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
+pub fn rotate_token(path: &Path) -> Result<String> {
+    let parent = path
+        .parent()
+        .context("bearer token path must have a parent directory")?;
+    prepare_private_dir(parent, "bearer token")?;
+    if fs::symlink_metadata(path).is_ok() {
+        prepare_private_file(path, "bearer token")?;
+    }
+
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+    let file_name = path
+        .file_name()
+        .context("bearer token path must have a file name")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(error) = write_private_new(&temporary, format!("{token}\n").as_bytes()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("stage bearer token {}", path.display()));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("replace bearer token {}", path.display()));
+    }
+    Ok(token)
+}
+
 fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -54,4 +82,33 @@ fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
     file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rotation_replaces_token_while_load_keeps_current_startup_value() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("observer-data/token");
+        let initial = load_or_create_token(&path)?;
+        assert_eq!(load_or_create_token(&path)?, initial);
+
+        let first_startup = rotate_token(&path)?;
+        assert_ne!(first_startup, initial);
+        assert_eq!(load_or_create_token(&path)?, first_startup);
+
+        let second_startup = rotate_token(&path)?;
+        assert_ne!(second_startup, first_startup);
+        assert_eq!(fs::read_to_string(&path)?.trim(), second_startup);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        }
+        Ok(())
+    }
 }

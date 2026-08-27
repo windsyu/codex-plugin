@@ -1,6 +1,4 @@
-use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -8,74 +6,46 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-const PAIR_TTL_SECONDS: i64 = 5 * 60;
 const SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
-const MAX_USED_NONCES: usize = 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SignedPayload {
+struct PairPayload {
+    kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionPayload {
     kind: String,
     nonce: String,
     exp: i64,
 }
 
-#[derive(Default)]
-pub struct PairingNonceStore {
-    used: Mutex<VecDeque<(String, i64)>>,
-}
-
-impl PairingNonceStore {
-    pub fn consume(&self, nonce: &str, exp: i64, now: i64) -> bool {
-        let mut used = self.used.lock().expect("pairing nonce store poisoned");
-        while used.front().is_some_and(|(_, expires)| *expires < now) {
-            used.pop_front();
-        }
-        if used.iter().any(|(used_nonce, _)| used_nonce == nonce) {
-            return false;
-        }
-        while used.len() >= MAX_USED_NONCES {
-            used.pop_front();
-        }
-        used.push_back((nonce.to_string(), exp));
-        true
-    }
-}
-
-pub fn generate_pair_code(token: &str, now: i64) -> Result<String> {
-    let mut nonce = [0_u8; 24];
-    rand::rng().fill_bytes(&mut nonce);
+pub fn generate_pair_code(token: &str) -> Result<String> {
     sign(
         token,
-        &SignedPayload {
+        &PairPayload {
             kind: "pair".into(),
-            nonce: URL_SAFE_NO_PAD.encode(nonce),
-            exp: now.saturating_add(PAIR_TTL_SECONDS),
         },
     )
 }
 
-pub fn generate_pairing_url(bind: SocketAddr, token: &str, now: i64) -> Result<String> {
+pub fn generate_pairing_url(bind: SocketAddr, token: &str) -> Result<String> {
     Ok(format!(
         "http://{bind}/#pair={}",
-        generate_pair_code(token, now)?
+        generate_pair_code(token)?
     ))
 }
 
-pub fn redeem_pair_code(
-    token: &str,
-    code: &str,
-    nonces: &PairingNonceStore,
-    now: i64,
-) -> Result<String> {
-    let payload = verify(token, code, "pair", now)?;
-    if !nonces.consume(&payload.nonce, payload.exp, now) {
-        anyhow::bail!("pairing code was already used");
+pub fn redeem_pair_code(token: &str, code: &str, now: i64) -> Result<String> {
+    let payload: PairPayload = verify(token, code)?;
+    if payload.kind != "pair" {
+        anyhow::bail!("signed value has the wrong purpose");
     }
     let mut nonce = [0_u8; 24];
     rand::rng().fill_bytes(&mut nonce);
     sign(
         token,
-        &SignedPayload {
+        &SessionPayload {
             kind: "session".into(),
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             exp: now.saturating_add(SESSION_TTL_SECONDS),
@@ -84,7 +54,10 @@ pub fn redeem_pair_code(
 }
 
 pub fn verify_session(token: &str, cookie: &str, now: i64) -> bool {
-    verify(token, cookie, "session", now).is_ok()
+    let Ok(payload) = verify::<SessionPayload>(token, cookie) else {
+        return false;
+    };
+    payload.kind == "session" && payload.exp >= now
 }
 
 fn key(token: &str) -> Result<[u8; 32]> {
@@ -96,7 +69,7 @@ fn key(token: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("bearer secret must decode to 32 bytes"))
 }
 
-fn sign(token: &str, payload: &SignedPayload) -> Result<String> {
+fn sign(token: &str, payload: &impl Serialize) -> Result<String> {
     let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload)?);
     let signature = blake3::keyed_hash(&key(token)?, body.as_bytes());
     Ok(format!(
@@ -105,7 +78,7 @@ fn sign(token: &str, payload: &SignedPayload) -> Result<String> {
     ))
 }
 
-fn verify(token: &str, signed: &str, kind: &str, now: i64) -> Result<SignedPayload> {
+fn verify<T: for<'de> Deserialize<'de>>(token: &str, signed: &str) -> Result<T> {
     let (body, signature) = signed
         .split_once('.')
         .context("signed value is malformed")?;
@@ -114,11 +87,7 @@ fn verify(token: &str, signed: &str, kind: &str, now: i64) -> Result<SignedPaylo
     if !constant_time_eq(expected.as_bytes(), &supplied) {
         anyhow::bail!("signed value is invalid");
     }
-    let payload: SignedPayload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(body)?)?;
-    if payload.kind != kind || payload.exp < now {
-        anyhow::bail!("signed value is expired or has the wrong purpose");
-    }
-    Ok(payload)
+    Ok(serde_json::from_slice(&URL_SAFE_NO_PAD.decode(body)?)?)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -136,30 +105,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_is_single_use_expires_and_sessions_follow_token_rotation() -> Result<()> {
+    fn pair_is_reusable_for_one_startup_and_rotation_invalidates_it() -> Result<()> {
         let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
         let rotated = URL_SAFE_NO_PAD.encode([8_u8; 32]);
-        let store = PairingNonceStore::default();
-        let pair = generate_pair_code(&token, 100)?;
-        let session = redeem_pair_code(&token, &pair, &store, 101)?;
+        let pair = generate_pair_code(&token)?;
+        let session = redeem_pair_code(&token, &pair, 101)?;
         assert!(verify_session(&token, &session, 102));
         assert!(!verify_session(&rotated, &session, 102));
-        assert!(redeem_pair_code(&token, &pair, &store, 102).is_err());
-        let expired = generate_pair_code(&token, 100)?;
-        assert!(redeem_pair_code(&token, &expired, &store, 401).is_err());
+        let second_session = redeem_pair_code(&token, &pair, 102)?;
+        assert!(verify_session(&token, &second_session, 103));
+        assert!(redeem_pair_code(&rotated, &pair, 103).is_err());
+        assert_ne!(generate_pair_code(&rotated)?, pair);
         Ok(())
     }
 
     #[test]
-    fn pairing_url_contains_only_a_short_lived_code() -> Result<()> {
+    fn pairing_url_is_stable_for_one_startup_and_hides_bearer_secret() -> Result<()> {
         let token = URL_SAFE_NO_PAD.encode([9_u8; 32]);
         let bind = "127.0.0.1:4765".parse()?;
-        let url = generate_pairing_url(bind, &token, 100)?;
+        let url = generate_pairing_url(bind, &token)?;
         assert!(url.starts_with("http://127.0.0.1:4765/#pair="));
         assert!(!url.contains(&token));
+        assert_eq!(url, generate_pairing_url(bind, &token)?);
 
         let code = url.split("#pair=").nth(1).expect("pairing fragment");
-        let session = redeem_pair_code(&token, code, &PairingNonceStore::default(), 101)?;
+        let session = redeem_pair_code(&token, code, 101)?;
         assert!(verify_session(&token, &session, 102));
         Ok(())
     }
