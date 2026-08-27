@@ -3,7 +3,7 @@ import type { Item } from './types';
 export type PresentationGroup = 'dialogue' | 'activity' | 'status' | 'request' | 'unknown';
 export type DialogueRole = 'user' | 'assistant';
 export type ActivityKind = 'command' | 'tool' | 'file' | 'search' | 'image' | 'plan' | 'collaboration'
-  | 'reasoning' | 'usage' | 'compaction' | 'error' | 'interrupt' | 'request' | 'other';
+  | 'reasoning' | 'usage' | 'compaction' | 'context' | 'error' | 'interrupt' | 'request' | 'other';
 
 export interface ItemPresentation {
   group: PresentationGroup;
@@ -30,6 +30,7 @@ const labels: Record<ActivityKind, string> = {
   reasoning: '推理摘要',
   usage: '用量',
   compaction: '上下文整理',
+  context: '会话上下文',
   error: '错误',
   interrupt: '中断',
   request: '待处理请求',
@@ -49,10 +50,29 @@ function activity(activity: ActivityKind, group: PresentationGroup = 'activity')
   return { group, activity, label: labels[activity] };
 }
 
+const contextPrefixes = [
+  '<app-context>',
+  '<skills_instructions>',
+  '<permissions instructions>',
+  '<multi_agent_mode>',
+  '<environment_context>',
+  '<codex_internal_context',
+  '# AGENTS.md instructions for ',
+  '# Codex desktop context',
+  'You are `/root`, the primary agent'
+];
+
+export function isContextMessage(item: Item): boolean {
+  const summary = String(item.summaryText || '').trimStart();
+  return contextPrefixes.some((prefix) => summary.startsWith(prefix));
+}
+
 export function presentItem(item: Item): ItemPresentation {
   const payload = itemPayload(item);
   const rawType = String(payload.type || '').toLowerCase();
   const type = item.itemType.toLowerCase();
+
+  if (isContextMessage(item)) return activity('context', 'status');
 
   if (type === 'user_message' || (type === 'message' && payload.role === 'user')) {
     return { group: 'dialogue', role: 'user', label: '你' };
@@ -133,6 +153,6 @@ export function summarizeActivities(entries: ActivityEntry[]): string {
     counts.set(kind, (counts.get(kind) || 0) + 1);
   }
   const order: ActivityKind[] = ['command', 'tool', 'file', 'search', 'image', 'plan', 'collaboration', 'reasoning',
-    'usage', 'compaction', 'error', 'interrupt', 'request', 'other'];
+    'usage', 'compaction', 'context', 'error', 'interrupt', 'request', 'other'];
   return order.filter((kind) => counts.has(kind)).map((kind) => `${counts.get(kind)} 次${labels[kind]}`).join(' · ');
 }

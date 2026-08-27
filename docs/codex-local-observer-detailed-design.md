@@ -1417,7 +1417,7 @@ unknown
 
 ### 17.6 下一步 Viewer 改进基线
 
-当前 Preact Viewer 已完成项目分组、背景上下文、响应式列表/详情导航、认证模式感知的 SSE/轮询、独立加载与错误状态、搜索定位、对话优先 Timeline、折叠过程/诊断摘要和按需 Raw Inspector。P0/P1 加固于 2026-08-22 完成，对话优先体验重构于 2026-08-24 完成。
+当前 Preact Viewer 已完成项目分组、背景上下文、响应式列表/详情导航、认证模式感知的 SSE/轮询、独立加载与错误状态、搜索定位、对话优先 Timeline、折叠过程/诊断摘要和按需 Raw Inspector。P0/P1 加固于 2026-08-22 完成，对话优先体验重构于 2026-08-24 完成；2026-08-27 又将应用外壳、项目/会话导航和对话画布调整为更接近 Codex 的中性、紧凑、内容优先层级，并将内部上下文消息和子代理记录从默认阅读路径收纳到可展开的次级层级。Observer 特有诊断继续完整保留。
 
 后续 P2 Viewer 工作仍以
 [`codex-local-observer-web-viewer-improvements.md`](codex-local-observer-web-viewer-improvements.md)
