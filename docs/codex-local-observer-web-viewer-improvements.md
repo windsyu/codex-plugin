@@ -69,7 +69,7 @@ P0/P1 加固已在同一 Viewer 技术栈内完成：
 - 健康过程和真正 unknown 默认折叠，失败、pending 与 interrupt 自动展开，Raw/provenance 仍完整可查；
 - 四个筛选器收进一个入口，source 级 decode/unknown/disconnected 只聚合提示一次，不再污染每个 Thread 行；
 - Thread 诊断和完整性技术信息降级到折叠或异常提示，不占据健康 Thread 的默认阅读路径；
-- `serve` 就绪后直接打印单次配对 URL；直接访问的登录页以配对链接为主，手工 bearer 仅保留为高级恢复入口。
+- `serve` 就绪后直接打印启动级、可重复使用的配对 URL；直接访问的登录页以配对链接为主，手工 bearer 仅保留为高级恢复入口。
 
 本次仅改变前端 presentation 和启动入口，不修改 REST、SQLite、raw event 或 projection 契约，也不需要 migration。
 
