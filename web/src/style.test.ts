@@ -18,6 +18,15 @@ describe('responsive Viewer contract', () => {
 
   it('defines keyboard focus and mobile target sizes', () => {
     expect(css).toContain(':focus-visible');
-    expect(css).toMatch(/\.thread-row, \.search-result, \.back-button[^}]*min-height:\s*44px/);
+    expect(css).toMatch(/\.project-heading, \.subagent-group > summary, \.thread-row, \.search-result, \.back-button[^}]*min-height:\s*44px/);
+  });
+
+  it('uses a compact Codex-like application shell and centered conversation canvas', () => {
+    expect(css).toMatch(/\.topbar\s*\{[^}]*min-height:\s*52px/);
+    expect(css).toMatch(/\.workspace\s*\{[^}]*grid-template-columns:\s*320px/);
+    expect(css).toMatch(/\.detail-inner\s*\{[^}]*max-width:\s*780px/);
+    expect(css).toMatch(/\.dialogue-assistant\s*\{[^}]*grid-template-columns:\s*28px/);
+    expect(css).toMatch(/\.project-heading\s*\{[^}]*justify-content:\s*flex-start/);
+    expect(css).toMatch(/\.project-heading \.project-title\s*\{[^}]*flex:\s*1/);
   });
 });

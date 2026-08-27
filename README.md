@@ -11,7 +11,7 @@
 - 单行读取受 `max_raw_event_bytes` 约束；oversize 只保存完整输入 fingerprint 和审计占位，不会阻塞后续 record；
 - raw event、Thread/Turn/Item projection、trigram FTS 和 checkpoint 同一 SQLite 事务提交；
 - SessionMeta 的 parent/fork/sub-agent/history-base 与每 Turn model/effort/approval/sandbox/permission context 结构化投影；SessionMeta `base_instructions`、dynamic tools、capability roots、memory mode 与 context window 也作为线程背景上下文保存；
-- Web Viewer 按规范化 `cwd` 聚合项目，使用对话优先 Timeline；用户/助手消息保持主阅读流，命令、工具、文件、reasoning、usage 与兼容诊断按 Turn 折叠汇总；
+- Web Viewer 按规范化 `cwd` 聚合项目，使用接近 Codex 的紧凑项目/会话侧栏与居中对话画布；用户/助手消息保持主阅读流，命令、工具、文件、reasoning、usage 与兼容诊断按 Turn 折叠汇总；
 - Web Viewer 使用 Vite + Preact；Cookie 模式使用 SSE，bearer 模式安全降级为轮询；Markdown 经 DOMPurify 清洗，代码块按需注册 highlight.js 语言，脚本和本地文件链接不作为可执行内容；
 - redaction v2 在入库前处理 secret/header/MCP auth、URL token/signature，并以不可还原 marker 丢弃 image/audio base64 正文；
 - Thread completeness 从全部 Turn coverage 聚合，clean EOF、decode/unknown/disconnect 计数不会再被后续事件清零；

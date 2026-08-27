@@ -13,8 +13,29 @@ interface RequestState { phase: RequestPhase; message?: string; }
 const defaultFilters: Filters = { source: '', status: '', completeness: '', archived: '', q: '' };
 const savedToken = sessionStorage.getItem('observer-token') || '';
 
+function Icon({ name, size = 16 }: { name: 'codex' | 'folder' | 'search' | 'chevron' | 'arrow'; size?: number }) {
+  const paths = {
+    codex: <><path d="M8 1.5 13.6 4.7v6.6L8 14.5l-5.6-3.2V4.7L8 1.5Z"/><path d="m5.2 6.1 2.8-1.6 2.8 1.6v3.8L8 11.5 5.2 9.9V6.1Z"/></>,
+    folder: <path d="M1.8 4.1h4.6l1.3 1.5h6.5v7.2H1.8V4.1Z"/>,
+    search: <><circle cx="7" cy="7" r="4.3"/><path d="m10.2 10.2 3.3 3.3"/></>,
+    chevron: <path d="m6 3.5 4.5 4.5L6 12.5"/>,
+    arrow: <><path d="M13.5 8h-11M6.5 4 2.5 8l4 4"/></>
+  };
+  return <svg class={`icon icon-${name}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true"
+    fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">{paths[name]}</svg>;
+}
+
 function formatTime(ms?: number) {
   return ms ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(ms)) : '时间未知';
+}
+
+function formatClock(ms?: number) {
+  return ms ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(ms)) : '时间未知';
+}
+
+function phaseLabel(value: string) {
+  return ({ commentary: '进度更新', final: '最终回复', message: '消息' } as Record<string, string>)[value]
+    || value.replaceAll('_', ' ');
 }
 
 function formatRelativeTime(ms?: number) {
@@ -33,10 +54,20 @@ function duration(start?: number, end?: number) {
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
 }
 
+function statusLabel(value: string | undefined) {
+  return ({ active: '活跃', idle: '空闲', not_loaded: '未加载', completed: '已完成', running: '进行中', streaming: '生成中',
+    failed: '失败', error: '错误', pending: '待处理', interrupted: '已中断' } as Record<string, string>)[value || '']
+    || value?.replaceAll('_', ' ') || '状态未知';
+}
+
 function badge(value: string | undefined, label?: string) {
   const normalized = value || 'unknown';
+  const display = ({ completed: '已完成', running: '进行中', streaming: '生成中', failed: '失败', error: '错误', pending: '待处理',
+    durable_complete: '历史完整', durable_partial: '历史不完整', live_complete: '实时完整', live_partial: '实时不完整',
+    metadata_only: '仅元数据', ephemeral_lost: '实时细节已丢失', unknown: '未知' } as Record<string, string>)[normalized]
+    || normalized.replaceAll('_', ' ');
   return <span class={`badge badge-${normalized}`} aria-label={label ? `${label}：${normalized}` : normalized}>
-    {normalized.replaceAll('_', ' ')}
+    {display}
   </span>;
 }
 
@@ -66,6 +97,46 @@ function textValue(value: unknown): string {
 function itemSummary(item: Item) {
   const payload = payloadOf(item);
   return item.summaryText || textValue(payload.message ?? payload.content ?? payload.text ?? payload.summary);
+}
+
+function shorten(value: string, max: number) {
+  return value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value;
+}
+
+function cleanPreviewLine(value: string) {
+  return value.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^[\s#>*`-]+/, '').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function shortThreadId(value: string) {
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+export function threadDisplay(thread: Thread): { title: string; excerpt: string } {
+  if (thread.name?.trim()) return { title: shorten(cleanPreviewLine(thread.name), 52), excerpt: '' };
+  if (thread.agentNickname?.trim()) return { title: shorten(cleanPreviewLine(thread.agentNickname), 52), excerpt: '子代理会话' };
+  const preview = (thread.lastMessagePreview || '').trim();
+  const outcome = preview.match(/"outcome"\s*:\s*"([^"]+)/i)?.[1];
+  const rationale = preview.match(/"rationale"\s*:\s*"([^"]+)/i)?.[1];
+  if (outcome || /"risk_level"\s*:/.test(preview)) {
+    const outcomeLabel = ({ allow: '允许', allowed: '允许', deny: '拒绝', denied: '拒绝', review: '需复核' } as Record<string, string>)[outcome?.toLowerCase() || ''];
+    return { title: `审批审查${outcomeLabel ? ` · ${outcomeLabel}` : ''}`, excerpt: rationale ? shorten(cleanPreviewLine(rationale), 68) : '自动审批子代理记录' };
+  }
+  if (/^<turn_aborted>/i.test(preview)) return { title: '已中断的会话', excerpt: '执行被中断，历史记录可能不完整' };
+  if (/^call_[\w-]+$/i.test(preview) || /^(exec|tool_output)$/i.test(preview)) return { title: '工具调用记录', excerpt: '' };
+  if (/^The following is the Codex agent history whose request action you are assessing/i.test(preview)) {
+    return { title: '审批审查记录', excerpt: '自动审批子代理记录' };
+  }
+  if (/^\*\*(Planning|Designing|Considering|Reviewing|Inspecting|Implementing|Running|Checking|Preparing|Analyzing|Exploring|Refining|Verifying)/i.test(preview)) {
+    return { title: thread.status === 'active' ? '当前会话 · 正在处理' : '处理过程记录', excerpt: '' };
+  }
+  if (/^(<app-context>|<multi_agent_mode>|<environment_context>|<codex_internal_context|# AGENTS\.md instructions for)/i.test(preview)) {
+    return { title: '会话上下文记录', excerpt: '' };
+  }
+  const lines = preview.split(/\r?\n/).map(cleanPreviewLine).filter(Boolean);
+  const title = lines[0] ? shorten(lines[0], 52) : `会话 ${shortThreadId(thread.codexThreadId)}`;
+  const excerpt = lines.slice(1).find((line) => line !== title) || '';
+  return { title, excerpt: shorten(excerpt, 68) };
 }
 
 function itemBlobRefs(item: Item): { blobId: string; size: number }[] {
@@ -172,11 +243,14 @@ function DialogueMessage({ item }: { item: Item }) {
   const presentation = presentItem(item);
   const summary = itemSummary(item);
   const phase = String(payloadOf(item).phase || '');
+  const assistant = presentation.role !== 'user';
   return <article class={`dialogue-message dialogue-${presentation.role || 'assistant'}`} id={`item-${encodeURIComponent(item.itemId)}`}
     data-item-id={item.itemId}>
-    <header><strong>{presentation.label}</strong><span>{formatTime(item.startedAtMs || item.completedAtMs)}{phase ? ` · ${phase.replaceAll('_', ' ')}` : ''}</span></header>
-    {summary ? <div class="dialogue-content markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }} />
-      : <p class="empty-message">消息正文未保留</p>}
+    {assistant && <span class="dialogue-avatar"><Icon name="codex" size={15} /></span>}
+    <div class="dialogue-body"><header><strong>{presentation.label}</strong><span>{formatClock(item.startedAtMs || item.completedAtMs)}{phase ? ` · ${phaseLabel(phase)}` : ''}</span></header>
+      {summary ? <div class="dialogue-content markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }} />
+        : <p class="empty-message">消息正文未保留</p>}
+    </div>
   </article>;
 }
 
@@ -204,8 +278,8 @@ export function TurnSection({ turn, items, token, onBlob, focusedItemId, ordinal
   const dialogue = items.filter((item) => presentItem(item).group === 'dialogue');
   const activities = coalesceActivities(items);
   return <section class="turn" id={turn ? `turn-${encodeURIComponent(turn.turnId)}` : undefined}>
-    <div class="turn-heading"><div><h3>{turn ? `对话 ${ordinal}` : '未归属记录'}</h3>
-      {turn && <p class="turn-meta">{formatTime(turn.startedAtMs || turn.completedAtMs)}{turnDuration ? ` · ${turnDuration}` : ''} · {turn.status}</p>}</div>
+    <div class="turn-heading"><div><h3>{turn ? `第 ${ordinal} 轮` : '未归属记录'}</h3>
+      {turn && <p class="turn-meta">{formatTime(turn.startedAtMs || turn.completedAtMs)}{turnDuration ? ` · ${turnDuration}` : ''} · {statusLabel(turn.status)}</p>}</div>
       {turn && turn.captureCompleteness !== 'durable_complete' && badge(turn.captureCompleteness, 'Turn 捕获完整性')}</div>
     {turn?.completenessReasons.length ? <p class="completeness-reasons">{turn.completenessReasons.join(' · ')}</p> : null}
     {dialogue.map((item) => <DialogueMessage key={`${item.turnScope}:${item.itemId}`} item={item} />)}
@@ -218,21 +292,21 @@ function RelationLink({ label, relation, onNavigate }: { label: string; relation
   const title = relation.name || relation.codexThreadId || relation.threadKey;
   return relation.resolved
     ? <button class="relation-link" type="button" onClick={() => onNavigate(relation.threadKey)}>{label}: {title}</button>
-    : <span class="relation-unresolved">{label}: {title.slice(0, 24)} · unresolved</span>;
+    : <span class="relation-unresolved">{label}: {title.slice(0, 24)} · 未解析</span>;
 }
 
 function DiagnosticsSummary({ detail, health }: { detail: ThreadDetail; health?: Health }) {
   const legacy = health?.privacy?.legacyRedactionEvents || 0;
   const issueCount = detail.diagnostics.decodeErrors + detail.diagnostics.unknownVariants + detail.pendingRequests.length
     + detail.projectionConflicts.length + (legacy > 0 ? 1 : 0);
-  return <details class={`diagnostic-summary${issueCount ? ' diagnostic-warning' : ''}`} aria-label="Thread 诊断摘要">
-    <summary><span>Thread 诊断</span><span>{issueCount ? `${issueCount} 项需要关注` : '未发现异常'}</span></summary><div class="diagnostic-content"><div class="diagnostic-grid">
-    <div><strong>{detail.diagnostics.decodeErrors}</strong><span>decode errors</span></div>
-    <div><strong>{detail.diagnostics.unknownVariants}</strong><span>unknown variants</span></div>
-    <div><strong>{detail.pendingRequests.length}</strong><span>pending requests</span></div>
-    <div><strong>{detail.projectionConflicts.length}</strong><span>projection conflicts</span></div>
+  return <details class={`diagnostic-summary${issueCount ? ' diagnostic-warning' : ''}`} aria-label="会话诊断摘要">
+    <summary><span>会话诊断</span><span>{issueCount ? `${issueCount} 项需要关注` : '未发现异常'}</span></summary><div class="diagnostic-content"><div class="diagnostic-grid">
+    <div><strong>{detail.diagnostics.decodeErrors}</strong><span>解析错误</span></div>
+    <div><strong>{detail.diagnostics.unknownVariants}</strong><span>未知变体</span></div>
+    <div><strong>{detail.pendingRequests.length}</strong><span>待处理请求</span></div>
+    <div><strong>{detail.projectionConflicts.length}</strong><span>投影冲突</span></div>
   </div>{legacy > 0 && <p class="privacy-warning" role="status">隐私提醒：{health?.privacy?.warning || `${legacy} 条记录使用旧版脱敏规则`}</p>}
-    <details><summary>Coverage evidence</summary><pre>{jsonText(detail.coverageSummary)}</pre></details>
+    <details><summary>覆盖证据</summary><pre>{jsonText(detail.coverageSummary)}</pre></details>
     {detail.pendingRequests.map((request) => <div class="pending-request"><strong>{request.requestType || 'request'} · {request.state || 'pending'}</strong>
       <span>{request.sourceId || 'unknown source'} · epoch {request.epochId || 'unknown'}</span>
       <p>Observer V1 为只读模式，请在原 Codex 客户端中处理该请求。</p></div>)}
@@ -275,19 +349,20 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     for (const item of items) { const key = item.turnId || item.turnScope; if (!map.has(key)) map.set(key, { turn: null, items: [] }); map.get(key)!.items.push(item); }
     return Array.from(map.entries());
   }, [turns, items]);
-  return <div><button class="back-button" type="button" onClick={onBack}>← 返回列表</button>
-    <div class="thread-header"><p class="eyebrow">{thread.archived ? 'ARCHIVED THREAD' : thread.stale ? 'STALE THREAD' : 'CURRENT THREAD'}</p>
-      <h2>{thread.name || thread.codexThreadId}</h2><p class="thread-meta">{[
-        thread.context.session.modelProvider, thread.context.runtime.model, thread.context.session.agentNickname,
-        thread.context.session.agentRole, thread.context.runtime.cwd, thread.source
+  const copy = threadDisplay(thread);
+  return <div><button class="back-button" type="button" aria-label="返回列表" onClick={onBack}><Icon name="arrow" /> 返回会话</button>
+    <div class="thread-header"><p class="eyebrow">{thread.archived ? '已归档会话' : thread.stale ? '状态可能过期' : '当前会话'}</p>
+      <h2>{copy.title}</h2><p class="thread-meta">{[
+        thread.context.runtime.model, thread.context.session.agentNickname, thread.context.session.agentRole,
+        thread.project.name, thread.source, `会话 ${shortThreadId(thread.codexThreadId)}`
       ].filter(Boolean).join(' · ')}</p><div class="thread-relations">
-        {relations.parent && <RelationLink label="parent" relation={relations.parent} onNavigate={onNavigate} />}
-        {relations.forkedFrom && <RelationLink label="forked from" relation={relations.forkedFrom} onNavigate={onNavigate} />}
-        {relations.children.map((child) => <RelationLink label="child" relation={child} onNavigate={onNavigate} />)}
+        {relations.parent && <RelationLink label="父会话" relation={relations.parent} onNavigate={onNavigate} />}
+        {relations.forkedFrom && <RelationLink label="分支来源" relation={relations.forkedFrom} onNavigate={onNavigate} />}
+        {relations.children.map((child) => <RelationLink label="子会话" relation={child} onNavigate={onNavigate} />)}
       </div></div>
     {thread.captureCompleteness !== 'durable_complete' && <div class="capture-banner">{badge(thread.captureCompleteness, 'Thread 捕获完整性')}
       <span>{thread.completenessReasons.length ? thread.completenessReasons.join(' · ') : '该 Thread 的捕获完整性需要关注'}</span></div>}
-    <DiagnosticsSummary detail={detail} health={health} /><ContextPanel thread={thread} />
+    <div class="conversation-utilities"><DiagnosticsSummary detail={detail} health={health} /><ContextPanel thread={thread} /></div>
     <div class="timeline">{grouped.length === 0 && <p class="empty-list">此 Thread 尚无可投影 Item。</p>}
       {grouped.map(([key, group], index) => <TurnSection key={key} turn={group.turn} items={group.items} token={token} onBlob={onBlob}
         focusedItemId={focusedItemId} ordinal={index + 1} />)}</div>
@@ -301,10 +376,24 @@ function completenessLabel(value: string) {
     live_complete: '实时完整', durable_complete: '历史完整' } as Record<string, string>)[value] || value.replaceAll('_', ' ');
 }
 
+function isSubAgentThread(thread: Thread) {
+  return Boolean(thread.agentPath || thread.parentThreadKey || thread.parentThreadId);
+}
+
 function threadFlags(thread: Thread) {
-  const subAgent = Boolean(thread.agentPath || thread.parentThreadKey || thread.parentThreadId);
+  const subAgent = isSubAgentThread(thread);
   return [thread.archived ? '已归档' : thread.stale ? '状态可能过期' : '', subAgent ? '子代理' : '',
     thread.captureCompleteness !== 'durable_complete' ? completenessLabel(thread.captureCompleteness) : ''].filter(Boolean);
+}
+
+function ThreadRow({ thread, selected, onSelect }: { thread: Thread; selected?: string; onSelect: (threadKey: string) => void }) {
+  const copy = threadDisplay(thread);
+  return <button type="button" class={`thread-row${selected === thread.threadKey ? ' selected' : ''}`}
+    aria-current={selected === thread.threadKey ? 'true' : undefined} title={copy.excerpt ? `${copy.title} — ${copy.excerpt}` : copy.title}
+    onClick={() => onSelect(thread.threadKey)}><div class="thread-row-top"><strong>{copy.title}</strong>
+      {thread.captureCompleteness !== 'durable_complete' && <span class="thread-warning" aria-label={`捕获完整性：${thread.captureCompleteness}`}>需关注</span>}</div>
+    {copy.excerpt && <p>{copy.excerpt}</p>}<small>{[formatRelativeTime(thread.recencyAtMs), ...threadFlags(thread)].join(' · ')}</small>
+  </button>;
 }
 
 export function Sidebar({ health, projects, threads, sources, filters, setFilters, searchResults, searchState, selected, onSearch, onSearchResult, onSelect }: {
@@ -323,7 +412,7 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
   return <aside class="sidebar" aria-label="Thread 导航"><div class="sidebar-head">
     <form class="search-row" role="search" onSubmit={(event) => { event.preventDefault(); onSearch(search.trim()); }}>
       <label class="sr-only" for="viewer-search">搜索消息和工具摘要</label><input id="viewer-search" type="search" value={search}
-        onInput={(event) => setSearch((event.target as HTMLInputElement).value)} placeholder="搜索对话与过程" /><button type="submit" aria-label="搜索">搜索</button>
+        onInput={(event) => setSearch((event.target as HTMLInputElement).value)} placeholder="搜索会话" /><button type="submit" aria-label="搜索"><Icon name="search" /></button>
     </form></div>
     <details class="filter-panel"><summary><span>筛选</span><span>{[filters.source, filters.status, filters.completeness, filters.archived].filter(Boolean).length || '全部'}</span></summary>
     <div class="filters" aria-label="Thread 筛选">
@@ -340,7 +429,7 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
     {(filters.q || filters.source || filters.status || filters.completeness || filters.archived) && <div class="active-filters"><span>当前筛选：{[
       filters.q && `搜索“${filters.q}”`, filters.source, filters.status, filters.completeness,
       filters.archived && (filters.archived === 'true' ? '归档' : '当前')].filter(Boolean).join(' · ')}</span><button type="button" onClick={reset}>全部重置</button></div>}
-    <div class="source-summary">后端 {health?.status || 'loading'} · {sources.length} 个 source · {threads.length} 个 Thread</div>
+    <div class="source-summary" title={`后端 ${health?.status || 'loading'} · ${sources.length} 个数据源`}><span>项目</span><span>{visibleProjects.length} 个项目 · {threads.length} 个会话</span></div>
     {(compatibility.decode > 0 || compatibility.unknown > 0 || compatibility.disconnected > 0) && <div class="compatibility-notice" role="status">
       数据兼容性提示：{[compatibility.decode && `${compatibility.decode} 条解析失败`, compatibility.unknown && `${compatibility.unknown} 条未知事件`,
         compatibility.disconnected && `${compatibility.disconnected} 个数据源未连接`].filter(Boolean).join(' · ')}。详情请查看 Thread 诊断。
@@ -352,13 +441,20 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
       {searchResults.map((result) => <button type="button" class="search-result" onClick={() => onSearchResult(result)}>
         <strong>{result.turnId ? `Turn ${result.turnId}` : 'Thread 命中'}</strong><span>{result.snippet || '无摘要'}</span></button>)}</div>}
     {!searchResults && <div class="project-tree">{visibleProjects.length === 0 && <p class="empty-list">尚未导入或没有符合筛选条件的 Thread。</p>}
-      {visibleProjects.map((project) => { const projectThreads = threads.filter((thread) => thread.project.key === project.project.key); return <details class="project-group" open>
-        <summary class="project-heading"><span class="project-title"><strong>{project.project.name}</strong><small>{project.project.path}</small></span>
-          <span class="project-count">{projectThreads.length}</span></summary><div class="thread-list">{projectThreads.map((thread) => <button type="button"
-            class={`thread-row${selected === thread.threadKey ? ' selected' : ''}`} aria-current={selected === thread.threadKey ? 'true' : undefined}
-            onClick={() => onSelect(thread.threadKey)}><div class="thread-row-top"><strong>{thread.name || thread.lastMessagePreview || thread.codexThreadId}</strong>
-              {thread.captureCompleteness !== 'durable_complete' && <span class="thread-warning" aria-label={`捕获完整性：${thread.captureCompleteness}`}>需关注</span>}</div>
-            <p>{thread.lastMessagePreview || '仅有元数据'}</p><small>{[formatRelativeTime(thread.recencyAtMs), ...threadFlags(thread)].join(' · ')}</small></button>)}</div>
+      {visibleProjects.map((project) => { const projectThreads = threads.filter((thread) => thread.project.key === project.project.key);
+        const primaryThreads = projectThreads.filter((thread) => !isSubAgentThread(thread));
+        const subAgentThreads = projectThreads.filter(isSubAgentThread);
+        return <details class="project-group" open>
+        <summary class="project-heading" title={project.project.path}><Icon name="chevron" size={13} /><Icon name="folder" size={15} />
+          <span class="project-title"><strong>{project.project.name}</strong><small>{project.project.path}</small></span>
+          <span class="project-count">{projectThreads.length}</span></summary><div class="thread-list primary-thread-list">
+          {primaryThreads.map((thread) => <ThreadRow thread={thread} selected={selected} onSelect={onSelect} />)}
+          {primaryThreads.length === 0 && <p class="empty-project">没有主会话</p>}
+          {subAgentThreads.length > 0 && <details class="subagent-group" open={subAgentThreads.some((thread) => thread.threadKey === selected)}>
+            <summary><Icon name="chevron" size={12} /><span>子代理记录</span><span>{subAgentThreads.length}</span></summary>
+            <div class="subagent-list">{subAgentThreads.map((thread) => <ThreadRow thread={thread} selected={selected} onSelect={onSelect} />)}</div>
+          </details>}
+        </div>
       </details>; })}</div>}
   </aside>;
 }
@@ -515,12 +611,12 @@ export function App() {
   const transportText = transport === 'bearer-polling' ? 'Bearer · 15 秒轮询' : transport === 'cookie-live' ? 'Cookie · 实时已连接'
     : transport === 'cookie-disconnected' ? 'Cookie · 实时已断开，正在重试' : 'Cookie · 正在连接实时更新';
 
-  if (!api) return <main><header class="topbar"><div><p class="eyebrow">LOCAL · READ ONLY</p><h1>Codex Observer</h1></div></header>
+  if (!api) return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">只读</span></div></header>
     <AuthPanel onConnect={handleConnect} error={authError} checking={authChecking} /></main>;
 
-  return <main><header class="topbar"><div><p class="eyebrow">LOCAL · READ ONLY</p><h1>Codex Observer</h1></div>
-    <div class="status-stack"><div class={`health health-${health?.status || 'loading'}`}>后端 {health?.status || 'loading'} · event {health?.asOfEventSeq || 0}</div>
-      <div class={`transport transport-${transport}`}>{transportText}</div></div></header>
+  return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">只读</span></div>
+    <div class="status-stack"><div class={`health health-${health?.status || 'loading'}`} title={`后端 ${health?.status || 'loading'} · event ${health?.asOfEventSeq || 0}`}>
+      <span class="status-dot" />本机数据</div><div class={`transport transport-${transport}`}>{transportText}</div></div></header>
     {dashboardState.phase === 'loading' && !health && <div class="page-status" role="status">正在加载 Dashboard…</div>}
     {dashboardState.phase === 'error' && <ErrorNotice message={`Dashboard：${dashboardState.message}`} onRetry={() => setApi(connect(token))}
       onClose={() => setDashboardState({ phase: 'idle' })} />}
@@ -534,8 +630,8 @@ export function App() {
         {detailState.phase === 'loading' && <div class="detail-loading" role="status"><p class="eyebrow">THREAD → TURN → ITEM</p><h2>正在加载所选 Thread…</h2></div>}
         {detailState.phase === 'error' && <ErrorNotice message={`Thread：${detailState.message}`} onRetry={() => selected && selectThread(selected, focusTarget)}
           onClose={() => setDetailState({ phase: 'idle' })} />}
-        {!selected && <div class="empty-state"><p class="eyebrow">THREAD → TURN → ITEM</p><h2>选择一个 Thread</h2>
-          <p>查看持久化时间线、完整性说明和已脱敏原始事件。</p></div>}
+        {!selected && <div class="empty-state"><span class="empty-mark"><Icon name="codex" size={28} /></span><h2>选择一个会话</h2>
+          <p>从左侧项目中打开 Codex 会话，查看对话与执行过程。</p></div>}
         {detail && detailState.phase === 'success' && <ThreadDetailView detail={detail} turns={turns} items={items} token={token} health={health}
           rawEvents={rawEvents} rawState={rawState} rawHasMore={rawHasMore} onRawOpen={() => void loadRaw(true)} onRawMore={() => void loadRaw(false)}
           onRawRetry={() => void loadRaw(rawEvents.length === 0)} onRawCloseError={() => setRawState({ phase: rawEvents.length ? 'success' : 'idle' })}

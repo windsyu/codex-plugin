@@ -1,7 +1,7 @@
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ItemCard, Sidebar, TurnSection, itemRendererKind } from './App';
+import { ItemCard, Sidebar, TurnSection, itemRendererKind, threadDisplay } from './App';
 import type { Item, ProjectSummary, Source, Thread, Turn } from './types';
 
 const containers: HTMLElement[] = [];
@@ -43,6 +43,18 @@ const project = {
 } as ProjectSummary;
 
 describe('Viewer components', () => {
+  it('turns raw previews into concise human-facing thread titles', () => {
+    expect(threadDisplay({ ...thread, lastMessagePreview: '{"risk_level":"low","outcome":"allow","rationale":"只读检查本机服务"}' })).toEqual({
+      title: '审批审查 · 允许', excerpt: '只读检查本机服务'
+    });
+    expect(threadDisplay({ ...thread, lastMessagePreview: '<turn_aborted>\nThe previous turn was interrupted' })).toEqual({
+      title: '已中断的会话', excerpt: '执行被中断，历史记录可能不完整'
+    });
+    expect(threadDisplay({ ...thread, lastMessagePreview: '已完成界面改进：\n- 收纳子代理记录\n- 优化标题' })).toEqual({
+      title: '已完成界面改进：', excerpt: '收纳子代理记录'
+    });
+  });
+
   it('submits search with Enter and exposes named filters and selected state', () => {
     const onSearch = vi.fn();
     const container = mount(<Sidebar
@@ -69,6 +81,7 @@ describe('Viewer components', () => {
     expect(onSearch).toHaveBeenCalledWith('needle');
     expect(container.querySelectorAll('label select')).toHaveLength(4);
     expect(container.querySelector('[aria-current="true"]')).not.toBeNull();
+    expect(container.querySelector('.project-heading .icon-folder')).not.toBeNull();
   });
 
   it('shows snippets and opens the exact search result', () => {
@@ -110,14 +123,16 @@ describe('Viewer components', () => {
       { turnScope: 'turn-1', turnId: 'turn-1', itemId: 'user', itemType: 'user_message', status: 'completed', summaryText: '请检查测试', raw: {}, provenance: {}, lastEventSeq: 1 },
       { turnScope: 'turn-1', turnId: 'turn-1', itemId: 'call', itemType: 'tool_call', status: 'completed', raw: { call_id: 'call-1', name: 'test' }, provenance: {}, lastEventSeq: 2 },
       { turnScope: 'turn-1', turnId: 'turn-1', itemId: 'output', itemType: 'tool_output', status: 'completed', raw: { call_id: 'call-1', output: 'ok' }, provenance: {}, lastEventSeq: 3 },
-      { turnScope: 'turn-1', turnId: 'turn-1', itemId: 'answer', itemType: 'agent_message', status: 'completed', summaryText: '测试通过', raw: {}, provenance: {}, lastEventSeq: 4 }
+      { turnScope: 'turn-1', turnId: 'turn-1', itemId: 'answer', itemType: 'agent_message', status: 'completed', summaryText: '测试通过', raw: { phase: 'commentary' }, provenance: {}, lastEventSeq: 4 }
     ] as Item[];
     const turn = { turnId: 'turn-1', status: 'completed', captureCompleteness: 'durable_complete', completenessReasons: [], coverage: {}, raw: {}, lastEventSeq: 4 } as Turn;
     const container = mount(<TurnSection turn={turn} items={items} token="" onBlob={vi.fn()} ordinal={1} />);
     expect(container.querySelectorAll('.dialogue-message')).toHaveLength(2);
+    expect(container.querySelectorAll('.dialogue-avatar')).toHaveLength(1);
     expect(container.querySelectorAll('.activity-entry')).toHaveLength(1);
     expect(container.querySelector('.activity-counts')?.textContent).toBe('1 次工具调用');
     expect((container.querySelector('.activity-panel') as HTMLDetailsElement).open).toBe(false);
+    expect(container.textContent).toContain('进度更新');
   });
 
   it('surfaces failed and pending process records without opening every healthy detail', () => {
@@ -135,5 +150,17 @@ describe('Viewer components', () => {
     expect(container.querySelectorAll('.compatibility-notice')).toHaveLength(1);
     expect(container.querySelector('.compatibility-notice')?.textContent).toContain('3 条未知事件');
     expect(container.querySelector('.thread-row')?.textContent).not.toContain('unknown event');
+  });
+
+  it('keeps primary conversations visible and tucks sub-agent records into a disclosure', () => {
+    const child = { ...thread, threadKey: 'thread-child', codexThreadId: 'thread-child', parentThreadKey: thread.threadKey,
+      lastMessagePreview: '{"risk_level":"low","outcome":"allow","rationale":"只读检查"}' } as Thread;
+    const container = mount(<Sidebar projects={[{ ...project, threadCount: 2, currentThreadCount: 2 }]} threads={[thread, child]} sources={[]}
+      filters={{ source: '', status: '', completeness: '', archived: '', q: '' }} setFilters={vi.fn()} searchResults={null}
+      searchState={{ phase: 'idle' }} onSearch={vi.fn()} onSearchResult={vi.fn()} onSelect={vi.fn()} />);
+    expect(container.querySelectorAll('.primary-thread-list > .thread-row')).toHaveLength(1);
+    expect(container.querySelector('.subagent-group summary')?.textContent).toContain('子代理记录1');
+    expect((container.querySelector('.subagent-group') as HTMLDetailsElement).open).toBe(false);
+    expect(container.querySelector('.subagent-list')?.textContent).toContain('审批审查 · 允许');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coalesceActivities, presentItem, summarizeActivities } from './presentation';
+import { coalesceActivities, isContextMessage, presentItem, summarizeActivities } from './presentation';
 import type { Item } from './types';
 
 function item(itemType: string, raw: unknown = {}, itemId = itemType, status = 'completed'): Item {
@@ -21,6 +21,15 @@ describe('presentation registry', () => {
   it('keeps only genuine future variants unknown', () => {
     expect(presentItem(item('future_protocol_variant'))).toMatchObject({ group: 'unknown' });
     expect(presentItem(item('agent_message', { type: 'message', role: 'assistant' }))).toMatchObject({ group: 'dialogue', role: 'assistant' });
+  });
+
+  it('moves persisted app and project instructions out of the dialogue reading flow', () => {
+    const appContext = { ...item('agent_message'), summaryText: '<app-context>\n# Codex desktop context' };
+    const projectInstructions = { ...item('user_message'), summaryText: '# AGENTS.md instructions for /tmp/project' };
+    expect(isContextMessage(appContext)).toBe(true);
+    expect(presentItem(appContext)).toMatchObject({ group: 'status', activity: 'context', label: '会话上下文' });
+    expect(presentItem(projectInstructions)).toMatchObject({ group: 'status', activity: 'context' });
+    expect(presentItem({ ...item('user_message'), summaryText: '请检查页面布局' })).toMatchObject({ group: 'dialogue', role: 'user' });
   });
 
   it('coalesces call and output by call_id while retaining severe state', () => {
