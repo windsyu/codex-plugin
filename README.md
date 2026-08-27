@@ -19,7 +19,7 @@
 - Thread、Turn、Item 与 Search 列表支持签名 keyset cursor、稳定 `asOfEventSeq`，游标绑定端点及筛选条件；
 - Viewer 自动消费 Thread/Turn/Item/Search cursor 与 raw event sequence，不静默截断长时间线；
 - 4096-event 有界 ingest 背压、512-slot CommittedEventBus，以及 SSE/WebSocket 的 DB replay → live 无缝切换和慢消费者隔离；
-- `serve` 就绪时打印五分钟单次配对 URL，兑换 HttpOnly Cookie；同时保留 API bearer、loopback-only、Origin 检查、CSP 和纯文本 Raw Inspector；
+- `serve` 就绪时打印五分钟本机配对 URL；可选在同一次启动中建立 Tailscale Serve HTTPS → loopback 转发并打印固定 Tailnet URL；
 - `serve`、`import`、严格只读 `doctor`、`rebuild-projections`；
 - `retention` 默认 dry-run，`--apply` 删除过期 raw，但保留 projection、dedupe tombstone 和 cursor low watermark；
 - `export` 在 writer lock 前分流，用只读 WAL snapshot 输出独占创建的 `0600` 脱敏 JSON；daemon 运行中也可导出；
@@ -71,6 +71,16 @@ cp observer.example.toml observer.toml
 
 所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind；live 仅支持当前用户拥有、权限不宽于 `0600` 且位于私有目录中的直接 Unix socket。
 
+若所有访问设备已经加入同一个 Tailnet，可在保持 Observer loopback-only 的前提下启用启动期端口转发：
+
+```toml
+[server.tailscale_serve]
+enabled = true
+https_port = 443
+```
+
+该模式要求本机 `tailscale` CLI、daemon、MagicDNS 和 HTTPS 已启用。Observer 启动时只创建根路径 `https://<machine>.<tailnet>.ts.net[:port]/ → http://127.0.0.1:4765`；已有不同 Serve 配置时拒绝覆盖，且永不启用 Funnel。Tailscale HTTPS 会把机器 FQDN 写入 Certificate Transparency，机器名不得包含敏感信息。
+
 `capture.ingest_queue_events` 与 `capture.api_consumer_queue_events` 默认分别为 4096 和 512。`keep_reasoning=false` 会只保留 reasoning 身份与 policy marker；`keep_raw_json=false` 会保留 raw event 行与 checkpoint，但不持久化 raw 正文，projection 仍使用入库前的已脱敏内存结构。`delta_retention_days` 独立控制 transient delta，不再沿用普通 raw retention。
 
 需要显式启用 live preview 时，在对应 source 中配置：
@@ -103,7 +113,9 @@ cargo run -- purge --thread '<threadKey>' --observer-copy-only --yes
 cargo run -- serve
 ```
 
-服务成功监听后会直接打印 `Viewer: http://127.0.0.1:4765/#pair=...`。打开后，Viewer 将五分钟有效、单次使用的配对码兑换为 30 天 `HttpOnly; SameSite=Strict` Cookie，并立即清除 fragment；URL 不包含长期 bearer token。
+服务成功监听后会打印 `Local Viewer: http://127.0.0.1:4765/#pair=...`。打开后，Viewer 将五分钟有效、单次使用的配对码兑换为 30 天 `HttpOnly; SameSite=Strict` Cookie，并立即清除 fragment；URL 不包含长期 bearer token。
+
+启用 Tailscale Serve 时还会打印固定的 `Tailscale Viewer: https://<machine>.<tailnet>.ts.net/`。远程浏览器不需要配对 token：Serve 先执行 Tailnet ACL，再向 loopback 后端注入已验证身份；Viewer、API、SSE、搜索和 Blob 下载继续走与本机完全相同的实现。
 
 如果启动链接已经过期，可在另一个终端重新生成（命令只打印，不自动打开）：
 
@@ -171,6 +183,7 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
 - redaction v2 不自动重写历史 v1 记录；health、Viewer 和 export 会报告 legacy record 警告；
 - API 不存在控制 Codex 的 mutation 路由；`POST /v1/auth/pair` 只兑换 Observer 会话 Cookie；
+- Tailscale 模式仍只监听 loopback；仅接受匹配 MagicDNS Host、HTTPS 转发标记和 Serve 用户身份的请求，不支持 Funnel 或普通 LAN 暴露；
 - Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；
 - App Server transport 仍为官方实验能力，因此默认关闭，协议不兼容时退回 store-only。
 

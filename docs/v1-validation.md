@@ -52,6 +52,10 @@ git diff --check                               passed
 
 使用内置浏览器与仓库合成 fixture 复核真实嵌入式 Viewer：Cookie SSE 实时连接、用户气泡与助手正文层级清晰，健康过程和真正 unknown 默认折叠，页面无横向溢出，控制台无 error/warning。`serve` 就绪输出单次配对 URL；单元测试同时确认 URL 不包含 bearer secret，并保持重放、过期和 token 轮换失效语义。
 
+### Tailscale Serve 私网入口复核（2026-08-27）
+
+本机 Tailscale 1.96.4、MagicDNS 和 HTTPS capability 已启用。临时 Serve 将 tailnet HTTPS 8443 转发到 loopback header echo，系统信任 TLS 证书；后端收到真实 `Tailscale-User-Login`、`X-Forwarded-For` 和 `X-Forwarded-Proto=https`。客户端伪造身份头时，Serve 会删除并替换为真实登录身份。临时路由撤销后，release Observer 在同一次 `serve` 启动中建立正式 HTTPS 443 → `127.0.0.1:4765` 转发；无 token Tailnet health 返回 200，错误 Origin 返回 403，本机无认证返回 401，SSE 可持续读取事件，文本状态明确标记 `tailnet only`。
+
 覆盖的关键回归包括：
 
 - plain/zstd、半行、坏行、oversize、archive rename、representation sibling、content fingerprint；
