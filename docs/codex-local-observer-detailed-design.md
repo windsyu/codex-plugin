@@ -1499,7 +1499,8 @@ codex-observerd purge --thread <threadKey> --observer-copy-only --yes
 
 - 默认 bind `127.0.0.1`；
 - 默认不支持 `0.0.0.0`；
-- 若未来允许 LAN，必须显式启用 TLS 与独立认证方案，不复用 loopback 默认；
+- 可选 Tailscale Serve 在启动时将 tailnet HTTPS 根路径转发到 Observer loopback；Observer 不直接监听 LAN、不管理证书，也不启用 Funnel；
+- Tailscale 请求必须来自 loopback proxy、匹配本机 MagicDNS Host 和 HTTPS forwarded proto，并携带 Serve 删除伪造值后注入的登录身份；其余 Viewer/API/SSE 路径与本机模式共用；
 - bearer token 至少 256 bit，由 daemon 首次生成；
 - token 文件仅当前用户可读；
 - `codex-observerd serve` 成功绑定 loopback 后直接打印五分钟有效、fragment 携带的单次配对链接；`open` 可重新生成，二者都不自动打开浏览器；`POST /v1/auth/pair` 兑换 30 天签名 `observer_session` Cookie；
@@ -1587,6 +1588,10 @@ bearer_token_file = "observer-data/token"
 strict_origin = true
 allowed_origins = ["http://127.0.0.1:4765"]
 
+[server.tailscale_serve]
+enabled = false
+https_port = 443
+
 [storage]
 database = "observer-data/observer.sqlite"
 blob_dir = "observer-data/blobs"
@@ -1634,6 +1639,7 @@ environment_value_allowlist = []
 启动前拒绝：
 
 - 非 loopback bind 且未启用明确的远程安全配置；
+- Tailscale Serve 启用但 bind 非 loopback、Origin 检查关闭、HTTPS 端口无效，或现有 Serve/Funnel 配置冲突；
 - 重复 stable source identity；
 - 数据库位于被观察的 Codex store 内；
 - blob 目录位于 sessions/archived_sessions 内；

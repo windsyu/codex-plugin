@@ -12,6 +12,7 @@ mod instance_lock;
 mod live;
 mod permissions;
 mod store;
+mod tailscale;
 mod watcher;
 mod writer;
 

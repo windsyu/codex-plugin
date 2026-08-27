@@ -4,6 +4,10 @@ bearer_token_file = "observer-data/token"
 strict_origin = true
 allowed_origins = ["http://127.0.0.1:4765"]
 
+[server.tailscale_serve]
+enabled = false
+https_port = 443
+
 [storage]
 database = "observer-data/observer.sqlite"
 blob_dir = "observer-data/blobs"

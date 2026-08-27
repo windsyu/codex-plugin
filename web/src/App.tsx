@@ -12,6 +12,7 @@ interface RequestState { phase: RequestPhase; message?: string; }
 
 const defaultFilters: Filters = { source: '', status: '', completeness: '', archived: '', q: '' };
 const savedToken = sessionStorage.getItem('observer-token') || '';
+const tailscaleViewer = window.location.protocol === 'https:' && window.location.hostname.endsWith('.ts.net');
 
 function Icon({ name, size = 16 }: { name: 'codex' | 'folder' | 'search' | 'chevron' | 'arrow'; size?: number }) {
   const paths = {
@@ -169,7 +170,9 @@ function ErrorNotice({ message, onRetry, onClose }: { message: string; onRetry?:
 function AuthPanel({ onConnect, error, checking }: { onConnect: (token: string) => void; error: string; checking: boolean }) {
   const [value, setValue] = useState('');
   return <section class="auth-panel" aria-busy={checking}><p class="eyebrow">LOCAL · READ ONLY</p>
-    <h2>使用本机访问链接</h2><p class="auth-guidance">请打开 Observer 启动输出中的单次配对链接。链接会安全地换成本机 Cookie，地址栏不会保留访问凭据。</p>
+    <h2>{tailscaleViewer ? 'Tailscale 私网访问未授权' : '使用本机访问链接'}</h2><p class="auth-guidance">{tailscaleViewer
+      ? '请确认当前设备已登录同一 Tailnet，并且通过 Observer 启动输出中的 Tailscale Viewer 地址访问。'
+      : '请打开 Observer 启动输出中的单次配对链接。链接会安全地换成本机 Cookie，地址栏不会保留访问凭据。'}</p>
     {error && <p class="error" role="alert">{error}</p>}
     <details class="advanced-auth"><summary>高级访问：使用 Bearer token</summary>
       <form onSubmit={(event) => { event.preventDefault(); onConnect(value.trim()); }}>
@@ -608,8 +611,9 @@ export function App() {
   const visibleThreadKeys = useMemo(() => new Set(filteredThreads.map((thread) => thread.threadKey)), [filteredThreads]);
   const visibleSearchResults = useMemo(() => searchResults?.filter((result) => visibleThreadKeys.has(result.threadKey)) ?? null,
     [searchResults, visibleThreadKeys]);
-  const transportText = transport === 'bearer-polling' ? 'Bearer · 15 秒轮询' : transport === 'cookie-live' ? 'Cookie · 实时已连接'
-    : transport === 'cookie-disconnected' ? 'Cookie · 实时已断开，正在重试' : 'Cookie · 正在连接实时更新';
+  const sessionLabel = tailscaleViewer ? 'Tailscale' : 'Cookie';
+  const transportText = transport === 'bearer-polling' ? 'Bearer · 15 秒轮询' : transport === 'cookie-live' ? `${sessionLabel} · 实时已连接`
+    : transport === 'cookie-disconnected' ? `${sessionLabel} · 实时已断开，正在重试` : `${sessionLabel} · 正在连接实时更新`;
 
   if (!api) return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">只读</span></div></header>
     <AuthPanel onConnect={handleConnect} error={authError} checking={authChecking} /></main>;

@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -6,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self as axum_middleware, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -42,6 +43,7 @@ use crate::credentials::load_or_create_token;
 use crate::domain::model::ApiEnvelope;
 use crate::domain::project::{project_key, project_name};
 use crate::store::{Database, LATEST_SCHEMA_VERSION};
+use crate::tailscale::{ServeAccess, ensure_serve};
 use crate::writer::WriterHandle;
 pub use auth::generate_pairing_url;
 use auth::{PairingNonceStore, redeem_pair_code, verify_session};
@@ -85,6 +87,7 @@ struct ApiState {
     writer: WriterHandle,
     pairing_nonces: Arc<PairingNonceStore>,
     settings: Arc<Value>,
+    tailscale: Option<Arc<ServeAccess>>,
 }
 
 pub async fn serve(
@@ -96,11 +99,29 @@ pub async fn serve(
     let token = load_or_create_token(&config.server.bearer_token_file)?;
     let pairing_token = token.clone();
     let settings_snapshot = settings_snapshot(&config);
+    let listener = TcpListener::bind(config.server.bind).await?;
+    let bound_address = listener.local_addr()?;
+    let tailscale = if config.server.tailscale_serve.enabled {
+        Some(Arc::new(ensure_serve(
+            bound_address,
+            config.server.tailscale_serve.https_port,
+        )?))
+    } else {
+        None
+    };
+    let mut allowed_origins = config.server.allowed_origins.clone();
+    if let Some(access) = &tailscale
+        && !allowed_origins
+            .iter()
+            .any(|origin| origin == &access.origin)
+    {
+        allowed_origins.push(access.origin.clone());
+    }
     let state = ApiState {
         database,
         token: Arc::new(token),
         strict_origin: config.server.strict_origin,
-        allowed_origins: Arc::new(config.server.allowed_origins.clone()),
+        allowed_origins: Arc::new(allowed_origins),
         live_modes: Arc::new(
             config
                 .sources
@@ -113,6 +134,7 @@ pub async fn serve(
         writer,
         pairing_nonces: Arc::new(PairingNonceStore::default()),
         settings: Arc::new(settings_snapshot),
+        tailscale: tailscale.clone(),
     };
     let protected = Router::new()
         .route("/health", get(health))
@@ -149,24 +171,28 @@ pub async fn serve(
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(security_headers));
 
-    let listener = TcpListener::bind(config.server.bind).await?;
-    let bound_address = listener.local_addr()?;
     let viewer_url = generate_pairing_url(
         bound_address,
         &pairing_token,
         chrono::Utc::now().timestamp(),
     )?;
-    println!("Viewer: {viewer_url}");
-    tracing::info!(address = %bound_address, token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready; open the printed single-use Viewer URL");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            while !*shutdown.borrow() {
-                if shutdown.changed().await.is_err() {
-                    break;
-                }
+    println!("Local Viewer: {viewer_url}");
+    if let Some(access) = &tailscale {
+        println!("Tailscale Viewer: {}", access.viewer_url);
+    }
+    tracing::info!(address = %bound_address, tailscale = tailscale.is_some(), token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                break;
             }
-        })
-        .await?;
+        }
+    })
+    .await?;
     Ok(())
 }
 
@@ -199,7 +225,11 @@ async fn authorize(State(state): State<ApiState>, request: Request, next: Next) 
         .and_then(|value| value.to_str().ok())
         .and_then(|cookies| cookie_value(cookies, "observer_session"))
         .is_some_and(|cookie| verify_session(&state.token, cookie, chrono::Utc::now().timestamp()));
-    let authorized = bearer_authorized || cookie_authorized;
+    let tailscale_authorized = state
+        .tailscale
+        .as_ref()
+        .is_some_and(|access| tailscale_request_is_authorized(access, &request));
+    let authorized = bearer_authorized || cookie_authorized || tailscale_authorized;
     if !authorized {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -224,6 +254,27 @@ async fn authorize(State(state): State<ApiState>, request: Request, next: Next) 
         );
     }
     next.run(request).await
+}
+
+fn tailscale_request_is_authorized(access: &ServeAccess, request: &Request) -> bool {
+    let headers = request.headers();
+    let loopback_peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+    let matching_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host == access.authority);
+    let forwarded_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        == Some("https");
+    let identified_user = headers
+        .get("tailscale-user-login")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|login| !login.trim().is_empty());
+    loopback_peer && matching_host && forwarded_https && identified_user
 }
 
 #[derive(Deserialize)]
@@ -1595,6 +1646,58 @@ mod tests {
         assert!(!constant_time_eq(b"token", b"token-long"));
     }
 
+    #[test]
+    fn tailscale_auth_requires_loopback_proxy_https_host_and_identity() -> Result<()> {
+        let access = ServeAccess {
+            authority: "observer.example.ts.net".into(),
+            origin: "https://observer.example.ts.net".into(),
+            viewer_url: "https://observer.example.ts.net/".into(),
+        };
+        let request = |peer: &str, host: &str, login: Option<&str>| -> Result<Request> {
+            let mut builder = Request::builder()
+                .header(header::HOST, host)
+                .header("x-forwarded-proto", "https");
+            if let Some(login) = login {
+                builder = builder.header("tailscale-user-login", login);
+            }
+            let mut request = builder.body(Body::empty())?;
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>()?));
+            Ok(request)
+        };
+
+        assert!(tailscale_request_is_authorized(
+            &access,
+            &request(
+                "127.0.0.1:50000",
+                "observer.example.ts.net",
+                Some("user@example.com")
+            )?
+        ));
+        assert!(!tailscale_request_is_authorized(
+            &access,
+            &request(
+                "100.64.0.1:50000",
+                "observer.example.ts.net",
+                Some("user@example.com")
+            )?
+        ));
+        assert!(!tailscale_request_is_authorized(
+            &access,
+            &request(
+                "127.0.0.1:50000",
+                "wrong.example.ts.net",
+                Some("user@example.com")
+            )?
+        ));
+        assert!(!tailscale_request_is_authorized(
+            &access,
+            &request("127.0.0.1:50000", "observer.example.ts.net", None)?
+        ));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn errors_use_stable_non_leaking_contract() -> Result<()> {
         let response = api_error(
@@ -1662,6 +1765,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let first = query_threads(
             &state,
@@ -1756,6 +1860,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
 
         let started = std::time::Instant::now();
@@ -1836,6 +1941,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
 
         let first = query_turns(
@@ -1977,6 +2083,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let response = event_query(&state, 4, Some(10), None, None, None);
         assert_eq!(response.status(), StatusCode::GONE);
@@ -2023,6 +2130,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let snapshot = query_threads(&state, ThreadQuery::default()).map_err(cursor_test_error)?;
         let snapshot: Value =
@@ -2092,6 +2200,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("last-event-id", HeaderValue::from_static("not-an-integer"));
@@ -2145,6 +2254,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-5"));
@@ -2193,6 +2303,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let child = thread_detail(State(state.clone()), Path(child_key)).await;
         let child: Value =
@@ -2249,6 +2360,7 @@ mod tests {
             blob_downloads: Arc::new(Semaphore::new(1)),
             pairing_nonces: Arc::new(PairingNonceStore::default()),
             settings: Arc::new(json!({})),
+            tailscale: None,
         };
         let response = projects(State(state.clone())).await;
         let body: Value =

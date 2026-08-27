@@ -24,6 +24,14 @@ pub struct ServerConfig {
     pub bearer_token_file: PathBuf,
     pub strict_origin: bool,
     pub allowed_origins: Vec<String>,
+    pub tailscale_serve: TailscaleServeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TailscaleServeConfig {
+    pub enabled: bool,
+    pub https_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +85,16 @@ impl Default for ServerConfig {
             bearer_token_file: PathBuf::from("observer-data/token"),
             strict_origin: true,
             allowed_origins: vec!["http://127.0.0.1:4765".into()],
+            tailscale_serve: TailscaleServeConfig::default(),
+        }
+    }
+}
+
+impl Default for TailscaleServeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            https_port: 443,
         }
     }
 }
@@ -166,6 +184,12 @@ impl Config {
             && !matches!(self.server.bind.ip(), IpAddr::V6(ip) if ip.is_loopback())
         {
             bail!("V1 only permits a loopback server bind");
+        }
+        if self.server.tailscale_serve.enabled && !self.server.strict_origin {
+            bail!("Tailscale Serve requires strict_origin=true");
+        }
+        if self.server.tailscale_serve.enabled && self.server.tailscale_serve.https_port == 0 {
+            bail!("Tailscale Serve https_port must be greater than zero");
         }
         if self.sources.is_empty() {
             bail!("at least one source is required");
@@ -367,5 +391,21 @@ mod tests {
         assert!(config.validate().is_err());
         config.capture.api_consumer_queue_events = 512;
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn tailscale_serve_keeps_loopback_and_strict_origin_boundaries() {
+        let mut config = Config::default();
+        config.server.tailscale_serve.enabled = true;
+        assert!(config.validate().is_ok());
+
+        config.server.strict_origin = false;
+        assert!(config.validate().is_err());
+        config.server.strict_origin = true;
+        config.server.tailscale_serve.https_port = 0;
+        assert!(config.validate().is_err());
+        config.server.tailscale_serve.https_port = 443;
+        config.server.bind = "0.0.0.0:4765".parse().expect("valid bind");
+        assert!(config.validate().is_err());
     }
 }
