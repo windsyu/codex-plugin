@@ -163,4 +163,21 @@ describe('Viewer components', () => {
     expect((container.querySelector('.subagent-group') as HTMLDetailsElement).open).toBe(false);
     expect(container.querySelector('.subagent-list')?.textContent).toContain('审批审查 · 允许');
   });
+
+  it('keeps projectless conversations in Recent instead of inventing cwd projects', () => {
+    const projectless = {
+      ...thread,
+      threadKey: 'thread-projectless',
+      codexThreadId: 'thread-projectless',
+      cwdDisplay: '/Users/demo/Documents/Codex/2026-08-28/generated-name',
+      name: '独立对话',
+      project: undefined
+    } as unknown as Thread;
+    const container = mount(<Sidebar projects={[]} threads={[projectless]} sources={[]}
+      filters={{ source: '', status: '', completeness: '', archived: '', q: '' }} setFilters={vi.fn()} searchResults={null}
+      searchState={{ phase: 'idle' }} onSearch={vi.fn()} onSearchResult={vi.fn()} onSelect={vi.fn()} />);
+    expect(container.querySelector('.recent-section')?.textContent).toContain('独立对话');
+    expect(container.textContent).not.toContain('generated-name');
+    expect(container.querySelectorAll('.project-group')).toHaveLength(0);
+  });
 });

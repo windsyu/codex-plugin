@@ -357,7 +357,7 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     <div class="thread-header"><p class="eyebrow">{thread.archived ? '已归档会话' : thread.stale ? '状态可能过期' : '当前会话'}</p>
       <h2>{copy.title}</h2><p class="thread-meta">{[
         thread.context.runtime.model, thread.context.session.agentNickname, thread.context.session.agentRole,
-        thread.project.name, thread.source, `会话 ${shortThreadId(thread.codexThreadId)}`
+        thread.project?.name, thread.source, `会话 ${shortThreadId(thread.codexThreadId)}`
       ].filter(Boolean).join(' · ')}</p><div class="thread-relations">
         {relations.parent && <RelationLink label="父会话" relation={relations.parent} onNavigate={onNavigate} />}
         {relations.forkedFrom && <RelationLink label="分支来源" relation={relations.forkedFrom} onNavigate={onNavigate} />}
@@ -405,7 +405,9 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
   onSearchResult: (result: SearchResult) => void; onSelect: (threadKey: string) => void;
 }) {
   const [search, setSearch] = useState(filters.q);
-  const visibleProjects = useMemo(() => projects.filter((project) => threads.some((thread) => thread.project.key === project.project.key)), [projects, threads]);
+  const visibleProjects = useMemo(() => projects.filter((project) => threads.some((thread) => thread.project?.key === project.project.key)), [projects, threads]);
+  const recentThreads = useMemo(() => threads.filter((thread) => !thread.project && !isSubAgentThread(thread)), [threads]);
+  const recentSubAgentThreads = useMemo(() => threads.filter((thread) => !thread.project && isSubAgentThread(thread)), [threads]);
   const reset = () => { setSearch(''); setFilters(defaultFilters); onSearch(''); };
   const compatibility = sources.reduce((summary, source) => ({
     decode: summary.decode + (source.currentEpoch?.decodeErrorCount || 0),
@@ -443,8 +445,8 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
     {searchResults && <div class="search-results" aria-label="搜索结果">{searchResults.length === 0 && <p class="empty-list">没有匹配结果</p>}
       {searchResults.map((result) => <button type="button" class="search-result" onClick={() => onSearchResult(result)}>
         <strong>{result.turnId ? `Turn ${result.turnId}` : 'Thread 命中'}</strong><span>{result.snippet || '无摘要'}</span></button>)}</div>}
-    {!searchResults && <div class="project-tree">{visibleProjects.length === 0 && <p class="empty-list">尚未导入或没有符合筛选条件的 Thread。</p>}
-      {visibleProjects.map((project) => { const projectThreads = threads.filter((thread) => thread.project.key === project.project.key);
+    {!searchResults && <div class="project-tree">{visibleProjects.length === 0 && recentThreads.length === 0 && recentSubAgentThreads.length === 0 && <p class="empty-list">尚未导入或没有符合筛选条件的 Thread。</p>}
+      {visibleProjects.map((project) => { const projectThreads = threads.filter((thread) => thread.project?.key === project.project.key);
         const primaryThreads = projectThreads.filter((thread) => !isSubAgentThread(thread));
         const subAgentThreads = projectThreads.filter(isSubAgentThread);
         return <details class="project-group" open>
@@ -458,7 +460,17 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
             <div class="subagent-list">{subAgentThreads.map((thread) => <ThreadRow thread={thread} selected={selected} onSelect={onSelect} />)}</div>
           </details>}
         </div>
-      </details>; })}</div>}
+      </details>; })}
+      {(recentThreads.length > 0 || recentSubAgentThreads.length > 0) && <section class="recent-section" aria-labelledby="recent-heading">
+        <h2 id="recent-heading">最近</h2><div class="thread-list recent-thread-list">
+          {recentThreads.map((thread) => <ThreadRow thread={thread} selected={selected} onSelect={onSelect} />)}
+          {recentSubAgentThreads.length > 0 && <details class="subagent-group" open={recentSubAgentThreads.some((thread) => thread.threadKey === selected)}>
+            <summary><Icon name="chevron" size={12} /><span>子代理记录</span><span>{recentSubAgentThreads.length}</span></summary>
+            <div class="subagent-list">{recentSubAgentThreads.map((thread) => <ThreadRow thread={thread} selected={selected} onSelect={onSelect} />)}</div>
+          </details>}
+        </div>
+      </section>}
+    </div>}
   </aside>;
 }
 

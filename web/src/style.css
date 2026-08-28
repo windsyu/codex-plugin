@@ -156,6 +156,9 @@ input:focus, select:focus { border-color: #555; box-shadow: 0 0 0 2px #ffffff12;
 .source-summary span:first-child { color: var(--soft); font-size: 12px; font-weight: 600; }
 .compatibility-notice { margin: 7px 12px; padding: 9px 10px; color: var(--amber); font-size: 11px; line-height: 1.45; border: 1px solid #69562f; border-radius: 8px; background: #251e12; }
 .project-tree { padding: 4px 7px 18px; }
+.recent-section { margin: 14px 0 0; }
+.recent-section > h2 { margin: 0; padding: 7px 8px 5px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.recent-section .recent-thread-list { padding-left: 0; }
 .project-group { margin: 3px 0 8px; }
 .project-group > summary::-webkit-details-marker { display: none; }
 .project-group > summary { list-style: none; }
