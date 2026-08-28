@@ -44,6 +44,50 @@ pub fn project_key(cwd: &str) -> String {
     }
 }
 
+/// Returns the inferred project key that durable rollout history can support.
+///
+/// Codex Desktop gives projectless conversations an isolated working directory
+/// under `Documents/Codex/YYYY-MM-DD/<name>`. That cwd is execution context,
+/// not a user-visible Codex project, so it must not become a project by itself.
+pub fn inferred_project_key(cwd: &str, originator: Option<&str>) -> Option<String> {
+    let key = project_key(cwd);
+    if key == "unknown"
+        || originator.is_some_and(is_codex_desktop_originator)
+            && is_codex_projectless_workspace(&key)
+    {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+fn is_codex_desktop_originator(value: &str) -> bool {
+    value.eq_ignore_ascii_case("Codex Desktop") || value.eq_ignore_ascii_case("codex_work_desktop")
+}
+
+fn is_codex_projectless_workspace(key: &str) -> bool {
+    let segments = key
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 4 {
+        return false;
+    }
+    let tail = &segments[segments.len() - 4..];
+    tail[0] == "Documents" && tail[1] == "Codex" && is_iso_date(tail[2]) && !tail[3].is_empty()
+}
+
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+}
+
 pub fn project_name(key: &str) -> String {
     if key == "/" {
         return "/".to_string();
@@ -96,5 +140,35 @@ mod tests {
         assert_eq!(project_name("/"), "/");
         assert_eq!(project_name("unknown"), "unknown");
         assert_eq!(project_name("/trailing/"), "trailing");
+    }
+
+    #[test]
+    fn codex_desktop_generated_workspaces_are_projectless() {
+        assert_eq!(
+            inferred_project_key(
+                "/Users/demo/Documents/Codex/2026-08-28/generated-name",
+                Some("Codex Desktop")
+            ),
+            None
+        );
+        assert_eq!(
+            inferred_project_key(
+                "/Users/demo/Documents/Codex/2026-08-28/generated-name",
+                Some("codex_work_desktop")
+            ),
+            None
+        );
+        assert_eq!(
+            inferred_project_key(
+                "/Users/demo/Documents/Codex/2026-08-28/generated-name",
+                Some("codex-tui")
+            ),
+            Some("/Users/demo/Documents/Codex/2026-08-28/generated-name".into())
+        );
+        assert_eq!(
+            inferred_project_key("/Users/demo/workspace/real-project", Some("Codex Desktop")),
+            Some("/Users/demo/workspace/real-project".into())
+        );
+        assert_eq!(inferred_project_key("", Some("Codex Desktop")), None);
     }
 }

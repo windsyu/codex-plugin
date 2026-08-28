@@ -455,6 +455,8 @@ interface ThreadProjection {
 
 Thread 级 `model`、reasoning、sandbox 只是最近已知值。每个 Turn 还要保存不可变的 `executionContext` snapshot，因为这些设置可能在 Thread 生命周期内变化。
 
+`project` 是可选投影，不得由 cwd 无条件伪造。Codex Desktop 的 projectless 会话虽有隔离 cwd，但在 Codex UI 中属于“最近”而非“项目”；对已观察到的 Desktop originator（`Codex Desktop`、`codex_work_desktop`）且 cwd 符合 `*/Documents/Codex/YYYY-MM-DD/<name>` 的 durable 会话，`project` 返回 `null`。cwd 仍完整保留在 runtime context。其他会话继续使用词法规范化 cwd 作为 V1 降级项目键；该规则不宣称恢复了 Codex App 未持久化到 rollout 的完整项目注册表。详见 [ADR 0012](decisions/0012-projectless-thread-grouping.md)。
+
 ### 8.3 TurnProjection
 
 ```ts
@@ -1166,7 +1168,7 @@ DbWriter 对 batch 中每条事件执行：
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/v1/sources` | source 状态、epoch、capabilities |
-| GET | `/v1/projects` | 按规范化 cwd 聚合的项目快照 |
+| GET | `/v1/projects` | 排除 projectless 后，按规范化 cwd 聚合的项目快照 |
 | GET | `/v1/threads` | Thread 分页、筛选、搜索 |
 | GET | `/v1/threads/{threadKey}` | Thread 详情 |
 | GET | `/v1/threads/{threadKey}/turns` | Turn 分页 |
@@ -1344,6 +1346,8 @@ stream event 默认只携带 projection delta 与 raw metadata。大于 inline �
 Source Health
 Project Tree
   Thread List / Search
+Recent
+  Projectless Thread List
 Thread Detail
   Thread Header
   Capture Warning (only when incomplete)
@@ -1417,7 +1421,7 @@ unknown
 
 ### 17.6 下一步 Viewer 改进基线
 
-当前 Preact Viewer 已完成项目分组、背景上下文、响应式列表/详情导航、认证模式感知的 SSE/轮询、独立加载与错误状态、搜索定位、对话优先 Timeline、折叠过程/诊断摘要和按需 Raw Inspector。P0/P1 加固于 2026-08-22 完成，对话优先体验重构于 2026-08-24 完成；2026-08-27 又将应用外壳、项目/会话导航和对话画布调整为更接近 Codex 的中性、紧凑、内容优先层级，并将内部上下文消息和子代理记录从默认阅读路径收纳到可展开的次级层级。Observer 特有诊断继续完整保留。
+当前 Preact Viewer 已完成项目分组、projectless“最近”分区、背景上下文、响应式列表/详情导航、认证模式感知的 SSE/轮询、独立加载与错误状态、搜索定位、对话优先 Timeline、折叠过程/诊断摘要和按需 Raw Inspector。P0/P1 加固于 2026-08-22 完成，对话优先体验重构于 2026-08-24 完成；2026-08-27 又将应用外壳、项目/会话导航和对话画布调整为更接近 Codex 的中性、紧凑、内容优先层级，并将内部上下文消息和子代理记录从默认阅读路径收纳到可展开的次级层级。2026-08-28 起，Codex Desktop 自动生成工作目录不再被伪装成项目。Observer 特有诊断继续完整保留。
 
 后续 P2 Viewer 工作仍以
 [`codex-local-observer-web-viewer-improvements.md`](codex-local-observer-web-viewer-improvements.md)

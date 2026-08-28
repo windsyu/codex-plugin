@@ -16,8 +16,9 @@ pub(super) const MIGRATION_9: &str =
 pub(super) const MIGRATION_10: &str = include_str!("../../migrations/0010_completeness_v2.sql");
 pub(super) const MIGRATION_11: &str = include_str!("../../migrations/0011_writer_conflicts.sql");
 pub(super) const MIGRATION_12: &str = include_str!("../../migrations/0012_context_project.sql");
+pub(super) const MIGRATION_13: &str = include_str!("../../migrations/0013_projectless_threads.sql");
 
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 
 pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION as usize] {
     [
@@ -33,5 +34,6 @@ pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION 
         (10, MIGRATION_10),
         (11, MIGRATION_11),
         (12, MIGRATION_12),
+        (13, MIGRATION_13),
     ]
 }

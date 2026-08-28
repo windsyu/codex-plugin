@@ -85,6 +85,14 @@ P0/P1 加固已在同一 Viewer 技术栈内完成：
 
 本轮不复制 Codex 私有资产或依赖不可验证的 macOS App 私有行为，仅对齐可观察的信息架构、密度和视觉层级。REST、SQLite、projection、安全与 V1 只读边界均未变化，也不需要 migration。
 
+### 3.4 Projectless 分类对齐（2026-08-28）
+
+- Codex Desktop 独立对话的自动生成 cwd 不再生成项目实体，Thread API 返回 `project: null`；
+- `/v1/projects` 只返回实际参与项目分组的 Thread，“最近”作为独立 presentation 分区展示 projectless Thread；
+- cwd 继续保留在 Thread runtime context 和详情诊断中，不因分类变化丢失；
+- schema migration 13 清理既有错误 `project_key`，import、replay 与 rebuild 使用同一分类规则；
+- rollout 不包含 Codex App 的完整 `projectId`，因此当前采用 macOS 优先的可审计降级规则，边界见 [ADR 0012](decisions/0012-projectless-thread-grouping.md)。
+
 ## 4. 优先级定义
 
 | 级别 | 含义 |

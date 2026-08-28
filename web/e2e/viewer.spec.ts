@@ -25,7 +25,10 @@ async function mockApi(page: Page, delays: Record<string, number> = {}) {
     if (path === '/v1/health') data = { status: 'healthy', ready: true, privacy: { legacyRedactionEvents: 1, warning: 'legacy warning' } };
     else if (path === '/v1/projects') data = [{ project: { key: 'project', name: 'Fixture project', path: '/fixture' }, threadCount: 2, currentThreadCount: 2, lastRecencyAtMs: 8 }];
     else if (path === '/v1/sources') data = [{ sourceId: 'source-1', kind: 'rollout', stableIdentity: 'fixture', status: 'ready', currentEpoch: { decodeErrorCount: 1, unknownEventCount: 1 } }];
-    else if (path === '/v1/threads') data = [thread(longId, 'Slow thread'), thread('thread-fast', 'Fast thread')];
+    else if (path === '/v1/threads') data = [thread(longId, 'Slow thread'), thread('thread-fast', 'Fast thread'), {
+      ...thread('thread-recent', 'Recent conversation'), project: undefined,
+      context: { session: { originator: 'Codex Desktop' }, runtime: { cwd: '/Users/demo/Documents/Codex/2026-08-28/generated-name', model: 'fixture' } }
+    }];
     else if (path === '/v1/search') data = [{ entityKey: 'entity', threadKey: 'thread-fast', turnId: 'turn-fast', itemId: 'item-fast', snippet: 'safe matching snippet', score: 1, lastEventSeq: 8 }];
     else if (path.endsWith('/turns')) data = [{ turnId: path.includes(encodeURIComponent(longId)) ? 'turn-slow' : 'turn-fast', status: 'completed', captureCompleteness: 'durable_partial', completenessReasons: ['terminal missing'], coverage: {}, startedAtMs: 1, completedAtMs: 2, raw: {}, lastEventSeq: 8 }];
     else if (path.endsWith('/items')) {
@@ -101,6 +104,15 @@ test('keeps filters and healthy process details out of the default reading path'
   await expect(process).not.toHaveAttribute('open', '');
   await process.locator('> summary').click();
   await expect(page.getByText('command output')).toBeVisible();
+});
+
+test('shows projectless conversations in Recent without exposing generated cwd names as projects', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: '最近' })).toBeVisible();
+  await expect(page.getByText('Recent conversation')).toBeVisible();
+  await expect(page.locator('.project-group')).toHaveCount(1);
+  await expect(page.getByText('generated-name')).toHaveCount(0);
 });
 
 test('redeems a pairing fragment, clears it, and does not persist a bearer token', async ({ page }) => {
