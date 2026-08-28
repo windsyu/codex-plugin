@@ -20,7 +20,7 @@ Web Viewer 以规范化后的 `cwd` 绝对路径作为 `project_key` 聚合 Thre
 
 ## Status
 
-Accepted
+Superseded by [ADR 0012](0012-projectless-thread-grouping.md)
 
 ## Date
 

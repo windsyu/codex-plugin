@@ -41,7 +41,7 @@ mod stream;
 use crate::config::Config;
 use crate::credentials::rotate_token;
 use crate::domain::model::ApiEnvelope;
-use crate::domain::project::{project_key, project_name};
+use crate::domain::project::project_name;
 use crate::store::{Database, LATEST_SCHEMA_VERSION};
 use crate::tailscale::{ServeAccess, ensure_serve};
 use crate::writer::WriterHandle;
@@ -458,18 +458,12 @@ async fn projects(State(state): State<ApiState>) -> Response {
     let rows = state.database.query_json(
         "SELECT project_key,MIN(cwd),COUNT(*),SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END),
               MAX(COALESCE(recency_at_ms,0)) FROM threads
+             WHERE project_key IS NOT NULL AND project_key <> ''
              GROUP BY project_key
              ORDER BY MAX(COALESCE(recency_at_ms,0)) DESC,project_key",
         &[],
         |row| {
-            let key = match row.get::<_, Option<String>>(0)? {
-                Some(key) if !key.is_empty() => key,
-                _ => row
-                    .get::<_, Option<String>>(1)?
-                    .as_deref()
-                    .map(project_key)
-                    .unwrap_or_else(|| "unknown".to_string()),
-            };
+            let key = row.get::<_, String>(0)?;
             Ok(json!({
                 "project":{"key":key,"name":project_name(&key),
                   "path":row.get::<_,Option<String>>(1)?.unwrap_or_else(|| key.clone())},
@@ -1392,12 +1386,14 @@ fn query_search(state: &ApiState, query: SearchQuery) -> Result<Response, Cursor
 fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let cwd: Option<String> = row.get(4)?;
     let project_key_value: Option<String> = row.get(36)?;
-    let key = project_key_value
+    let project = project_key_value
         .filter(|value| !value.is_empty())
-        .or_else(|| cwd.as_deref().map(project_key))
-        .unwrap_or_else(|| "unknown".to_string());
-    let name = project_name(&key);
-    let path = cwd.clone().unwrap_or_else(|| key.clone());
+        .map(|key| {
+            json!({
+                "key":key,"name":project_name(&key),
+                "path":cwd.clone().unwrap_or_else(|| key.clone())
+            })
+        });
 
     let base_instructions = parse_optional_json(row.get(37)?);
     let dynamic_tools = parse_optional_json(row.get(38)?);
@@ -1425,7 +1421,7 @@ fn thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "approvalPolicy":row.get::<_,Option<String>>(31)?,"approvalsReviewer":parse_optional_json(row.get::<_,Option<String>>(32)?),
         "sandbox":parse_optional_json(row.get::<_,Option<String>>(33)?),
         "activePermissionProfile":parse_optional_json(row.get::<_,Option<String>>(34)?),"ruleVersion":row.get::<_,String>(35)?,
-        "project":{"key":key,"name":name,"path":path},
+        "project":project,
         "context":{
             "session":{
                 "baseInstructions":base_instructions,
@@ -2345,9 +2341,9 @@ mod tests {
         let response = projects(State(state.clone())).await;
         let body: Value =
             serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
-        let projects = body["data"].as_array().unwrap();
-        assert_eq!(projects.len(), 2);
-        let local = projects
+        let project_rows = body["data"].as_array().unwrap();
+        assert_eq!(project_rows.len(), 2);
+        let local = project_rows
             .iter()
             .find(|project| project["project"]["key"] == "/demo/local-observer")
             .unwrap();
@@ -2371,6 +2367,33 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|thread| thread["project"]["key"] == "/demo/local-observer")
+        );
+
+        state.database.connect()?.execute(
+            "UPDATE threads SET cwd='/Users/demo/Documents/Codex/2026-08-28/generated-name',
+             originator='Codex Desktop',project_key=NULL
+             WHERE codex_thread_id='00000000-0000-7000-8000-000000000003'",
+            [],
+        )?;
+        let response = projects(State(state.clone())).await;
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+        let ungrouped = query_threads(&state, ThreadQuery::default()).map_err(cursor_test_error)?;
+        let ungrouped: Value = serde_json::from_slice(
+            &axum::body::to_bytes(ungrouped.into_body(), usize::MAX).await?,
+        )?;
+        let projectless = ungrouped["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["codexThreadId"] == "00000000-0000-7000-8000-000000000003")
+            .unwrap();
+        assert!(projectless["project"].is_null());
+        assert_eq!(
+            projectless["cwdDisplay"],
+            "/Users/demo/Documents/Codex/2026-08-28/generated-name"
         );
         Ok(())
     }

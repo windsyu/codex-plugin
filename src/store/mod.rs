@@ -21,7 +21,7 @@ use crate::domain::model::{
     OwnedIngestBatch, PurgeReport, RetentionReport,
 };
 use crate::domain::normalize::parse_time_ms;
-use crate::domain::project::{project_key, project_name};
+use crate::domain::project::{inferred_project_key, project_name};
 use crate::permissions::{
     create_private_file, prepare_database_files, prepare_private_dir, prepare_private_file,
 };
@@ -391,22 +391,23 @@ impl Database {
         let transaction = connection.transaction()?;
         let thread_rows = {
             let mut statement =
-                transaction.prepare("SELECT thread_key,cwd,project_key FROM threads")?;
+                transaction.prepare("SELECT thread_key,cwd,project_key,originator FROM threads")?;
             statement
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (thread_key_value, cwd, existing_project_key) in thread_rows {
+        for (thread_key_value, cwd, existing_project_key, originator) in thread_rows {
             if existing_project_key.is_none()
                 && let Some(cwd_value) = cwd.as_deref()
+                && let Some(key) = inferred_project_key(cwd_value, originator.as_deref())
             {
-                let key = project_key(cwd_value);
                 transaction.execute(
                     "UPDATE threads SET project_key=?1 WHERE thread_key=?2 AND project_key IS NULL",
                     params![key, thread_key_value],
@@ -1060,10 +1061,12 @@ impl Database {
                 |row| {
                     let cwd: Option<String> = row.get(4)?;
                     let project_key_value: Option<String> = row.get(16)?;
-                    let key = project_key_value
+                    let project = project_key_value
                         .filter(|value| !value.is_empty())
-                        .or_else(|| cwd.as_deref().map(project_key))
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .map(|key| json!({
+                            "key":key,"name":project_name(&key),
+                            "path":cwd.clone().unwrap_or_else(|| key.clone())
+                        }));
                     Ok(json!({
                         "threadKey":row.get::<_,String>(0)?,"codexThreadId":row.get::<_,String>(1)?,
                         "storeSourceId":row.get::<_,String>(2)?,"name":row.get::<_,Option<String>>(3)?,
@@ -1076,8 +1079,7 @@ impl Database {
                         "projection":parse_stored_json(row.get::<_,String>(13)?),
                         "provenance":parse_stored_json(row.get::<_,String>(14)?),
                         "lastEventSeq":row.get::<_,i64>(15)?,
-                        "project":{"key":key,"name":project_name(&key),
-                          "path":row.get::<_,Option<String>>(4)?.unwrap_or_else(|| key.clone())},
+                        "project":project,
                         "context":{
                             "session":{
                                 "baseInstructions":parse_stored_json(row.get::<_,Option<String>>(17)?.unwrap_or_default()),
@@ -1878,7 +1880,9 @@ fn project_event(
                 .as_deref()
                 .map(|id| thread_key(&event.store_source_id, id));
             let history_base = p.get("history_base").filter(|value| !value.is_null());
-            let project_key_value = p.get("cwd").and_then(Value::as_str).map(project_key);
+            let project_key_value = p.get("cwd").and_then(Value::as_str).and_then(|cwd| {
+                inferred_project_key(cwd, p.get("originator").and_then(Value::as_str))
+            });
             let base_instructions = p
                 .get("base_instructions")
                 .filter(|value| !value.is_null())
@@ -1924,7 +1928,7 @@ fn project_event(
                    parent_thread_id=?6,parent_thread_key=?7,forked_from_id=?8,forked_from_thread_key=?9,
                    agent_nickname=?10,agent_role=?11,agent_path=?12,originator=?13,cli_version=?14,
                    thread_source=?15,history_mode=?16,history_base_json=?17,
-                   project_key=COALESCE(?18,project_key),
+                   project_key=CASE WHEN ?2 IS NOT NULL THEN ?18 ELSE project_key END,
                    base_instructions_json=COALESCE(?19,base_instructions_json),
                    dynamic_tools_json=COALESCE(?20,dynamic_tools_json),
                    selected_capability_roots_json=COALESCE(?21,selected_capability_roots_json),
@@ -1968,13 +1972,12 @@ fn project_event(
             transaction.execute(
                 "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),reasoning_effort=?3,
                    approval_policy=?4,approvals_reviewer_json=?5,sandbox_json=?6,active_permission_profile_json=?7,
-                   project_key=COALESCE(?8,project_key),projection_json=?9 WHERE thread_key=?10",
+                   projection_json=?8 WHERE thread_key=?9",
                 params![event.payload.get("cwd").and_then(Value::as_str), event.payload.get("model").and_then(Value::as_str),
                     value_as_string(event.payload.get("effort")),value_as_string(event.payload.get("approval_policy")),
                     event.payload.get("approvals_reviewer").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("sandbox_policy").filter(|value| !value.is_null()).map(Value::to_string),
                     event.payload.get("permission_profile").filter(|value| !value.is_null()).map(Value::to_string),
-                    event.payload.get("cwd").and_then(Value::as_str).map(project_key),
                     projection,event.thread_key],
             )?;
         }
@@ -2842,6 +2845,70 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_thirteen_removes_generated_codex_desktop_projects() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for migration in [
+            MIGRATION_1,
+            MIGRATION_2,
+            MIGRATION_3,
+            MIGRATION_4,
+            MIGRATION_5,
+            MIGRATION_6,
+            MIGRATION_7,
+            MIGRATION_8,
+            MIGRATION_9,
+            MIGRATION_10,
+            MIGRATION_11,
+            MIGRATION_12,
+        ] {
+            connection.execute_batch(migration)?;
+        }
+        connection.execute(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,cwd,originator,project_key,last_event_seq)
+             VALUES ('projectless','source','projectless','/Users/demo/Documents/Codex/2026-08-28/generated-name',
+               'Codex Desktop','/Users/demo/Documents/Codex/2026-08-28/generated-name',0),
+              ('project','source','project','/Users/demo/workspace/project','Codex Desktop',
+               '/Users/demo/workspace/project',0),
+              ('work-desktop','source','work-desktop','/Users/demo/Documents/Codex/2026-08-27/generated-work',
+               'codex_work_desktop','/Users/demo/Documents/Codex/2026-08-27/generated-work',0),
+              ('unknown','source','unknown','','Codex Desktop','unknown',0)",
+            [],
+        )?;
+        drop(connection);
+
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let projectless: Option<String> = connection.query_row(
+            "SELECT project_key FROM threads WHERE thread_key='projectless'",
+            [],
+            |row| row.get(0),
+        )?;
+        let project: Option<String> = connection.query_row(
+            "SELECT project_key FROM threads WHERE thread_key='project'",
+            [],
+            |row| row.get(0),
+        )?;
+        let work_desktop: Option<String> = connection.query_row(
+            "SELECT project_key FROM threads WHERE thread_key='work-desktop'",
+            [],
+            |row| row.get(0),
+        )?;
+        let unknown: Option<String> = connection.query_row(
+            "SELECT project_key FROM threads WHERE thread_key='unknown'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(projectless, None);
+        assert_eq!(work_desktop, None);
+        assert_eq!(unknown, None);
+        assert_eq!(project.as_deref(), Some("/Users/demo/workspace/project"));
         Ok(())
     }
 }
