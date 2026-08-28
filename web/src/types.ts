@@ -90,7 +90,7 @@ export interface Thread {
   sandbox?: unknown;
   activePermissionProfile?: unknown;
   ruleVersion: string;
-  project: ProjectRef;
+  project?: ProjectRef;
   context: ThreadContext;
 }
 
