@@ -32,7 +32,7 @@
 - 合成 fixture，不读取或提交真实用户 rollout；
 - 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
-`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。更大数据集的容量规划与 SLA 冻结属于后续发布工程，不影响当前 V1 MVP 边界，详见[详细设计](docs/codex-local-observer-detailed-design.md)。
+`live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。V1 的设计、验证和已知限制已压缩到[开发历史归档](docs/archive/v1-development-history.md)。
 
 ## 构建与测试
 
@@ -52,7 +52,7 @@ cargo build --release
 
 测试只使用临时目录和 `fixtures/` 中的合成数据，不会写入 `~/.codex`。
 `cargo build` 会检查 `web/dist/index.html` 是否已生成且不早于 Viewer 源文件；缺失或过期时会提示先完成前端构建。Viewer 静态资源嵌入 Rust 可执行文件，修改 `web/src` 后必须依次运行 `npm run build --prefix web` 和 `cargo build`（发布构建则使用 `cargo build --release`），仅重启旧二进制不会加载新页面或执行新 migration。
-发布前自动化、release E2E、安全与容量冒烟结果见 [V1 验证记录](docs/v1-validation.md)。
+V1 发布阶段的自动化、release E2E、安全与容量冒烟结果见[开发历史归档](docs/archive/v1-development-history.md)。
 
 ## 配置
 
