@@ -1,4 +1,4 @@
-# Codex Local Observer 项目执行指南
+# Codex Local Gateway 项目执行指南
 
 本文约束本仓库内未来的设计、开发、测试和交付会话。所有执行者在开始工作前必须阅读本文，并将其作为项目级默认工作方式。
 
@@ -22,29 +22,18 @@
 - V2：在安全、可审计的前提下控制确定的 Codex live source；
 - V3：通过 Telegram、飞书、企业微信、Discord 等 IM 接入 V2 Gateway。
 
-当前交付重点是 **V1 本地 MVP，用于快速验证产品价值**。
+V1 本地 MVP 已完成其只读基础目标。当前交付重点是 **V2 Local Gateway 对话与控制能力**；V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md`，同时保持 V1 只读能力兼容。
 
-V1 的默认边界：
+V1 的历史设计、ADR 和验证记录已经压缩到 `docs/archive/v1-development-history.md`。该归档只用于解释现有代码和兼容性，不是当前开发指令，也不得作为恢复 V1 开发范围的依据。
 
-- 单用户、本机运行，macOS 优先；
-- store-first、read-only；
-- 优先实现 Codex rollout 历史导入和增量观察；
-- 优先完成 Thread → Turn → Item 时间线和本地 Web Viewer；
-- 不获取隐藏 chain-of-thought，只处理 Codex 对客户端公开或持久化的数据；
-- 不写 Codex rollout、SQLite、writer lock 或其他原始状态；
-- App Server live attach 不是 MVP 正确性的前提，且默认关闭；
-- V2/V3 能力除非用户明确授权，不得提前混入 V1 实现。
-
-避免为了未来可能的需求提前建设复杂框架。允许为 V2/V3 保留清晰接口，但不得因此拖延 V1 的可运行纵向切片。
+V2 必须继续保持 `/v1` 只读兼容和 store-first 观察能力，但控制、对话、权限、source、cwd、附件和 Slash commands 的当前决定只以 V2 核心约束为准。V3 除非用户明确授权，不得提前混入 V2 实现。
 
 ## 3. 事实与设计依据
 
 项目文档：
 
-- `docs/codex-local-observer-research.md`：需求调研、源码研究和技术事实；
-- `docs/codex-local-observer-detailed-design.md`：V1 完整详细设计；
-- `docs/codex-local-observer-web-viewer-improvements.md`：V1 Viewer 当前问题、下一步改进需求和验收基线；
-- `docs/codex-local-observer-future-design.md`：V2/V3 未来设计。
+- `docs/codex-local-gateway-v2-development-constraints.md`：V2 当前开发核心约束；
+- `docs/archive/v1-development-history.md`：非规范性的 V1 历史归档，仅用于兼容性和追溯。
 
 Codex 官方源码的本地参考路径：
 
@@ -75,12 +64,12 @@ Codex 官方源码的本地参考路径：
 
 ```text
 可启动
-  → 可导入一份真实形态的脱敏 fixture
-  → 可投影 Thread/Turn/Item
-  → 可通过 API 查询
-  → 可在 Web 中查看
-  → 可增量更新
-  → 再做搜索、兼容、性能和加固
+  → 可连接一个确定的现有 App Server source
+  → 可持久化并审计一条 Gateway command
+  → 可创建/继续 Thread 并完成一轮对话
+  → 可实时展示 Turn 与最终答复
+  → 可使用受支持的 Slash commands 和交互请求
+  → 再做图片、兼容、性能和安全加固
 ```
 
 每个阶段都应保持项目可运行、可演示、可回退。不要先完成所有底层抽象再第一次展示用户价值。
@@ -123,7 +112,7 @@ ephemeral_lost
 - Raw JSON、Markdown、ANSI、HTML 和 SVG 默认作为不可信内容；
 - 不把 cwd、diff、完整命令输出或 reasoning 自动发送到外部平台；
 - destructive、高权限和外部写操作必须符合当前用户授权范围；
-- V1 不注册控制 Codex 的 mutation API。
+- `/v1` 不注册控制 Codex 的 mutation API；V2 mutation 只能位于 `/v2` 并遵守核心约束。
 
 ## 5. 会话开始流程
 
@@ -181,20 +170,7 @@ ADR 至少包含：Context、Decision、Alternatives、Consequences、Status、D
 
 ### 7.1 推荐切片
 
-V1 MVP 默认按以下顺序推进：
-
-1. 项目骨架、配置、health；
-2. rollout fixture 与最小 JSONL reader；
-3. raw event 与 Thread/Turn/Item 内存投影；
-4. Observer SQLite、事务和 checkpoint；
-5. 历史全量导入；
-6. active JSONL tail / rescan；
-7. 只读 REST API；
-8. Web Viewer 时间线；
-9. 搜索、Raw Inspector 和 completeness；
-10. crash recovery、安全与兼容加固。
-
-只有前一个切片达到其验收条件后，才把下一个切片作为主线。允许并行准备 fixture 或文档，但不要维持多个长期未集成的大分支。
+V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` 第 12 节的纵向切片推进。只有前一个切片达到验收条件后，才把下一个切片作为主线。允许并行准备 fixture 或文档，但不要维持多个长期未集成的大分支。
 
 ### 7.2 编码要求
 
@@ -210,7 +186,7 @@ V1 MVP 默认按以下顺序推进：
 
 ### 7.3 避免的做法
 
-- 不在 V1 中实现消息发送、approval 或 interrupt；
+- 不在 `/v1` 中注册消息发送、approval、interrupt 或其他控制路由；
 - 不做模型 API MITM；
 - 不让 Web 请求路径直接扫描 Codex store；
 - 不在 adapter 内散落业务投影规则；
@@ -343,7 +319,7 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 以下变化必须同步更新文档：
 
-- V1 范围或验收变化；
+- `/v1` 兼容基线或只读行为变化；
 - ObserverEvent、Thread、Turn、Item schema 变化；
 - SQLite migration；
 - REST/WS/SSE 契约；
@@ -379,16 +355,17 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 用户已经明确确认：
 
 - 产品按 V1、V2、V3 演进；
-- 当前交付目标是快速验证价值的 V1 本地 MVP；
+- V1 本地 MVP 已完成基础交付，当前开发目标是 V2 Local Gateway；
 - 项目使用 Git + GitHub 进行版本控制。
 
-当前详细设计采用的默认技术基线：
+当前 V2 已确认的关键边界：
 
-- 平台重点：macOS、本机、单用户；
-- 数据路径：store-first；
-- 权限边界：V1 read-only；
-- 完整性来源：rollout durable history；
-- 实时增强：可选、默认关闭，不作为 MVP 成功前提；
-- 未来能力：V2 Control Plane、V3 IM Bridge，按独立设计推进。
+- V1 是已完成的只读兼容基础，历史说明只存在于非规范性归档；
+- V2 只连接已存在的 App Server，不负责启动或守护进程；
+- V2 复用 V1 bearer、Cookie 和 Tailscale 登录，不增加 control token；
+- 所有已验证的 Tailnet 用户拥有与本机登录相同的 V2 mutation 能力；
+- `/v1` 保持只读，V2 mutation 只注册在 `/v2`；
+- V2 首版范围、任意 cwd、图片和 Slash commands 以核心约束为准；
+- V3 IM Bridge 保持独立未来范围。
 
 默认技术基线可以通过 Issue、设计评审和 ADR 调整。任何变化都应在同一个 PR 中更新本节和对应设计文档。
