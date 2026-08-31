@@ -1,8 +1,8 @@
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ItemCard, Sidebar, TurnSection, itemRendererKind, threadDisplay } from './App';
-import type { Item, ProjectSummary, Source, Thread, Turn } from './types';
+import { Composer, ControlSettings, ItemCard, NewThreadDialog, OptimisticMessageCard, PendingRequestCard, Sidebar, TurnSection, commandNotice, itemRendererKind, reconcileOptimisticMessages, threadDisplay } from './App';
+import type { ControlCatalog, ControllerSource, Item, PendingRequest, ProjectSummary, Source, Thread, Turn } from './types';
 
 const containers: HTMLElement[] = [];
 
@@ -179,5 +179,146 @@ describe('Viewer components', () => {
     expect(container.querySelector('.recent-section')?.textContent).toContain('独立对话');
     expect(container.textContent).not.toContain('generated-name');
     expect(container.querySelectorAll('.project-group')).toHaveLength(0);
+  });
+
+  it('renders exact approval target and emits a closed typed action', () => {
+    const onAction = vi.fn();
+    const request = { requestKey:'signed',sourceId:'source',sourceEpoch:'epoch',requestId:'7',requestType:'approval',
+      state:'pending',requestVersion:1,payload:{command:'cargo test',cwd:'/workspace'},requestEventSeq:1 } as PendingRequest;
+    const container = mount(<PendingRequestCard request={request} busy={false} onAction={onAction} />);
+    expect(container.textContent).toContain('cargo test'); expect(container.textContent).toContain('/workspace');
+    act(() => (container.querySelector('.request-actions button') as HTMLButtonElement).click());
+    expect(onAction).toHaveBeenCalledWith(request, { type:'approval', decision:'accept' });
+  });
+
+  it('composer exposes epoch-scoped slash commands and interrupt', () => {
+    const onInterrupt = vi.fn(); const catalog = { sourceId:'source',sourceEpoch:'epoch',threadLoaded:true,activeTurnId:'turn-1',
+      slashCommands:[{name:'/status',capability:'status',interactionRequiredWithoutArgument:false}] } as ControlCatalog;
+    const container = mount(<Composer catalog={catalog} busy={false} onSend={vi.fn()} onInterrupt={onInterrupt} />);
+    expect(container.textContent).toContain('活动 Turn');
+    act(() => (Array.from(container.querySelectorAll('button')).find((button) => button.textContent === 'Interrupt') as HTMLButtonElement).click());
+    expect(onInterrupt).toHaveBeenCalledOnce();
+  });
+
+  it('composer previews and sends text with bounded local images', () => {
+    const onSend = vi.fn(); const catalog = { sourceId:'source',sourceEpoch:'epoch',threadLoaded:true,slashCommands:[] } as ControlCatalog;
+    const container = mount(<Composer catalog={catalog} busy={false} onSend={onSend} onInterrupt={vi.fn()} />);
+    const textarea = container.querySelector('textarea')!;
+    act(() => { textarea.value = 'hello image'; textarea.dispatchEvent(new Event('input', { bubbles: true })); });
+    const image = new File(['png'], 'proof.png', { type: 'image/png' });
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(picker, 'files', { configurable: true, value: [image] });
+    act(() => picker.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(container.querySelector('.image-preview')?.textContent).toContain('proof.png');
+    const send = Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '发送')!;
+    act(() => send.click());
+    expect(onSend).toHaveBeenCalledWith('hello image', [image]);
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('');
+    expect(container.querySelector('.image-preview')).toBeNull();
+  });
+
+  it('shows optimistic user input and removes it only after matching projected reconciliation', () => {
+    const message = { threadKey:'thread-1',clientUserMessageId:'client-message-1',text:'optimistic text',imageCount:1,
+      createdAtMs:1,state:'accepted' as const };
+    const container = mount(<OptimisticMessageCard message={message} />);
+    expect(container.textContent).toContain('optimistic text');
+    expect(container.textContent).toContain('已提交，等待投影');
+    expect(container.textContent).toContain('1 张本地图片');
+
+    const unrelated = { turnScope:'turn-1',itemId:'client-message-1',itemType:'agent_message',status:'completed',
+      raw:{},provenance:{},lastEventSeq:1 } as Item;
+    expect(reconcileOptimisticMessages([message], 'thread-1', [unrelated])).toHaveLength(1);
+    const projected = { ...unrelated, itemId:'server-item', itemType:'user_message', raw:{payload:{clientUserMessageId:'client-message-1'}} } as Item;
+    expect(reconcileOptimisticMessages([message], 'thread-1', [projected])).toHaveLength(0);
+  });
+
+  it('slash palette selects only advertised commands and offline state disables mutation', () => {
+    const catalog = { sourceId:'source',sourceEpoch:'epoch',threadLoaded:true,
+      slashCommands:[{name:'/status',capability:'status',interactionRequiredWithoutArgument:false},
+        {name:'/steer',capability:'turn.steer',interactionRequiredWithoutArgument:false}] } as ControlCatalog;
+    const container = mount(<Composer catalog={catalog} busy={false} onSend={vi.fn()} onInterrupt={vi.fn()} />);
+    const textarea = container.querySelector('textarea')!;
+    act(() => { textarea.value = '/sta'; textarea.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(container.querySelectorAll('.slash-palette button')).toHaveLength(1);
+    act(() => (container.querySelector('.slash-palette button') as HTMLButtonElement).click());
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('/status ');
+
+    const offline = mount(<Composer catalog={undefined} disabledReason="source 离线或 epoch 已变化" busy={false}
+      onSend={vi.fn()} onInterrupt={vi.fn()} />);
+    expect(offline.textContent).toContain('epoch 已变化');
+    expect((offline.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((offline.querySelector('input[type="file"]') as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('emits closed user-question and MCP elicitation payloads', () => {
+    const onAction = vi.fn();
+    const question = { requestKey:'q',sourceId:'source',sourceEpoch:'epoch',requestId:'q',requestType:'user_input',state:'pending',
+      requestVersion:2,payload:{questions:[{id:'first',header:'First'},{id:'second',header:'Second'}]},requestEventSeq:1 } as PendingRequest;
+    const questionCard = mount(<PendingRequestCard request={question} busy={false} onAction={onAction} />);
+    const questionInput = questionCard.querySelector('textarea')!;
+    act(() => { questionInput.value = 'alpha\nbeta'; questionInput.dispatchEvent(new Event('input', { bubbles: true })); });
+    act(() => (Array.from(questionCard.querySelectorAll('button')).find((button) => button.textContent === '提交回答') as HTMLButtonElement).click());
+    expect(onAction).toHaveBeenLastCalledWith(question, { type:'userInput', answers:{ first:['alpha'], second:['beta'] } });
+
+    const mcp = { ...question, requestKey:'mcp',requestId:'mcp',requestType:'mcp_elicitation',
+      payload:{requestedSchema:{type:'object',properties:{name:{type:'string'}}}} } as PendingRequest;
+    const mcpCard = mount(<PendingRequestCard request={mcp} busy={false} onAction={onAction} />);
+    const mcpInput = mcpCard.querySelector('textarea')!;
+    act(() => { mcpInput.value = '{"name":"safe"}'; mcpInput.dispatchEvent(new Event('input', { bubbles: true })); });
+    act(() => (Array.from(mcpCard.querySelectorAll('button')).find((button) => button.textContent === '提交表单') as HTMLButtonElement).click());
+    expect(onAction).toHaveBeenLastCalledWith(mcp, { type:'mcpElicitation', action:'accept', content:{name:'safe'} });
+  });
+
+  it('never presents outcome_unknown as success or ordinary failure', () => {
+    expect(commandNotice({ commandId:'command',state:'outcome_unknown' })).toContain('结果未知');
+    expect(commandNotice({ commandId:'command',state:'outcome_unknown' })).toContain('不会自动重放');
+    expect(commandNotice({ commandId:'command',state:'completed' })).toBe('控制操作：completed');
+  });
+
+  it('renders capability-gated settings and Plan/Goal controls', () => {
+    const onSetting = vi.fn(); const onSlash = vi.fn();
+    const catalog = { sourceId:'source',sourceEpoch:'epoch',threadLoaded:true,collaborationMode:{mode:'default'},goal:{status:'active'},
+      slashCommands:[],capabilities:{entries:{
+        'model/list':{available:true,experimental:false,data:{data:[{id:'model-a',displayName:'Model A',supportsPersonality:true,
+          supportedReasoningEfforts:[{reasoningEffort:'low',label:'Low'},{reasoningEffort:'high',label:'High'}]},
+          {id:'hidden',displayName:'Hidden',hidden:true}]}},
+        'permissionProfile/list':{available:true,experimental:false,data:{data:[{id:'workspace',displayName:'Workspace'}]}}
+      }}} as ControlCatalog;
+    const controlledThread = { ...thread, context:{ ...thread.context,runtime:{model:'model-a',reasoningEffort:'low',activePermissionProfile:{id:'workspace'}} } };
+    const container = mount(<ControlSettings thread={controlledThread} catalog={catalog} busy={false} onSetting={onSetting} onSlash={onSlash} />);
+    expect(container.querySelectorAll('select[aria-label="Model"] option')).toHaveLength(1);
+    const reasoning = container.querySelector<HTMLSelectElement>('select[aria-label="Reasoning"]')!;
+    act(() => { reasoning.value = 'high'; reasoning.dispatchEvent(new Event('change', { bubbles:true })); });
+    expect(onSetting).toHaveBeenCalledWith('thread.settings.reasoning', 'high');
+    act(() => (Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '进入 Plan') as HTMLButtonElement).click());
+    expect(onSlash).toHaveBeenCalledWith('/plan');
+    const objective = container.querySelector<HTMLInputElement>('input[aria-label="Goal objective"]')!;
+    act(() => { objective.value = 'ship safely'; objective.dispatchEvent(new Event('input', { bubbles:true })); });
+    act(() => (Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '设置') as HTMLButtonElement).click());
+    expect(onSlash).toHaveBeenCalledWith('/goal ship safely');
+    act(() => (Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '暂停') as HTMLButtonElement).click());
+    expect(onSlash).toHaveBeenCalledWith('/goal pause');
+  });
+
+  it('creates a new Thread only from a ready exact-epoch source and absolute cwd', () => {
+    const onCreate = vi.fn(); const onSource = vi.fn();
+    const catalog = { sourceId:'source',sourceEpoch:'epoch-exact',threadLoaded:false,slashCommands:[],capabilities:{entries:{
+      'model/list':{available:true,experimental:false,data:{data:[{id:'model-a',displayName:'Model A'}]}},
+      'permissionProfile/list':{available:true,experimental:false,data:{data:[{id:'workspace',displayName:'Workspace'}]}}
+    }}} as ControlCatalog;
+    const sources = [{sourceId:'source',sourceEpoch:'epoch-exact',state:'ready'}] as ControllerSource[];
+    const container = mount(<NewThreadDialog sources={sources} catalog={catalog} busy={false} onSource={onSource}
+      onClose={vi.fn()} onCreate={onCreate} />);
+    const create = Array.from(container.querySelectorAll('button')).find((button) => button.textContent === '创建 Thread') as HTMLButtonElement;
+    const cwd = container.querySelector<HTMLInputElement>('input[aria-label="cwd"]')!;
+    act(() => { cwd.value = 'relative'; cwd.dispatchEvent(new Event('input', { bubbles:true })); });
+    expect(create.disabled).toBe(true);
+    act(() => { cwd.value = '/workspace/project'; cwd.dispatchEvent(new Event('input', { bubbles:true })); });
+    const model = container.querySelector<HTMLSelectElement>('select[aria-label="New thread model"]')!;
+    const permissions = container.querySelector<HTMLSelectElement>('select[aria-label="New thread permissions"]')!;
+    act(() => { model.value='model-a'; model.dispatchEvent(new Event('change',{bubbles:true}));
+      permissions.value='workspace'; permissions.dispatchEvent(new Event('change',{bubbles:true})); });
+    act(() => create.click());
+    expect(onCreate).toHaveBeenCalledWith({sourceId:'source',sourceEpoch:'epoch-exact',cwd:'/workspace/project',model:'model-a',personality:null,permissions:'workspace'});
   });
 });

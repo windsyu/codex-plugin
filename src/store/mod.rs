@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::clock::now_ms;
 use crate::config::Config;
 use crate::domain::classify::{classify_item, summary_text};
+use crate::domain::gateway::GatewayCommandRecord;
 use crate::domain::identity::thread_key;
 use crate::domain::live::{classify_live_item, live_summary};
 use crate::domain::model::{
@@ -27,12 +28,17 @@ use crate::permissions::{
 };
 
 mod blob;
+mod gateway;
 mod maintenance;
 mod pool;
 mod projection;
 mod query;
 mod schema;
 mod write;
+
+pub(crate) use gateway::{
+    ClaimedImageUpload, ImageUploadRecord, NewImageUpload, PendingRequestClaim, StageImageUpload,
+};
 
 pub use blob::BlobRecord;
 use blob::PreparedBlob;
@@ -43,6 +49,11 @@ use query::query_json_connection;
 pub use schema::LATEST_SCHEMA_VERSION;
 use schema::*;
 use write::TurnUpdate;
+
+pub(crate) struct GatewayCommandPage {
+    pub as_of_rowid: i64,
+    pub commands: Vec<GatewayCommandRecord>,
+}
 
 struct SessionContextBackfill {
     base_instructions: Option<String>,
@@ -891,7 +902,7 @@ impl Database {
         )?;
         transaction.execute(
             "UPDATE pending_requests SET state='source_disconnected'
-             WHERE source_id=?1 AND epoch_id=?2 AND state='pending'",
+             WHERE source_id=?1 AND epoch_id=?2 AND state IN ('pending','resolving')",
             params![source_id, epoch_id],
         )?;
         for thread_key in thread_keys {
@@ -2063,7 +2074,12 @@ fn project_event(
         transaction.execute(
             "INSERT INTO pending_requests(source_id,epoch_id,request_id,thread_key,request_type,state,
                request_event_seq,payload_json) VALUES (?1,?2,?3,?4,?5,'pending',?6,?7)
-             ON CONFLICT(source_id,epoch_id,request_id) DO NOTHING",
+             ON CONFLICT(source_id,epoch_id,request_id) DO UPDATE SET
+               thread_key=excluded.thread_key,request_type=excluded.request_type,state='pending',
+               request_event_seq=excluded.request_event_seq,resolved_event_seq=NULL,
+               payload_json=excluded.payload_json,request_version=pending_requests.request_version+1,
+               resolving_command_id=NULL,resolving_started_at_ms=NULL
+             WHERE excluded.request_event_seq>pending_requests.request_event_seq",
             params![event.source_id,event.epoch_id,request_id,event.thread_key,request_type,event_seq,event.payload.to_string()],
         )?;
     }
@@ -2072,7 +2088,8 @@ fn project_event(
     {
         transaction.execute(
             "UPDATE pending_requests SET state='resolved',resolved_event_seq=?1
-             WHERE source_id=?2 AND epoch_id=?3 AND request_id=?4 AND state='pending'",
+             WHERE source_id=?2 AND epoch_id=?3 AND request_id=?4
+               AND state IN ('pending','resolving')",
             params![event_seq, event.source_id, event.epoch_id, request_id],
         )?;
     }
@@ -2341,6 +2358,70 @@ fn project_live_lifecycle(
                     event_seq,event.thread_key],
             )?;
         }
+        "thread/settings/updated" => {
+            let settings = event
+                .payload
+                .get("threadSettings")
+                .unwrap_or(&event.payload);
+            tx.execute(
+                "UPDATE threads SET cwd=COALESCE(?1,cwd),model=COALESCE(?2,model),
+                   reasoning_effort=COALESCE(?3,reasoning_effort),
+                   approval_policy=COALESCE(?4,approval_policy),
+                   approvals_reviewer_json=COALESCE(?5,approvals_reviewer_json),
+                   sandbox_json=COALESCE(?6,sandbox_json),
+                   active_permission_profile_json=COALESCE(?7,active_permission_profile_json),
+                   runtime_status_stale=0,projection_json=?8,last_event_seq=?9 WHERE thread_key=?10",
+                params![
+                    settings.get("cwd").and_then(Value::as_str),
+                    settings.get("model").and_then(Value::as_str),
+                    value_as_string(settings.get("effort")),
+                    value_as_string(settings.get("approvalPolicy")),
+                    settings.get("approvalsReviewer").map(Value::to_string),
+                    settings.get("sandboxPolicy").map(Value::to_string),
+                    settings.get("activePermissionProfile").map(Value::to_string),
+                    event.payload.to_string(),
+                    event_seq,
+                    event.thread_key,
+                ],
+            )?;
+        }
+        "thread/goal/updated" | "thread/goal/get/response" | "thread/goal/set/response" => {
+            let goal = event.payload.get("goal");
+            if let Some(goal) = goal.filter(|value| !value.is_null()) {
+                let status = goal
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("active");
+                tx.execute(
+                    "INSERT INTO thread_goals(thread_key,source_id,source_epoch,status,goal_json,
+                       updated_event_seq,updated_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)
+                     ON CONFLICT(thread_key) DO UPDATE SET source_id=excluded.source_id,
+                       source_epoch=excluded.source_epoch,status=excluded.status,
+                       goal_json=excluded.goal_json,updated_event_seq=excluded.updated_event_seq,
+                       updated_at_ms=excluded.updated_at_ms",
+                    params![
+                        event.thread_key,
+                        event.source_id,
+                        event.epoch_id,
+                        status,
+                        goal.to_string(),
+                        event_seq,
+                        time,
+                    ],
+                )?;
+            } else if event.method == "thread/goal/get/response" {
+                tx.execute(
+                    "DELETE FROM thread_goals WHERE thread_key=?1",
+                    [&event.thread_key],
+                )?;
+            }
+        }
+        "thread/goal/cleared" | "thread/goal/clear/response" => {
+            tx.execute(
+                "DELETE FROM thread_goals WHERE thread_key=?1",
+                [&event.thread_key],
+            )?;
+        }
         "turn/started" => {
             if let Some(turn_id) = event.turn_id.as_deref() {
                 upsert_live_turn(
@@ -2576,6 +2657,147 @@ mod tests {
         assert!(relation_column);
         assert!(purge_table);
         assert!(search_lookup_index);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_fourteen_adds_append_only_command_and_request_cas_schema() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
+        for table in [
+            "gateway_commands",
+            "command_transitions",
+            "control_audit",
+            "image_uploads",
+        ] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing migration table {table}");
+        }
+        for column in [
+            "request_version",
+            "resolving_command_id",
+            "resolving_started_at_ms",
+        ] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pending_requests') WHERE name=?1)",
+                [column],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing pending request CAS column {column}");
+        }
+
+        connection.execute(
+            "INSERT INTO gateway_commands(command_id,principal_id,capability,idempotency_key,
+               payload_hash,source_id,source_epoch,input_summary_json,state,created_at_ms,updated_at_ms)
+             VALUES ('command','local_bearer','turn.start','key','hash','source','epoch','{}','received',1,1)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO command_transitions(command_id,from_state,to_state,occurred_at_ms,details_summary_json)
+             VALUES ('command',NULL,'received',1,'{}')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO control_audit(command_id,principal_id,capability,source_id,source_epoch,
+               decision,outcome,payload_hash,input_summary_json,occurred_at_ms)
+             VALUES ('command','local_bearer','turn.start','source','epoch','received','pending','hash','{}',1)",
+            [],
+        )?;
+        assert!(
+            connection
+                .execute(
+                    "UPDATE command_transitions SET to_state='failed' WHERE command_id='command'",
+                    [],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("DELETE FROM control_audit WHERE command_id='command'", [])
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migration_fourteen_rolls_back_all_ddl_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 14 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute("CREATE TABLE control_audit(conflict INTEGER)", [])?;
+        drop(connection);
+
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let gateway_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='gateway_commands')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 13);
+        assert!(!gateway_table);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_fifteen_adds_rebuildable_thread_goal_projection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='thread_goals')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 15);
+        assert!(exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_fifteen_rolls_back_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 15 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute(
+            "CREATE INDEX thread_goals_source_epoch ON threads(thread_key)",
+            [],
+        )?;
+        drop(connection);
+
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='thread_goals')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 14);
+        assert!(!table_exists);
         Ok(())
     }
 

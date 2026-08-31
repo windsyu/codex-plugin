@@ -22,7 +22,7 @@ async function mockApi(page: Page, delays: Record<string, number> = {}) {
     const url = new URL(route.request().url());
     const path = url.pathname;
     let data: unknown;
-    if (path === '/v1/health') data = { status: 'healthy', ready: true, privacy: { legacyRedactionEvents: 1, warning: 'legacy warning' } };
+    if (path === '/v1/health') data = { status: 'healthy', ready: true, control:{enabled:true,tailscaleMutationAccess:false}, privacy: { legacyRedactionEvents: 1, warning: 'legacy warning' } };
     else if (path === '/v1/projects') data = [{ project: { key: 'project', name: 'Fixture project', path: '/fixture' }, threadCount: 2, currentThreadCount: 2, lastRecencyAtMs: 8 }];
     else if (path === '/v1/sources') data = [{ sourceId: 'source-1', kind: 'rollout', stableIdentity: 'fixture', status: 'ready', currentEpoch: { decodeErrorCount: 1, unknownEventCount: 1 } }];
     else if (path === '/v1/threads') data = [thread(longId, 'Slow thread'), thread('thread-fast', 'Fast thread'), {
@@ -48,6 +48,80 @@ async function mockApi(page: Page, delays: Record<string, number> = {}) {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(envelope(data)) });
   });
   return () => rawRequests;
+}
+
+async function mockControlApi(page: Page) {
+  await mockApi(page);
+  const capture = { uploadedBytes: 0, input: undefined as Record<string, unknown> | undefined,
+    action: undefined as Record<string, unknown> | undefined, createdThread: undefined as Record<string, unknown> | undefined,
+    setting: undefined as Record<string, unknown> | undefined, streamPaths: [] as string[], projectionReady:false,
+    threadDetailRequests:0 };
+  await page.route('**/v1/threads/thread-fast/items**', async (route) => {
+    const data: Record<string, unknown>[] = [
+      { turnScope:'turn-fast',turnId:'turn-fast',itemId:'user-turn-fast',itemType:'user_message',status:'completed',summaryText:'fixture question',raw:{},provenance:{},lastEventSeq:6 },
+      { turnScope:'turn-fast',turnId:'turn-fast',itemId:'item-fast',itemType:'command_execution',status:'completed',summaryText:'command output',raw:{payload:{command:'echo fixture',phase:'completed'}},provenance:{},lastEventSeq:7 },
+      { turnScope:'turn-fast',turnId:'turn-fast',itemId:'answer-turn-fast',itemType:'agent_message',status:'completed',summaryText:'fixture answer',raw:{},provenance:{},lastEventSeq:8 }
+    ];
+    const clientId = capture.input?.clientUserMessageId;
+    if (capture.projectionReady && typeof clientId === 'string') data.push({ turnScope:'turn-active',turnId:'turn-active',itemId:'projected-user',
+      itemType:'user_message',status:'completed',summaryText:String(capture.input?.text || 'image message'),
+      raw:{payload:{clientUserMessageId:clientId}},provenance:{},lastEventSeq:9 });
+    await route.fulfill({ status:200,contentType:'application/json',body:JSON.stringify(envelope(data)) });
+  });
+  await page.route('**/v1/threads/thread-fast', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== '/v1/threads/thread-fast') return route.fallback();
+    capture.threadDetailRequests += 1;
+    const data = { thread: thread('thread-fast', 'Fast thread'), sources: [], coverageSummary: { durable_partial: 1 }, projectionConflicts: [],
+      relations: { children: [] }, diagnostics: { decodeErrors: 0, unknownVariants: 0, conflicts: 0 }, pendingRequests: [{
+        requestKey: 'signed-request', sourceId: 'source-1', sourceEpoch: 'epoch-1', requestId: 'approval-1', requestType: 'approval',
+        state: 'pending', requestVersion: 1, requestEventSeq: 8, payload: { command: 'cargo test', cwd: '/fixture/project' }
+      }] };
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(envelope(data)) });
+  });
+  await page.route('**/v2/**', async (route) => {
+    const request = route.request(); const url = new URL(request.url());
+    expect(url.searchParams.has('token')).toBe(false);
+    expect(request.headers().authorization).toBe('Bearer fixture-token');
+    if (url.pathname === '/v2/stream') {
+      capture.streamPaths.push(`${url.pathname}${url.search}`);
+      if (capture.input?.clientUserMessageId) capture.projectionReady = true;
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: observer\nid: signed-stream-cursor\ndata: {"eventSeq":9}\n\n' });
+    } else if (url.pathname === '/v2/control/sources') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:[{sourceId:'source-1',sourceEpoch:'epoch-1',state:'ready'}] }) });
+    } else if (url.pathname === '/v2/control/catalog') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{
+        sourceId:'source-1',sourceEpoch:'epoch-1',threadLoaded:true,activeTurnId:'turn-active',collaborationMode:{mode:'default'},goal:{status:'active'},
+        capabilities:{entries:{'model/list':{available:true,experimental:false,data:{data:[{id:'fixture',displayName:'Fixture',supportsPersonality:true,
+          supportedReasoningEfforts:[{reasoningEffort:'low',label:'Low'},{reasoningEffort:'high',label:'High'}]}]}},
+          'permissionProfile/list':{available:true,experimental:false,data:{data:[{id:'workspace',displayName:'Workspace'}]}}}},
+        slashCommands:[{name:'/status',capability:'status',interactionRequiredWithoutArgument:false},{name:'/interrupt',capability:'turn.interrupt',interactionRequiredWithoutArgument:false}]
+      } }) });
+    } else if (url.pathname === '/v2/uploads/images') {
+      capture.uploadedBytes = request.postDataBuffer()?.byteLength || 0;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{uploadId:'upload-1',mimeType:'image/png',sizeBytes:capture.uploadedBytes,expiresAtMs:Date.now()+60_000} }) });
+    } else if (url.pathname === '/v2/threads/thread-fast/inputs') {
+      capture.input = request.postDataJSON();
+      const state = capture.input?.text === 'simulate uncertainty' ? 'outcome_unknown' : 'dispatching';
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{commandId:'command-1',state} }) });
+    } else if (url.pathname === '/v2/threads') {
+      capture.createdThread = request.postDataJSON();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{commandId:'thread-command',state:'completed',result:{threadId:'created-thread'}} }) });
+    } else if (url.pathname === '/v2/commands') {
+      if (request.method() === 'GET') {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:[] }) });
+      } else {
+        capture.setting = request.postDataJSON();
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{commandId:'setting-command',state:'completed'} }) });
+      }
+    } else if (url.pathname === '/v2/requests/signed-request/actions') {
+      capture.action = request.postDataJSON();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ apiVersion:'v2',data:{commandId:'command-2',state:'completed'} }) });
+    } else {
+      await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error:{message:'not mocked'} }) });
+    }
+  });
+  return capture;
 }
 
 for (const width of [390, 820, 1280, 1440]) {
@@ -115,6 +189,61 @@ test('shows projectless conversations in Recent without exposing generated cwd n
   await expect(page.getByText('generated-name')).toHaveCount(0);
 });
 
+test('controls a live thread with image Composer, interrupt, approval and cursor reconnect', async ({ page }) => {
+  const capture = await mockControlApi(page);
+  await page.goto('/');
+  await page.getByText('Fast thread').first().click();
+  await expect(page.getByLabel('Codex 控制 Composer')).toContainText('活动 Turn');
+  await page.locator('.image-picker input').setInputFiles({ name:'fixture.png',mimeType:'image/png',buffer:Buffer.from('\x89PNG\r\n\x1a\nfixture') });
+  await expect(page.locator('.image-preview')).toContainText('fixture.png');
+  await page.getByPlaceholder('发送消息，输入 / 查看可用命令').fill('image message');
+  await page.getByRole('button', { name:'发送', exact:true }).click();
+  await expect.poll(() => capture.uploadedBytes).toBeGreaterThan(8);
+  await expect.poll(() => capture.input?.uploadIds).toEqual(['upload-1']);
+  expect(capture.input?.sourceEpoch).toBe('epoch-1');
+  await expect(page.locator('.optimistic-message')).toContainText('image message');
+  await expect(page.locator('.optimistic-message')).toContainText('等待投影');
+  await expect(page.locator('.optimistic-message')).toHaveCount(0, { timeout:4_000 });
+
+  await page.getByRole('button', { name:'Interrupt' }).click();
+  await expect.poll(() => capture.input?.text).toBe('/interrupt');
+  await expect(page.getByText('cargo test')).toBeVisible();
+  await expect(page.getByText('/fixture/project')).toBeVisible();
+  await page.getByRole('button', { name:'允许', exact:true }).click();
+  await expect.poll(() => capture.action).toMatchObject({ sourceEpoch:'epoch-1',expectedRequestVersion:1,action:{type:'approval',decision:'accept'} });
+  await expect.poll(() => capture.streamPaths.some((path) => new URL(path, 'http://fixture').searchParams.get('cursor') === 'signed-stream-cursor')).toBe(true);
+});
+
+test('shows outcome_unknown as non-replayed uncertainty', async ({ page }) => {
+  await mockControlApi(page);
+  await page.goto('/');
+  await page.getByText('Fast thread').first().click();
+  await page.getByPlaceholder('发送消息，输入 / 查看可用命令').fill('simulate uncertainty');
+  await page.getByRole('button', { name:'发送', exact:true }).click();
+  await expect(page.locator('.notice')).toContainText('操作结果未知');
+  await expect(page.locator('.notice')).toContainText('不会自动重放');
+});
+
+test('creates a new exact-epoch Thread and changes only catalog-advertised settings', async ({ page }) => {
+  const capture = await mockControlApi(page);
+  await page.goto('/');
+  await page.getByRole('button', { name:'新建对话' }).click();
+  const dialog = page.getByRole('dialog', { name:'新建 Codex Thread' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel('cwd').fill('/fixture/project');
+  await dialog.getByLabel('New thread model').selectOption('fixture');
+  await dialog.getByLabel('New thread permissions').selectOption('workspace');
+  await dialog.getByRole('button', { name:'创建 Thread' }).click();
+  await expect.poll(() => capture.createdThread).toMatchObject({sourceId:'source-1',sourceEpoch:'epoch-1',cwd:'/fixture/project',model:'fixture',permissions:'workspace'});
+  await expect(dialog).toBeHidden();
+
+  await page.getByText('Fast thread').first().click();
+  await page.getByLabel('Reasoning').selectOption('high');
+  await expect.poll(() => capture.setting).toMatchObject({capability:'thread.settings.reasoning',target:{sourceId:'source-1',sourceEpoch:'epoch-1',threadKey:'thread-fast'},input:{value:'high'}});
+  await page.getByRole('button', { name:'进入 Plan' }).click();
+  await expect.poll(() => capture.input?.text).toBe('/plan');
+});
+
 test('redeems a pairing fragment, clears it, and does not persist a bearer token', async ({ page }) => {
   let paired = false;
   let suppliedCode = '';
@@ -135,8 +264,8 @@ test('redeems a pairing fragment, clears it, and does not persist a bearer token
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(envelope(data)) });
   });
   await page.goto('/#pair=signed-fixture-code');
+  await expect.poll(() => suppliedCode).toBe('signed-fixture-code');
   await expect(page.getByText('尚未导入或没有符合筛选条件的 Thread。')).toBeVisible();
-  expect(suppliedCode).toBe('signed-fixture-code');
   expect(new URL(page.url()).hash).toBe('');
   expect(await page.evaluate(() => sessionStorage.getItem('observer-token'))).toBeNull();
 });
