@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::fs;
+use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self as axum_middleware, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -19,6 +21,7 @@ use base64::Engine;
 #[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
+use rusqlite::OptionalExtension;
 use rusqlite::types::Value as SqlValue;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -39,10 +42,21 @@ mod router;
 mod stream;
 
 use crate::config::Config;
-use crate::credentials::rotate_token;
+use crate::controller::{
+    ActorCommand, ControllerOperation, ControllerRegistry, PendingRequestAction, RegistryError,
+    ReviewTarget, ThreadSetting,
+};
+use crate::credentials::{load_or_create_key, rotate_token};
+use crate::domain::gateway::{
+    GatewayCommandTarget, GatewayTransition, NewGatewayCommand, ReceiveGatewayCommand,
+};
 use crate::domain::model::ApiEnvelope;
 use crate::domain::project::project_name;
-use crate::store::{Database, LATEST_SCHEMA_VERSION};
+use crate::permissions::{create_private_file, prepare_private_dir, prepare_private_file};
+use crate::store::{
+    ClaimedImageUpload, Database, ImageUploadRecord, LATEST_SCHEMA_VERSION, NewImageUpload,
+    StageImageUpload,
+};
 use crate::tailscale::{ServeAccess, ensure_serve};
 use crate::writer::WriterHandle;
 pub use auth::generate_pairing_url;
@@ -80,21 +94,28 @@ impl Drop for ConsumerGuard {
 struct ApiState {
     database: Arc<Database>,
     token: Arc<String>,
+    fingerprint_key: [u8; 32],
     strict_origin: bool,
     allowed_origins: Arc<Vec<String>>,
     live_modes: Arc<Vec<String>>,
     blob_downloads: Arc<Semaphore>,
     writer: WriterHandle,
+    controller: ControllerRegistry,
     settings: Arc<Value>,
     tailscale: Option<Arc<ServeAccess>>,
 }
+
+#[derive(Debug, Clone)]
+struct AuditPrincipal(String);
 
 pub async fn serve(
     config: Config,
     database: Arc<Database>,
     writer: WriterHandle,
+    controller: ControllerRegistry,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let controller_enabled = config.controller.enabled;
     let settings_snapshot = settings_snapshot(&config);
     let listener = TcpListener::bind(config.server.bind).await?;
     let bound_address = listener.local_addr()?;
@@ -115,10 +136,12 @@ pub async fn serve(
         allowed_origins.push(access.origin.clone());
     }
     let token = rotate_token(&config.server.bearer_token_file)?;
+    let fingerprint_key = load_or_create_key(&config.storage.fingerprint_key_file)?;
     let viewer_url = generate_pairing_url(bound_address, &token)?;
     let state = ApiState {
         database,
         token: Arc::new(token),
+        fingerprint_key,
         strict_origin: config.server.strict_origin,
         allowed_origins: Arc::new(allowed_origins),
         live_modes: Arc::new(
@@ -131,6 +154,7 @@ pub async fn serve(
         ),
         blob_downloads: Arc::new(Semaphore::new(4)),
         writer,
+        controller,
         settings: Arc::new(settings_snapshot),
         tailscale: tailscale.clone(),
     };
@@ -154,12 +178,51 @@ pub async fn serve(
             state.clone(),
             authorize,
         ));
+    let mut v2 = Router::new()
+        .route("/control/sources", get(controller_sources))
+        .route("/control/catalog", get(controller_catalog))
+        .route("/stream", get(v2_stream))
+        .route_layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            authorize,
+        ));
+    if controller_enabled {
+        v2 = v2.merge(
+            Router::new()
+                .route(
+                    "/commands",
+                    get(list_gateway_commands).post(create_gateway_command),
+                )
+                .route("/commands/{command_id}", get(get_gateway_command))
+                .route("/threads", post(create_gateway_thread))
+                .route("/threads/{thread_key}/inputs", post(create_thread_input))
+                .route(
+                    "/requests/{request_key}/actions",
+                    post(create_pending_request_action),
+                )
+                .route_layer(DefaultBodyLimit::max(256 * 1024))
+                .route_layer(axum_middleware::from_fn_with_state(
+                    state.clone(),
+                    authorize,
+                )),
+        );
+        v2 = v2.merge(
+            Router::new()
+                .route("/uploads/images", post(upload_image))
+                .route_layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+                .route_layer(axum_middleware::from_fn_with_state(
+                    state.clone(),
+                    authorize,
+                )),
+        );
+    }
 
     let app = Router::new()
         .route("/", get(index))
         .route("/assets/{*path}", get(web_asset))
         .route("/v1/auth/pair", post(pair_auth))
         .nest("/v1", protected)
+        .nest("/v2", v2)
         .with_state(state)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -189,6 +252,1905 @@ pub async fn serve(
     Ok(())
 }
 
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+async fn upload_image(
+    State(state): State<ApiState>,
+    Extension(principal): Extension<AuditPrincipal>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !mutation_origin_allowed(&state, &headers) {
+        return v2_error(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REJECTED",
+            "mutation requests require an allowed Origin",
+            None,
+        );
+    }
+    let Some(idempotency_key) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (8..=200).contains(&value.len()) && value.is_ascii())
+    else {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Idempotency-Key must contain 8 to 200 ASCII characters",
+            None,
+        );
+    };
+    if body.is_empty() || body.len() > 20 * 1024 * 1024 {
+        return v2_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "IMAGE_TOO_LARGE",
+            "image must contain 1 byte to 20 MiB",
+            None,
+        );
+    }
+    let Some(detected_mime) = image_mime(&body) else {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "IMAGE_INVALID",
+            "only PNG, JPEG, WebP, and GIF images are accepted",
+            None,
+        );
+    };
+    let declared_mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if declared_mime != Some(detected_mime) {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "IMAGE_INVALID",
+            "Content-Type does not match the image signature",
+            None,
+        );
+    }
+    let key = state.fingerprint_key;
+    let upload_id = blake3::keyed_hash(
+        &key,
+        format!("image-upload\0{}\0{idempotency_key}", principal.0).as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    let fingerprint = blake3::keyed_hash(&key, &body).to_hex().to_string();
+    let relative_path = format!("{upload_id}.bin");
+    let principal_id = principal.0;
+    let existing = match state.database.image_upload(&upload_id) {
+        Ok(existing) => existing,
+        Err(error) => return v2_internal_error(error),
+    };
+    if let Some(existing) = existing {
+        if !existing_image_matches(
+            &existing,
+            &principal_id,
+            detected_mime,
+            body.len() as i64,
+            &fingerprint,
+            &relative_path,
+        ) {
+            return image_idempotency_conflict();
+        }
+        if matches!(existing.state.as_str(), "staged" | "attached")
+            && verified_image_path(&state, &existing).is_err()
+        {
+            return staged_image_integrity_error();
+        }
+        return image_upload_response(&existing);
+    }
+    let directory = state.database.image_staging_dir();
+    if let Err(error) = prepare_private_dir(&directory, "image staging") {
+        return v2_internal_error(error);
+    }
+    let path = directory.join(&relative_path);
+    let mut created = false;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            match create_private_file(&path, "staged image")
+                .and_then(|mut file| file.write_all(&body).map_err(Into::into))
+            {
+                Ok(()) => created = true,
+                Err(error) => return v2_internal_error(error),
+            }
+        }
+        Err(error) => return v2_internal_error(error.into()),
+        Ok(_) => {
+            let orphan = ImageUploadRecord {
+                upload_id: upload_id.clone(),
+                principal_id: principal_id.clone(),
+                mime_type: detected_mime.into(),
+                size_bytes: body.len() as i64,
+                keyed_fingerprint: fingerprint.clone(),
+                relative_path: relative_path.clone(),
+                state: "staged".into(),
+                expires_at_ms: 0,
+            };
+            if verified_image_path(&state, &orphan).is_err() {
+                return staged_image_integrity_error();
+            }
+        }
+    }
+    let expires_at_ms = crate::clock::now_ms() + 24 * 60 * 60 * 1000;
+    let staged = state.writer.stage_image_upload(NewImageUpload {
+        upload_id: upload_id.clone(),
+        principal_id: principal_id.clone(),
+        mime_type: detected_mime.into(),
+        size_bytes: body.len() as i64,
+        keyed_fingerprint: fingerprint.clone(),
+        relative_path: relative_path.clone(),
+        expires_at_ms,
+    });
+    match staged {
+        Ok(StageImageUpload::Created(record)) => image_upload_response(&record),
+        Ok(StageImageUpload::Existing(record)) => {
+            if !existing_image_matches(
+                &record,
+                &principal_id,
+                detected_mime,
+                body.len() as i64,
+                &fingerprint,
+                &relative_path,
+            ) || (matches!(record.state.as_str(), "staged" | "attached")
+                && verified_image_path(&state, &record).is_err())
+            {
+                if created {
+                    let _ = fs::remove_file(&path);
+                }
+                return staged_image_integrity_error();
+            }
+            image_upload_response(&record)
+        }
+        Ok(StageImageUpload::Conflict) => {
+            if created {
+                let _ = fs::remove_file(&path);
+            }
+            image_idempotency_conflict()
+        }
+        Err(error) => {
+            if created {
+                let _ = fs::remove_file(&path);
+            }
+            v2_internal_error(error)
+        }
+    }
+}
+
+fn existing_image_matches(
+    existing: &ImageUploadRecord,
+    principal_id: &str,
+    mime_type: &str,
+    size_bytes: i64,
+    keyed_fingerprint: &str,
+    relative_path: &str,
+) -> bool {
+    existing.principal_id == principal_id
+        && existing.mime_type == mime_type
+        && existing.size_bytes == size_bytes
+        && existing.keyed_fingerprint == keyed_fingerprint
+        && existing.relative_path == relative_path
+}
+
+fn verified_image_path(state: &ApiState, upload: &ImageUploadRecord) -> Result<std::path::PathBuf> {
+    let expected_relative = format!("{}.bin", upload.upload_id);
+    if upload.relative_path != expected_relative {
+        anyhow::bail!("staged image relative path is invalid");
+    }
+    let path = state
+        .database
+        .image_staging_dir()
+        .join(&upload.relative_path);
+    prepare_private_file(&path, "staged image")?;
+    let bytes = fs::read(&path)?;
+    if bytes.len() as i64 != upload.size_bytes
+        || blake3::keyed_hash(&state.fingerprint_key, &bytes)
+            .to_hex()
+            .to_string()
+            != upload.keyed_fingerprint
+    {
+        anyhow::bail!("staged image failed integrity validation");
+    }
+    Ok(path)
+}
+
+fn image_upload_response(upload: &ImageUploadRecord) -> Response {
+    Json(json!({"apiVersion":"v2","data":{
+        "uploadId":upload.upload_id,
+        "mimeType":upload.mime_type,
+        "sizeBytes":upload.size_bytes,
+        "expiresAtMs":upload.expires_at_ms
+    }}))
+    .into_response()
+}
+
+fn image_idempotency_conflict() -> Response {
+    v2_error(
+        StatusCode::CONFLICT,
+        "IDEMPOTENCY_CONFLICT",
+        "Idempotency-Key is already bound to another image",
+        None,
+    )
+}
+
+fn staged_image_integrity_error() -> Response {
+    v2_error(
+        StatusCode::CONFLICT,
+        "IMAGE_INVALID",
+        "staged image is unavailable or failed integrity validation",
+        None,
+    )
+}
+
+async fn controller_sources(State(state): State<ApiState>) -> Response {
+    let sources = state.controller.resolved_snapshots().await;
+    Json(json!({
+        "apiVersion":"v2",
+        "data":sources,
+        "controllerEnabled":state.settings["controller"]["enabled"]
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ControllerCatalogQuery {
+    source_id: Option<String>,
+    thread_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct V2StreamQuery {
+    cursor: Option<String>,
+    thread_key: Option<String>,
+}
+
+async fn v2_stream(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<V2StreamQuery>,
+) -> Response {
+    let encoded_cursor = query.cursor.as_deref().or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+    });
+    let cursor_was_supplied = encoded_cursor.is_some();
+    let mut cursor = match encoded_cursor {
+        Some(value) => match decode_v2_stream_cursor(value, &state.token) {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                return v2_error(
+                    StatusCode::BAD_REQUEST,
+                    "CURSOR_INVALID",
+                    "V2 stream cursor is invalid",
+                    None,
+                );
+            }
+        },
+        None => V2StreamCursor::default(),
+    };
+    match state.database.retention_low_watermark() {
+        Ok(low_watermark) if cursor_was_supplied && cursor.event_seq < low_watermark => {
+            return v2_error(
+                StatusCode::GONE,
+                "CURSOR_EXPIRED",
+                "event cursor is older than the retention window",
+                None,
+            );
+        }
+        Ok(low_watermark) => cursor.event_seq = cursor.event_seq.max(low_watermark),
+        Err(error) => return v2_internal_error(error),
+    }
+    let database = state.database.clone();
+    let token = state.token.clone();
+    let thread_key = query.thread_key;
+    let mut committed = state.writer.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            let events = database.query_json(
+                "SELECT event_seq,event_id,source_id,epoch_id,source_seq,observed_at_ms,event_at_ms,thread_key,codex_thread_id,
+                  turn_id,item_id,method,phase,durability,raw_json,redaction_json,decode_status,decode_error,stored_raw_hash,blob_id
+                  FROM raw_events WHERE event_seq>?1 ORDER BY event_seq LIMIT 200",
+                &[&cursor.event_seq], event_row,
+            ).unwrap_or_default();
+            let transitions = database.query_json(
+                "SELECT t.transition_seq,t.command_id,g.thread_key,g.source_id,g.source_epoch,t.from_state,
+                   t.to_state,t.occurred_at_ms,t.reason_code
+                 FROM command_transitions t JOIN gateway_commands g ON g.command_id=t.command_id
+                 WHERE t.transition_seq>?1 ORDER BY t.transition_seq LIMIT 200",
+                &[&cursor.command_transition_seq], |row| Ok(json!({
+                    "kind":"commandTransition","transitionSeq":row.get::<_,i64>(0)?,
+                    "commandId":row.get::<_,String>(1)?,"threadKey":row.get::<_,Option<String>>(2)?,
+                    "sourceId":row.get::<_,String>(3)?,"sourceEpoch":row.get::<_,String>(4)?,
+                    "fromState":row.get::<_,Option<String>>(5)?,"toState":row.get::<_,String>(6)?,
+                    "occurredAtMs":row.get::<_,i64>(7)?,"reasonCode":row.get::<_,Option<String>>(8)?
+                })),
+            ).unwrap_or_default();
+            let empty = events.is_empty() && transitions.is_empty();
+            for mut row in events {
+                cursor.event_seq = row["eventSeq"].as_i64().unwrap_or(cursor.event_seq);
+                let matches = thread_key.as_deref().is_none_or(|expected| row["threadKey"] == expected);
+                if matches {
+                    row["kind"] = Value::String("observerEvent".into());
+                    let id = encode_v2_stream_cursor(&cursor, &token).unwrap_or_default();
+                    yield Ok::<Event, Infallible>(Event::default().id(id).event("observer_event").json_data(row).unwrap());
+                }
+            }
+            for row in transitions {
+                cursor.command_transition_seq = row["transitionSeq"].as_i64().unwrap_or(cursor.command_transition_seq);
+                let matches = thread_key.as_deref().is_none_or(|expected| row["threadKey"] == expected);
+                if matches {
+                    let id = encode_v2_stream_cursor(&cursor, &token).unwrap_or_default();
+                    yield Ok::<Event, Infallible>(Event::default().id(id).event("command_transition").json_data(row).unwrap());
+                }
+            }
+            if empty {
+                tokio::select! {
+                    _ = committed.recv() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("heartbeat"),
+        )
+        .into_response()
+}
+
+async fn controller_catalog(
+    State(state): State<ApiState>,
+    Query(query): Query<ControllerCatalogQuery>,
+) -> Response {
+    let Some(source_id) = query.source_id.filter(|value| !value.is_empty()) else {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "QUERY_INVALID",
+            "sourceId is required",
+            None,
+        );
+    };
+    let thread_id = match query.thread_key.as_deref() {
+        None => None,
+        Some(thread_key) => match state.database.connect().and_then(|connection| {
+            connection
+                .query_row(
+                    "SELECT codex_thread_id FROM threads WHERE thread_key=?1",
+                    [thread_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Into::into)
+        }) {
+            Ok(Some(thread_id)) => Some(thread_id),
+            Ok(None) => {
+                return v2_error(
+                    StatusCode::NOT_FOUND,
+                    "THREAD_NOT_FOUND",
+                    "the selected Thread was not found",
+                    None,
+                );
+            }
+            Err(error) => return v2_internal_error(error),
+        },
+    };
+    match state
+        .controller
+        .catalog(&source_id, thread_id, query.thread_key)
+        .await
+    {
+        Ok(catalog) => Json(json!({"apiVersion":"v2","data":catalog})).into_response(),
+        Err(RegistryError::SourceNotLive | RegistryError::SourceEpochStale) => v2_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SOURCE_NOT_LIVE",
+            "the selected source is not ready",
+            None,
+        ),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateGatewayCommandRequest {
+    capability: String,
+    target: CreateGatewayCommandTarget,
+    input: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateGatewayCommandTarget {
+    source_id: String,
+    source_epoch: String,
+    thread_key: Option<String>,
+    codex_thread_id: Option<String>,
+    expected_turn_id: Option<String>,
+    expected_request_id: Option<String>,
+    expected_request_version: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ThreadStartCommandInput {
+    cwd: String,
+    model: Option<String>,
+    personality: Option<String>,
+    permissions: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TextCommandInput {
+    text: String,
+    client_user_message_id: String,
+    #[serde(default)]
+    upload_ids: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ThreadForkCommandInput {
+    last_turn_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyCommandInput {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingCommandInput {
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadNameCommandInput {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewCommandInput {
+    target: ReviewTargetInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum ReviewTargetInput {
+    UncommittedChanges,
+    BaseBranch { branch: String },
+    Commit { sha: String, title: Option<String> },
+    Custom { instructions: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoalSetCommandInput {
+    objective: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanCommandInput {
+    prompt: Option<String>,
+    client_user_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum PendingRequestActionInput {
+    Approval {
+        decision: String,
+    },
+    Permissions {
+        grant: bool,
+        scope: String,
+        strict_auto_review: Option<bool>,
+    },
+    UserInput {
+        answers: std::collections::BTreeMap<String, Vec<String>>,
+    },
+    McpElicitation {
+        action: String,
+        content: Option<Value>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingRequestActionRequest {
+    source_epoch: String,
+    expected_request_version: i64,
+    action: PendingRequestActionInput,
+}
+
+#[derive(Debug)]
+struct CommandValidationError {
+    code: &'static str,
+    message: &'static str,
+    status: StatusCode,
+}
+
+impl std::fmt::Display for CommandValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for CommandValidationError {}
+
+async fn create_gateway_command(
+    State(state): State<ApiState>,
+    Extension(principal): Extension<AuditPrincipal>,
+    headers: HeaderMap,
+    Json(request): Json<CreateGatewayCommandRequest>,
+) -> Response {
+    create_gateway_command_core(&state, principal, &headers, request).await
+}
+
+async fn create_gateway_command_core(
+    state: &ApiState,
+    principal: AuditPrincipal,
+    headers: &HeaderMap,
+    request: CreateGatewayCommandRequest,
+) -> Response {
+    if !mutation_origin_allowed(state, headers) {
+        return v2_error(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REJECTED",
+            "mutation requests require an allowed Origin",
+            None,
+        );
+    }
+    let Some(idempotency_key) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (8..=200).contains(&value.len()) && value.is_ascii())
+        .map(str::to_string)
+    else {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Idempotency-Key must contain 8 to 200 ASCII characters",
+            None,
+        );
+    };
+    if request.capability.is_empty()
+        || request.capability.len() > 100
+        || request.target.source_id.is_empty()
+        || request.target.source_epoch.is_empty()
+    {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "COMMAND_INVALID",
+            "capability, sourceId, and sourceEpoch are required",
+            None,
+        );
+    }
+
+    let canonical = match serde_json::to_vec(&request) {
+        Ok(canonical) => canonical,
+        Err(error) => return v2_internal_error(error.into()),
+    };
+    let payload_hash = blake3::hash(&canonical).to_hex().to_string();
+    let input_bytes = serde_json::to_vec(&request.input)
+        .map(|input| input.len())
+        .unwrap_or(0);
+    let command_id = uuid::Uuid::now_v7().to_string();
+    let principal_id = principal.0;
+    let received = state.writer.receive_gateway_command(NewGatewayCommand {
+        command_id: command_id.clone(),
+        principal_id: principal_id.clone(),
+        capability: request.capability.clone(),
+        idempotency_key,
+        payload_hash,
+        target: GatewayCommandTarget {
+            source_id: request.target.source_id.clone(),
+            source_epoch: request.target.source_epoch.clone(),
+            thread_key: request.target.thread_key.clone(),
+            codex_thread_id: request.target.codex_thread_id.clone(),
+            expected_turn_id: request.target.expected_turn_id.clone(),
+            expected_request_id: request.target.expected_request_id.clone(),
+            expected_request_version: request.target.expected_request_version,
+        },
+        input_summary_json: json!({"jsonBytes":input_bytes}).to_string(),
+    });
+    let command = match received {
+        Ok(ReceiveGatewayCommand::Created(command)) => command,
+        Ok(ReceiveGatewayCommand::Existing(command)) => {
+            return gateway_command_response(StatusCode::OK, command);
+        }
+        Ok(ReceiveGatewayCommand::Conflict) => {
+            return v2_error(
+                StatusCode::CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency-Key is already bound to a different payload",
+                None,
+            );
+        }
+        Err(error) => return v2_internal_error(error),
+    };
+
+    let upload_ids = if matches!(request.capability.as_str(), "turn.start" | "turn.steer") {
+        match request.input.get("uploadIds") {
+            None => Vec::new(),
+            Some(Value::Array(values)) if values.iter().all(|value| value.as_str().is_some()) => {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }
+            Some(_) => {
+                return reject_gateway_command(
+                    state,
+                    &command.command_id,
+                    "COMMAND_INVALID",
+                    "uploadIds must be an array of strings",
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let claimed_images =
+        match state
+            .writer
+            .claim_image_uploads(&command.command_id, &principal_id, upload_ids)
+        {
+            Ok(paths) => paths,
+            Err(_) => {
+                return reject_gateway_command(
+                    state,
+                    &command.command_id,
+                    "IMAGE_INVALID",
+                    "one or more staged images are unavailable",
+                    StatusCode::BAD_REQUEST,
+                );
+            }
+        };
+    let image_paths = match claimed_images
+        .iter()
+        .map(|upload| verified_claimed_image_path(state, upload))
+        .collect::<Result<Vec<_>>>()
+    {
+        Ok(paths) => paths,
+        Err(_) => {
+            cleanup_command_image_files(state, &command.command_id);
+            return reject_gateway_command(
+                state,
+                &command.command_id,
+                "IMAGE_INVALID",
+                "one or more staged images failed integrity validation",
+                StatusCode::CONFLICT,
+            );
+        }
+    };
+    let operation = match controller_operation(&request, image_paths) {
+        Ok(operation) => operation,
+        Err(error) => {
+            cleanup_command_image_files(state, &command.command_id);
+            return reject_gateway_command(
+                state,
+                &command.command_id,
+                error.code,
+                error.message,
+                error.status,
+            );
+        }
+    };
+    if let Err(error) = state.writer.transition_gateway_command(gateway_transition(
+        &command.command_id,
+        "authorized",
+        "allow",
+        "authorized",
+    )) {
+        cleanup_command_image_files(state, &command.command_id);
+        return v2_internal_error(error);
+    }
+    match state
+        .controller
+        .dispatch(
+            &command.target.source_id,
+            &command.target.source_epoch,
+            ActorCommand {
+                command_id: command.command_id.clone(),
+                operation,
+            },
+        )
+        .await
+    {
+        Err(RegistryError::SourceNotLive) => {
+            cleanup_command_image_files(state, &command.command_id);
+            reject_gateway_command(
+                state,
+                &command.command_id,
+                "SOURCE_NOT_LIVE",
+                "the selected source is not ready",
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
+        Err(RegistryError::SourceEpochStale) => {
+            cleanup_command_image_files(state, &command.command_id);
+            reject_gateway_command(
+                state,
+                &command.command_id,
+                "SOURCE_EPOCH_STALE",
+                "the selected source epoch is stale",
+                StatusCode::CONFLICT,
+            )
+        }
+        Ok(record) => {
+            if matches!(record.state.as_str(), "rejected" | "failed" | "cancelled") {
+                cleanup_command_image_files(state, &command.command_id);
+            }
+            gateway_dispatch_response(record)
+        }
+    }
+}
+
+fn cleanup_command_image_files(state: &ApiState, command_id: &str) {
+    if let Ok(paths) = state.writer.cleanup_command_images(command_id) {
+        for path in paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn verified_claimed_image_path(state: &ApiState, upload: &ClaimedImageUpload) -> Result<String> {
+    let expected_relative = format!("{}.bin", upload.upload_id);
+    if upload.relative_path != expected_relative {
+        anyhow::bail!("staged image relative path is invalid");
+    }
+    let path = state
+        .database
+        .image_staging_dir()
+        .join(&upload.relative_path);
+    prepare_private_file(&path, "staged image")?;
+    let bytes = fs::read(&path)?;
+    if blake3::keyed_hash(&state.fingerprint_key, &bytes)
+        .to_hex()
+        .to_string()
+        != upload.keyed_fingerprint
+    {
+        anyhow::bail!("staged image failed integrity validation");
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn controller_operation(
+    request: &CreateGatewayCommandRequest,
+    image_paths: Vec<String>,
+) -> std::result::Result<ControllerOperation, CommandValidationError> {
+    let target_thread = || {
+        let Some(thread_id) = request
+            .target
+            .codex_thread_id
+            .as_deref()
+            .filter(|value| !value.is_empty() && value.len() <= 200)
+        else {
+            return Err(command_invalid(
+                "codexThreadId is required for this capability",
+            ));
+        };
+        let Some(thread_key) = request
+            .target
+            .thread_key
+            .as_deref()
+            .filter(|value| !value.is_empty() && value.len() <= 200)
+        else {
+            return Err(command_invalid("threadKey is required for this capability"));
+        };
+        Ok((thread_id.to_string(), thread_key.to_string()))
+    };
+    match request.capability.as_str() {
+        "thread.start" => {
+            let input: ThreadStartCommandInput = decode_command_input(&request.input)?;
+            let cwd_path = std::path::Path::new(&input.cwd);
+            if !cwd_path.is_absolute() {
+                return Err(command_invalid("cwd must be an absolute directory"));
+            }
+            let canonical = fs::canonicalize(cwd_path)
+                .ok()
+                .filter(|path| path.is_dir())
+                .and_then(|path| path.to_str().map(str::to_string))
+                .ok_or_else(|| command_invalid("cwd must be an existing local directory"))?;
+            if input
+                .model
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 200)
+                || input
+                    .permissions
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 200)
+                || input
+                    .personality
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "none" | "friendly" | "pragmatic"))
+            {
+                return Err(command_invalid(
+                    "model, personality, or permissions is invalid",
+                ));
+            }
+            Ok(ControllerOperation::ThreadStart {
+                cwd: canonical,
+                model: input.model,
+                personality: input.personality,
+                permissions: input.permissions,
+            })
+        }
+        "thread.resume" => {
+            let _: EmptyCommandInput = decode_command_input(&request.input)?;
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::ThreadResume {
+                thread_id,
+                thread_key,
+            })
+        }
+        "thread.fork" => {
+            let input: ThreadForkCommandInput = decode_command_input(&request.input)?;
+            if input
+                .last_turn_id
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 200)
+            {
+                return Err(command_invalid("lastTurnId is invalid"));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::ThreadFork {
+                thread_id,
+                thread_key,
+                last_turn_id: input.last_turn_id,
+            })
+        }
+        "turn.start" | "turn.steer" => {
+            let input: TextCommandInput = decode_command_input(&request.input)?;
+            if input.upload_ids.len() > 4
+                || input
+                    .upload_ids
+                    .iter()
+                    .any(|value| value.is_empty() || value.len() > 200)
+                || input
+                    .upload_ids
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != input.upload_ids.len()
+                || image_paths.len() != input.upload_ids.len()
+            {
+                return Err(command_invalid("uploadIds are invalid"));
+            }
+            let text = if input.text.is_empty() && !image_paths.is_empty() {
+                String::new()
+            } else {
+                normalize_user_text(&input.text)?
+            };
+            if input.client_user_message_id.is_empty() || input.client_user_message_id.len() > 200 {
+                return Err(command_invalid("clientUserMessageId is invalid"));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            if request.capability == "turn.start" {
+                if request.target.expected_turn_id.is_some() {
+                    return Err(command_invalid("turn.start does not accept expectedTurnId"));
+                }
+                Ok(ControllerOperation::TurnStart {
+                    thread_id,
+                    thread_key,
+                    client_user_message_id: input.client_user_message_id,
+                    text,
+                    image_paths,
+                })
+            } else {
+                let expected_turn_id = expected_turn_id(request)?;
+                Ok(ControllerOperation::TurnSteer {
+                    thread_id,
+                    thread_key,
+                    expected_turn_id,
+                    client_user_message_id: input.client_user_message_id,
+                    text,
+                    image_paths,
+                })
+            }
+        }
+        "turn.interrupt" => {
+            let _: EmptyCommandInput = decode_command_input(&request.input)?;
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::TurnInterrupt {
+                thread_id,
+                thread_key,
+                expected_turn_id: expected_turn_id(request)?,
+            })
+        }
+        "thread.settings.model"
+        | "thread.settings.reasoning"
+        | "thread.settings.personality"
+        | "thread.settings.permissions" => {
+            let input: SettingCommandInput = decode_command_input(&request.input)?;
+            if input.value.is_empty() || input.value.len() > 200 {
+                return Err(command_invalid("setting value is invalid"));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            let setting = match request.capability.as_str() {
+                "thread.settings.model" => ThreadSetting::Model(input.value),
+                "thread.settings.reasoning" => ThreadSetting::ReasoningEffort(input.value),
+                "thread.settings.personality" => {
+                    if !matches!(input.value.as_str(), "none" | "friendly" | "pragmatic") {
+                        return Err(command_invalid("personality is invalid"));
+                    }
+                    ThreadSetting::Personality(input.value)
+                }
+                "thread.settings.permissions" => ThreadSetting::Permissions(input.value),
+                _ => unreachable!(),
+            };
+            Ok(ControllerOperation::ThreadSettingsUpdate {
+                thread_id,
+                thread_key,
+                setting,
+            })
+        }
+        "thread.plan" => {
+            let input: PlanCommandInput = decode_command_input(&request.input)?;
+            let prompt = input
+                .prompt
+                .map(|value| normalize_plan_prompt(&value))
+                .transpose()?;
+            let client_user_message_id = input
+                .client_user_message_id
+                .filter(|value| !value.is_empty() && value.len() <= 200);
+            if prompt.is_some() != client_user_message_id.is_some() {
+                return Err(command_invalid(
+                    "Plan prompt and clientUserMessageId must be supplied together",
+                ));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::Plan {
+                thread_id,
+                thread_key,
+                expected_turn_id: request.target.expected_turn_id.clone(),
+                client_user_message_id,
+                prompt,
+            })
+        }
+        "thread.name.set" => {
+            let input: ThreadNameCommandInput = decode_command_input(&request.input)?;
+            if input.name.trim().is_empty() || input.name.len() > 200 {
+                return Err(command_invalid("Thread name is invalid"));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::ThreadNameSet {
+                thread_id,
+                thread_key,
+                name: input.name,
+            })
+        }
+        "thread.archive" | "thread.compact" | "thread.goal.get" | "thread.goal.clear" => {
+            let _: EmptyCommandInput = decode_command_input(&request.input)?;
+            let (thread_id, thread_key) = target_thread()?;
+            match request.capability.as_str() {
+                "thread.archive" => Ok(ControllerOperation::ThreadArchive {
+                    thread_id,
+                    thread_key,
+                }),
+                "thread.compact" => Ok(ControllerOperation::ThreadCompact {
+                    thread_id,
+                    thread_key,
+                }),
+                "thread.goal.get" => Ok(ControllerOperation::GoalGet {
+                    thread_id,
+                    thread_key,
+                }),
+                "thread.goal.clear" => Ok(ControllerOperation::GoalClear {
+                    thread_id,
+                    thread_key,
+                }),
+                _ => unreachable!(),
+            }
+        }
+        "review.start" => {
+            let input: ReviewCommandInput = decode_command_input(&request.input)?;
+            let target = match input.target {
+                ReviewTargetInput::UncommittedChanges => ReviewTarget::UncommittedChanges,
+                ReviewTargetInput::BaseBranch { branch }
+                    if !branch.is_empty() && branch.len() <= 200 =>
+                {
+                    ReviewTarget::BaseBranch(branch)
+                }
+                ReviewTargetInput::Commit { sha, title }
+                    if !sha.is_empty()
+                        && sha.len() <= 200
+                        && title.as_ref().is_none_or(|value| value.len() <= 200) =>
+                {
+                    ReviewTarget::Commit { sha, title }
+                }
+                ReviewTargetInput::Custom { instructions }
+                    if !instructions.is_empty() && instructions.len() <= 20_000 =>
+                {
+                    ReviewTarget::Custom(instructions)
+                }
+                _ => return Err(command_invalid("review target is invalid")),
+            };
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::ReviewStart {
+                thread_id,
+                thread_key,
+                target,
+            })
+        }
+        "thread.goal.set" => {
+            let input: GoalSetCommandInput = decode_command_input(&request.input)?;
+            if input
+                .objective
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 100_000)
+                || input
+                    .status
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "active" | "paused"))
+                || (input.objective.is_none() && input.status.is_none())
+            {
+                return Err(command_invalid("goal update is invalid"));
+            }
+            let (thread_id, thread_key) = target_thread()?;
+            Ok(ControllerOperation::GoalSet {
+                thread_id,
+                thread_key,
+                objective: input.objective,
+                status: input.status,
+            })
+        }
+        "request.action" => {
+            let input: PendingRequestActionInput = decode_command_input(&request.input)?;
+            let (thread_id, thread_key) = target_thread()?;
+            let request_id = request
+                .target
+                .expected_request_id
+                .as_deref()
+                .filter(|value| !value.is_empty() && value.len() <= 200)
+                .ok_or_else(|| {
+                    command_invalid("expectedRequestId is required for this capability")
+                })?
+                .to_string();
+            let expected_request_version = request
+                .target
+                .expected_request_version
+                .filter(|version| *version > 0)
+                .ok_or_else(|| {
+                    command_invalid("expectedRequestVersion is required for this capability")
+                })?;
+            let action = match input {
+                PendingRequestActionInput::Approval { decision } => {
+                    PendingRequestAction::Approval { decision }
+                }
+                PendingRequestActionInput::Permissions {
+                    grant,
+                    scope,
+                    strict_auto_review,
+                } => PendingRequestAction::Permissions {
+                    grant,
+                    scope,
+                    strict_auto_review,
+                },
+                PendingRequestActionInput::UserInput { answers } => {
+                    PendingRequestAction::UserInput { answers }
+                }
+                PendingRequestActionInput::McpElicitation { action, content } => {
+                    PendingRequestAction::McpElicitation { action, content }
+                }
+            };
+            Ok(ControllerOperation::PendingRequestAction {
+                thread_id,
+                thread_key,
+                request_id,
+                expected_request_version,
+                action,
+            })
+        }
+        _ => Err(CommandValidationError {
+            code: "CAPABILITY_UNAVAILABLE",
+            message: "the requested capability is not published by this Gateway version",
+            status: StatusCode::CONFLICT,
+        }),
+    }
+}
+
+async fn create_pending_request_action(
+    State(state): State<ApiState>,
+    Extension(principal): Extension<AuditPrincipal>,
+    headers: HeaderMap,
+    Path(request_key): Path<String>,
+    Json(request): Json<PendingRequestActionRequest>,
+) -> Response {
+    if !mutation_origin_allowed(&state, &headers) {
+        return v2_error(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REJECTED",
+            "mutation requests require an allowed Origin",
+            None,
+        );
+    }
+    let key = match decode_request_key(&request_key, &state.token) {
+        Ok(key) => key,
+        Err(_) => {
+            return v2_error(
+                StatusCode::BAD_REQUEST,
+                "REQUEST_NOT_PENDING",
+                "requestKey is invalid",
+                None,
+            );
+        }
+    };
+    if request.source_epoch != key.source_epoch {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "SOURCE_EPOCH_STALE",
+            "sourceEpoch does not match requestKey",
+            None,
+        );
+    }
+    if request.expected_request_version <= 0 {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "REQUEST_NOT_PENDING",
+            "expectedRequestVersion must be positive",
+            None,
+        );
+    }
+    let target = match state.database.pending_request_target(
+        &key.source_id,
+        &key.source_epoch,
+        &key.request_id,
+    ) {
+        Ok(Some(target)) => target,
+        Ok(None) => {
+            return v2_error(
+                StatusCode::CONFLICT,
+                "REQUEST_NOT_PENDING",
+                "the pending request was not found",
+                None,
+            );
+        }
+        Err(error) => return v2_internal_error(error),
+    };
+    if target.source_id != key.source_id
+        || target.source_epoch != key.source_epoch
+        || target.request_id != key.request_id
+    {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "REQUEST_NOT_PENDING",
+            "requestKey no longer identifies this pending request",
+            None,
+        );
+    }
+    let error = match target.state.as_str() {
+        "resolving" | "resolved" => Some((
+            "REQUEST_ALREADY_RESOLVED",
+            "another client already resolved this request",
+        )),
+        "source_disconnected" => Some((
+            "SOURCE_EPOCH_STALE",
+            "the request belongs to an inactive source epoch",
+        )),
+        "pending" if target.request_version != request.expected_request_version => Some((
+            "REQUEST_NOT_PENDING",
+            "the pending request version no longer matches",
+        )),
+        "pending" => None,
+        _ => Some(("REQUEST_NOT_PENDING", "the request is not pending")),
+    };
+    if let Some((code, message)) = error {
+        return v2_error(StatusCode::CONFLICT, code, message, None);
+    }
+    let action_matches_request = matches!(
+        (&target.request_type, &request.action),
+        (
+            request_type,
+            PendingRequestActionInput::Approval { .. }
+                | PendingRequestActionInput::Permissions { .. }
+        ) if request_type == "approval"
+    ) || matches!(
+        (&target.request_type, &request.action),
+        (request_type, PendingRequestActionInput::UserInput { .. }) if request_type == "user_input"
+    ) || matches!(
+        (&target.request_type, &request.action),
+        (request_type, PendingRequestActionInput::McpElicitation { .. }) if request_type == "mcp_elicitation"
+    );
+    if !action_matches_request {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "COMMAND_INVALID",
+            "action type does not match the pending request",
+            None,
+        );
+    }
+    let Some(thread_key) = target.thread_key else {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "THREAD_NOT_LOADED",
+            "the pending request is not associated with a projected Thread",
+            None,
+        );
+    };
+    let Some(codex_thread_id) = target.codex_thread_id else {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "THREAD_NOT_LOADED",
+            "the pending request Thread is not available",
+            None,
+        );
+    };
+    create_gateway_command_core(
+        &state,
+        principal,
+        &headers,
+        CreateGatewayCommandRequest {
+            capability: "request.action".into(),
+            target: CreateGatewayCommandTarget {
+                source_id: key.source_id,
+                source_epoch: key.source_epoch,
+                thread_key: Some(thread_key),
+                codex_thread_id: Some(codex_thread_id),
+                expected_turn_id: None,
+                expected_request_id: Some(key.request_id),
+                expected_request_version: Some(request.expected_request_version),
+            },
+            input: serde_json::to_value(request.action).unwrap_or(Value::Null),
+        },
+    )
+    .await
+}
+
+fn decode_command_input<T: for<'de> Deserialize<'de>>(
+    input: &Value,
+) -> std::result::Result<T, CommandValidationError> {
+    serde_json::from_value(input.clone()).map_err(|_| command_invalid("command input is invalid"))
+}
+
+fn expected_turn_id(
+    request: &CreateGatewayCommandRequest,
+) -> std::result::Result<String, CommandValidationError> {
+    request
+        .target
+        .expected_turn_id
+        .as_deref()
+        .filter(|value| !value.is_empty() && value.len() <= 200)
+        .map(str::to_string)
+        .ok_or_else(|| command_invalid("expectedTurnId is required for this capability"))
+}
+
+fn normalize_user_text(text: &str) -> std::result::Result<String, CommandValidationError> {
+    if text.is_empty() || text.len() > 200_000 {
+        return Err(command_invalid("text must contain 1 to 200000 bytes"));
+    }
+    if let Some(literal) = text.strip_prefix("//") {
+        return Ok(format!("/{literal}"));
+    }
+    if text.starts_with('/') {
+        return Err(CommandValidationError {
+            code: "UNKNOWN_COMMAND",
+            message: "the Slash command is not available",
+            status: StatusCode::BAD_REQUEST,
+        });
+    }
+    Ok(text.to_string())
+}
+
+fn normalize_plan_prompt(text: &str) -> std::result::Result<String, CommandValidationError> {
+    if text.is_empty() || text.len() > 200_000 {
+        return Err(command_invalid(
+            "Plan prompt must contain 1 to 200000 bytes",
+        ));
+    }
+    Ok(text.to_string())
+}
+
+fn command_invalid(message: &'static str) -> CommandValidationError {
+    CommandValidationError {
+        code: "COMMAND_INVALID",
+        message,
+        status: StatusCode::BAD_REQUEST,
+    }
+}
+
+fn gateway_dispatch_response(command: crate::domain::gateway::GatewayCommandRecord) -> Response {
+    if let Some(error) = command.error.as_ref() {
+        let status = match error.code.as_str() {
+            "THREAD_NOT_LOADED" | "TURN_STATE_CONFLICT" | "SOURCE_EPOCH_STALE" => {
+                StatusCode::CONFLICT
+            }
+            "SOURCE_NOT_LIVE" => StatusCode::SERVICE_UNAVAILABLE,
+            "UPSTREAM_REJECTED" | "OUTCOME_UNKNOWN" => StatusCode::BAD_GATEWAY,
+            _ => StatusCode::CONFLICT,
+        };
+        return v2_error(
+            status,
+            &error.code,
+            &error.message,
+            Some(&command.command_id),
+        );
+    }
+    let status = if matches!(command.state.as_str(), "running" | "accepted_by_source") {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    gateway_command_response(status, command)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateGatewayThreadRequest {
+    source_id: String,
+    source_epoch: String,
+    cwd: String,
+    model: Option<String>,
+    personality: Option<String>,
+    permissions: Option<String>,
+}
+
+async fn create_gateway_thread(
+    State(state): State<ApiState>,
+    Extension(principal): Extension<AuditPrincipal>,
+    headers: HeaderMap,
+    Json(request): Json<CreateGatewayThreadRequest>,
+) -> Response {
+    create_gateway_command_core(
+        &state,
+        principal,
+        &headers,
+        CreateGatewayCommandRequest {
+            capability: "thread.start".into(),
+            target: CreateGatewayCommandTarget {
+                source_id: request.source_id,
+                source_epoch: request.source_epoch,
+                thread_key: None,
+                codex_thread_id: None,
+                expected_turn_id: None,
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input: json!({
+                "cwd":request.cwd,
+                "model":request.model,
+                "personality":request.personality,
+                "permissions":request.permissions,
+            }),
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateThreadInputRequest {
+    source_id: String,
+    source_epoch: String,
+    codex_thread_id: String,
+    expected_turn_id: Option<String>,
+    client_user_message_id: String,
+    text: String,
+    #[serde(default)]
+    upload_ids: Vec<String>,
+}
+
+async fn create_thread_input(
+    State(state): State<ApiState>,
+    Extension(principal): Extension<AuditPrincipal>,
+    headers: HeaderMap,
+    Path(thread_key): Path<String>,
+    Json(request): Json<CreateThreadInputRequest>,
+) -> Response {
+    if !mutation_origin_allowed(&state, &headers) {
+        return v2_error(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REJECTED",
+            "mutation requests require an allowed Origin",
+            None,
+        );
+    }
+    let (capability, input) = if request.text.starts_with('/') && !request.text.starts_with("//") {
+        let (slash, argument) = slash_parts(&request.text);
+        match (slash, argument) {
+            ("/new", None) => {
+                return interaction_required("thread.start", "newThread");
+            }
+            ("/resume", None) => ("thread.resume", json!({})),
+            ("/fork", None) => ("thread.fork", json!({"lastTurnId":null})),
+            ("/interrupt", None) => ("turn.interrupt", json!({})),
+            ("/plan", prompt) => (
+                "thread.plan",
+                json!({
+                    "prompt":prompt,
+                    "clientUserMessageId":prompt.map(|_| request.client_user_message_id.as_str()),
+                }),
+            ),
+            ("/rename", None) => {
+                return interaction_required("thread.name.set", "threadNameInput");
+            }
+            ("/rename", Some(name)) => ("thread.name.set", json!({"name":name})),
+            ("/archive", None) => ("thread.archive", json!({})),
+            ("/compact", None) => ("thread.compact", json!({})),
+            ("/review", None) => (
+                "review.start",
+                json!({"target":{"type":"uncommittedChanges"}}),
+            ),
+            ("/goal", None) => ("thread.goal.get", json!({})),
+            ("/goal", Some("pause")) => (
+                "thread.goal.set",
+                json!({"objective":null,"status":"paused"}),
+            ),
+            ("/goal", Some("resume")) => (
+                "thread.goal.set",
+                json!({"objective":null,"status":"active"}),
+            ),
+            ("/goal", Some("clear")) => ("thread.goal.clear", json!({})),
+            ("/goal", Some(objective)) => (
+                "thread.goal.set",
+                json!({"objective":objective,"status":"active"}),
+            ),
+            ("/status", None) => {
+                return local_control_card(
+                    &state,
+                    &request.source_id,
+                    &request.source_epoch,
+                    &thread_key,
+                    &request.codex_thread_id,
+                    "status",
+                )
+                .await;
+            }
+            ("/mcp", None | Some("verbose")) => {
+                return local_control_card(
+                    &state,
+                    &request.source_id,
+                    &request.source_epoch,
+                    &thread_key,
+                    &request.codex_thread_id,
+                    "mcp",
+                )
+                .await;
+            }
+            ("/usage", None) => {
+                return local_control_card(
+                    &state,
+                    &request.source_id,
+                    &request.source_epoch,
+                    &thread_key,
+                    &request.codex_thread_id,
+                    "usage",
+                )
+                .await;
+            }
+            ("/model", None) => {
+                return interaction_required("thread.settings.model", "modelPicker");
+            }
+            ("/reasoning", None) => {
+                return interaction_required("thread.settings.reasoning", "reasoningPicker");
+            }
+            ("/personality", None) => {
+                return interaction_required("thread.settings.personality", "personalityPicker");
+            }
+            ("/permissions", None) => {
+                return interaction_required("thread.settings.permissions", "permissionPicker");
+            }
+            ("/model", Some(value)) => ("thread.settings.model", json!({"value":value})),
+            ("/reasoning", Some(value)) => ("thread.settings.reasoning", json!({"value":value})),
+            ("/personality", Some(value)) => {
+                ("thread.settings.personality", json!({"value":value}))
+            }
+            ("/permissions", Some(value)) => {
+                ("thread.settings.permissions", json!({"value":value}))
+            }
+            _ => (
+                "turn.start",
+                json!({
+                    "text":request.text,
+                    "clientUserMessageId":request.client_user_message_id,
+                    "uploadIds":request.upload_ids,
+                }),
+            ),
+        }
+    } else if request.expected_turn_id.is_some() {
+        (
+            "turn.steer",
+            json!({
+                "text":request.text,
+                "clientUserMessageId":request.client_user_message_id,
+                "uploadIds":request.upload_ids,
+            }),
+        )
+    } else {
+        (
+            "turn.start",
+            json!({
+                "text":request.text,
+                "clientUserMessageId":request.client_user_message_id,
+                "uploadIds":request.upload_ids,
+            }),
+        )
+    };
+    create_gateway_command_core(
+        &state,
+        principal,
+        &headers,
+        CreateGatewayCommandRequest {
+            capability: capability.into(),
+            target: CreateGatewayCommandTarget {
+                source_id: request.source_id,
+                source_epoch: request.source_epoch,
+                thread_key: Some(thread_key),
+                codex_thread_id: Some(request.codex_thread_id),
+                expected_turn_id: request.expected_turn_id,
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input,
+        },
+    )
+    .await
+}
+
+fn slash_parts(text: &str) -> (&str, Option<&str>) {
+    let Some(split) = text.find(char::is_whitespace) else {
+        return (text, None);
+    };
+    let (command, remainder) = text.split_at(split);
+    let argument = remainder.trim();
+    (command, (!argument.is_empty()).then_some(argument))
+}
+
+async fn local_control_card(
+    state: &ApiState,
+    source_id: &str,
+    source_epoch: &str,
+    thread_key: &str,
+    thread_id: &str,
+    card_type: &str,
+) -> Response {
+    let catalog = match state
+        .controller
+        .catalog(
+            source_id,
+            Some(thread_id.to_string()),
+            Some(thread_key.to_string()),
+        )
+        .await
+    {
+        Ok(catalog) => catalog,
+        Err(RegistryError::SourceNotLive | RegistryError::SourceEpochStale) => {
+            return v2_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SOURCE_NOT_LIVE",
+                "the selected source is not ready",
+                None,
+            );
+        }
+    };
+    if catalog.source_epoch != source_epoch {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "SOURCE_EPOCH_STALE",
+            "the selected source epoch is stale",
+            None,
+        );
+    }
+    let content = match card_type {
+        "status" => {
+            let latest_command = state
+                .database
+                .gateway_commands_page(Some(thread_key), None, None, None, 1)
+                .ok()
+                .and_then(|page| page.commands.into_iter().next());
+            json!({
+                "threadLoaded":catalog.thread_loaded,
+                "activeTurnId":catalog.active_turn_id,
+                "collaborationMode":catalog.collaboration_mode,
+                "goal":catalog.goal,
+                "latestCommand":latest_command,
+            })
+        }
+        "mcp" => {
+            let Some(entry) = catalog
+                .capabilities
+                .entries
+                .get("mcpServerStatus/list")
+                .filter(|entry| entry.available)
+                .and_then(|entry| entry.data.clone())
+            else {
+                return v2_error(
+                    StatusCode::CONFLICT,
+                    "CAPABILITY_UNAVAILABLE",
+                    "MCP status is unavailable for this source",
+                    None,
+                );
+            };
+            entry
+        }
+        "usage" => {
+            let usage = catalog
+                .capabilities
+                .entries
+                .get("account/usage/read")
+                .filter(|entry| entry.available)
+                .and_then(|entry| entry.data.clone());
+            let limits = catalog
+                .capabilities
+                .entries
+                .get("account/rateLimits/read")
+                .filter(|entry| entry.available)
+                .and_then(|entry| entry.data.clone());
+            if usage.is_none() || limits.is_none() {
+                return v2_error(
+                    StatusCode::CONFLICT,
+                    "CAPABILITY_UNAVAILABLE",
+                    "usage or rate-limit status is unavailable for this source",
+                    None,
+                );
+            }
+            json!({"usage":usage,"rateLimits":limits})
+        }
+        _ => {
+            return v2_error(
+                StatusCode::BAD_REQUEST,
+                "COMMAND_INVALID",
+                "status card type is invalid",
+                None,
+            );
+        }
+    };
+    Json(json!({
+        "apiVersion":"v2",
+        "data":{
+            "kind":"gatewayStatusCard",
+            "cardType":card_type,
+            "sourceId":catalog.source_id,
+            "sourceEpoch":catalog.source_epoch,
+            "threadKey":thread_key,
+            "content":content,
+        }
+    }))
+    .into_response()
+}
+
+fn interaction_required(capability: &str, interaction_type: &str) -> Response {
+    v2_error_details(
+        StatusCode::CONFLICT,
+        "INTERACTION_REQUIRED",
+        "the command requires a structured selection",
+        json!({
+            "capability":capability,
+            "interaction":{"type":interaction_type}
+        }),
+    )
+}
+
+async fn get_gateway_command(
+    State(state): State<ApiState>,
+    Path(command_id): Path<String>,
+) -> Response {
+    match state.database.gateway_command(&command_id) {
+        Ok(Some(command)) => gateway_command_response(StatusCode::OK, command),
+        Ok(None) => v2_error(
+            StatusCode::NOT_FOUND,
+            "COMMAND_NOT_FOUND",
+            "Gateway command was not found",
+            None,
+        ),
+        Err(error) => v2_internal_error(error),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GatewayCommandQuery {
+    thread_key: Option<String>,
+    state: Option<String>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_gateway_commands(
+    State(state): State<ApiState>,
+    Query(query): Query<GatewayCommandQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "QUERY_INVALID",
+            "limit must be between 1 and 100",
+            None,
+        );
+    }
+    if query.state.as_deref().is_some_and(|state| {
+        !matches!(
+            state,
+            "received"
+                | "authorized"
+                | "dispatching"
+                | "accepted_by_source"
+                | "running"
+                | "completed"
+                | "rejected"
+                | "failed"
+                | "cancelled"
+                | "outcome_unknown"
+        )
+    }) {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "QUERY_INVALID",
+            "state is not a Gateway command state",
+            None,
+        );
+    }
+    let fingerprint = query_fingerprint(&json!({
+        "threadKey":query.thread_key,
+        "state":query.state
+    }));
+    let cursor = match decode_bound_page_cursor(
+        query.cursor.as_deref(),
+        "v2.commands",
+        &fingerprint,
+        &state.token,
+    ) {
+        Ok(cursor) => cursor,
+        Err(CursorFailure::Invalid(_)) => {
+            return v2_error(
+                StatusCode::BAD_REQUEST,
+                "CURSOR_INVALID",
+                "cursor is invalid for this command query",
+                None,
+            );
+        }
+        Err(CursorFailure::Internal(error)) => return v2_internal_error(error),
+    };
+    let page = state.database.gateway_commands_page(
+        query.thread_key.as_deref(),
+        query.state.as_deref(),
+        cursor.as_ref().map(|cursor| cursor.as_of_event_seq),
+        cursor
+            .as_ref()
+            .map(|cursor| (cursor.last_sort, cursor.last_key.as_str())),
+        limit + 1,
+    );
+    let mut page = match page {
+        Ok(page) => page,
+        Err(error) => return v2_internal_error(error),
+    };
+    let has_more = page.commands.len() > limit;
+    if has_more {
+        page.commands.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        page.commands.last().and_then(|command| {
+            encode_page_cursor(
+                &PageCursor {
+                    endpoint: "v2.commands".into(),
+                    query_fingerprint: fingerprint,
+                    as_of_event_seq: page.as_of_rowid,
+                    last_sort: command.created_at_ms,
+                    last_key: command.command_id.clone(),
+                    last_secondary: None,
+                },
+                &state.token,
+            )
+            .ok()
+        })
+    } else {
+        None
+    };
+    Json(json!({
+        "apiVersion":"v2",
+        "data":page.commands,
+        "nextCursor":next_cursor
+    }))
+    .into_response()
+}
+
+fn mutation_origin_allowed(state: &ApiState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| {
+            state
+                .allowed_origins
+                .iter()
+                .any(|allowed| allowed == origin)
+        })
+}
+
+fn gateway_transition(
+    command_id: &str,
+    to_state: &str,
+    decision: &str,
+    outcome: &str,
+) -> GatewayTransition {
+    GatewayTransition {
+        command_id: command_id.into(),
+        to_state: to_state.into(),
+        result_summary_json: None,
+        error_code: None,
+        error_message: None,
+        reason_code: None,
+        decision: decision.into(),
+        outcome: outcome.into(),
+    }
+}
+
+fn reject_gateway_command(
+    state: &ApiState,
+    command_id: &str,
+    code: &str,
+    message: &str,
+    status: StatusCode,
+) -> Response {
+    let mut transition = gateway_transition(command_id, "rejected", "deny", "rejected");
+    transition.error_code = Some(code.into());
+    transition.error_message = Some(message.into());
+    transition.reason_code = Some(code.into());
+    match state.writer.transition_gateway_command(transition) {
+        Ok(_) => v2_error(status, code, message, Some(command_id)),
+        Err(error) => v2_internal_error(error),
+    }
+}
+
+fn gateway_command_response(
+    status: StatusCode,
+    command: crate::domain::gateway::GatewayCommandRecord,
+) -> Response {
+    (status, Json(json!({"apiVersion":"v2","data":command}))).into_response()
+}
+
+fn v2_error(status: StatusCode, code: &str, message: &str, command_id: Option<&str>) -> Response {
+    v2_error_details(status, code, message, json!({"commandId":command_id}))
+}
+
+fn v2_error_details(status: StatusCode, code: &str, message: &str, details: Value) -> Response {
+    (
+        status,
+        Json(json!({
+            "apiVersion":"v2",
+            "error":{
+                "code":code,
+                "message":message,
+                "requestId":uuid::Uuid::now_v7().to_string(),
+                "details":details
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn v2_internal_error(error: anyhow::Error) -> Response {
+    tracing::error!(error = %error, "V2 command persistence failed");
+    v2_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+        "internal command error",
+        None,
+    )
+}
+
 async fn not_found() -> Response {
     api_error(
         StatusCode::NOT_FOUND,
@@ -205,7 +2167,7 @@ async fn method_not_allowed() -> Response {
     )
 }
 
-async fn authorize(State(state): State<ApiState>, request: Request, next: Next) -> Response {
+async fn authorize(State(state): State<ApiState>, mut request: Request, next: Next) -> Response {
     let bearer_authorized = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -218,18 +2180,24 @@ async fn authorize(State(state): State<ApiState>, request: Request, next: Next) 
         .and_then(|value| value.to_str().ok())
         .and_then(|cookies| cookie_value(cookies, "observer_session"))
         .is_some_and(|cookie| verify_session(&state.token, cookie, chrono::Utc::now().timestamp()));
-    let tailscale_authorized = state
+    let tailscale_principal = state
         .tailscale
         .as_ref()
-        .is_some_and(|access| tailscale_request_is_authorized(access, &request));
-    let authorized = bearer_authorized || cookie_authorized || tailscale_authorized;
-    if !authorized {
+        .and_then(|access| tailscale_request_principal(access, &request));
+    let principal = if bearer_authorized {
+        Some("local_bearer".to_string())
+    } else if cookie_authorized {
+        Some("local_cookie".to_string())
+    } else {
+        tailscale_principal
+    };
+    let Some(principal) = principal else {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "valid bearer token required",
         );
-    }
+    };
     if state.strict_origin
         && let Some(origin) = request
             .headers()
@@ -240,16 +2208,26 @@ async fn authorize(State(state): State<ApiState>, request: Request, next: Next) 
             .iter()
             .any(|allowed| allowed == origin)
     {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "ORIGIN_REJECTED",
-            "request origin is not allowed",
-        );
+        return if request.uri().path().starts_with("/v2/") {
+            v2_error(
+                StatusCode::FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "request origin is not allowed",
+                None,
+            )
+        } else {
+            api_error(
+                StatusCode::FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "request origin is not allowed",
+            )
+        };
     }
+    request.extensions_mut().insert(AuditPrincipal(principal));
     next.run(request).await
 }
 
-fn tailscale_request_is_authorized(access: &ServeAccess, request: &Request) -> bool {
+fn tailscale_request_principal(access: &ServeAccess, request: &Request) -> Option<String> {
     let headers = request.headers();
     let loopback_peer = request
         .extensions()
@@ -263,11 +2241,16 @@ fn tailscale_request_is_authorized(access: &ServeAccess, request: &Request) -> b
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
         == Some("https");
-    let identified_user = headers
+    let login = headers
         .get("tailscale-user-login")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|login| !login.trim().is_empty());
-    loopback_peer && matching_host && forwarded_https && identified_user
+        .map(str::trim)
+        .filter(|login| !login.is_empty());
+    if loopback_peer && matching_host && forwarded_https {
+        login.map(|login| format!("tailscale:{login}"))
+    } else {
+        None
+    }
 }
 
 #[derive(Deserialize)]
@@ -418,6 +2401,9 @@ async fn health(State(state): State<ApiState>) -> Response {
         "consumers":{"active":ACTIVE_CONSUMERS.load(Ordering::Relaxed),"total":TOTAL_CONSUMERS.load(Ordering::Relaxed),
           "slowDrops":SLOW_CONSUMER_DROPS.load(Ordering::Relaxed)},"continuity":continuity,
         "sources":sources,"live":{"enabled":live_enabled,"modes":state.live_modes.as_ref()},
+        "control":{"enabled":state.settings["controller"]["enabled"],
+          "tailscaleMutationAccess":state.settings["controller"]["tailscaleMutationAccess"],
+          "warning":state.settings["controller"]["warning"]},
         "privacy":{"redactionRuleVersion":"known-secrets-v2","legacyRedactionEvents":legacy_redaction_events,
           "warning":if legacy_redaction_events > 0 { Some("legacy records may contain values not covered by redaction v2") } else { None }}
     }))).into_response()
@@ -651,12 +2637,28 @@ async fn thread_detail(State(state): State<ApiState>, Path(thread_key): Path<Str
             ).unwrap_or_default();
             let coverage_summary = turn_coverage_summary(&state.database, &thread_key);
             let pending_requests = state.database.query_json(
-                "SELECT source_id,epoch_id,request_id,request_type,state,request_event_seq,resolved_event_seq
+                "SELECT source_id,epoch_id,request_id,request_type,state,request_version,payload_json,
+                   request_event_seq,resolved_event_seq
                  FROM pending_requests WHERE thread_key=?1 ORDER BY request_event_seq DESC LIMIT 100",
-                &[&thread_key], |row| Ok(json!({"sourceId":row.get::<_,String>(0)?,"epochId":row.get::<_,String>(1)?,
-                    "requestId":row.get::<_,String>(2)?,"requestType":row.get::<_,String>(3)?,"state":row.get::<_,String>(4)?,
-                    "requestEventSeq":row.get::<_,i64>(5)?,"resolvedEventSeq":row.get::<_,Option<i64>>(6)?})),
-            ).unwrap_or_default();
+                &[&thread_key], |row| {
+                    let source_id = row.get::<_,String>(0)?;
+                    let source_epoch = row.get::<_,String>(1)?;
+                    let request_id = row.get::<_,String>(2)?;
+                    let payload = row.get::<_,String>(6)?;
+                    Ok(json!({"sourceId":source_id,"sourceEpoch":source_epoch,
+                        "requestId":request_id,"requestType":row.get::<_,String>(3)?,"state":row.get::<_,String>(4)?,
+                        "requestVersion":row.get::<_,i64>(5)?,"payload":serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
+                        "requestEventSeq":row.get::<_,i64>(7)?,"resolvedEventSeq":row.get::<_,Option<i64>>(8)?}))
+                },
+            ).unwrap_or_default().into_iter().map(|mut request| {
+                let request_key = encode_request_key(&RequestKey {
+                    source_id: request["sourceId"].as_str().unwrap_or_default().to_string(),
+                    source_epoch: request["sourceEpoch"].as_str().unwrap_or_default().to_string(),
+                    request_id: request["requestId"].as_str().unwrap_or_default().to_string(),
+                }, &state.token).unwrap_or_default();
+                request["requestKey"] = Value::String(request_key);
+                request
+            }).collect::<Vec<_>>();
             let projection_conflicts = state.database.query_json(
                 "SELECT conflict_id,entity_type,entity_key,field_name,live_event_seq,durable_event_seq,status,detected_at_ms,resolved_at_ms
                  FROM projection_conflicts WHERE thread_key=?1 ORDER BY detected_at_ms DESC LIMIT 100",
@@ -1622,13 +3624,1058 @@ fn internal_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::*;
     use crate::ingest::Importer;
+    use anyhow::{Context as _, bail};
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     #[test]
     fn token_comparison_checks_length_and_content() {
         assert!(constant_time_eq(b"token", b"token"));
         assert!(!constant_time_eq(b"token", b"other"));
         assert!(!constant_time_eq(b"token", b"token-long"));
+    }
+
+    #[tokio::test]
+    async fn controller_sources_is_authenticated_and_reports_disabled_empty_state() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let state = ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
+            database,
+            token: Arc::new("read-token".into()),
+            fingerprint_key: [7; 32],
+            strict_origin: true,
+            allowed_origins: Arc::new(vec!["http://127.0.0.1:4765".into()]),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+            settings: Arc::new(json!({"controller":{"enabled":false}})),
+            tailscale: None,
+        };
+        let app = Router::new()
+            .route("/v2/control/sources", get(controller_sources))
+            .route_layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                authorize,
+            ))
+            .with_state(state);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/control/sources")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/control/sources")
+                    .header(header::AUTHORIZATION, "Bearer read-token")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["apiVersion"], "v2");
+        assert_eq!(body["controllerEnabled"], false);
+        assert_eq!(body["data"], json!([]));
+        Ok(())
+    }
+
+    fn gateway_test_state(
+        database: Arc<Database>,
+        token: &str,
+        tailscale: Option<ServeAccess>,
+    ) -> Result<ApiState> {
+        Ok(ApiState {
+            writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
+            database,
+            token: Arc::new(token.into()),
+            fingerprint_key: [7; 32],
+            strict_origin: true,
+            allowed_origins: Arc::new(vec![
+                "http://127.0.0.1:4765".into(),
+                "https://observer.example.ts.net".into(),
+            ]),
+            live_modes: Arc::new(Vec::new()),
+            blob_downloads: Arc::new(Semaphore::new(1)),
+            settings: Arc::new(json!({"controller":{"enabled":true}})),
+            tailscale: tailscale.map(Arc::new),
+        })
+    }
+
+    fn gateway_test_app(state: ApiState) -> Router {
+        Router::new()
+            .route(
+                "/v2/commands",
+                get(list_gateway_commands).post(create_gateway_command),
+            )
+            .route("/v2/commands/{command_id}", get(get_gateway_command))
+            .route("/v2/control/catalog", get(controller_catalog))
+            .route("/v2/stream", get(v2_stream))
+            .route("/v2/threads", post(create_gateway_thread))
+            .route("/v2/threads/{thread_key}/inputs", post(create_thread_input))
+            .route(
+                "/v2/requests/{request_key}/actions",
+                post(create_pending_request_action),
+            )
+            .route("/v2/uploads/images", post(upload_image))
+            .route_layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                authorize,
+            ))
+            .with_state(state)
+    }
+
+    async fn response_json(response: Response) -> Result<Value> {
+        Ok(serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX).await?,
+        )?)
+    }
+
+    async fn first_sse_frame(response: Response) -> Result<String> {
+        let mut stream = response.into_body().into_data_stream();
+        let mut frame = String::new();
+        while !frame.contains("\n\n") {
+            let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .context("timed out waiting for SSE data")?
+                .context("SSE stream ended before an event")??;
+            frame.push_str(std::str::from_utf8(&chunk)?);
+        }
+        Ok(frame)
+    }
+
+    #[tokio::test]
+    async fn command_api_requires_origin_is_idempotent_and_audits_shared_local_auth() -> Result<()>
+    {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([4_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let body = json!({
+            "capability":"turn.start",
+            "target":{"sourceId":"source","sourceEpoch":"epoch","threadKey":"thread-key","codexThreadId":"thread"},
+            "input":{"text":"sensitive fixture message","clientUserMessageId":"client-message"}
+        })
+        .to_string();
+
+        let missing_origin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/commands")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("idempotency-key", "bearer-key-0001")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))?,
+            )
+            .await?;
+        assert_eq!(missing_origin.status(), StatusCode::FORBIDDEN);
+
+        let request = |body: String| -> Result<Request> {
+            Ok(Request::builder()
+                .method("POST")
+                .uri("/v2/commands")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("idempotency-key", "bearer-key-0001")
+                .header(header::ORIGIN, "http://127.0.0.1:4765")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))?)
+        };
+        let response = app.clone().oneshot(request(body.clone())?).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let first = response_json(response).await?;
+        assert_eq!(first["error"]["code"], "SOURCE_NOT_LIVE");
+        let command_id = first["error"]["details"]["commandId"]
+            .as_str()
+            .context("missing command id")?
+            .to_string();
+
+        let replay = app.clone().oneshot(request(body.clone())?).await?;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = response_json(replay).await?;
+        assert_eq!(replay["data"]["commandId"], command_id);
+        assert_eq!(replay["data"]["state"], "rejected");
+
+        let conflict = body.replace("sensitive fixture message", "different fixture message");
+        let conflict = app.clone().oneshot(request(conflict)?).await?;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(conflict).await?["error"]["code"],
+            "IDEMPOTENCY_CONFLICT"
+        );
+
+        let pair = auth::generate_pair_code(&token)?;
+        let session = redeem_pair_code(&token, &pair, chrono::Utc::now().timestamp())?;
+        let cookie = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/commands")
+                    .header(header::COOKIE, format!("observer_session={session}"))
+                    .header("idempotency-key", "cookie-key-0001")
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))?,
+            )
+            .await?;
+        assert_eq!(cookie.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let connection = database.connect()?;
+        let counts: (i64, i64, i64) = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM gateway_commands),
+                    (SELECT COUNT(*) FROM command_transitions),
+                    (SELECT COUNT(*) FROM control_audit)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(counts, (2, 6, 6));
+        let principals: String = connection.query_row(
+            "SELECT group_concat(DISTINCT principal_id) FROM gateway_commands",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(principals.contains("local_bearer"));
+        assert!(principals.contains("local_cookie"));
+        let summaries: String = connection.query_row(
+            "SELECT group_concat(input_summary_json) FROM gateway_commands",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!summaries.contains("sensitive fixture message"));
+        drop(connection);
+
+        let first_page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/commands?state=rejected&limit=1")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(first_page.status(), StatusCode::OK);
+        let first_page = response_json(first_page).await?;
+        assert_eq!(first_page["data"].as_array().map(Vec::len), Some(1));
+        let cursor = first_page["nextCursor"]
+            .as_str()
+            .context("missing command cursor")?;
+        let second_page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v2/commands?state=rejected&limit=1&cursor={cursor}"
+                    ))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(second_page.status(), StatusCode::OK);
+        let second_page = response_json(second_page).await?;
+        assert_eq!(second_page["data"].as_array().map(Vec::len), Some(1));
+        assert!(second_page["nextCursor"].is_null());
+
+        let mismatched = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v2/commands?state=failed&limit=1&cursor={cursor}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(mismatched.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(mismatched).await?["error"]["code"],
+            "CURSOR_INVALID"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_action_requires_signed_key_origin_epoch_and_keeps_content_out_of_audit()
+    -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+               capture_completeness,completeness_reasons_json,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','store-source','thread',0,'metadata_only','[]','{}','{}',0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO pending_requests(source_id,epoch_id,request_id,thread_key,request_type,
+               state,request_event_seq,payload_json,request_version)
+             VALUES ('source','epoch','request','thread-key','mcp_elicitation','pending',1,
+               '{\"requestedSchema\":{\"type\":\"object\"}}',2)",
+            [],
+        )?;
+        drop(connection);
+        let token = URL_SAFE_NO_PAD.encode([21_u8; 32]);
+        let request_key = encode_request_key(
+            &RequestKey {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                request_id: "request".into(),
+            },
+            &token,
+        )?;
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let body = json!({
+            "sourceEpoch":"epoch",
+            "expectedRequestVersion":2,
+            "action":{"type":"mcpElicitation","action":"accept","content":{"value":"PRIVATE-MCP-CONTENT"}}
+        })
+        .to_string();
+
+        let missing_origin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v2/requests/{request_key}/actions"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("idempotency-key", "request-key-0001")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))?,
+            )
+            .await?;
+        assert_eq!(missing_origin.status(), StatusCode::FORBIDDEN);
+
+        let mut tampered = request_key.clone().into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered)?;
+        let invalid_key = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v2/requests/{tampered}/actions"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header("idempotency-key", "request-key-0002")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))?,
+            )
+            .await?;
+        assert_eq!(invalid_key.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v2/requests/{request_key}/actions"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header("idempotency-key", "request-key-0003")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = response_json(response).await?;
+        assert_eq!(error["error"]["code"], "SOURCE_NOT_LIVE");
+
+        let connection = database.connect()?;
+        let stored: String = connection.query_row(
+            "SELECT group_concat(value,' ') FROM (
+               SELECT input_summary_json AS value FROM gateway_commands
+               UNION ALL SELECT input_summary_json FROM control_audit)",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!stored.contains("PRIVATE-MCP-CONTENT"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_upload_checks_signature_mime_idempotency_and_private_storage() -> Result<()> {
+        assert_eq!(image_mime(b"\x89PNG\r\n\x1a\nsynthetic"), Some("image/png"));
+        assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0]), Some("image/jpeg"));
+        assert_eq!(image_mime(b"GIF87asynthetic"), Some("image/gif"));
+        assert_eq!(image_mime(b"GIF89asynthetic"), Some("image/gif"));
+        assert_eq!(
+            image_mime(b"RIFF\x04\x00\x00\x00WEBPsynthetic"),
+            Some("image/webp")
+        );
+        assert_eq!(image_mime(b"<svg/>"), None);
+
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([22_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let png = b"\x89PNG\r\n\x1a\nsynthetic".to_vec();
+        let request = |body: Vec<u8>, content_type: &str, key: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/v2/uploads/images")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ORIGIN, "http://127.0.0.1:4765")
+                .header("idempotency-key", key)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+        };
+        let invalid = app
+            .clone()
+            .oneshot(request(
+                b"<svg/>".to_vec(),
+                "image/svg+xml",
+                "image-key-0001",
+            )?)
+            .await?;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let mismatch = app
+            .clone()
+            .oneshot(request(png.clone(), "image/jpeg", "image-key-0002")?)
+            .await?;
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        let created = app
+            .clone()
+            .oneshot(request(png.clone(), "image/png", "image-key-0003")?)
+            .await?;
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = response_json(created).await?;
+        let original_upload = created["data"].clone();
+        let upload_id = created["data"]["uploadId"]
+            .as_str()
+            .context("missing uploadId")?;
+        let replay = app
+            .clone()
+            .oneshot(request(png.clone(), "image/png", "image-key-0003")?)
+            .await?;
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(response_json(replay).await?["data"], original_upload);
+        let conflict = app
+            .clone()
+            .oneshot(request(
+                b"\x89PNG\r\n\x1a\ndifferent".to_vec(),
+                "image/png",
+                "image-key-0003",
+            )?)
+            .await?;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(conflict).await?["error"]["code"],
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let oversized = app
+            .clone()
+            .oneshot(request(
+                {
+                    let mut bytes = vec![0_u8; 20 * 1024 * 1024 + 1];
+                    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+                    bytes
+                },
+                "image/png",
+                "image-key-0004",
+            )?)
+            .await?;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let path = database
+            .image_staging_dir()
+            .join(format!("{upload_id}.bin"));
+        assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::os::unix::fs::MetadataExt::mode(&fs::metadata(&path)?) & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::os::unix::fs::MetadataExt::mode(&fs::metadata(database.image_staging_dir())?)
+                    & 0o777,
+                0o700
+            );
+        }
+        fs::write(&path, b"tampered")?;
+        let tampered = app
+            .clone()
+            .oneshot(request(png, "image/png", "image-key-0003")?)
+            .await?;
+        assert_eq!(tampered.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(tampered).await?["error"]["code"],
+            "IMAGE_INVALID"
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_file(&path)?;
+            let target = temp.path().join("symlink-target");
+            fs::write(&target, b"must-not-be-read-as-an-upload")?;
+            std::os::unix::fs::symlink(&target, &path)?;
+            let symlink = app
+                .clone()
+                .oneshot(request(
+                    b"\x89PNG\r\n\x1a\nsynthetic".to_vec(),
+                    "image/png",
+                    "image-key-0003",
+                )?)
+                .await?;
+            assert_eq!(symlink.status(), StatusCode::CONFLICT);
+            assert_eq!(fs::read(target)?, b"must-not-be-read-as-an-upload");
+        }
+        let count: i64 =
+            database
+                .connect()?
+                .query_row("SELECT COUNT(*) FROM image_uploads", [], |row| row.get(0))?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_claim_is_deleted_when_dispatch_cannot_start() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([23_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let upload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/uploads/images")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header("idempotency-key", "image-cleanup-key")
+                    .header(header::CONTENT_TYPE, "image/png")
+                    .body(Body::from(b"\x89PNG\r\n\x1a\ncleanup".to_vec()))?,
+            )
+            .await?;
+        let upload = response_json(upload).await?;
+        let upload_id = upload["data"]["uploadId"]
+            .as_str()
+            .context("missing uploadId")?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/commands")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header("idempotency-key", "image-command-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "capability":"turn.start",
+                            "target":{
+                                "sourceId":"offline-source",
+                                "sourceEpoch":"offline-epoch",
+                                "threadKey":"thread-key",
+                                "codexThreadId":"thread-id"
+                            },
+                            "input":{
+                                "clientUserMessageId":"client-message",
+                                "text":"with image",
+                                "uploadIds":[upload_id]
+                            }
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let (state, relative_path): (String, String) = database.connect()?.query_row(
+            "SELECT state,relative_path FROM image_uploads WHERE upload_id=?1",
+            [upload_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(state, "deleted");
+        assert!(!database.image_staging_dir().join(relative_path).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_command_validation_canonicalizes_cwd_and_enforces_slash_contract() -> Result<()> {
+        let temp = TempDir::new()?;
+        let thread_start = |cwd: &std::path::Path| CreateGatewayCommandRequest {
+            capability: "thread.start".into(),
+            target: CreateGatewayCommandTarget {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                thread_key: None,
+                codex_thread_id: None,
+                expected_turn_id: None,
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input: json!({"cwd":cwd,"model":null,"personality":"pragmatic","permissions":null}),
+        };
+        let valid_thread_start = thread_start(temp.path());
+        let ControllerOperation::ThreadStart { cwd, .. } =
+            controller_operation(&valid_thread_start, Vec::new())?
+        else {
+            bail!("expected thread start operation");
+        };
+        assert_eq!(std::path::Path::new(&cwd), fs::canonicalize(temp.path())?);
+
+        let ordinary_file = temp.path().join("not-a-directory");
+        fs::write(&ordinary_file, b"synthetic")?;
+        for invalid_cwd in [
+            std::path::PathBuf::from("relative"),
+            temp.path().join("missing-directory"),
+            ordinary_file,
+        ] {
+            assert_eq!(
+                controller_operation(&thread_start(&invalid_cwd), Vec::new())
+                    .unwrap_err()
+                    .code,
+                "COMMAND_INVALID"
+            );
+        }
+
+        let text_request = |text: &str| CreateGatewayCommandRequest {
+            capability: "turn.start".into(),
+            target: CreateGatewayCommandTarget {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                thread_key: Some("thread-key".into()),
+                codex_thread_id: Some("thread".into()),
+                expected_turn_id: None,
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input: json!({"text":text,"clientUserMessageId":"message"}),
+        };
+        let error = controller_operation(&text_request("/unknown"), Vec::new()).unwrap_err();
+        assert_eq!(error.code, "UNKNOWN_COMMAND");
+        let ControllerOperation::TurnStart { text, .. } =
+            controller_operation(&text_request("//literal"), Vec::new())?
+        else {
+            bail!("expected turn start operation");
+        };
+        assert_eq!(text, "/literal");
+
+        let plan = CreateGatewayCommandRequest {
+            capability: "thread.plan".into(),
+            target: CreateGatewayCommandTarget {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                thread_key: Some("thread-key".into()),
+                codex_thread_id: Some("thread".into()),
+                expected_turn_id: Some("turn".into()),
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input: json!({
+                "prompt":"/literal inside Plan prompt",
+                "clientUserMessageId":"plan-message"
+            }),
+        };
+        let ControllerOperation::Plan {
+            prompt,
+            expected_turn_id,
+            ..
+        } = controller_operation(&plan, Vec::new())?
+        else {
+            bail!("expected Plan operation");
+        };
+        assert_eq!(prompt.as_deref(), Some("/literal inside Plan prompt"));
+        assert_eq!(expected_turn_id.as_deref(), Some("turn"));
+        let invalid_plan = CreateGatewayCommandRequest {
+            input: json!({"prompt":"missing client id","clientUserMessageId":null}),
+            ..plan
+        };
+        assert_eq!(
+            controller_operation(&invalid_plan, Vec::new())
+                .unwrap_err()
+                .code,
+            "COMMAND_INVALID"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_input_shortcut_uses_same_command_ledger_and_typed_actor() -> Result<()> {
+        use crate::controller::{
+            ActorRequest, CapabilityCatalog, SourceActorSnapshot, actor_channel,
+        };
+
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([11_u8; 32]);
+        let mut state = gateway_test_state(database.clone(), &token, None)?;
+        let registry = ControllerRegistry::default();
+        let (sender, mut receiver) = actor_channel();
+        registry.publish(
+            SourceActorSnapshot {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                state: "ready".into(),
+                experimental_api: true,
+                catalog: CapabilityCatalog::default(),
+                unavailable_reason: None,
+            },
+            sender,
+        );
+        state.controller = registry;
+        let actor_writer = state.writer.clone();
+        let actor = tokio::spawn(async move {
+            let Some(ActorRequest::Dispatch { command, reply }) = receiver.recv().await else {
+                bail!("missing dispatch request");
+            };
+            assert!(matches!(
+                command.operation,
+                ControllerOperation::TurnStart { .. }
+            ));
+            actor_writer.transition_gateway_command(gateway_transition(
+                &command.command_id,
+                "dispatching",
+                "allow",
+                "dispatching",
+            ))?;
+            actor_writer.transition_gateway_command(gateway_transition(
+                &command.command_id,
+                "accepted_by_source",
+                "allow",
+                "accepted_by_source",
+            ))?;
+            let mut completed =
+                gateway_transition(&command.command_id, "completed", "allow", "completed");
+            completed.result_summary_json = Some(json!({"turnId":"turn"}).to_string());
+            let record = actor_writer.transition_gateway_command(completed)?;
+            let _ = reply.send(record);
+            Result::<()>::Ok(())
+        });
+        let app = gateway_test_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/threads/thread-key/inputs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("idempotency-key", "shortcut-key-0001")
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "sourceId":"source",
+                            "sourceEpoch":"epoch",
+                            "codexThreadId":"thread",
+                            "clientUserMessageId":"client-message",
+                            "text":"sensitive shortcut body"
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body["data"]["state"], "completed");
+        assert_eq!(body["data"]["result"]["turnId"], "turn");
+        actor.await??;
+        let stored: String = database.connect()?.query_row(
+            "SELECT input_summary_json FROM gateway_commands",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!stored.contains("sensitive shortcut body"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn control_catalog_resolves_thread_without_cross_source_passthrough() -> Result<()> {
+        use crate::controller::{
+            ActorRequest, CapabilityCatalog, SlashCommandEntry, SourceActorSnapshot,
+            SourceControlCatalog, actor_channel,
+        };
+
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        database.connect()?.execute(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+               capture_completeness,completeness_reasons_json,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','store-source','thread',0,'metadata_only','[]','{}','{}',0)",
+            [],
+        )?;
+        let token = URL_SAFE_NO_PAD.encode([12_u8; 32]);
+        let mut state = gateway_test_state(database, &token, None)?;
+        let registry = ControllerRegistry::default();
+        let (sender, mut receiver) = actor_channel();
+        registry.publish(
+            SourceActorSnapshot {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                state: "ready".into(),
+                experimental_api: true,
+                catalog: CapabilityCatalog::default(),
+                unavailable_reason: None,
+            },
+            sender,
+        );
+        state.controller = registry;
+        let actor = tokio::spawn(async move {
+            let Some(ActorRequest::Catalog {
+                thread_id,
+                thread_key,
+                reply,
+            }) = receiver.recv().await
+            else {
+                bail!("missing catalog request");
+            };
+            assert_eq!(thread_id.as_deref(), Some("thread"));
+            assert_eq!(thread_key.as_deref(), Some("thread-key"));
+            let _ = reply.send(SourceControlCatalog {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                thread_loaded: true,
+                active_turn_id: None,
+                collaboration_mode: None,
+                goal: None,
+                capabilities: CapabilityCatalog::default(),
+                slash_commands: vec![SlashCommandEntry {
+                    name: "/model".into(),
+                    capability: "thread.settings.model".into(),
+                    interaction_required_without_argument: true,
+                }],
+            });
+            Result::<()>::Ok(())
+        });
+        let response = gateway_test_app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/control/catalog?sourceId=source&threadKey=thread-key")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body["data"]["sourceEpoch"], "epoch");
+        assert_eq!(body["data"]["slashCommands"][0]["name"], "/model");
+        actor.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slash_picker_is_structured_and_unknown_command_is_never_model_input() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([13_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let request = |key: &str, text: &str| -> Result<Request> {
+            Ok(Request::builder()
+                .method("POST")
+                .uri("/v2/threads/thread-key/inputs")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("idempotency-key", key)
+                .header(header::ORIGIN, "http://127.0.0.1:4765")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "sourceId":"source",
+                        "sourceEpoch":"epoch",
+                        "codexThreadId":"thread",
+                        "clientUserMessageId":"message",
+                        "text":text
+                    })
+                    .to_string(),
+                ))?)
+        };
+        let picker = app
+            .clone()
+            .oneshot(request("picker-key-0001", "/model")?)
+            .await?;
+        assert_eq!(picker.status(), StatusCode::CONFLICT);
+        let picker = response_json(picker).await?;
+        assert_eq!(picker["error"]["code"], "INTERACTION_REQUIRED");
+        assert_eq!(
+            picker["error"]["details"]["interaction"]["type"],
+            "modelPicker"
+        );
+        assert_eq!(
+            database
+                .connect()?
+                .query_row("SELECT COUNT(*) FROM gateway_commands", [], |row| row
+                    .get::<_, i64>(0),)?,
+            0
+        );
+
+        let unknown = app
+            .oneshot(request("unknown-key-0001", "/does-not-exist")?)
+            .await?;
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(unknown).await?["error"]["code"],
+            "UNKNOWN_COMMAND"
+        );
+        let stored: (String, String) = database.connect()?.query_row(
+            "SELECT state,input_summary_json FROM gateway_commands",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(stored.0, "rejected");
+        assert!(!stored.1.contains("does-not-exist"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn status_mcp_and_usage_slash_results_are_local_gateway_cards() -> Result<()> {
+        use crate::controller::{
+            ActorRequest, CapabilityCatalog, SourceActorSnapshot, SourceControlCatalog,
+            actor_channel,
+        };
+
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([14_u8; 32]);
+        let mut state = gateway_test_state(database.clone(), &token, None)?;
+        let registry = ControllerRegistry::default();
+        let (sender, mut receiver) = actor_channel();
+        registry.publish(
+            SourceActorSnapshot {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                state: "ready".into(),
+                experimental_api: true,
+                catalog: CapabilityCatalog::default(),
+                unavailable_reason: None,
+            },
+            sender,
+        );
+        state.controller = registry;
+        let actor = tokio::spawn(async move {
+            let mut capabilities = CapabilityCatalog::default();
+            for (method, result) in [
+                (
+                    "mcpServerStatus/list",
+                    json!({"data":[{"name":"synthetic","status":"ready"}]}),
+                ),
+                (
+                    "account/usage/read",
+                    json!({"summary":{"lifetimeTokens":10}}),
+                ),
+                (
+                    "account/rateLimits/read",
+                    json!({"rateLimits":{"primary":{"usedPercent":5}}}),
+                ),
+            ] {
+                capabilities.record_response(method, false, &json!({"result":result}));
+            }
+            for _ in 0..3 {
+                let Some(ActorRequest::Catalog { reply, .. }) = receiver.recv().await else {
+                    bail!("missing local card catalog request");
+                };
+                let _ = reply.send(SourceControlCatalog {
+                    source_id: "source".into(),
+                    source_epoch: "epoch".into(),
+                    thread_loaded: true,
+                    active_turn_id: Some("turn".into()),
+                    collaboration_mode: Some(json!({"mode":"plan"})),
+                    goal: Some(json!({"status":"active","objective":"synthetic"})),
+                    capabilities: capabilities.clone(),
+                    slash_commands: Vec::new(),
+                });
+            }
+            Result::<()>::Ok(())
+        });
+        let app = gateway_test_app(state);
+        for (index, (text_input, expected_type)) in [
+            ("/status", "status"),
+            ("/mcp verbose", "mcp"),
+            ("/usage", "usage"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v2/threads/thread-key/inputs")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header("idempotency-key", format!("local-card-key-{index:04}"))
+                        .header(header::ORIGIN, "http://127.0.0.1:4765")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "sourceId":"source",
+                                "sourceEpoch":"epoch",
+                                "codexThreadId":"thread",
+                                "expectedTurnId":"turn",
+                                "clientUserMessageId":format!("local-card-message-{index}"),
+                                "text":text_input,
+                            })
+                            .to_string(),
+                        ))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await?;
+            assert_eq!(body["data"]["kind"], "gatewayStatusCard");
+            assert_eq!(body["data"]["cardType"], expected_type);
+        }
+        actor.await??;
+        assert_eq!(
+            database
+                .connect()?
+                .query_row("SELECT COUNT(*) FROM gateway_commands", [], |row| row
+                    .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_api_accepts_only_verified_tailscale_principal() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let access = ServeAccess {
+            authority: "observer.example.ts.net".into(),
+            origin: "https://observer.example.ts.net".into(),
+            viewer_url: "https://observer.example.ts.net/".into(),
+        };
+        let token = URL_SAFE_NO_PAD.encode([5_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, Some(access))?);
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v2/commands")
+            .header(header::HOST, "observer.example.ts.net")
+            .header("x-forwarded-proto", "https")
+            .header("tailscale-user-login", "user@example.com")
+            .header("idempotency-key", "tailscale-key-0001")
+            .header(header::ORIGIN, "https://observer.example.ts.net")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "capability":"turn.start",
+                    "target":{"sourceId":"source","sourceEpoch":"epoch","threadKey":"thread-key","codexThreadId":"thread"},
+                    "input":{"text":"fixture","clientUserMessageId":"tailscale-message"}
+                })
+                .to_string(),
+            ))?;
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:50000".parse::<SocketAddr>()?));
+        let response = app.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let principal: String = database.connect()?.query_row(
+            "SELECT principal_id FROM gateway_commands",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(principal, "tailscale:user@example.com");
+        Ok(())
     }
 
     #[test]
@@ -1652,34 +4699,47 @@ mod tests {
             Ok(request)
         };
 
-        assert!(tailscale_request_is_authorized(
-            &access,
-            &request(
-                "127.0.0.1:50000",
-                "observer.example.ts.net",
-                Some("user@example.com")
-            )?
-        ));
-        assert!(!tailscale_request_is_authorized(
-            &access,
-            &request(
-                "100.64.0.1:50000",
-                "observer.example.ts.net",
-                Some("user@example.com")
-            )?
-        ));
-        assert!(!tailscale_request_is_authorized(
-            &access,
-            &request(
-                "127.0.0.1:50000",
-                "wrong.example.ts.net",
-                Some("user@example.com")
-            )?
-        ));
-        assert!(!tailscale_request_is_authorized(
-            &access,
-            &request("127.0.0.1:50000", "observer.example.ts.net", None)?
-        ));
+        assert_eq!(
+            tailscale_request_principal(
+                &access,
+                &request(
+                    "127.0.0.1:50000",
+                    "observer.example.ts.net",
+                    Some("user@example.com")
+                )?
+            )
+            .as_deref(),
+            Some("tailscale:user@example.com")
+        );
+        assert!(
+            tailscale_request_principal(
+                &access,
+                &request(
+                    "100.64.0.1:50000",
+                    "observer.example.ts.net",
+                    Some("user@example.com")
+                )?
+            )
+            .is_none()
+        );
+        assert!(
+            tailscale_request_principal(
+                &access,
+                &request(
+                    "127.0.0.1:50000",
+                    "wrong.example.ts.net",
+                    Some("user@example.com")
+                )?
+            )
+            .is_none()
+        );
+        assert!(
+            tailscale_request_principal(
+                &access,
+                &request("127.0.0.1:50000", "observer.example.ts.net", None)?
+            )
+            .is_none()
+        );
         Ok(())
     }
 
@@ -1722,6 +4782,93 @@ mod tests {
         let mut tampered = encoded.into_bytes();
         tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
         assert!(decode_cursor(std::str::from_utf8(&tampered)?, &token).is_err());
+
+        let request = RequestKey {
+            source_id: "source".into(),
+            source_epoch: "epoch".into(),
+            request_id: "request".into(),
+        };
+        let encoded = encode_request_key(&request, &token)?;
+        assert_eq!(decode_request_key(&encoded, &token)?, request);
+        let stream = V2StreamCursor {
+            event_seq: 12,
+            command_transition_seq: 34,
+        };
+        let encoded = encode_v2_stream_cursor(&stream, &token)?;
+        assert_eq!(decode_v2_stream_cursor(&encoded, &token)?, stream);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn v2_stream_starts_at_retention_floor_and_replays_from_composite_cursor() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO sources(source_id,kind,stable_identity,config_json,status,created_at_ms,updated_at_ms)
+             VALUES ('source','app_server','source','{}','ready',0,0)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms) VALUES ('source','epoch',0)",
+            [],
+        )?;
+        for sequence in 1..=6_i64 {
+            connection.execute(
+                "INSERT INTO raw_events(event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,
+                   thread_key,codex_thread_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+                   raw_json,redaction_json,decode_status,store_source_id)
+                 VALUES (?1,'source','epoch',?2,?1,?2,'thread','thread',?3,'completed','live',?1,?1,'{}','{}','decoded','source')",
+                rusqlite::params![format!("event-{sequence}"), sequence, format!("event/{sequence}")],
+            )?;
+        }
+        connection.execute(
+            "UPDATE retention_state SET value_integer=5 WHERE key='raw_low_watermark'",
+            [],
+        )?;
+        drop(connection);
+        let token = URL_SAFE_NO_PAD.encode([24_u8; 32]);
+        let app = gateway_test_app(gateway_test_state(database.clone(), &token, None)?);
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/stream")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = first_sse_frame(first).await?;
+        assert!(first.contains("\"eventSeq\":6"));
+        let cursor = first
+            .lines()
+            .find_map(|line| line.strip_prefix("id:"))
+            .map(str::trim)
+            .context("SSE event did not contain a cursor")?;
+        assert_eq!(decode_v2_stream_cursor(cursor, &token)?.event_seq, 6);
+
+        database.connect()?.execute(
+            "INSERT INTO raw_events(event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,
+               thread_key,codex_thread_id,method,phase,durability,source_fingerprint,stored_raw_hash,
+               raw_json,redaction_json,decode_status,store_source_id)
+             VALUES ('event-7','source','epoch',7,'event-7',7,'thread','thread','event/7','completed','live',
+               'event-7','event-7','{}','{}','decoded','source')",
+            [],
+        )?;
+        let replay = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v2/stream?cursor={cursor}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = first_sse_frame(replay).await?;
+        assert!(replay.contains("\"eventSeq\":7"));
+        assert!(!replay.contains("\"eventSeq\":6"));
         Ok(())
     }
 
@@ -1742,8 +4889,10 @@ mod tests {
         }
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -1836,8 +4985,10 @@ mod tests {
         transaction.commit()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([6_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -1916,8 +5067,10 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([8_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2057,8 +5210,10 @@ mod tests {
         )?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2103,8 +5258,10 @@ mod tests {
         )?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([5_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2172,8 +5329,10 @@ mod tests {
         database.migrate()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new("token".into()),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2225,8 +5384,10 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new("token".into()),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2273,8 +5434,10 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),
@@ -2329,8 +5492,10 @@ mod tests {
         Importer::new(&config, database.as_ref())?.import_all()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
+            controller: ControllerRegistry::default(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
+            fingerprint_key: [7; 32],
             strict_origin: true,
             allowed_origins: Arc::new(Vec::new()),
             live_modes: Arc::new(Vec::new()),

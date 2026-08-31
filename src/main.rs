@@ -4,6 +4,7 @@
 mod architecture;
 mod clock;
 mod config;
+mod controller;
 mod credentials;
 mod domain;
 mod http;
@@ -151,6 +152,30 @@ async fn main() -> Result<()> {
         config.capture.inline_blob_bytes,
     )?);
     database.migrate()?;
+    let gateway_recovery = database.recover_gateway_after_restart()?;
+    for path in &gateway_recovery.image_paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove stale image {path}")),
+        }
+    }
+    if gateway_recovery.closed_epochs > 0
+        || gateway_recovery.failed_before_dispatch > 0
+        || gateway_recovery.outcome_unknown > 0
+    {
+        info!(
+            closed_epochs = gateway_recovery.closed_epochs,
+            failed_before_dispatch = gateway_recovery.failed_before_dispatch,
+            outcome_unknown = gateway_recovery.outcome_unknown,
+            removed_images = gateway_recovery.image_paths.len(),
+            "Gateway restart recovery completed without replay"
+        );
+    }
+    let expired_images = database.sweep_expired_image_uploads(crate::clock::now_ms())?;
+    if expired_images > 0 {
+        info!(files = expired_images, "removed expired staged images");
+    }
     let writer = WriterHandle::start(
         database.clone(),
         config.capture.ingest_queue_events,
@@ -210,7 +235,7 @@ async fn main() -> Result<()> {
                 "post-watcher reconciliation complete"
             );
             let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-            let live_handles =
+            let live_runtime =
                 live::spawn_enabled(&config, writer.clone(), shutdown_receiver.clone())?;
 
             let scan_config = config.clone();
@@ -254,9 +279,16 @@ async fn main() -> Result<()> {
                     let _ = signal_sender.send(true);
                 }
             });
-            http::serve(config, database, writer, shutdown_receiver).await?;
+            http::serve(
+                config,
+                database,
+                writer,
+                live_runtime.controller,
+                shutdown_receiver,
+            )
+            .await?;
             let _ = shutdown_sender.send(true);
-            for handle in live_handles {
+            for handle in live_runtime.handles {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }
         }

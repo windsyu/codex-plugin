@@ -1,9 +1,9 @@
 [package]
 name = "codex-local-observer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Read-only local observer for Codex rollout history"
+description = "Local Codex observer and auditable V2 control gateway"
 
 [[bin]]
 name = "codex-observerd"
@@ -37,3 +37,4 @@ zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

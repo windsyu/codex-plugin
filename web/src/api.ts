@@ -47,10 +47,113 @@ export class Api {
     return { ...envelope, data };
   }
 
+  async post<T>(path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<ApiEnvelope<T>> {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { ...this.headers(), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify(body),
+      signal
+    });
+    const payload = await response.json().catch(() => undefined);
+    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
+    return payload as ApiEnvelope<T>;
+  }
+
+  async uploadImage(file: File, idempotencyKey: string, signal?: AbortSignal) {
+    const response = await fetch('/v2/uploads/images', {
+      method: 'POST', headers: { ...this.headers(), 'Content-Type': file.type, 'Idempotency-Key': idempotencyKey },
+      credentials: 'same-origin', cache: 'no-store', body: file, signal
+    });
+    const payload = await response.json().catch(() => undefined);
+    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
+    return payload as ApiEnvelope<import('./types').ImageUpload>;
+  }
+
+  async stream(path: string, onEvent: (event: StreamEvent) => void, signal: AbortSignal, onOpen?: () => void) {
+    const response = await fetch(path, {
+      headers: { ...this.headers(), Accept: 'text/event-stream' }, credentials: 'same-origin', cache: 'no-store', signal
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => undefined);
+      throw new ApiError(response.status, payload?.error?.message || `实时连接失败：HTTP ${response.status}`, payload?.error?.code);
+    }
+    onOpen?.();
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+        let type = 'message'; let id: string | undefined; const data: string[] = [];
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) type = line.slice(6).trim();
+          else if (line.startsWith('id:')) id = line.slice(3).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+        }
+        if (data.length) {
+          const text = data.join('\n');
+          onEvent({ type, id, data: JSON.parse(text) });
+        }
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+  }
+
+}
+
+export interface StreamEvent { type: string; id?: string; data: unknown; }
+
+function streamPath(path: string, cursor?: string) {
+  if (!cursor) return path;
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set('cursor', cursor);
+  return `${url.pathname}${url.search}`;
+}
+
+function reconnectDelay(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted || milliseconds <= 0) return resolve();
+    const timer = window.setTimeout(done, milliseconds);
+    signal.addEventListener('abort', done, { once: true });
+    function done() { window.clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+  });
+}
+
+export async function reconnectingStream(
+  api: Api,
+  path: string,
+  onEvent: (event: StreamEvent) => void,
+  onState: (state: 'connecting' | 'live' | 'disconnected') => void,
+  signal: AbortSignal,
+  retryMilliseconds = 1_000
+) {
+  let cursor: string | undefined;
+  while (!signal.aborted) {
+    onState('connecting');
+    try {
+      await api.stream(streamPath(path, cursor), (event) => {
+        if (event.id) cursor = event.id;
+        onEvent(event);
+      }, signal, () => onState('live'));
+    } catch (error) {
+      if (signal.aborted) return;
+      if (error instanceof ApiError && error.status === 401) throw error;
+      if (error instanceof ApiError && error.status === 410) cursor = undefined;
+    }
+    if (signal.aborted) return;
+    onState('disconnected');
+    await reconnectDelay(retryMilliseconds, signal);
+  }
 }
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(public readonly status: number, message: string, public readonly code?: string) {
     super(message);
     this.name = 'ApiError';
   }

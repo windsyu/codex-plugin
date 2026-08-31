@@ -1,6 +1,6 @@
-# Codex Local Observer
+# Codex Local Gateway
 
-本机只读的 Codex rollout 历史观察器。当前版本实现 V1 store-first MVP：从一个或多个 `CODEX_HOME` 导入 durable JSONL 历史，投影为 Thread → Turn → Item，并通过带认证的本地 API 和 Web Viewer 查询。
+本机运行的 Codex Local Observer & Gateway。V1 store-first Observer 已完成；当前开发主线是目标版本 `v0.2.0` 的 V2 本地对话与控制能力。V2 的固定边界见[核心约束](docs/codex-local-gateway-v2-development-constraints.md)，当前实现切片见[详细设计](docs/codex-local-gateway-v2-detailed-design.md)。
 
 ## 已实现
 
@@ -33,6 +33,8 @@
 - 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
 `live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。V1 的设计、验证和已知限制已压缩到[开发历史归档](docs/archive/v1-development-history.md)。
+
+V2 九个纵向切片已经落地：Controller foundation、LiveSourceActor、command ledger、最小对话闭环、capability-aware settings/Slash、Plan/Goal、本地控制卡、pending request CAS、Web Composer/fetch SSE/图片 staging，以及 crash recovery/安全/兼容/发布加固。固定配置默认关闭，开启后每个配置 socket 的 source 由一个独占 WebSocket actor 连接，以 `experimentalApi:true` 初始化并逐项探测 catalog。`/v2/commands` 提供认证、Origin、幂等、exact epoch、append-only transition/audit 和签名分页；全部已发布操作使用固定 typed mapping，response/notification 先入 V1 raw event。approval、permission、user question 和 MCP elicitation 通过签名 `requestKey` 与 request-version CAS 处理。Composer 支持文本、本地图片、Slash、steer/interrupt 和请求卡；fetch SSE 通过请求头认证并以签名复合 cursor 重连。图片采用私有 staging、keyed fingerprint、主体绑定和终态/expiry 清理。写入后无法确认仍明确记录 `outcome_unknown`，不会自动重放；进程重启时同样只做 fail-closed reconciliation，绝不重派发 mutation。完整发布证据和已知兼容限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。
 
 ## 构建与测试
 
@@ -68,6 +70,7 @@ cp observer.example.toml observer.toml
 - Codex source：`~/.codex`；
 - Observer 数据：`./observer-data`；
 - Live Adapter：关闭。
+- V2 Controller：关闭。
 
 所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind；live 仅支持当前用户拥有、权限不宽于 `0600` 且位于私有目录中的直接 Unix socket。
 
@@ -91,6 +94,15 @@ live_mode = "observe_new" # 或 attach_loaded
 ```
 
 两种模式每 `max(scan_interval_seconds, 30s)` 分别对 archived/non-archived Thread 做 list/read 对账；`attach_loaded` 还会复查 loaded 集合，并且只对该连接首次发现的 loaded Thread 调用 `thread/resume`。两种模式都不会发送 approval、question、turn 或其他控制响应。
+
+V2 Controller 的显式开关为：
+
+```toml
+[controller]
+enabled = false
+```
+
+启用时必须保持 `strict_origin=true`，并至少为一个 source 配置 `app_server_socket`。Controller 复用现有 bearer、配对 Cookie 和经验证的 Tailscale 身份，不创建第二套 control token。开启后已发布的 `/v2` 对话 mutation 可控制该 socket 对应的 Codex source；若同时开启 Tailscale Serve，任何通过 Tailnet ACL 和 Serve 身份验证的用户都获得相同 mutation 权限，health、配置快照和 UI 会明确显示该风险。保持 `false` 即为兼容的只读默认值。
 
 ## 使用
 
@@ -175,6 +187,23 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 
 `filters` 可包含 `threadKeys`、`sourceIds`、`methods` 数组，每类最多 100 个值。发送阻塞超过 10 秒时服务端尝试返回 `SLOW_CONSUMER` 并关闭连接；客户端应从最后收到的 `eventSeq` 重连。
 
+V2 当前发布 Controller source/catalog 与 command ledger 端点：
+
+```text
+GET /v2/control/sources
+GET /v2/control/catalog?sourceId=&threadKey=
+POST /v2/commands
+GET /v2/commands/{commandId}
+GET /v2/commands?threadKey=&state=&cursor=
+POST /v2/threads
+POST /v2/threads/{threadKey}/inputs
+POST /v2/uploads/images
+POST /v2/requests/{requestKey}/actions
+GET /v2/stream
+```
+
+响应绑定当前 `sourceId + sourceEpoch`，并区分 `ready` 与 `unavailable`。catalog 只把 RPC 成功的 catalog method 标记为可用；experimental method 探测失败或 typed method 明确返回 method-not-found 时单项关闭，不影响 V1 浏览。Mutation 仅在 Controller 启用时注册，必须携带允许的 `Origin` 与 8—200 字符的 `Idempotency-Key`。快捷路由也进入相同 `GatewayCommand`、审计和 epoch/Turn/request precondition；所有发布 capability 都使用 closed typed mapping，不提供通用 JSON-RPC passthrough。`/v2/stream` 使用 fetch SSE 和签名复合 cursor，Bearer 只放在 Authorization header 中。
+
 ## 安全边界
 
 - Observer 只读打开 Codex rollout，不修改 Codex SQLite、rollout 或 writer lock；
@@ -182,11 +211,12 @@ WebSocket 连接后需在 5 秒内发送订阅 frame；当前实现接受：
 - blob 路径完全由服务端生成，下载强制 attachment，单 Range、并发上限 4；文件使用 `O_NOFOLLOW` 打开；
 - fingerprint 使用本机随机 256-bit key 的 BLAKE3 keyed hash；
 - redaction v2 不自动重写历史 v1 记录；health、Viewer 和 export 会报告 legacy record 警告；
-- API 不存在控制 Codex 的 mutation 路由；`POST /v1/auth/pair` 只兑换 Observer 会话 Cookie；
+- Codex mutation 只允许位于 `/v2`，`/v1` 继续只读；`POST /v1/auth/pair` 只兑换 Observer 会话 Cookie；
 - Tailscale 模式仍只监听 loopback；仅接受匹配 MagicDNS Host、HTTPS 转发标记和 Serve 用户身份的请求，不支持 Funnel 或普通 LAN 暴露；
 - Store completeness 仅声明 durable coverage；live completeness 只有在同一连续 epoch 观察到 Turn started 和 terminal 时才标记完整；
 - App Server transport 仍为官方实验能力，因此默认关闭，协议不兼容时退回 store-only。
+- Gateway 重启会先关闭遗留 live epoch 并校验 command ledger；未跨越写入边界的命令失败，可能已写入的命令进入 `outcome_unknown`，两者都不会自动重放。
 
 ## 项目状态
 
-本地 Git 已初始化，当前 V1 开发在 feature branch 以逻辑提交维护。仓库尚未配置 remote；创建远程仓库、push 和 PR 仍需单独授权。
+V1 只读基础已完成。V2 `v0.2.0` 的九个纵向切片和发布门禁均已完成；自动化、临时 release E2E、安全负向测试、migration/rollback 与已知限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。

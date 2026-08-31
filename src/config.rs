@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
+    pub controller: ControllerConfig,
     pub storage: StorageConfig,
     pub sources: Vec<SourceConfig>,
     pub capture: CaptureConfig,
@@ -32,6 +33,12 @@ pub struct ServerConfig {
 pub struct TailscaleServeConfig {
     pub enabled: bool,
     pub https_port: u16,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ControllerConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +77,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             server: ServerConfig::default(),
+            controller: ControllerConfig::default(),
             storage: StorageConfig::default(),
             sources: vec![SourceConfig::default()],
             capture: CaptureConfig::default(),
@@ -190,6 +198,17 @@ impl Config {
         }
         if self.server.tailscale_serve.enabled && self.server.tailscale_serve.https_port == 0 {
             bail!("Tailscale Serve https_port must be greater than zero");
+        }
+        if self.controller.enabled && !self.server.strict_origin {
+            bail!("V2 Controller requires strict_origin=true");
+        }
+        if self.controller.enabled
+            && !self
+                .sources
+                .iter()
+                .any(|source| source.app_server_socket.is_some())
+        {
+            bail!("V2 Controller requires at least one source with app_server_socket");
         }
         if self.sources.is_empty() {
             bail!("at least one source is required");
@@ -406,6 +425,22 @@ mod tests {
         assert!(config.validate().is_err());
         config.server.tailscale_serve.https_port = 443;
         config.server.bind = "0.0.0.0:4765".parse().expect("valid bind");
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn controller_is_default_off_and_requires_strict_origin_and_a_socket() {
+        let mut config = Config::default();
+        assert!(!config.controller.enabled);
+        assert!(config.validate().is_ok());
+
+        config.controller.enabled = true;
+        assert!(config.validate().is_err());
+
+        config.sources[0].app_server_socket = Some(PathBuf::from("/tmp/app-server.sock"));
+        assert!(config.validate().is_ok());
+
+        config.server.strict_origin = false;
         assert!(config.validate().is_err());
     }
 }

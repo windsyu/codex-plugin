@@ -42,6 +42,7 @@ fn adr_0009_layer_dependencies_are_one_way() {
     assert_avoids("store", &["ingest", "live", "http", "writer"]);
     assert_avoids("ingest", &["live", "http"]);
     assert_avoids("live", &["ingest", "http"]);
+    assert_avoids("controller", &["ingest", "http"]);
     assert_avoids("http", &["ingest", "live"]);
 }
 
@@ -77,6 +78,7 @@ fn adr_0009_required_module_roots_exist() {
         ),
         ("ingest", &["mod", "importer", "io", "keys"][..]),
         ("live", &["mod", "transport"][..]),
+        ("controller", &["mod", "actor", "protocol"][..]),
         (
             "http",
             &[

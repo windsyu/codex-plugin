@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { Api, ApiError, connect, loadDashboard, loadEventPage, loadThread } from './api';
+import { Api, ApiError, connect, loadDashboard, loadEventPage, loadThread, reconnectingStream } from './api';
 import { renderMarkdown } from './lib/markdown';
 import { coalesceActivities, itemPayload, presentItem, summarizeActivities } from './presentation';
 import type { ActivityEntry } from './presentation';
-import type { Health, Item, ProjectSummary, RawEvent, SearchResult, Source, Thread, ThreadDetail, Turn } from './types';
+import type { ControlCatalog, ControllerSource, GatewayCommand, Health, Item, PendingRequest, ProjectSummary, RawEvent, SearchResult, Source, Thread, ThreadDetail, Turn } from './types';
 
 type RequestPhase = 'idle' | 'loading' | 'success' | 'error';
-type TransportState = 'cookie-connecting' | 'cookie-live' | 'cookie-disconnected' | 'bearer-polling';
+type TransportState = 'connecting' | 'live' | 'disconnected';
 interface Filters { source: string; status: string; completeness: string; archived: string; q: string; }
 interface RequestState { phase: RequestPhase; message?: string; }
 
@@ -160,6 +160,12 @@ export function itemRendererKind(itemType: string) {
 function isAbort(error: unknown) { return error instanceof DOMException && error.name === 'AbortError'; }
 function requestMessage(error: unknown) { return error instanceof Error ? error.message : '请求失败'; }
 
+export function commandNotice(command: GatewayCommand) {
+  return command.state === 'outcome_unknown'
+    ? '操作结果未知：请刷新状态，系统不会自动重放'
+    : `控制操作：${command.state}`;
+}
+
 function ErrorNotice({ message, onRetry, onClose }: { message: string; onRetry?: () => void; onClose: () => void }) {
   return <div class="notice notice-error" role="alert"><span>{message}</span><span class="notice-actions">
     {onRetry && <button type="button" onClick={onRetry}>重试</button>}
@@ -257,6 +263,46 @@ function DialogueMessage({ item }: { item: Item }) {
   </article>;
 }
 
+export interface OptimisticMessage {
+  threadKey: string;
+  clientUserMessageId: string;
+  text: string;
+  imageCount: number;
+  createdAtMs: number;
+  state: 'sending' | 'accepted' | 'outcome_unknown' | 'failed';
+  error?: string;
+}
+
+function projectedClientMessageIds(items: Item[]) {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (item.itemType !== 'user_message') continue;
+    const raw = record(item.raw); const payload = payloadOf(item); const provenance = record(item.provenance);
+    for (const candidate of [item.itemId, raw.clientUserMessageId, payload.clientUserMessageId, provenance.clientUserMessageId]) {
+      if (typeof candidate === 'string' && candidate) ids.add(candidate);
+    }
+  }
+  return ids;
+}
+
+export function reconcileOptimisticMessages(messages: OptimisticMessage[], threadKey: string, items: Item[]) {
+  const projected = projectedClientMessageIds(items);
+  return messages.filter((message) => message.threadKey !== threadKey || !projected.has(message.clientUserMessageId));
+}
+
+export function OptimisticMessageCard({ message }: { message: OptimisticMessage }) {
+  const status = ({ sending:'正在发送', accepted:'已提交，等待投影', outcome_unknown:'结果未知，不会自动重放', failed:'发送失败' } as const)[message.state];
+  const content = message.text || (message.imageCount ? '图片消息' : '空消息');
+  return <article class={`dialogue-message dialogue-user optimistic-message optimistic-${message.state}`}
+    data-client-user-message-id={message.clientUserMessageId} role="status">
+    <div class="dialogue-body"><header><strong>你</strong><span>{formatClock(message.createdAtMs)} · {status}</span></header>
+      <div class="dialogue-content markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      {message.imageCount > 0 && <p class="optimistic-images">{message.imageCount} 张本地图片</p>}
+      {message.error && <p class="optimistic-error">{message.error}</p>}
+    </div>
+  </article>;
+}
+
 function ActivityPanel({ entries, token, onBlob, focusedItemId }: {
   entries: ActivityEntry[]; token: string; onBlob: (message: string) => void; focusedItemId?: string;
 }) {
@@ -311,10 +357,155 @@ function DiagnosticsSummary({ detail, health }: { detail: ThreadDetail; health?:
   </div>{legacy > 0 && <p class="privacy-warning" role="status">隐私提醒：{health?.privacy?.warning || `${legacy} 条记录使用旧版脱敏规则`}</p>}
     <details><summary>覆盖证据</summary><pre>{jsonText(detail.coverageSummary)}</pre></details>
     {detail.pendingRequests.map((request) => <div class="pending-request"><strong>{request.requestType || 'request'} · {request.state || 'pending'}</strong>
-      <span>{request.sourceId || 'unknown source'} · epoch {request.epochId || 'unknown'}</span>
-      <p>Observer V1 为只读模式，请在原 Codex 客户端中处理该请求。</p></div>)}
+      <span>{request.sourceId || 'unknown source'} · epoch {request.sourceEpoch || 'unknown'}</span></div>)}
     {detail.projectionConflicts.length > 0 && <details><summary>查看投影冲突</summary><pre>{jsonText(detail.projectionConflicts)}</pre></details>}</div>
   </details>;
+}
+
+function requestPayloadSummary(request: PendingRequest) {
+  const payload = record(request.payload);
+  const fields = ['command', 'cwd', 'grantRoot', 'reason', 'permissions', 'questions', 'serverName', 'message', 'requestedSchema'];
+  return Object.fromEntries(fields.filter((field) => payload[field] != null).map((field) => [field, payload[field]]));
+}
+
+export function PendingRequestCard({ request, busy, onAction }: {
+  request: PendingRequest; busy: boolean; onAction: (request: PendingRequest, action: Record<string, unknown>) => void;
+}) {
+  const [answer, setAnswer] = useState('');
+  const actionable = request.state === 'pending' && !busy;
+  const questions = Array.isArray(request.payload.questions) ? request.payload.questions.map(record) : [];
+  const formSchema = record(request.payload.requestedSchema); const formProperties = record(formSchema.properties);
+  const approval = request.requestType === 'approval';
+  const permissionRequest = approval && request.payload.permissions != null;
+  return <article class={`request-card request-${request.state}`} aria-label={`${request.requestType} request`}>
+    <header><strong>{request.requestType?.replaceAll('_', ' ') || 'request'}</strong>{badge(request.state)}</header>
+    <pre>{jsonText(requestPayloadSummary(request))}</pre>
+    {request.requestType === 'user_input' && questions.length > 0 && <label>回答（每行对应一个问题）
+      <textarea value={answer} onInput={(event) => setAnswer((event.target as HTMLTextAreaElement).value)} disabled={!actionable} /></label>}
+    {request.requestType === 'mcp_elicitation' && Object.keys(formProperties).length > 0 && <label>表单 JSON
+      <textarea value={answer} placeholder="{}" onInput={(event) => setAnswer((event.target as HTMLTextAreaElement).value)} disabled={!actionable} /></label>}
+    <div class="request-actions">
+      {approval && !permissionRequest && <><button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'accept' })}>允许</button>
+        <button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'acceptForSession' })}>本次会话允许</button>
+        <button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'decline' })}>拒绝</button></>}
+      {permissionRequest && <><button type="button" disabled={!actionable} onClick={() => onAction(request,
+        { type: 'permissions', grant: true, scope: 'turn', strictAutoReview: null })}>允许本 Turn</button>
+        <button type="button" disabled={!actionable} onClick={() => onAction(request,
+          { type: 'permissions', grant: false, scope: 'turn', strictAutoReview: null })}>拒绝</button></>}
+      {request.requestType === 'user_input' && <button type="button" disabled={!actionable || !answer.trim()} onClick={() => {
+        const lines = answer.split(/\r?\n/); const answers = Object.fromEntries(questions.map((question, index) => [String(question.id), [lines[index] || '']]));
+        onAction(request, { type: 'userInput', answers });
+      }}>提交回答</button>}
+      {request.requestType === 'mcp_elicitation' && <><button type="button" disabled={!actionable || !answer.trim()} onClick={() => {
+        try { onAction(request, { type: 'mcpElicitation', action: 'accept', content: JSON.parse(answer) }); } catch { /* server is never called for malformed local JSON */ }
+      }}>提交表单</button><button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'mcpElicitation', action: 'decline' })}>拒绝</button></>}
+    </div>
+  </article>;
+}
+
+export function Composer({ catalog, disabledReason, busy, onSend, onInterrupt }: {
+  catalog?: ControlCatalog; disabledReason?: string; busy: boolean; onSend: (text: string, images: File[]) => void; onInterrupt: () => void;
+}) {
+  const [text, setText] = useState(''); const [images, setImages] = useState<File[]>([]); const disabled = Boolean(disabledReason) || busy;
+  return <section class="composer" aria-label="Codex 控制 Composer"><div class="composer-status">
+    <span>{disabledReason || (catalog?.activeTurnId ? `活动 Turn ${shortThreadId(catalog.activeTurnId)}` : 'Source 已连接')}</span>
+    {catalog?.activeTurnId && <button type="button" disabled={disabled} onClick={onInterrupt}>Interrupt</button>}</div>
+    <textarea value={text} disabled={disabled} placeholder="发送消息，输入 / 查看可用命令"
+      onInput={(event) => setText((event.target as HTMLTextAreaElement).value)} onKeyDown={(event) => {
+        if (event.key === 'Enter' && !event.shiftKey && (text.trim() || images.length)) { event.preventDefault(); onSend(text, images); setText(''); setImages([]); }
+      }} />
+    {text.startsWith('/') && <div class="slash-palette">{catalog?.slashCommands.filter((command) => command.name.startsWith(text.split(/\s/)[0])).map((command) =>
+      <button type="button" onClick={() => setText(`${command.name} `)}>{command.name}<small>{command.capability}</small></button>)}</div>}
+    {images.length > 0 && <div class="image-preview">{images.map((file) => <span>{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MiB</span>)}</div>}
+    <div class="composer-footer"><label class="image-picker">添加图片<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={disabled}
+      onChange={(event) => setImages(Array.from((event.target as HTMLInputElement).files || []).slice(0, 4))} /></label>
+      <span>Enter 发送 · Shift+Enter 换行</span><button type="button" disabled={disabled || (!text.trim() && !images.length)}
+      onClick={() => { onSend(text, images); setText(''); setImages([]); }}>发送</button></div>
+  </section>;
+}
+
+function catalogItems(catalog: ControlCatalog, method: string) {
+  const entry = catalog.capabilities?.entries?.[method];
+  return entry?.available && Array.isArray(entry.data?.data)
+    ? entry.data.data.filter((item) => item.hidden !== true && item.allowed !== false)
+    : [];
+}
+
+function catalogItemId(item: Record<string, unknown>) { return typeof item.id === 'string' ? item.id : ''; }
+function catalogItemLabel(item: Record<string, unknown>) {
+  return String(item.displayName || item.name || item.label || item.id || 'unknown');
+}
+
+export function ControlSettings({ thread, catalog, busy, onSetting, onSlash }: {
+  thread: Thread; catalog: ControlCatalog; busy: boolean;
+  onSetting: (capability: string, value: string) => void; onSlash: (command: string) => void;
+}) {
+  const [goal, setGoal] = useState('');
+  const models = catalogItems(catalog, 'model/list'); const permissions = catalogItems(catalog, 'permissionProfile/list');
+  const currentModel = thread.context.runtime.model || thread.model || catalogItemId(models[0] || {});
+  const model = models.find((item) => catalogItemId(item) === currentModel);
+  const efforts = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts.map(record) : [];
+  const permission = record(thread.context.runtime.activePermissionProfile);
+  const currentPermission = typeof thread.context.runtime.activePermissionProfile === 'string'
+    ? thread.context.runtime.activePermissionProfile : String(permission.id || '');
+  const planMode = catalog.collaborationMode?.mode === 'plan'; const goalStatus = catalog.goal?.status;
+  return <section class="control-settings" aria-label="Codex 控制设置">
+    <div class="setting-row">
+      <label>Model<select aria-label="Model" value={currentModel} disabled={busy || models.length === 0}
+        onChange={(event) => onSetting('thread.settings.model', (event.target as HTMLSelectElement).value)}>
+        {models.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
+      <label>Reasoning<select aria-label="Reasoning" value={thread.context.runtime.reasoningEffort || thread.reasoningEffort || ''}
+        disabled={busy || efforts.length === 0} onChange={(event) => onSetting('thread.settings.reasoning', (event.target as HTMLSelectElement).value)}>
+        {!thread.context.runtime.reasoningEffort && !thread.reasoningEffort && <option value="">默认</option>}
+        {efforts.map((item) => <option value={String(item.reasoningEffort || '')}>{String(item.label || item.reasoningEffort || '')}</option>)}</select></label>
+      <label>Permissions<select aria-label="Permissions" value={currentPermission} disabled={busy || permissions.length === 0}
+        onChange={(event) => onSetting('thread.settings.permissions', (event.target as HTMLSelectElement).value)}>
+        {!currentPermission && <option value="">默认</option>}{permissions.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
+      {model?.supportsPersonality === true && <label>Personality<select aria-label="Personality" disabled={busy}
+        onChange={(event) => onSetting('thread.settings.personality', (event.target as HTMLSelectElement).value)}>
+        <option value="none">默认</option><option value="friendly">Friendly</option><option value="pragmatic">Pragmatic</option></select></label>}
+    </div>
+    <div class="mode-row"><span>Plan：{planMode ? '已启用' : '未启用'}</span><button type="button" disabled={busy || planMode}
+      onClick={() => onSlash('/plan')}>进入 Plan</button><span>Goal：{goalStatus || '未设置'}</span>
+      <input aria-label="Goal objective" value={goal} placeholder="设置 Goal" disabled={busy}
+        onInput={(event) => setGoal((event.target as HTMLInputElement).value)} />
+      <button type="button" disabled={busy || !goal.trim()} onClick={() => { onSlash(`/goal ${goal}`); setGoal(''); }}>设置</button>
+      {goalStatus === 'active' && <button type="button" disabled={busy} onClick={() => onSlash('/goal pause')}>暂停</button>}
+      {goalStatus === 'paused' && <button type="button" disabled={busy} onClick={() => onSlash('/goal resume')}>恢复</button>}
+      {goalStatus && <button type="button" disabled={busy} onClick={() => onSlash('/goal clear')}>清除</button>}
+    </div>
+  </section>;
+}
+
+export function NewThreadDialog({ sources, catalog, busy, error, onSource, onClose, onCreate }: {
+  sources: ControllerSource[]; catalog?: ControlCatalog; busy: boolean; error?: string;
+  onSource: (sourceId: string) => void; onClose: () => void;
+  onCreate: (input: { sourceId: string; sourceEpoch: string; cwd: string; model: string | null; personality: string | null; permissions: string | null }) => void;
+}) {
+  const [cwd, setCwd] = useState(''); const [model, setModel] = useState(''); const [personality, setPersonality] = useState('');
+  const [permissions, setPermissions] = useState(''); const source = sources.find((value) => value.sourceId === catalog?.sourceId) || sources[0];
+  const models = catalog ? catalogItems(catalog, 'model/list') : []; const profiles = catalog ? catalogItems(catalog, 'permissionProfile/list') : [];
+  return <div class="dialog-backdrop"><section class="new-thread-dialog" role="dialog" aria-modal="true" aria-label="新建 Codex Thread">
+    <header><div><p class="eyebrow">V2 CONTROL</p><h2>新建对话</h2></div><button type="button" onClick={onClose} disabled={busy}>关闭</button></header>
+    {error && <p class="dialog-error" role="alert">{error}</p>}
+    <label>Live source<select aria-label="Live source" value={source?.sourceId || ''} disabled={busy || sources.length === 0}
+      onChange={(event) => onSource((event.target as HTMLSelectElement).value)}>{sources.map((value) =>
+        <option value={value.sourceId}>{value.sourceId} · epoch {value.sourceEpoch.slice(0, 8)}</option>)}</select></label>
+    <label>本机绝对 cwd<input aria-label="cwd" value={cwd} placeholder="/Users/me/workspace/project" disabled={busy}
+      onInput={(event) => setCwd((event.target as HTMLInputElement).value)} /></label>
+    <div class="new-thread-options"><label>Model<select aria-label="New thread model" value={model} disabled={busy || models.length === 0}
+      onChange={(event) => setModel((event.target as HTMLSelectElement).value)}><option value="">Source 默认</option>
+      {models.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
+      <label>Permissions<select aria-label="New thread permissions" value={permissions} disabled={busy || profiles.length === 0}
+        onChange={(event) => setPermissions((event.target as HTMLSelectElement).value)}><option value="">Source 默认</option>
+        {profiles.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
+      <label>Personality<select aria-label="New thread personality" value={personality} disabled={busy}
+        onChange={(event) => setPersonality((event.target as HTMLSelectElement).value)}><option value="">默认</option>
+        <option value="friendly">Friendly</option><option value="pragmatic">Pragmatic</option></select></label></div>
+    <button class="primary-action" type="button" disabled={busy || !source || !catalog || !cwd.startsWith('/')}
+      onClick={() => source && catalog && onCreate({ sourceId:source.sourceId,sourceEpoch:catalog.sourceEpoch,cwd,
+        model:model || null,personality:personality || null,permissions:permissions || null })}>创建 Thread</button>
+  </section></div>;
 }
 
 function RawInspector({ events, state, hasMore, onOpen, onMore, onRetry, onCloseError, onCopy }: {
@@ -339,11 +530,17 @@ function RawInspector({ events, state, hasMore, onOpen, onMore, onRetry, onClose
 }
 
 function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawState, rawHasMore, onRawOpen, onRawMore,
-  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId }: {
+  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId, catalog, controlBusy, controlError,
+  latestCommand, optimisticMessages, onSend, onInterrupt, onSetting, onRequestAction }: {
   detail: ThreadDetail; turns: Turn[]; items: Item[]; token: string; health?: Health; rawEvents: RawEvent[]; rawState: RequestState;
   rawHasMore: boolean; onRawOpen: () => void; onRawMore: () => void; onRawRetry: () => void; onRawCloseError: () => void;
   onCopy: (event: RawEvent) => void;
   onBack: () => void; onNavigate: (key: string) => void; onBlob: (message: string) => void; focusedItemId?: string;
+  catalog?: ControlCatalog; controlBusy: boolean; controlError?: string; onSend: (text: string, images: File[]) => void; onInterrupt: () => void;
+  latestCommand?: GatewayCommand;
+  optimisticMessages: OptimisticMessage[];
+  onSetting: (capability: string, value: string) => void;
+  onRequestAction: (request: PendingRequest, action: Record<string, unknown>) => void;
 }) {
   const { thread, relations } = detail;
   const grouped = useMemo(() => {
@@ -366,9 +563,18 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     {thread.captureCompleteness !== 'durable_complete' && <div class="capture-banner">{badge(thread.captureCompleteness, 'Thread 捕获完整性')}
       <span>{thread.completenessReasons.length ? thread.completenessReasons.join(' · ') : '该 Thread 的捕获完整性需要关注'}</span></div>}
     <div class="conversation-utilities"><DiagnosticsSummary detail={detail} health={health} /><ContextPanel thread={thread} /></div>
-    <div class="timeline">{grouped.length === 0 && <p class="empty-list">此 Thread 尚无可投影 Item。</p>}
+    <div class="timeline">{grouped.length === 0 && optimisticMessages.length === 0 && <p class="empty-list">此 Thread 尚无可投影 Item。</p>}
       {grouped.map(([key, group], index) => <TurnSection key={key} turn={group.turn} items={group.items} token={token} onBlob={onBlob}
-        focusedItemId={focusedItemId} ordinal={index + 1} />)}</div>
+        focusedItemId={focusedItemId} ordinal={index + 1} />)}
+      {optimisticMessages.map((message) => <OptimisticMessageCard key={message.clientUserMessageId} message={message} />)}</div>
+    <div class="request-card-list">{detail.pendingRequests.filter((request) => request.state !== 'resolved').map((request) =>
+      <PendingRequestCard request={request} busy={controlBusy} onAction={onRequestAction} />)}</div>
+    {latestCommand && <div class={`command-status command-${latestCommand.state}`} role="status"><strong>最近命令</strong>
+      <span>{latestCommand.commandId.slice(0, 8)} · {latestCommand.state}</span>{latestCommand.error && <span>{latestCommand.error.code} · {latestCommand.error.message}</span>}</div>}
+    {catalog?.threadLoaded && <ControlSettings thread={thread} catalog={catalog} busy={controlBusy} onSetting={onSetting}
+      onSlash={(command) => onSend(command, [])} />}
+    <Composer catalog={catalog} busy={controlBusy} disabledReason={controlError || (!catalog?.threadLoaded ? '当前 Thread 未加载到可控 source' : undefined)}
+      onSend={onSend} onInterrupt={onInterrupt} />
     <RawInspector events={rawEvents} state={rawState} hasMore={rawHasMore} onOpen={onRawOpen} onMore={onRawMore} onRetry={onRawRetry}
       onCloseError={onRawCloseError} onCopy={onCopy} />
   </div>;
@@ -493,7 +699,7 @@ export function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [dashboardState, setDashboardState] = useState<RequestState>({ phase: 'idle' });
-  const [transport, setTransport] = useState<TransportState>(token ? 'bearer-polling' : 'cookie-connecting');
+  const [transport, setTransport] = useState<TransportState>('connecting');
   const [selected, setSelected] = useState<string>();
   const [detail, setDetail] = useState<ThreadDetail>();
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -506,11 +712,21 @@ export function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searchState, setSearchState] = useState<RequestState>({ phase: 'idle' });
   const [notice, setNotice] = useState('');
+  const [controlCatalog, setControlCatalog] = useState<ControlCatalog>();
+  const [controlError, setControlError] = useState('Controller 状态尚未加载');
+  const [controlBusy, setControlBusy] = useState(false);
+  const [latestCommand, setLatestCommand] = useState<GatewayCommand>();
+  const [optimisticMessages, setOptimisticMessages] = useState<OptimisticMessage[]>([]);
+  const [newThreadOpen, setNewThreadOpen] = useState(false);
+  const [newThreadSources, setNewThreadSources] = useState<ControllerSource[]>([]);
+  const [newThreadCatalog, setNewThreadCatalog] = useState<ControlCatalog>();
+  const [newThreadError, setNewThreadError] = useState('');
   const [focusTarget, setFocusTarget] = useState<{ turnId?: string; itemId?: string }>();
   const refreshTimer = useRef<number>();
   const detailController = useRef<AbortController>();
   const searchController = useRef<AbortController>();
   const rawController = useRef<AbortController>();
+  const selectedRef = useRef<string>();
 
   function unauthorize(message: string) {
     sessionStorage.removeItem('observer-token'); setToken(''); setApi(null); setAuthError(message); setAuthChecking(false);
@@ -522,7 +738,7 @@ export function App() {
     history.replaceState(null, '', `${location.pathname}${location.search}`); setAuthChecking(true);
     fetch('/v1/auth/pair', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
       .then(async (response) => { const body = await response.json(); if (!response.ok) throw new Error(body?.error?.message || `HTTP ${response.status}`);
-        sessionStorage.removeItem('observer-token'); setToken(''); setApi(connect('')); setTransport('cookie-connecting'); })
+        sessionStorage.removeItem('observer-token'); setToken(''); setApi(connect('')); setTransport('connecting'); })
       .catch((error) => unauthorize(requestMessage(error)));
   }, []);
 
@@ -545,16 +761,19 @@ export function App() {
       }
     }
     void refresh();
-    let stream: EventSource | undefined;
-    if (token) setTransport('bearer-polling');
-    else {
-      setTransport('cookie-connecting'); stream = new EventSource('/v1/stream');
-      stream.onopen = () => setTransport('cookie-live');
-      stream.addEventListener('event', () => { window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(refresh, 150); });
-      stream.onerror = () => setTransport('cookie-disconnected');
-    }
+    const streamController = new AbortController();
+    void reconnectingStream(api, '/v2/stream', () => {
+      window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(() => {
+        void refresh();
+        const threadKey = selectedRef.current;
+        if (threadKey) void selectThread(threadKey, undefined, true);
+      }, 150);
+    }, setTransport, streamController.signal).catch((error) => {
+      if (error instanceof ApiError && error.status === 401) unauthorize(error.message);
+      else if (!isAbort(error)) setTransport('disconnected');
+    });
     const interval = window.setInterval(refresh, 15_000);
-    return () => { cancelled = true; window.clearInterval(interval); window.clearTimeout(refreshTimer.current); stream?.close(); };
+    return () => { cancelled = true; streamController.abort(); window.clearInterval(interval); window.clearTimeout(refreshTimer.current); };
   }, [api, token]);
 
   useEffect(() => () => { detailController.current?.abort(); searchController.current?.abort(); rawController.current?.abort(); }, []);
@@ -565,20 +784,140 @@ export function App() {
     if (id) requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ block: 'center' }));
   }, [detailState.phase, focusTarget]);
 
-  async function selectThread(threadKey: string, target?: { turnId?: string; itemId?: string }) {
+  async function selectThread(threadKey: string, target?: { turnId?: string; itemId?: string }, preserve = false) {
     if (!api) return;
-    detailController.current?.abort(); rawController.current?.abort(); const controller = new AbortController(); detailController.current = controller;
-    setSelected(threadKey); setFocusTarget(target); setDetail(undefined); setTurns([]); setItems([]); setRawEvents([]);
-    setRawState({ phase: 'idle' }); setRawHasMore(false); setDetailState({ phase: 'loading' });
+    detailController.current?.abort(); const controller = new AbortController(); detailController.current = controller;
+    selectedRef.current = threadKey;
+    if (!preserve) {
+      rawController.current?.abort(); setSelected(threadKey); setFocusTarget(target); setDetail(undefined); setTurns([]); setItems([]); setRawEvents([]);
+      setControlCatalog(undefined); setLatestCommand(undefined); setControlError('正在匹配可控 source');
+      setRawState({ phase: 'idle' }); setRawHasMore(false); setDetailState({ phase: 'loading' });
+    }
     try {
       const loaded = await loadThread(api, threadKey, controller.signal);
       if (controller.signal.aborted) return;
       setDetail(loaded.detail.data); setTurns(loaded.turns.data); setItems(loaded.items.data); setDetailState({ phase: 'success' });
+      setOptimisticMessages((current) => reconcileOptimisticMessages(current, threadKey, loaded.items.data));
+      try {
+        const snapshots = await api.get<ControllerSource[]>('/v2/control/sources', controller.signal);
+        const catalogs = await Promise.allSettled(snapshots.data.filter((source) => source.state === 'ready').map((source) =>
+          api.get<ControlCatalog>(`/v2/control/catalog?sourceId=${encodeURIComponent(source.sourceId)}&threadKey=${encodeURIComponent(threadKey)}`, controller.signal)));
+        const matched = catalogs.flatMap((result) => result.status === 'fulfilled' && result.value.data.threadLoaded ? [result.value.data] : [])[0];
+        if (matched) {
+          setControlCatalog(matched); setControlError('');
+          try {
+            const commands = await api.get<GatewayCommand[]>(`/v2/commands?threadKey=${encodeURIComponent(threadKey)}&limit=1`, controller.signal);
+            setLatestCommand(commands.data[0]);
+          } catch (error) { if (isAbort(error)) return; }
+        }
+        else setControlError(snapshots.data.length ? '当前 Thread 未加载到可控 source' : 'Controller 已关闭或 source 离线');
+      } catch (error) { if (!isAbort(error)) setControlError(requestMessage(error)); }
     } catch (error) {
       if (isAbort(error)) return;
       if (error instanceof ApiError && error.status === 401) return unauthorize(error.message);
-      setDetailState({ phase: 'error', message: requestMessage(error) });
+      if (preserve) setNotice(`实时刷新失败：${requestMessage(error)}`);
+      else setDetailState({ phase: 'error', message: requestMessage(error) });
     }
+  }
+
+  async function runControl(path: string, body: unknown) {
+    if (!api) return;
+    setControlBusy(true); setNotice('');
+    try {
+      const response = await api.post<GatewayCommand>(path, body, crypto.randomUUID());
+      setLatestCommand(response.data);
+      setNotice(commandNotice(response.data));
+      if (selected) await selectThread(selected, focusTarget);
+      return response.data;
+    } catch (error) { setNotice(`控制失败：${requestMessage(error)}`); return undefined; }
+    finally { setControlBusy(false); }
+  }
+
+  async function sendInput(text: string, images: File[] = []) {
+    if (!detail || !controlCatalog) return;
+    const threadKey = detail.thread.threadKey;
+    const clientUserMessageId = crypto.randomUUID();
+    const optimistic = !text.startsWith('/') || text.startsWith('//');
+    if (optimistic) {
+      setOptimisticMessages((current) => [...current, {
+        threadKey, clientUserMessageId, text, imageCount:images.length, createdAtMs:Date.now(), state:'sending'
+      }].slice(-50));
+    }
+    setControlBusy(true);
+    try {
+      const uploads = await Promise.all(images.map((image) => api!.uploadImage(image, crypto.randomUUID())));
+      const command = await runControl(`/v2/threads/${encodeURIComponent(threadKey)}/inputs`, {
+      sourceId: controlCatalog.sourceId, sourceEpoch: controlCatalog.sourceEpoch,
+      codexThreadId: detail.thread.codexThreadId, expectedTurnId: controlCatalog.activeTurnId,
+      clientUserMessageId, text, uploadIds: uploads.map((upload) => upload.data.uploadId)
+      });
+      if (optimistic) setOptimisticMessages((current) => current.map((message) => message.clientUserMessageId === clientUserMessageId
+        ? { ...message, state:command?.state === 'outcome_unknown' ? 'outcome_unknown'
+          : command && !['failed','rejected','cancelled'].includes(command.state) ? 'accepted' : 'failed', error:command?.error?.message }
+        : message));
+    } catch (error) {
+      const message = requestMessage(error); setNotice(`图片上传失败：${message}`); setControlBusy(false);
+      if (optimistic) setOptimisticMessages((current) => current.map((entry) => entry.clientUserMessageId === clientUserMessageId
+        ? { ...entry, state:'failed', error:message } : entry));
+    }
+  }
+
+  function interruptTurn() {
+    if (!controlCatalog?.activeTurnId) return;
+    void sendInput('/interrupt');
+  }
+
+  function changeSetting(capability: string, value: string) {
+    if (!detail || !controlCatalog) return;
+    void runControl('/v2/commands', {
+      capability,
+      target: { sourceId:controlCatalog.sourceId,sourceEpoch:controlCatalog.sourceEpoch,threadKey:detail.thread.threadKey,
+        codexThreadId:detail.thread.codexThreadId,expectedTurnId:null,expectedRequestId:null,expectedRequestVersion:null },
+      input:{ value }
+    });
+  }
+
+  async function selectNewThreadSource(sourceId: string) {
+    if (!api) return;
+    setNewThreadError(''); setNewThreadCatalog(undefined);
+    try {
+      const catalog = await api.get<ControlCatalog>(`/v2/control/catalog?sourceId=${encodeURIComponent(sourceId)}`);
+      setNewThreadCatalog(catalog.data);
+    } catch (error) { setNewThreadError(requestMessage(error)); }
+  }
+
+  async function openNewThread() {
+    if (!api) return;
+    setNewThreadOpen(true); setNewThreadError(''); setNewThreadCatalog(undefined);
+    try {
+      const response = await api.get<ControllerSource[]>('/v2/control/sources');
+      const ready = response.data.filter((source) => source.state === 'ready'); setNewThreadSources(ready);
+      if (ready[0]) await selectNewThreadSource(ready[0].sourceId);
+      else setNewThreadError('Controller 已关闭或没有 ready source');
+    } catch (error) { setNewThreadError(requestMessage(error)); }
+  }
+
+  async function createNewThread(input: { sourceId: string; sourceEpoch: string; cwd: string; model: string | null; personality: string | null; permissions: string | null }) {
+    if (!api) return;
+    setControlBusy(true); setNewThreadError('');
+    try {
+      const response = await api.post<GatewayCommand>('/v2/threads', input, crypto.randomUUID());
+      setLatestCommand(response.data);
+      setNotice(commandNotice(response.data));
+      if (response.data.state !== 'completed') return;
+      const threadId = record(response.data.result).threadId;
+      const dashboard = await loadDashboard(api); setThreads(dashboard.threads.data); setProjects(dashboard.projects.data);
+      const created = dashboard.threads.data.find((thread) => thread.codexThreadId === threadId);
+      setNewThreadOpen(false);
+      if (created) await selectThread(created.threadKey);
+    } catch (error) { setNewThreadError(requestMessage(error)); }
+    finally { setControlBusy(false); }
+  }
+
+  function respondToRequest(request: PendingRequest, action: Record<string, unknown>) {
+    void runControl(`/v2/requests/${encodeURIComponent(request.requestKey)}/actions`, {
+      sourceEpoch: request.sourceEpoch, expectedRequestVersion: request.requestVersion, action
+    });
   }
 
   async function loadRaw(reset = false) {
@@ -598,7 +937,7 @@ export function App() {
 
   function handleConnect(value: string) {
     setAuthError(''); setAuthChecking(true); if (value) sessionStorage.setItem('observer-token', value);
-    setToken(value); setApi(connect(value)); setTransport(value ? 'bearer-polling' : 'cookie-connecting');
+    setToken(value); setApi(connect(value)); setTransport('connecting');
   }
 
   async function handleSearch(query: string) {
@@ -623,21 +962,26 @@ export function App() {
   const visibleThreadKeys = useMemo(() => new Set(filteredThreads.map((thread) => thread.threadKey)), [filteredThreads]);
   const visibleSearchResults = useMemo(() => searchResults?.filter((result) => visibleThreadKeys.has(result.threadKey)) ?? null,
     [searchResults, visibleThreadKeys]);
-  const sessionLabel = tailscaleViewer ? 'Tailscale' : 'Cookie';
-  const transportText = transport === 'bearer-polling' ? 'Bearer · 15 秒轮询' : transport === 'cookie-live' ? `${sessionLabel} · 实时已连接`
-    : transport === 'cookie-disconnected' ? `${sessionLabel} · 实时已断开，正在重试` : `${sessionLabel} · 正在连接实时更新`;
+  const sessionLabel = token ? 'Bearer' : tailscaleViewer ? 'Tailscale' : 'Cookie';
+  const transportText = transport === 'live' ? `${sessionLabel} · 实时已连接`
+    : transport === 'disconnected' ? `${sessionLabel} · 实时已断开，正在重试` : `${sessionLabel} · 正在连接实时更新`;
 
-  if (!api) return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">只读</span></div></header>
+  if (!api) return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">待认证</span></div></header>
     <AuthPanel onConnect={handleConnect} error={authError} checking={authChecking} /></main>;
 
-  return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">只读</span></div>
+  return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1>
+    <span class="readonly-label">{health?.control?.enabled ? 'V2 控制' : '只读'}</span></div>
+    {health?.control?.enabled && <button type="button" class="new-thread-button" onClick={() => void openNewThread()}>新建对话</button>}
     <div class="status-stack"><div class={`health health-${health?.status || 'loading'}`} title={`后端 ${health?.status || 'loading'} · event ${health?.asOfEventSeq || 0}`}>
       <span class="status-dot" />本机数据</div><div class={`transport transport-${transport}`}>{transportText}</div></div></header>
     {dashboardState.phase === 'loading' && !health && <div class="page-status" role="status">正在加载 Dashboard…</div>}
     {dashboardState.phase === 'error' && <ErrorNotice message={`Dashboard：${dashboardState.message}`} onRetry={() => setApi(connect(token))}
       onClose={() => setDashboardState({ phase: 'idle' })} />}
+    {tailscaleViewer && health?.control?.tailscaleMutationAccess && <div class="control-risk" role="alert">Tailscale 风险：当前经验证身份拥有与本机登录相同的 V2 mutation 权限。</div>}
     {notice && <div class={`notice ${notice.startsWith('已复制') ? 'notice-success' : 'notice-error'}`} role="status"><span>{notice}</span>
       <button type="button" onClick={() => setNotice('')}>关闭</button></div>}
+    {newThreadOpen && <NewThreadDialog sources={newThreadSources} catalog={newThreadCatalog} busy={controlBusy} error={newThreadError}
+      onSource={(sourceId) => void selectNewThreadSource(sourceId)} onClose={() => setNewThreadOpen(false)} onCreate={(input) => void createNewThread(input)} />}
     <div class={`workspace${selected ? ' detail-active' : ''}`}><Sidebar health={health} projects={projects} threads={filteredThreads} sources={sources}
       filters={filters} setFilters={(value) => { setFilters(value); if (!value.q) setSearchResults(null); }} searchResults={visibleSearchResults}
       searchState={searchState} selected={selected} onSearch={handleSearch}
@@ -653,8 +997,11 @@ export function App() {
           onRawRetry={() => void loadRaw(rawEvents.length === 0)} onRawCloseError={() => setRawState({ phase: rawEvents.length ? 'success' : 'idle' })}
           onCopy={(event) => navigator.clipboard.writeText(jsonText(event.raw))
             .then(() => setNotice('已复制脱敏 JSON')).catch(() => setNotice('复制失败'))}
-          onBack={() => { detailController.current?.abort(); rawController.current?.abort(); setSelected(undefined); setDetail(undefined); setDetailState({ phase: 'idle' }); }}
-          onNavigate={(key) => selectThread(key)} onBlob={setNotice} focusedItemId={focusTarget?.itemId} />}
+          onBack={() => { detailController.current?.abort(); rawController.current?.abort(); selectedRef.current = undefined; setSelected(undefined); setDetail(undefined); setDetailState({ phase: 'idle' }); }}
+          onNavigate={(key) => selectThread(key)} onBlob={setNotice} focusedItemId={focusTarget?.itemId}
+          catalog={controlCatalog} controlBusy={controlBusy} controlError={controlError} onSend={sendInput} onInterrupt={interruptTurn}
+          latestCommand={latestCommand} optimisticMessages={optimisticMessages.filter((message) => message.threadKey === detail.thread.threadKey)} onSetting={changeSetting}
+          onRequestAction={respondToRequest} />}
       </div></section>
     </div>
   </main>;

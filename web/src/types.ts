@@ -205,14 +205,55 @@ export interface Source {
 }
 
 export interface PendingRequest {
-  sourceId?: string;
-  epochId?: string;
-  requestId?: string;
+  requestKey: string;
+  sourceId: string;
+  sourceEpoch: string;
+  requestId: string;
   requestType?: string;
-  state?: string;
+  state: string;
+  requestVersion: number;
+  payload: Record<string, unknown>;
   requestEventSeq?: number;
   resolvedEventSeq?: number;
 }
+
+export interface ControllerSource {
+  sourceId: string;
+  sourceEpoch: string;
+  state: string;
+  unavailableReason?: string;
+}
+
+export interface SlashCommand {
+  name: string;
+  capability: string;
+  interactionRequiredWithoutArgument: boolean;
+}
+
+export interface ControlCatalog {
+  sourceId: string;
+  sourceEpoch: string;
+  threadLoaded: boolean;
+  activeTurnId?: string;
+  collaborationMode?: { mode?: string; settings?: Record<string, unknown> };
+  goal?: { status?: string; tokensUsed?: number; timeUsedSeconds?: number };
+  capabilities: { entries: Record<string, {
+    available: boolean;
+    experimental: boolean;
+    data?: { data?: Array<Record<string, unknown>> };
+    errorCode?: string;
+  }> };
+  slashCommands: SlashCommand[];
+}
+
+export interface GatewayCommand {
+  commandId: string;
+  state: string;
+  error?: { code: string; message: string };
+  result?: unknown;
+}
+
+export interface ImageUpload { uploadId: string; mimeType: string; sizeBytes: number; expiresAtMs: number; }
 
 export interface ProjectionConflict {
   conflictId?: string;
@@ -245,6 +286,7 @@ export interface Health {
   continuity: unknown;
   sources: unknown[];
   live: unknown;
+  control?: { enabled: boolean; tailscaleMutationAccess: boolean; warning?: string | null };
   privacy?: {
     legacyRedactionEvents?: number;
     warning?: string | null;

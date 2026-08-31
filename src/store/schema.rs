@@ -17,8 +17,10 @@ pub(super) const MIGRATION_10: &str = include_str!("../../migrations/0010_comple
 pub(super) const MIGRATION_11: &str = include_str!("../../migrations/0011_writer_conflicts.sql");
 pub(super) const MIGRATION_12: &str = include_str!("../../migrations/0012_context_project.sql");
 pub(super) const MIGRATION_13: &str = include_str!("../../migrations/0013_projectless_threads.sql");
+pub(super) const MIGRATION_14: &str = include_str!("../../migrations/0014_gateway_commands.sql");
+pub(super) const MIGRATION_15: &str = include_str!("../../migrations/0015_thread_goals.sql");
 
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 15;
 
 pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION as usize] {
     [
@@ -35,5 +37,26 @@ pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION 
         (11, MIGRATION_11),
         (12, MIGRATION_12),
         (13, MIGRATION_13),
+        (14, MIGRATION_14),
+        (15, MIGRATION_15),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatibility_manifest_matches_release_version_and_schema() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(COMPATIBILITY_MANIFEST).expect("valid compatibility manifest");
+        assert_eq!(
+            manifest["observerVersion"].as_str(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            manifest["observerSchemaVersion"].as_i64(),
+            Some(LATEST_SCHEMA_VERSION)
+        );
+    }
 }

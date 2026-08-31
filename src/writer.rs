@@ -8,8 +8,13 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+use crate::domain::gateway::{
+    GatewayCommandRecord, GatewayTransition, NewGatewayCommand, ReceiveGatewayCommand,
+};
 use crate::domain::model::OwnedIngestBatch;
-use crate::store::Database;
+use crate::store::{
+    ClaimedImageUpload, Database, NewImageUpload, PendingRequestClaim, StageImageUpload,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct WriterMetrics {
@@ -92,6 +97,36 @@ enum ControlCommand {
         epoch_id: String,
         reason: String,
         reply: mpsc::Sender<Result<()>>,
+    },
+    ReceiveGatewayCommand {
+        command: NewGatewayCommand,
+        reply: mpsc::Sender<Result<ReceiveGatewayCommand>>,
+    },
+    TransitionGatewayCommand {
+        transition: GatewayTransition,
+        reply: mpsc::Sender<Result<GatewayCommandRecord>>,
+    },
+    ClaimPendingRequest {
+        command_id: String,
+        reply: mpsc::Sender<Result<PendingRequestClaim>>,
+    },
+    StageImageUpload {
+        upload: NewImageUpload,
+        reply: mpsc::Sender<Result<StageImageUpload>>,
+    },
+    ClaimImageUploads {
+        command_id: String,
+        principal_id: String,
+        upload_ids: Vec<String>,
+        reply: mpsc::Sender<Result<Vec<ClaimedImageUpload>>>,
+    },
+    CleanupCommandImages {
+        command_id: String,
+        reply: mpsc::Sender<Result<Vec<String>>>,
+    },
+    CleanupTurnImages {
+        turn_id: String,
+        reply: mpsc::Sender<Result<Vec<String>>>,
     },
     Shutdown,
 }
@@ -325,6 +360,87 @@ impl WriterHandle {
             rx,
         )
     }
+
+    pub fn receive_gateway_command(
+        &self,
+        command: NewGatewayCommand,
+    ) -> Result<ReceiveGatewayCommand> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::ReceiveGatewayCommand { command, reply })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn transition_gateway_command(
+        &self,
+        transition: GatewayTransition,
+    ) -> Result<GatewayCommandRecord> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::TransitionGatewayCommand { transition, reply })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn claim_pending_request(&self, command_id: &str) -> Result<PendingRequestClaim> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::ClaimPendingRequest {
+                command_id: command_id.into(),
+                reply,
+            })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn stage_image_upload(&self, upload: NewImageUpload) -> Result<StageImageUpload> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::StageImageUpload { upload, reply })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn claim_image_uploads(
+        &self,
+        command_id: &str,
+        principal_id: &str,
+        upload_ids: Vec<String>,
+    ) -> Result<Vec<ClaimedImageUpload>> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::ClaimImageUploads {
+                command_id: command_id.into(),
+                principal_id: principal_id.into(),
+                upload_ids,
+                reply,
+            })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn cleanup_command_images(&self, command_id: &str) -> Result<Vec<String>> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::CleanupCommandImages {
+                command_id: command_id.into(),
+                reply,
+            })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
+
+    pub fn cleanup_turn_images(&self, turn_id: &str) -> Result<Vec<String>> {
+        let (reply, response) = mpsc::channel();
+        self.control
+            .send(ControlCommand::CleanupTurnImages {
+                turn_id: turn_id.into(),
+                reply,
+            })
+            .context("Observer DbWriter is unavailable")?;
+        response.recv().context("Observer DbWriter stopped")?
+    }
 }
 
 fn writer_loop(
@@ -430,6 +546,47 @@ fn execute_control(
     connection: &mut rusqlite::Connection,
     command: ControlCommand,
 ) -> bool {
+    let command = match command {
+        ControlCommand::ReceiveGatewayCommand { command, reply } => {
+            let _ = reply.send(database.receive_gateway_command_on(connection, &command));
+            return false;
+        }
+        ControlCommand::TransitionGatewayCommand { transition, reply } => {
+            let _ = reply.send(database.transition_gateway_command_on(connection, &transition));
+            return false;
+        }
+        ControlCommand::ClaimPendingRequest { command_id, reply } => {
+            let _ = reply.send(database.claim_pending_request_on(connection, &command_id));
+            return false;
+        }
+        ControlCommand::StageImageUpload { upload, reply } => {
+            let _ = reply.send(database.stage_image_upload_on(connection, &upload));
+            return false;
+        }
+        ControlCommand::ClaimImageUploads {
+            command_id,
+            principal_id,
+            upload_ids,
+            reply,
+        } => {
+            let _ = reply.send(database.claim_image_uploads_on(
+                connection,
+                &command_id,
+                &principal_id,
+                &upload_ids,
+            ));
+            return false;
+        }
+        ControlCommand::CleanupCommandImages { command_id, reply } => {
+            let _ = reply.send(database.cleanup_command_images_on(connection, &command_id));
+            return false;
+        }
+        ControlCommand::CleanupTurnImages { turn_id, reply } => {
+            let _ = reply.send(database.cleanup_turn_images_on(connection, &turn_id));
+            return false;
+        }
+        command => command,
+    };
     let (result, reply) = match command {
         ControlCommand::UpsertSource {
             source_id,
@@ -496,6 +653,15 @@ fn execute_control(
             database.close_live_epoch_on(connection, &source_id, &epoch_id, &reason),
             reply,
         ),
+        ControlCommand::ReceiveGatewayCommand { .. }
+        | ControlCommand::TransitionGatewayCommand { .. }
+        | ControlCommand::ClaimPendingRequest { .. }
+        | ControlCommand::StageImageUpload { .. }
+        | ControlCommand::ClaimImageUploads { .. }
+        | ControlCommand::CleanupCommandImages { .. }
+        | ControlCommand::CleanupTurnImages { .. } => {
+            unreachable!("Gateway commands are handled before unit control commands")
+        }
         ControlCommand::Shutdown => return true,
     };
     let _ = reply.send(result);
