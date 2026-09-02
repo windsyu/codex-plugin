@@ -20,6 +20,7 @@ clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 libc = "0.2"
 notify = "8"
+portable-pty = "0.9"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rust-embed = "8"
@@ -32,6 +33,7 @@ tower-http = { version = "0.6", features = ["catch-panic", "request-id", "set-he
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+vt100 = "0.16"
 walkdir = "2"
 zstd = "0.13"
 

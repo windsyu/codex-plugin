@@ -9,3 +9,4 @@ pub mod model;
 pub mod normalize;
 pub mod project;
 pub mod redact;
+pub mod session;
