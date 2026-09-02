@@ -6,6 +6,8 @@
 > 发布证据：[`v2-validation.md`](v2-validation.md)
 > 核心约束：[`codex-local-gateway-v2-development-constraints.md`](codex-local-gateway-v2-development-constraints.md)
 
+> 后续架构：本文是 `v0.2.0` 已完成/已验证实现的历史事实记录，不因重构而改写。2026-09-01 接受的目标架构以真实 Codex TUI + PTY 为活动会话内核，并以 Thread Session Worker + 私有 1:1 App Server proxy 替换 source-global actor 的会话所有权和 Web Composer 的 TUI 模拟层；见[`codex-tui-session-kernel-refactor.md`](codex-tui-session-kernel-refactor.md)、[`codex-tui-session-kernel-slices.md`](codex-tui-session-kernel-slices.md)和[ADR 0020](decisions/0020-codex-tui-session-kernel.md)。该后续 Session Kernel Slice 1–9 已于 2026-09-02 完成实现与本地验证，当前证据以 [`v2-validation.md`](v2-validation.md) 为准；本文各 `Complete / Validated` 仍只描述原 `v0.2.0` Controller 基线。
+
 ## 1. 用户价值与成功标准
 
 V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的现有 App Server source 提供可审计的本地对话控制。最终成功标准完全采用核心约束第 3.1 节和第 13.2 节；任何单个切片通过都不等价于 V2 完成。
@@ -22,7 +24,7 @@ V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的�
 8. 上游写入后的 timeout/disconnect 进入 `outcome_unknown`，不会自动重放；`turn.start` 由真实 terminal notification 对账。
 9. Plan 只使用 capability-gated collaboration mode；Goal 可在 reconnect 时恢复；compact/review/MCP/status/usage 具有 typed protocol 或本地卡闭环。
 10. approval、permission、user question 和 MCP elicitation 使用签名 request key、exact epoch 与 request-version CAS；只有 `serverRequest/resolved` 先进入 V1 raw/projection 后 command 才完成。
-11. Web Composer 支持文本、最多四张本地图片、Slash picker、steer/interrupt 和 pending request 卡；Bearer/Cookie/Tailscale 均通过 fetch SSE 使用签名复合 cursor 自动重连。
+11. Web Composer 支持文本、粘贴或选择最多四张本地图片、Slash picker、steer/interrupt 和 pending request 卡；Codex 风格的底部操作区把 Thinking、权限/model 摘要、停止/发送和近场反馈保持在当前视口；IME 安全提交、Shift/Alt+Enter 换行、Esc 弹层优先/Turn 中断和本会话输入历史与 CLI 操作习惯对齐；Bearer/Cookie/Tailscale 均通过 fetch SSE 使用签名复合 cursor 自动重连。
 12. 图片只以私有 staging 文件和 keyed metadata 存在；签名、MIME、大小、主体、路径、symlink、expiry、终态删除和启动 orphan sweep 均有负向测试。
 13. Gateway 重启会在 actor 启动前关闭遗留 epoch，校验 command current state 与 append-only transition 一致；pre-write command 失败，可能已写入的 command 进入 `outcome_unknown`，且恢复不会派发或重放 mutation。
 
@@ -54,8 +56,8 @@ V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的�
 - model/reasoning/personality/permissions 以单字段 `thread/settings/update` 派发，并由 catalog 二次校验；
 - 无参数 picker 返回结构化 `INTERACTION_REQUIRED`，unknown Slash 不会进入模型输入；
 - `thread/settings/updated` 同步更新 V1 Thread projection。
-- `/rename`、`/archive`、`/compact`、`/review` 和 Goal set/get/pause/resume/clear 使用固定协议映射；Goal 进入可重建 projection。
-- `/plan [prompt]` 使用真实 collaboration mode；活动 Turn 的两阶段 partial failure 为 `outcome_unknown`。
+- `/rename`、`/archive`、`/compact`、`/review` 和 Goal set/get/pause/resume/clear 使用固定协议映射；Goal 进入可重建 projection。`/clear` 是 Web 客户端的新 Thread 动作：复用当前 source、cwd 与可用设置提交可审计的 `thread.start`，成功后按返回的 `threadId` 切换，不向模型发送命令文本，也不伪造 App Server method。
+- `/plan [prompt]` 使用真实 Plan collaboration mode；Source Actor 在进入前保存当前 Default model/effort，`/plan off` 以该快照补全 Default preset 的未指定字段，避免退出时把原 reasoning effort 清空；活动 Turn 的两阶段 partial failure 为 `outcome_unknown`。
 - `/mcp`、`/status`、`/usage` 返回本地 Gateway 状态卡，不写成模型消息；catalog 或 method unavailable 时从 Slash registry 隐藏。
 - Thread detail 返回脱敏 pending request 卡片和签名 `requestKey`；`POST /v2/requests/{requestKey}/actions` 只接受四类 closed typed action。
 - pending request claim 与 command `authorized → dispatching` 在 DbWriter 单事务中完成；竞争失败、version drift 和旧 epoch 分别 fail closed。
@@ -63,13 +65,13 @@ V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的�
 - `POST /v2/uploads/images` 只接受 PNG/JPEG/WebP/GIF raw body；单图 20 MiB、单消息四张/50 MiB，文件 `0600`、目录 `0700`，浏览器只获得不透明 `uploadId`。
 - `turn.start`/`turn.steer` 在 claim 后再次校验 keyed fingerprint 和固定相对路径，再映射为 typed `LocalImage`；派发前失败和 Turn 终态删除文件，`outcome_unknown` 保留到 expiry。
 - `/v2/stream` 合并 raw Observer event 与 command transition，使用签名复合 cursor；Web fetch SSE 在 Authorization header 中携带 Bearer，断线从最后 cursor 恢复，cursor 过期 fail closed 后重新建立新鲜流。
-- Web Composer、图片预览、Slash palette、interrupt、approval/question/MCP 卡、离线禁用和 `outcome_unknown` 独立状态已由 unit 与 Playwright E2E 覆盖。
+- Web Composer、图片预览、Slash palette、interrupt、approval/question/MCP 卡、离线禁用和 `outcome_unknown` 独立状态已由 unit 与 Playwright E2E 覆盖；Slash palette 支持方向键/Enter/Tab/Escape，失败发送保留草稿，图片可单张撤销或从剪贴板添加；活动 Turn 中停止与即时 steer 同时可用，不引入本地排队语义；Esc 先关闭弹层再中断且保留草稿，输入历史只保留在当前 Thread 的内存组件中，切换 Thread 会卸载 Composer 并清空未发送草稿；当前会话头部明确区分正在处理、可继续、仅浏览和待处理请求；普通进入 Thread 跟随最新消息，用户上滚后实时刷新不抢回底部，并通过累计新进展的“回到最新”操作恢复跟随；短时操作反馈与持久 Goal 状态行停靠在 Composer 上方的对话操作区。
 
 ### 2.2 非目标
 
 - 不启动、停止或守护 App Server；
 - 不改变 V1 live adapter 的 `experimentalApi:false` 读取行为；
-- 不提前实现 V3 IM Bridge。
+- 本已验证版本不实现 V3 IM Bridge；后续 V3 已获授权设计为 Session Worker 之上的完整控制面，但仍按独立版本和adapter分片交付。
 
 ## 3. 事实、决定、限制和风险
 
@@ -81,13 +83,15 @@ V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的�
 - `model/list`、`permissionProfile/list` 和 `mcpServerStatus/list` 位于 stable schema。
 - `collaborationMode/list` 只位于 experimental schema；initialize 的 `experimentalApi` 默认值为 `false`。
 - `thread/settings/update.collaborationMode` 和 `turn/start.collaborationMode` 使用同一个 `CollaborationMode` shape；`thread/goal/get` 可在新 epoch 恢复 loaded Thread 的 Goal。
-- 配置指定的源码参考路径在当前机器不存在，因此本切片不声称核对了该 checkout 的实际 commit。
+- 2026-08-31 UI 对照复核时，本地官方源码参考 checkout 的实际 commit 为 `41ece455b7fa7166f4fc38522952afdaa2604e18`，与项目研究基线一致；本次只用它核对公开 TUI 文案与交互术语，没有重新生成协议 compatibility manifest。
+- 2026-09-01 较早的 UI 对照使用本地 `cc-viewer` checkout `5352005402fd`，当时只借鉴会话状态与滚动反馈模式；后续架构研究在同一 commit 进一步验证其真实 Claude PTY、xterm 和独立 IM worker 模式，并由 ADR 0020 决定采用架构思想而不引入其 Claude runtime、权限绕过或 transcript推断。
 
 ### 3.2 项目决定
 
 - 认证、Actor 所有权和 fail-closed 规则采用 [ADR 0013](decisions/0013-v2-controller-boundary.md)。
 - Plan、Goal 和本地控制卡采用 [ADR 0017](decisions/0017-plan-goal-and-local-control-cards.md)。
 - pending request CAS 与 closed typed response 采用 [ADR 0018](decisions/0018-pending-request-cas.md)。
+- 后续活动会话所有权和Web交互内核采用[ADR 0020](decisions/0020-codex-tui-session-kernel.md)；本节其余决定仍描述已验证的legacy基线。
 - compatibility manifest 记录实际生成 schema 的 CLI 版本和 hash，不把安装版本等同于文档中的源码 commit。
 - fixture 只含合成路径、空 catalog 和假 ID，不包含真实账户、cwd、model 或 MCP 数据。
 
@@ -105,7 +109,7 @@ V2 在保留 V1 历史浏览、搜索和安全投影的基础上，为确定的�
 | Tailscale 身份获得 mutation | Controller 默认关闭；配置、health 和 UI 明示相同控制权限 |
 | source reconnect 误重放 | command 必须绑定 epoch；写入边界后的断线进入 `outcome_unknown`；restart recovery 不重放 |
 
-## 4. 目标架构
+## 4. `v0.2.0` 已验证架构
 
 ```mermaid
 flowchart LR
@@ -122,6 +126,8 @@ flowchart LR
 ```
 
 依赖方向：`controller` 可依赖 `domain`、`store` 和 `writer`，不得依赖 `http` 或 `ingest`；`http` 只能调用 typed Controller 接口。每个 actor 独占一个 WebSocket、上游 request ID、pending correlation 和 source epoch。
+
+该图是当前代码与发布验证的事实，不再是下一阶段活动会话的目标图。迁移后的Source Supervisor、Session Worker、PTY、private proxy、Browser xterm与V3 IM数据流见[Session Kernel总体设计第5节](codex-tui-session-kernel-refactor.md#5-目标组件与职责)。
 
 ## 5. 配置契约
 
@@ -202,10 +208,10 @@ Migration 0014 让 command、transition 和 audit 在单写者事务中一致推
 - pending request 覆盖双客户端竞争、resolved/version drift/旧 epoch、原始 JSON-RPC ID 与 write 后 `outcome_unknown`。
 - 图片覆盖四种签名、伪造 MIME、SVG、20 MiB/四张/50 MiB 上限、幂等重放、主体隔离、篡改、symlink、路径穿越、expiry、Turn/command 清理和启动 orphan sweep。
 - fetch SSE 覆盖 retention floor、签名复合 cursor、后端 replay、Bearer header、分片解析、断线重连和 cursor expiry；token 不进入 URL。
-- Web unit 覆盖 Composer 文本/图片、乐观消息与 `clientUserMessageId` 投影对账、Slash/interrupt、approval/question/MCP、离线禁用和 `outcome_unknown`；Playwright 覆盖图片上传、乐观显示、SSE 驱动的当前 Thread 刷新/投影对账、审批、interrupt 及响应式 V1 回归。
+- Web unit 覆盖 Composer 文本/图片、四图上限和类型过滤、IME、换行快捷键、自动高度、输入历史、失败草稿保留、单图撤销、Slash/Esc 键盘流、最新消息跟随阈值、乐观消息与 `clientUserMessageId` 投影对账、interrupt、approval/question/MCP、离线禁用和 `outcome_unknown`；Playwright 覆盖图片上传、活动 Turn 双动作、输入召回、Esc 中断保留草稿、跨 Thread 草稿隔离、乐观显示、SSE 驱动的当前 Thread 刷新/投影对账、审批及响应式 V1 回归。
 - restart recovery 覆盖 open epoch/pending request 失效、pre-write/ambiguous 分流、transition/audit 同事务、图片清理/保留、重复恢复幂等和 ledger drift fail closed。
 
-发布门禁以核心约束第 13 节为准；134 个通过的 Rust tests、42 个 Web unit tests、12 个 Chromium Playwright E2E、clippy、Web production build、Rust release build 和临时 release E2E 的结果记录在 `docs/v2-validation.md`。
+发布门禁以核心约束第 13 节为准；140 个通过的 Rust tests、61 个 Web unit tests、13 个 Chrome Playwright E2E、clippy、Web production build、Rust release build 和临时 release E2E 的结果记录在 `docs/v2-validation.md`。
 
 ## 10. 实施切片与状态
 
@@ -218,8 +224,8 @@ Migration 0014 让 command、transition 和 audit 在单写者事务中一致推
 | 5 | model/reasoning/personality/permissions、Slash registry | Complete | catalog-aware typed settings、picker/unknown tests、protocol fixture |
 | 6 | Plan、Goal、compact、review、MCP/status/usage | Complete | ADR 0017、schema 15、typed dispatch、reconnect、catalog/status-card tests |
 | 7 | approval/question/elicitation CAS | Complete | signed requestKey、单事务 claim、typed response、双客户端/旧 epoch/outcome-unknown tests |
-| 8 | Web Composer、fetch SSE、图片 staging | Complete | 图片/SSE/乐观对账测试、42 Web unit tests、12 Playwright E2E |
-| 9 | crash recovery、安全、兼容、发布加固 | Complete | ADR 0019、restart reconciliation tests、134 个通过的 Rust tests、clippy/Web/Rust release build、release E2E、`docs/v2-validation.md` |
+| 8 | Web Composer、fetch SSE、图片 staging | Complete | 图片/SSE/乐观对账、IME/键盘/历史/草稿/滚动测试、61 Web unit tests、13 Playwright E2E |
+| 9 | crash recovery、安全、兼容、发布加固 | Complete | ADR 0019、restart reconciliation tests、140 个通过的 Rust tests、clippy/Web/Rust release build、release E2E、`docs/v2-validation.md` |
 
 ## 11. 需求追踪
 

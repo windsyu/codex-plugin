@@ -39,6 +39,7 @@ mod handlers;
 mod middleware;
 mod query;
 mod router;
+mod session_routes;
 mod stream;
 
 use crate::config::Config;
@@ -46,13 +47,15 @@ use crate::controller::{
     ActorCommand, ControllerOperation, ControllerRegistry, PendingRequestAction, RegistryError,
     ReviewTarget, ThreadSetting,
 };
-use crate::credentials::{load_or_create_key, rotate_token};
+use crate::credentials::load_or_create_key;
 use crate::domain::gateway::{
-    GatewayCommandTarget, GatewayTransition, NewGatewayCommand, ReceiveGatewayCommand,
+    GatewayCommandOrigin, GatewayCommandTarget, GatewayTransition, NewGatewayCommand,
+    ReceiveGatewayCommand,
 };
 use crate::domain::model::ApiEnvelope;
 use crate::domain::project::project_name;
 use crate::permissions::{create_private_file, prepare_private_dir, prepare_private_file};
+use crate::session::SessionKernel;
 use crate::store::{
     ClaimedImageUpload, Database, ImageUploadRecord, LATEST_SCHEMA_VERSION, NewImageUpload,
     StageImageUpload,
@@ -101,6 +104,7 @@ struct ApiState {
     blob_downloads: Arc<Semaphore>,
     writer: WriterHandle,
     controller: ControllerRegistry,
+    session_kernel: SessionKernel,
     settings: Arc<Value>,
     tailscale: Option<Arc<ServeAccess>>,
 }
@@ -113,6 +117,8 @@ pub async fn serve(
     database: Arc<Database>,
     writer: WriterHandle,
     controller: ControllerRegistry,
+    session_kernel: SessionKernel,
+    token: String,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let controller_enabled = config.controller.enabled;
@@ -135,7 +141,6 @@ pub async fn serve(
     {
         allowed_origins.push(access.origin.clone());
     }
-    let token = rotate_token(&config.server.bearer_token_file)?;
     let fingerprint_key = load_or_create_key(&config.storage.fingerprint_key_file)?;
     let viewer_url = generate_pairing_url(bound_address, &token)?;
     let state = ApiState {
@@ -155,6 +160,7 @@ pub async fn serve(
         blob_downloads: Arc::new(Semaphore::new(4)),
         writer,
         controller,
+        session_kernel,
         settings: Arc::new(settings_snapshot),
         tailscale: tailscale.clone(),
     };
@@ -186,6 +192,45 @@ pub async fn serve(
             state.clone(),
             authorize,
         ));
+    v2 = v2.merge(
+        Router::new()
+            .route("/sessions", post(session_routes::create_session))
+            .route("/sessions/fake", post(session_routes::create_fake_session))
+            .route("/sessions/{worker_id}", get(session_routes::get_session))
+            .route(
+                "/sessions/{worker_id}/events",
+                get(session_routes::session_events),
+            )
+            .route(
+                "/sessions/{worker_id}/attach",
+                post(session_routes::attach_session),
+            )
+            .route(
+                "/sessions/{worker_id}/input-lease",
+                post(session_routes::acquire_input_lease),
+            )
+            .route(
+                "/sessions/{worker_id}/input-lease/{lease_id}",
+                axum::routing::delete(session_routes::release_input_lease),
+            )
+            .route(
+                "/sessions/{worker_id}/terminal",
+                get(session_routes::terminal_socket),
+            )
+            .route(
+                "/sessions/{worker_id}/stop",
+                post(session_routes::stop_session),
+            )
+            .route(
+                "/sessions/{worker_id}/interrupt",
+                post(session_routes::interrupt_session),
+            )
+            .route_layer(DefaultBodyLimit::max(64 * 1024))
+            .route_layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                authorize,
+            )),
+    );
     if controller_enabled {
         v2 = v2.merge(
             Router::new()
@@ -665,7 +710,7 @@ async fn controller_catalog(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateGatewayCommandRequest {
     capability: String,
@@ -673,7 +718,7 @@ struct CreateGatewayCommandRequest {
     input: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateGatewayCommandTarget {
     source_id: String,
@@ -750,6 +795,7 @@ struct GoalSetCommandInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlanCommandInput {
+    mode: Option<String>,
     prompt: Option<String>,
     client_user_message_id: Option<String>,
 }
@@ -856,6 +902,21 @@ async fn create_gateway_command_core(
         .unwrap_or(0);
     let command_id = uuid::Uuid::now_v7().to_string();
     let principal_id = principal.0;
+    let session_owner = request
+        .target
+        .codex_thread_id
+        .as_deref()
+        .and_then(|thread_id| {
+            state
+                .database
+                .active_thread_lease_owner(
+                    &request.target.source_id,
+                    &request.target.source_epoch,
+                    thread_id,
+                )
+                .ok()
+                .flatten()
+        });
     let received = state.writer.receive_gateway_command(NewGatewayCommand {
         command_id: command_id.clone(),
         principal_id: principal_id.clone(),
@@ -872,6 +933,11 @@ async fn create_gateway_command_core(
             expected_request_version: request.target.expected_request_version,
         },
         input_summary_json: json!({"jsonBytes":input_bytes}).to_string(),
+        origin: if session_owner.is_some() {
+            GatewayCommandOrigin::WorkerControl
+        } else {
+            GatewayCommandOrigin::LegacyApi
+        },
     });
     let command = match received {
         Ok(ReceiveGatewayCommand::Created(command)) => command,
@@ -966,6 +1032,71 @@ async fn create_gateway_command_core(
     )) {
         cleanup_command_image_files(state, &command.command_id);
         return v2_internal_error(error);
+    }
+    if let (
+        Some(_),
+        ControllerOperation::PendingRequestAction {
+            thread_id,
+            request_id,
+            action,
+            ..
+        },
+    ) = (session_owner.as_deref(), &operation)
+    {
+        let registry = match state.session_kernel.registry() {
+            Ok(registry) => registry,
+            Err(error) => {
+                return reject_gateway_command(
+                    state,
+                    &command.command_id,
+                    error.code,
+                    &error.message,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                );
+            }
+        };
+        return match registry
+            .resolve_pending_request(
+                &command.command_id,
+                &command.target.source_id,
+                &command.target.source_epoch,
+                thread_id,
+                request_id,
+                action.clone(),
+            )
+            .await
+        {
+            Ok(record) => gateway_dispatch_response(record),
+            Err(error) => reject_gateway_command(
+                state,
+                &command.command_id,
+                error.code,
+                &error.message,
+                match error.code {
+                    "REQUEST_ALREADY_RESOLVED"
+                    | "REQUEST_NOT_PENDING"
+                    | "REQUEST_OWNED_BY_TERMINAL"
+                    | "SOURCE_EPOCH_STALE" => StatusCode::CONFLICT,
+                    "OUTCOME_UNKNOWN" => StatusCode::BAD_GATEWAY,
+                    "SESSION_PROXY_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+                    _ => StatusCode::BAD_REQUEST,
+                },
+            ),
+        };
+    }
+    if let Some(worker_id) = session_owner.as_deref() {
+        cleanup_command_image_files(state, &command.command_id);
+        return reject_gateway_command_details(
+            state,
+            &command.command_id,
+            "THREAD_OWNED_BY_SESSION",
+            "the selected Thread is owned by a Session Worker; attach to that Session",
+            StatusCode::CONFLICT,
+            json!({
+                "workerId":worker_id,
+                "attachUrl":format!("/sessions/{worker_id}"),
+            }),
+        );
     }
     match state
         .controller
@@ -1209,10 +1340,19 @@ fn controller_operation(
         }
         "thread.plan" => {
             let input: PlanCommandInput = decode_command_input(&request.input)?;
+            let mode = input.mode.unwrap_or_else(|| "plan".into());
+            if !matches!(mode.as_str(), "plan" | "default") {
+                return Err(command_invalid("collaboration mode is invalid"));
+            }
             let prompt = input
                 .prompt
                 .map(|value| normalize_plan_prompt(&value))
                 .transpose()?;
+            if mode != "plan" && prompt.is_some() {
+                return Err(command_invalid(
+                    "only Plan collaboration mode accepts a prompt",
+                ));
+            }
             let client_user_message_id = input
                 .client_user_message_id
                 .filter(|value| !value.is_empty() && value.len() <= 200);
@@ -1225,6 +1365,7 @@ fn controller_operation(
             Ok(ControllerOperation::Plan {
                 thread_id,
                 thread_key,
+                mode,
                 expected_turn_id: request.target.expected_turn_id.clone(),
                 client_user_message_id,
                 prompt,
@@ -1449,6 +1590,10 @@ async fn create_pending_request_action(
         "source_disconnected" => Some((
             "SOURCE_EPOCH_STALE",
             "the request belongs to an inactive source epoch",
+        )),
+        "outcome_unknown" => Some((
+            "OUTCOME_UNKNOWN",
+            "the previous response may have reached the source and cannot be retried safely",
         )),
         "pending" if target.request_version != request.expected_request_version => Some((
             "REQUEST_NOT_PENDING",
@@ -1676,11 +1821,24 @@ async fn create_thread_input(
             ("/resume", None) => ("thread.resume", json!({})),
             ("/fork", None) => ("thread.fork", json!({"lastTurnId":null})),
             ("/interrupt", None) => ("turn.interrupt", json!({})),
-            ("/plan", prompt) => (
+            ("/plan", None) => (
                 "thread.plan",
                 json!({
+                    "mode":"plan",
+                    "prompt":null,
+                    "clientUserMessageId":null,
+                }),
+            ),
+            ("/plan", Some("off" | "exit" | "default")) => (
+                "thread.plan",
+                json!({"mode":"default","prompt":null,"clientUserMessageId":null}),
+            ),
+            ("/plan", Some(prompt)) => (
+                "thread.plan",
+                json!({
+                    "mode":"plan",
                     "prompt":prompt,
-                    "clientUserMessageId":prompt.map(|_| request.client_user_message_id.as_str()),
+                    "clientUserMessageId":request.client_user_message_id.as_str(),
                 }),
             ),
             ("/rename", None) => {
@@ -2114,6 +2272,30 @@ fn reject_gateway_command(
     }
 }
 
+fn reject_gateway_command_details(
+    state: &ApiState,
+    command_id: &str,
+    code: &str,
+    message: &str,
+    status: StatusCode,
+    mut details: Value,
+) -> Response {
+    let mut transition = gateway_transition(command_id, "rejected", "deny", "rejected");
+    transition.result_summary_json = Some(details.to_string());
+    transition.error_code = Some(code.into());
+    transition.error_message = Some(message.into());
+    transition.reason_code = Some(code.into());
+    match state.writer.transition_gateway_command(transition) {
+        Ok(_) => {
+            if let Some(object) = details.as_object_mut() {
+                object.insert("commandId".into(), Value::String(command_id.into()));
+            }
+            v2_error_details(status, code, message, details)
+        }
+        Err(error) => v2_internal_error(error),
+    }
+}
+
 fn gateway_command_response(
     status: StatusCode,
     command: crate::domain::gateway::GatewayCommandRecord,
@@ -2404,6 +2586,7 @@ async fn health(State(state): State<ApiState>) -> Response {
         "control":{"enabled":state.settings["controller"]["enabled"],
           "tailscaleMutationAccess":state.settings["controller"]["tailscaleMutationAccess"],
           "warning":state.settings["controller"]["warning"]},
+        "sessionKernel":state.session_kernel.capabilities(),
         "privacy":{"redactionRuleVersion":"known-secrets-v2","legacyRedactionEvents":legacy_redaction_events,
           "warning":if legacy_redaction_events > 0 { Some("legacy records may contain values not covered by redaction v2") } else { None }}
     }))).into_response()
@@ -2851,6 +3034,7 @@ async fn capabilities(State(state): State<ApiState>) -> Response {
               "default":"off","transport":"websocket_over_unix_socket","readOnly":true,
               "serverRequests":"persist_without_response"},
             "streams":{"sse":true,"webSocket":true},"mutationRoutes":[]
+            ,"sessionKernel":state.session_kernel.capabilities()
             ,"effectiveCapture":state.settings["capture"],"effectiveStorage":state.settings["storage"]
         }),
     ))
@@ -3643,6 +3827,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("read-token".into()),
             fingerprint_key: [7; 32],
@@ -3696,6 +3881,7 @@ mod tests {
         Ok(ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(token.into()),
             fingerprint_key: [7; 32],
@@ -3899,6 +4085,95 @@ mod tests {
         assert_eq!(
             response_json(mismatched).await?["error"]["code"],
             "CURSOR_INVALID"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_owned_thread_returns_attach_contract_without_legacy_dispatch() -> Result<()> {
+        use crate::domain::session::SessionWorkerRegistration;
+
+        let temp = TempDir::new()?;
+        let database = Arc::new(Database::open(&temp.path().join("observer.sqlite"))?);
+        database.migrate()?;
+        let token = URL_SAFE_NO_PAD.encode([31_u8; 32]);
+        let state = gateway_test_state(database.clone(), &token, None)?;
+        state.writer.receive_gateway_command(NewGatewayCommand {
+            command_id: "session-create-command".into(),
+            principal_id: "local_bearer".into(),
+            capability: "session.create".into(),
+            idempotency_key: "session-create-owner-fixture".into(),
+            payload_hash: "fixture-hash".into(),
+            target: GatewayCommandTarget {
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                thread_key: Some("thread-key".into()),
+                codex_thread_id: Some("thread".into()),
+                expected_turn_id: None,
+                expected_request_id: None,
+                expected_request_version: None,
+            },
+            input_summary_json: "{}".into(),
+            origin: GatewayCommandOrigin::WorkerControl,
+        })?;
+        state
+            .writer
+            .register_session_worker(SessionWorkerRegistration {
+                worker_id: "worker-owned".into(),
+                create_command_id: "session-create-command".into(),
+                principal_id: "local_bearer".into(),
+                source_id: "source".into(),
+                source_epoch: "epoch".into(),
+                mode: "resume".into(),
+                canonical_cwd: temp.path().to_string_lossy().into_owned(),
+                rows: 24,
+                cols: 80,
+                runtime_dir_name: "worker-owned".into(),
+                primary_lease_id: "lease-owned".into(),
+                codex_thread_id: Some("thread".into()),
+                reservation_id: None,
+            })?;
+        let app = gateway_test_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/threads/thread-key/inputs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header("idempotency-key", "session-owned-input")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "sourceId":"source",
+                            "sourceEpoch":"epoch",
+                            "codexThreadId":"thread",
+                            "expectedTurnId":null,
+                            "text":"must not reach the legacy actor",
+                            "clientUserMessageId":"client-owned"
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await?;
+        assert_eq!(body["error"]["code"], "THREAD_OWNED_BY_SESSION");
+        assert_eq!(body["error"]["details"]["workerId"], "worker-owned");
+        assert_eq!(
+            body["error"]["details"]["attachUrl"],
+            "/sessions/worker-owned"
+        );
+        let command_id = body["error"]["details"]["commandId"]
+            .as_str()
+            .context("missing migration command id")?;
+        let command = database
+            .gateway_command(command_id)?
+            .context("missing rejected migration command")?;
+        assert_eq!(command.state, "rejected");
+        assert_eq!(
+            command.error.as_ref().map(|error| error.code.as_str()),
+            Some("THREAD_OWNED_BY_SESSION")
         );
         Ok(())
     }
@@ -4277,6 +4552,7 @@ mod tests {
             }),
         };
         let ControllerOperation::Plan {
+            mode,
             prompt,
             expected_turn_id,
             ..
@@ -4284,8 +4560,34 @@ mod tests {
         else {
             bail!("expected Plan operation");
         };
+        assert_eq!(mode, "plan");
         assert_eq!(prompt.as_deref(), Some("/literal inside Plan prompt"));
         assert_eq!(expected_turn_id.as_deref(), Some("turn"));
+        let default_mode = CreateGatewayCommandRequest {
+            input: json!({"mode":"default","prompt":null,"clientUserMessageId":null}),
+            ..plan.clone()
+        };
+        let ControllerOperation::Plan { mode, prompt, .. } =
+            controller_operation(&default_mode, Vec::new())?
+        else {
+            bail!("expected Default collaboration mode operation");
+        };
+        assert_eq!(mode, "default");
+        assert!(prompt.is_none());
+        let invalid_default_prompt = CreateGatewayCommandRequest {
+            input: json!({
+                "mode":"default",
+                "prompt":"must not run as Default",
+                "clientUserMessageId":"default-message"
+            }),
+            ..plan.clone()
+        };
+        assert_eq!(
+            controller_operation(&invalid_default_prompt, Vec::new())
+                .unwrap_err()
+                .code,
+            "COMMAND_INVALID"
+        );
         let invalid_plan = CreateGatewayCommandRequest {
             input: json!({"prompt":"missing client id","clientUserMessageId":null}),
             ..plan
@@ -4316,6 +4618,7 @@ mod tests {
             SourceActorSnapshot {
                 source_id: "source".into(),
                 source_epoch: "epoch".into(),
+                supervisor_version: 1,
                 state: "ready".into(),
                 experimental_api: true,
                 catalog: CapabilityCatalog::default(),
@@ -4326,34 +4629,52 @@ mod tests {
         state.controller = registry;
         let actor_writer = state.writer.clone();
         let actor = tokio::spawn(async move {
-            let Some(ActorRequest::Dispatch { command, reply }) = receiver.recv().await else {
-                bail!("missing dispatch request");
-            };
-            assert!(matches!(
-                command.operation,
-                ControllerOperation::TurnStart { .. }
-            ));
-            actor_writer.transition_gateway_command(gateway_transition(
-                &command.command_id,
-                "dispatching",
-                "allow",
-                "dispatching",
-            ))?;
-            actor_writer.transition_gateway_command(gateway_transition(
-                &command.command_id,
-                "accepted_by_source",
-                "allow",
-                "accepted_by_source",
-            ))?;
-            let mut completed =
-                gateway_transition(&command.command_id, "completed", "allow", "completed");
-            completed.result_summary_json = Some(json!({"turnId":"turn"}).to_string());
-            let record = actor_writer.transition_gateway_command(completed)?;
-            let _ = reply.send(record);
+            for expected in ["turn", "default-mode"] {
+                let Some(ActorRequest::Dispatch { command, reply }) = receiver.recv().await else {
+                    bail!("missing dispatch request");
+                };
+                match expected {
+                    "turn" => assert!(matches!(
+                        command.operation,
+                        ControllerOperation::TurnStart { .. }
+                    )),
+                    "default-mode" => assert!(matches!(
+                        command.operation,
+                        ControllerOperation::Plan {
+                            mode,
+                            prompt: None,
+                            ..
+                        } if mode == "default"
+                    )),
+                    _ => unreachable!(),
+                }
+                actor_writer.transition_gateway_command(gateway_transition(
+                    &command.command_id,
+                    "dispatching",
+                    "allow",
+                    "dispatching",
+                ))?;
+                actor_writer.transition_gateway_command(gateway_transition(
+                    &command.command_id,
+                    "accepted_by_source",
+                    "allow",
+                    "accepted_by_source",
+                ))?;
+                let mut completed =
+                    gateway_transition(&command.command_id, "completed", "allow", "completed");
+                completed.result_summary_json = Some(if expected == "turn" {
+                    json!({"turnId":"turn"}).to_string()
+                } else {
+                    json!({"collaborationMode":"default"}).to_string()
+                });
+                let record = actor_writer.transition_gateway_command(completed)?;
+                let _ = reply.send(record);
+            }
             Result::<()>::Ok(())
         });
         let app = gateway_test_app(state);
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -4378,13 +4699,42 @@ mod tests {
         let body = response_json(response).await?;
         assert_eq!(body["data"]["state"], "completed");
         assert_eq!(body["data"]["result"]["turnId"], "turn");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/threads/thread-key/inputs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("idempotency-key", "shortcut-plan-off-key-0001")
+                    .header(header::ORIGIN, "http://127.0.0.1:4765")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "sourceId":"source",
+                            "sourceEpoch":"epoch",
+                            "codexThreadId":"thread",
+                            "clientUserMessageId":"plan-off-message",
+                            "text":"/plan off"
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body["data"]["result"]["collaborationMode"], "default");
         actor.await??;
-        let stored: String = database.connect()?.query_row(
-            "SELECT input_summary_json FROM gateway_commands",
-            [],
-            |row| row.get(0),
-        )?;
-        assert!(!stored.contains("sensitive shortcut body"));
+        let stored = database
+            .connect()?
+            .prepare("SELECT input_summary_json FROM gateway_commands ORDER BY created_at_ms")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(stored.len(), 2);
+        assert!(
+            stored
+                .iter()
+                .all(|summary| !summary.contains("sensitive shortcut body"))
+        );
         Ok(())
     }
 
@@ -4412,6 +4762,7 @@ mod tests {
             SourceActorSnapshot {
                 source_id: "source".into(),
                 source_epoch: "epoch".into(),
+                supervisor_version: 1,
                 state: "ready".into(),
                 experimental_api: true,
                 catalog: CapabilityCatalog::default(),
@@ -4544,6 +4895,7 @@ mod tests {
             SourceActorSnapshot {
                 source_id: "source".into(),
                 source_epoch: "epoch".into(),
+                supervisor_version: 1,
                 state: "ready".into(),
                 experimental_api: true,
                 catalog: CapabilityCatalog::default(),
@@ -4890,6 +5242,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             fingerprint_key: [7; 32],
@@ -4986,6 +5339,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([6_u8; 32])),
             fingerprint_key: [7; 32],
@@ -5068,6 +5422,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([8_u8; 32])),
             fingerprint_key: [7; 32],
@@ -5211,6 +5566,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             fingerprint_key: [7; 32],
@@ -5259,6 +5615,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([5_u8; 32])),
             fingerprint_key: [7; 32],
@@ -5330,6 +5687,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("token".into()),
             fingerprint_key: [7; 32],
@@ -5385,6 +5743,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("token".into()),
             fingerprint_key: [7; 32],
@@ -5435,6 +5794,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             fingerprint_key: [7; 32],
@@ -5493,6 +5853,7 @@ mod tests {
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
             controller: ControllerRegistry::default(),
+            session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
             fingerprint_key: [7; 32],

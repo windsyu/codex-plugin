@@ -6,10 +6,11 @@
 mod actor;
 mod protocol;
 
+pub(crate) use crate::domain::gateway::PendingRequestAction;
 pub(crate) use actor::{
     ActorCommand, ActorRequest, CapabilityCatalog, ControllerOperation, ControllerRegistry,
-    PendingRequestAction, RegistryError, ReviewTarget, SlashCommandEntry, SourceActorSnapshot,
-    SourceControlCatalog, ThreadSetting, actor_channel,
+    RegistryError, ReviewTarget, SlashCommandEntry, SourceActorSnapshot, SourceControlCatalog,
+    ThreadSetting, actor_channel,
 };
 pub(crate) use protocol::{
     EXPERIMENTAL_API_ENABLED, EXPERIMENTAL_CATALOG_METHODS, SERVER_REQUEST_METHODS,

@@ -24,7 +24,11 @@ describe('responsive Viewer contract', () => {
   it('uses a compact Codex-like application shell and centered conversation canvas', () => {
     expect(css).toMatch(/\.topbar\s*\{[^}]*min-height:\s*52px/);
     expect(css).toMatch(/\.workspace\s*\{[^}]*grid-template-columns:\s*320px/);
-    expect(css).toMatch(/\.detail-inner\s*\{[^}]*max-width:\s*780px/);
+    expect(css).toMatch(/\.detail-inner\s*\{[^}]*max-width:\s*900px/);
+    expect(css).toMatch(/\.conversation-dock\s*\{[^}]*position:\s*sticky/);
+    expect(css).toMatch(/\.composer\s*\{[^}]*border-radius:\s*22px/);
+    expect(css).toMatch(/\.jump-to-latest\s*\{[^}]*border-radius:\s*99px/);
+    expect(css).toMatch(/\.session-overview\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(css).toMatch(/\.dialogue-assistant\s*\{[^}]*grid-template-columns:\s*28px/);
     expect(css).toMatch(/\.project-heading\s*\{[^}]*justify-content:\s*flex-start/);
     expect(css).toMatch(/\.project-heading \.project-title\s*\{[^}]*flex:\s*1/);

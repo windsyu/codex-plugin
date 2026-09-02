@@ -1,0 +1,48 @@
+{
+  "testedCodexCliVersion": "0.146.1",
+  "observedAt": "2026-09-02",
+  "sourceCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
+  "transport": "private_1_to_1_websocket_over_unix_socket",
+  "sessionKernelSlice": 9,
+  "controllerDefaultEnabled": false,
+  "observerSchemaVersion": 20,
+  "tuiClientIdentityPolicy": "preserve",
+  "proxy": {
+    "rawFirstBothDirections": true,
+    "sharedMonotonicProxySequence": true,
+    "workerConnectionEpoch": true,
+    "requestIdNamespace": "gateway:tui",
+    "serverRequestPolicy": "route_once_by_turn_owner_with_terminal_handoff",
+    "downstreamPeerPolicy": "same_uid_and_exact_pty_child_pid",
+    "unknownEnvelopePolicy": "retain_redacted_raw_then_transparently_forward",
+    "unattributedPotentialMutationPolicy": "fail_closed",
+    "upstreamWriteDisconnectPolicy": "outcome_unknown"
+  },
+  "fixtures": [
+    "fixtures/app-server-session-proxy-0.146.1.jsonl"
+  ],
+  "verifiedFlows": [
+    "initialize",
+    "thread/start",
+    "thread/resume",
+    "notification_interleaving",
+    "server_request_null_id",
+    "unknown_method_and_variant",
+    "persistent_worker_thread_input_and_turn_ownership",
+    "exclusive_primary_side_child_thread_lease_set",
+    "installed_codex_tui_new_clear_and_resume",
+    "session_state_sse",
+    "exact_turn_interrupt_and_safe_stop",
+    "terminal_and_channel_pending_request_cas",
+    "unsupported_channel_request_terminal_handoff",
+    "legacy_double_write_rejection",
+    "gateway_restart_orphan_reconciliation",
+    "tui_crash_boundary_reopen_matrix",
+    "single_worker_disconnect_isolation",
+    "fragmented_burst_and_out_of_order_proxy_transport",
+    "exact_pty_child_peer_rejection",
+    "all_supported_interactive_request_terminal_and_channel_routes",
+    "unattributed_callback_explicit_terminal_handoff",
+    "xterm_unicode_paste_resize_disconnect_and_hostile_osc"
+  ]
+}

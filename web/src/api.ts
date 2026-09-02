@@ -61,6 +61,20 @@ export class Api {
     return payload as ApiEnvelope<T>;
   }
 
+  async delete<T>(path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<ApiEnvelope<T>> {
+    const response = await fetch(path, {
+      method: 'DELETE',
+      headers: { ...this.headers(), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify(body),
+      signal
+    });
+    const payload = await response.json().catch(() => undefined);
+    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
+    return payload as ApiEnvelope<T>;
+  }
+
   async uploadImage(file: File, idempotencyKey: string, signal?: AbortSignal) {
     const response = await fetch('/v2/uploads/images', {
       method: 'POST', headers: { ...this.headers(), 'Content-Type': file.type, 'Idempotency-Key': idempotencyKey },

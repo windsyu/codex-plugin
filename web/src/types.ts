@@ -220,6 +220,7 @@ export interface PendingRequest {
 export interface ControllerSource {
   sourceId: string;
   sourceEpoch: string;
+  supervisorVersion: number;
   state: string;
   unavailableReason?: string;
 }
@@ -236,7 +237,7 @@ export interface ControlCatalog {
   threadLoaded: boolean;
   activeTurnId?: string;
   collaborationMode?: { mode?: string; settings?: Record<string, unknown> };
-  goal?: { status?: string; tokensUsed?: number; timeUsedSeconds?: number };
+  goal?: { objective?: string; status?: string; tokensUsed?: number; timeUsedSeconds?: number };
   capabilities: { entries: Record<string, {
     available: boolean;
     experimental: boolean;
@@ -248,9 +249,19 @@ export interface ControlCatalog {
 
 export interface GatewayCommand {
   commandId: string;
+  capability?: string;
   state: string;
   error?: { code: string; message: string };
   result?: unknown;
+}
+
+export interface GatewayStatusCard {
+  kind: 'gatewayStatusCard';
+  cardType: 'status' | 'mcp' | 'usage';
+  sourceId: string;
+  sourceEpoch: string;
+  threadKey: string;
+  content: unknown;
 }
 
 export interface ImageUpload { uploadId: string; mimeType: string; sizeBytes: number; expiresAtMs: number; }
@@ -287,8 +298,88 @@ export interface Health {
   sources: unknown[];
   live: unknown;
   control?: { enabled: boolean; tailscaleMutationAccess: boolean; warning?: string | null };
+  sessionKernel?: SessionKernelCapabilities;
   privacy?: {
     legacyRedactionEvents?: number;
     warning?: string | null;
   };
+}
+
+export interface SessionKernelCapabilities {
+  configuredMode: 'off' | 'preview' | 'tui';
+  compiled: boolean;
+  workerAvailable: boolean;
+  fakeCliAvailable: boolean;
+  cliAvailable: boolean;
+  errorCode?: string;
+}
+
+export type SessionWorkerState = 'starting' | 'connecting' | 'ready' | 'detached' | 'stopping' | 'exited' | 'stale_epoch' | 'failed';
+
+export interface InputLease {
+  leaseId?: string;
+  ownerAttachmentId?: string;
+  version: number;
+  state: 'none' | 'active' | 'releasing' | 'expired' | 'stale';
+}
+
+export interface SessionWorker {
+  workerId: string;
+  state: SessionWorkerState;
+  pid?: number;
+  cwd: string;
+  rows: number;
+  cols: number;
+  outputSeq: number;
+  terminalRetainedBytes: number;
+  terminalCheckpointBytes: number;
+  ptyEof: boolean;
+  exit?: { success: boolean; exitCode: number; signal?: string };
+  errorCode?: string;
+  inputLease: InputLease;
+  persistedWorker?: {
+    version: number;
+    primaryThreadId?: string;
+    sourceId: string;
+    sourceEpoch: string;
+  };
+  threadLeases?: Array<{
+    leaseId: string;
+    codexThreadId?: string;
+    reservationId?: string;
+    role: 'primary' | 'side' | 'child';
+    state: string;
+    version: number;
+  }>;
+  activeTurns?: Array<{
+    codexThreadId: string;
+    codexTurnId: string;
+    ownerType: 'terminal' | 'channel' | 'gateway';
+    ownerId: string;
+    principalId: string;
+    state: string;
+    version: number;
+  }>;
+}
+
+export interface SessionAttachment {
+  attachmentId: string;
+  attachmentToken: string;
+  descriptor: string;
+  descriptorExpiresInSeconds: number;
+  inputLeaseVersion: number;
+}
+
+export interface TerminalSnapshotFrame {
+  type: 'snapshot';
+  checkpointSeq: number;
+  fromSeq: number;
+  toSeq: number;
+  rows: number;
+  cols: number;
+  screen: string;
+  replay: string;
+  encoding: 'base64';
+  complete: boolean;
+  truncated: boolean;
 }

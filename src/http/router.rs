@@ -11,6 +11,8 @@ pub(super) fn settings_snapshot(config: &Config) -> Value {
         "storage":{"rawEventRetentionDays":config.storage.raw_event_retention_days,"deltaRetentionDays":config.storage.delta_retention_days,
           "blobRetentionDays":config.storage.blob_retention_days},
         "controller":{"enabled":config.controller.enabled,
+          "sessionKernel":config.controller.session_kernel.as_str(),
+          "sessionFixtureCliConfigured":config.controller.session_fixture_cli.is_some(),
           "tailscaleMutationAccess":config.controller.enabled && config.server.tailscale_serve.enabled,
           "warning":if config.controller.enabled && config.server.tailscale_serve.enabled {
             Some("verified Tailscale users have the same V2 mutation authority as local sessions")

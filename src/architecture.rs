@@ -38,11 +38,15 @@ fn assert_avoids(module: &str, forbidden: &[&str]) {
 
 #[test]
 fn adr_0009_layer_dependencies_are_one_way() {
-    assert_avoids("domain", &["store", "ingest", "live", "http", "writer"]);
-    assert_avoids("store", &["ingest", "live", "http", "writer"]);
-    assert_avoids("ingest", &["live", "http"]);
-    assert_avoids("live", &["ingest", "http"]);
-    assert_avoids("controller", &["ingest", "http"]);
+    assert_avoids(
+        "domain",
+        &["store", "ingest", "live", "session", "http", "writer"],
+    );
+    assert_avoids("store", &["ingest", "live", "session", "http", "writer"]);
+    assert_avoids("ingest", &["live", "session", "http"]);
+    assert_avoids("live", &["ingest", "session", "http"]);
+    assert_avoids("controller", &["ingest", "session", "http"]);
+    assert_avoids("session", &["ingest", "live", "http"]);
     assert_avoids("http", &["ingest", "live"]);
 }
 
@@ -79,6 +83,10 @@ fn adr_0009_required_module_roots_exist() {
         ("ingest", &["mod", "importer", "io", "keys"][..]),
         ("live", &["mod", "transport"][..]),
         ("controller", &["mod", "actor", "protocol"][..]),
+        (
+            "session",
+            &["mod", "worker", "pty", "runtime_dir", "terminal"][..],
+        ),
         (
             "http",
             &[

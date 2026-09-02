@@ -12,6 +12,7 @@ mod ingest;
 mod instance_lock;
 mod live;
 mod permissions;
+mod session;
 mod store;
 mod tailscale;
 mod watcher;
@@ -27,7 +28,7 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::config::Config;
-use crate::credentials::load_or_create_token;
+use crate::credentials::{load_or_create_token, rotate_token};
 use crate::ingest::Importer;
 use crate::instance_lock::InstanceLock;
 use crate::store::Database;
@@ -68,7 +69,7 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Print the reusable Viewer pairing link for the current server startup.
+    /// Print the reusable Viewer pairing link for the running server that uses this config.
     Open,
     /// Permanently suppress and delete one local Observer thread copy.
     Purge {
@@ -111,6 +112,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Open) {
+        if !InstanceLock::pairing_ready(config.database_path())? {
+            anyhow::bail!(
+                "no pairing-ready Observer instance matches config {}; start `serve`, wait for startup, or pass the same --config used by the running server",
+                cli.config.display()
+            );
+        }
         let token = load_or_create_token(&config.server.bearer_token_file)?;
         println!(
             "{}",
@@ -144,8 +151,15 @@ async fn main() -> Result<()> {
             anyhow::bail!("purge requires explicit --yes confirmation");
         }
     }
-    let instance_lock = InstanceLock::acquire(config.database_path())?;
+    let mut instance_lock = InstanceLock::acquire(config.database_path())?;
     info!(path = %instance_lock.path().display(), "Observer writer lock acquired");
+    let server_token = if matches!(cli.command, Command::Serve) {
+        let token = rotate_token(&config.server.bearer_token_file)?;
+        instance_lock.mark_pairing_ready()?;
+        Some(token)
+    } else {
+        None
+    };
     let database = Arc::new(Database::open_with_blobs(
         config.database_path(),
         &config.storage.blob_dir,
@@ -170,6 +184,20 @@ async fn main() -> Result<()> {
             outcome_unknown = gateway_recovery.outcome_unknown,
             removed_images = gateway_recovery.image_paths.len(),
             "Gateway restart recovery completed without replay"
+        );
+    }
+    let session_recovery = database.recover_sessions_after_restart()?;
+    if session_recovery.orphaned_workers > 0
+        || session_recovery.orphaned_thread_leases > 0
+        || session_recovery.orphaned_attachments > 0
+        || session_recovery.orphaned_input_leases > 0
+    {
+        info!(
+            orphaned_workers = session_recovery.orphaned_workers,
+            orphaned_thread_leases = session_recovery.orphaned_thread_leases,
+            orphaned_attachments = session_recovery.orphaned_attachments,
+            orphaned_input_leases = session_recovery.orphaned_input_leases,
+            "Session Kernel restart recovery completed without process adoption or replay"
         );
     }
     let expired_images = database.sweep_expired_image_uploads(crate::clock::now_ms())?;
@@ -235,8 +263,35 @@ async fn main() -> Result<()> {
                 "post-watcher reconciliation complete"
             );
             let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-            let live_runtime =
-                live::spawn_enabled(&config, writer.clone(), shutdown_receiver.clone())?;
+            let fingerprint_key =
+                credentials::load_or_create_key(&config.storage.fingerprint_key_file)?;
+            let session_kernel = session::SessionKernel::from_config(
+                &config,
+                database.clone(),
+                writer.clone(),
+                fingerprint_key,
+            )?;
+            let session_registry = session_kernel.registry_handle();
+            let source_stale_sender = session_registry.as_ref().map(|registry| {
+                let (sender, mut receiver) =
+                    tokio::sync::mpsc::unbounded_channel::<domain::session::SourceEpochStale>();
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    while let Some(stale) = receiver.recv().await {
+                        registry
+                            .stale_source(&stale.source_id, &stale.source_epoch)
+                            .await;
+                    }
+                });
+                sender
+            });
+            let live_runtime = live::spawn_enabled(
+                &config,
+                database.clone(),
+                writer.clone(),
+                source_stale_sender,
+                shutdown_receiver.clone(),
+            )?;
 
             let scan_config = config.clone();
             let scan_db = database.clone();
@@ -284,10 +339,13 @@ async fn main() -> Result<()> {
                 database,
                 writer,
                 live_runtime.controller,
+                session_kernel.clone(),
+                server_token.expect("Serve initialized one startup token"),
                 shutdown_receiver,
             )
             .await?;
             let _ = shutdown_sender.send(true);
+            session_kernel.shutdown().await;
             for handle in live_runtime.handles {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }

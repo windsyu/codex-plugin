@@ -35,10 +35,21 @@ pub struct TailscaleServeConfig {
     pub https_port: u16,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ControllerConfig {
     pub enabled: bool,
+    pub session_kernel: SessionKernelMode,
+    pub session_fixture_cli: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKernelMode {
+    #[default]
+    Off,
+    Preview,
+    Tui,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +114,26 @@ impl Default for TailscaleServeConfig {
         Self {
             enabled: false,
             https_port: 443,
+        }
+    }
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_kernel: SessionKernelMode::Off,
+            session_fixture_cli: None,
+        }
+    }
+}
+
+impl SessionKernelMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Preview => "preview",
+            Self::Tui => "tui",
         }
     }
 }
@@ -176,6 +207,12 @@ impl Config {
             canonicalize_allow_missing(&resolve_path(&base, &self.storage.fingerprint_key_file)?)?;
         self.server.bearer_token_file =
             canonicalize_allow_missing(&resolve_path(&base, &self.server.bearer_token_file)?)?;
+        if let Some(fixture_cli) = &self.controller.session_fixture_cli {
+            self.controller.session_fixture_cli = Some(canonicalize_allow_missing(&resolve_path(
+                &base,
+                fixture_cli,
+            )?)?);
+        }
         for source in &mut self.sources {
             let resolved_home = resolve_path(&base, &source.codex_home)?;
             source.codex_home = canonicalize_allow_missing(&resolved_home)?;
@@ -202,13 +239,26 @@ impl Config {
         if self.controller.enabled && !self.server.strict_origin {
             bail!("V2 Controller requires strict_origin=true");
         }
+        if self.controller.session_kernel != SessionKernelMode::Off && !self.controller.enabled {
+            bail!("controller.session_kernel requires controller.enabled=true when enabled");
+        }
+        if self.controller.session_fixture_cli.is_some()
+            && self.controller.session_kernel != SessionKernelMode::Preview
+        {
+            bail!("controller.session_fixture_cli requires controller.session_kernel=preview");
+        }
+        let fake_session_preview = self.controller.session_kernel == SessionKernelMode::Preview
+            && self.controller.session_fixture_cli.is_some();
         if self.controller.enabled
+            && !fake_session_preview
             && !self
                 .sources
                 .iter()
                 .any(|source| source.app_server_socket.is_some())
         {
-            bail!("V2 Controller requires at least one source with app_server_socket");
+            bail!(
+                "V2 Controller requires at least one source with app_server_socket unless fixed fake Session Kernel preview is configured"
+            );
         }
         if self.sources.is_empty() {
             bail!("at least one source is required");
@@ -432,6 +482,7 @@ mod tests {
     fn controller_is_default_off_and_requires_strict_origin_and_a_socket() {
         let mut config = Config::default();
         assert!(!config.controller.enabled);
+        assert_eq!(config.controller.session_kernel, SessionKernelMode::Off);
         assert!(config.validate().is_ok());
 
         config.controller.enabled = true;
@@ -442,5 +493,32 @@ mod tests {
 
         config.server.strict_origin = false;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn session_kernel_preview_is_explicit_and_fails_closed() {
+        let mut config = Config::default();
+        config.controller.session_kernel = SessionKernelMode::Preview;
+        assert!(config.validate().is_err());
+
+        config.controller.enabled = true;
+        assert!(config.validate().is_err());
+        config.controller.session_fixture_cli = Some(PathBuf::from("/tmp/fake-codex"));
+        assert!(config.validate().is_ok());
+
+        config.controller.session_kernel = SessionKernelMode::Off;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn session_kernel_mode_rejects_unknown_values() {
+        let parsed = toml::from_str::<Config>(
+            r#"
+            [controller]
+            enabled = true
+            session_kernel = "maybe"
+            "#,
+        );
+        assert!(parsed.is_err());
     }
 }

@@ -8,9 +8,10 @@ An active-Turn `/plan <prompt>` also requires two ordered upstream effects: upda
 
 ## Decision
 
-- Resolve Plan only from an epoch-scoped `collaborationMode/list` entry whose `mode` is `plan`, whose model is visible, and whose reasoning effort is supported by that model.
+- Resolve Plan entry and exit only from epoch-scoped `collaborationMode/list` entries whose `mode` is `plan` or `default`, whose model is visible, and whose reasoning effort is supported by that model.
 - Emit the exact `CollaborationMode` object required by Codex, including `developer_instructions: null`; never simulate Plan with a prompt.
 - For an idle Thread with a prompt, send one `turn/start` carrying `collaborationMode`. For an active Turn with a prompt, confirm `thread/settings/update` before sending `turn/steer`. Without a prompt, update Thread settings only.
+- Map `/plan off` (and the equivalent `exit` or `default` argument) to `thread/settings/update` with the catalog's Default preset merged over the model/effort snapshot captured before entering Plan. A `null`/unspecified preset field preserves the prior Default value instead of clearing it. The Web control toggles between entering Plan and returning to Default.
 - If the second active-Turn request fails or cannot be confirmed after Plan settings succeeded, transition the combined Gateway command to `outcome_unknown` and never replay it automatically.
 - Maintain Goal state in a rebuildable `thread_goals` projection and the current source actor cache. On every Controller reconnect, call `thread/goal/get` for loaded Threads before publishing the actor as ready.
 - Keep full Goal data only in the redacted V1 raw/projection path and actor cache. Command results and audit rows retain status/presence summaries, not objectives.
@@ -38,6 +39,7 @@ Rejected because those tables are long-lived control metadata and must not retai
 ## Consequences
 
 - Plan availability changes with each source epoch and current Thread model.
+- Plan is advertised only when both Plan and Default presets are valid, so entering the mode never strands the Gateway UI without a catalog-backed exit.
 - An active `/plan <prompt>` may end in `outcome_unknown` while the status card correctly shows Plan mode enabled.
 - Goal state is restored before a reconnected actor becomes controllable, and projection rebuild reproduces Goal updates and clears.
 - Local cards require a live exact-epoch source catalog but do not create command ledger rows.
