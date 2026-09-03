@@ -31,7 +31,7 @@ use super::proxy::{
 };
 use super::pty::{PtyProcess, SpawnSpec, canonical_executable, valid_terminal_size};
 use super::runtime_dir::RuntimeRoot;
-use super::terminal::{OutputEvent, TerminalJournal, TerminalSanitizer, TerminalSnapshot};
+use super::terminal::{OutputEvent, TerminalJournal, TerminalOutputFilter, TerminalSnapshot};
 
 const COMMAND_QUEUE_CAPACITY: usize = 128;
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
@@ -273,6 +273,7 @@ impl SessionWorkerHandle {
         id: SessionWorkerId,
         spec: SpawnSpec,
         readiness: WorkerReadiness,
+        readiness_timeout: Duration,
         runtime_root: RuntimeRoot,
         runtime_dir: PathBuf,
         persistence: Option<SessionPersistence>,
@@ -349,6 +350,7 @@ impl SessionWorkerHandle {
                     state_tx,
                     initial,
                     readiness,
+                    readiness_timeout,
                     runtime_root,
                     runtime_dir,
                     persistence,
@@ -545,6 +547,10 @@ impl SessionWorkerHandle {
         self.send(WorkerCommand::ProtocolReady)
     }
 
+    pub(super) fn protocol_connected(&self) -> Result<(), SessionError> {
+        self.send(WorkerCommand::ProtocolConnected)
+    }
+
     pub(super) fn protocol_failed(&self, error_code: &'static str) -> Result<(), SessionError> {
         self.send(WorkerCommand::ProtocolFailed { error_code })
     }
@@ -575,6 +581,7 @@ async fn receive_reply<T>(
 }
 
 enum WorkerCommand {
+    ProtocolConnected,
     ProtocolReady,
     SourceStale,
     ProtocolFailed {
@@ -691,7 +698,7 @@ struct WorkerActor {
     state_sender: watch::Sender<WorkerSnapshot>,
     state: WorkerSnapshot,
     journal: TerminalJournal,
-    sanitizer: TerminalSanitizer,
+    terminal_filter: TerminalOutputFilter,
     attachments: HashMap<String, Attachment>,
     input_lease: InputLease,
     readiness_window: Vec<u8>,
@@ -716,6 +723,7 @@ impl WorkerActor {
         state_sender: watch::Sender<WorkerSnapshot>,
         state: WorkerSnapshot,
         readiness: WorkerReadiness,
+        readiness_timeout: Duration,
         runtime_root: RuntimeRoot,
         runtime_dir: PathBuf,
         persistence: Option<SessionPersistence>,
@@ -736,14 +744,14 @@ impl WorkerActor {
             state_sender,
             state,
             journal,
-            sanitizer: TerminalSanitizer::default(),
+            terminal_filter: TerminalOutputFilter::default(),
             attachments: HashMap::new(),
             input_lease: InputLease {
                 version: input_lease_version,
                 ..InputLease::default()
             },
             readiness_window: Vec::new(),
-            readiness_deadline: Some(Instant::now() + READINESS_TIMEOUT),
+            readiness_deadline: Some(Instant::now() + readiness_timeout),
             readiness,
             stop_deadline: None,
             child_exit: None,
@@ -866,6 +874,13 @@ impl WorkerActor {
 
     fn handle_command(&mut self, command: WorkerCommand) {
         match command {
+            WorkerCommand::ProtocolConnected => {
+                if self.readiness == WorkerReadiness::AppServerProtocol
+                    && self.state.state == SessionWorkerState::Connecting
+                {
+                    self.readiness_deadline = None;
+                }
+            }
             WorkerCommand::ProtocolReady => {
                 if self.readiness == WorkerReadiness::AppServerProtocol
                     && self.state.state == SessionWorkerState::Connecting
@@ -1397,6 +1412,9 @@ impl WorkerActor {
                 "terminal dimensions are outside supported bounds",
             ));
         }
+        if self.state.rows == rows && self.state.cols == cols {
+            return Ok(self.state.clone());
+        }
         self.process.resize(rows, cols).map_err(|_| {
             SessionError::new(
                 "SESSION_WORKER_EXITED",
@@ -1413,27 +1431,39 @@ impl WorkerActor {
     fn handle_reader(&mut self, event: ReaderEvent) {
         match event {
             ReaderEvent::Output(data) => {
-                let data = self.sanitizer.process(&data);
-                if data.is_empty() {
-                    return;
-                }
-                if self.readiness == WorkerReadiness::OutputMarker
-                    && self.state.state == SessionWorkerState::Connecting
-                {
-                    self.readiness_window.extend_from_slice(&data);
-                    if self.readiness_window.len() > 512 {
-                        let drain = self.readiness_window.len() - 512;
-                        self.readiness_window.drain(..drain);
+                let filtered = self.terminal_filter.process(&data);
+                if !filtered.display_bytes.is_empty() {
+                    if self.readiness == WorkerReadiness::OutputMarker
+                        && self.state.state == SessionWorkerState::Connecting
+                    {
+                        self.readiness_window
+                            .extend_from_slice(&filtered.display_bytes);
+                        if self.readiness_window.len() > 512 {
+                            let drain = self.readiness_window.len() - 512;
+                            self.readiness_window.drain(..drain);
+                        }
+                        if contains_bytes(&self.readiness_window, b"SESSION_READY") {
+                            self.readiness_deadline = None;
+                            self.transition(SessionWorkerState::Ready, None);
+                        }
                     }
-                    if contains_bytes(&self.readiness_window, b"SESSION_READY") {
-                        self.readiness_deadline = None;
-                        self.transition(SessionWorkerState::Ready, None);
+                    let event = self.journal.append(filtered.display_bytes);
+                    self.state.output_seq = event.output_seq;
+                    self.publish();
+                    let _ = self.output.send(event);
+                }
+                let cursor_position = self.journal.cursor_position();
+                for request in filtered.terminal_replies {
+                    let reply = request.encode(cursor_position);
+                    if let Err(error) = self.process.write_input(&reply) {
+                        tracing::warn!(
+                            error = %error,
+                            worker_id = %self.state.worker_id.0,
+                            "failed to answer Session Worker terminal capability query"
+                        );
+                        break;
                     }
                 }
-                let event = self.journal.append(data);
-                self.state.output_seq = event.output_seq;
-                self.publish();
-                let _ = self.output.send(event);
             }
             ReaderEvent::Eof => {
                 self.pty_eof = true;
@@ -1796,6 +1826,7 @@ impl SessionRegistry {
                 cols: request.cols,
             },
             WorkerReadiness::OutputMarker,
+            READINESS_TIMEOUT,
             self.inner.runtime_root.clone(),
             runtime_dir,
             None,
@@ -2113,6 +2144,7 @@ impl SessionRegistry {
                 cols: request.cols,
             },
             WorkerReadiness::AppServerProtocol,
+            READINESS_TIMEOUT,
             self.inner.runtime_root.clone(),
             runtime_dir,
             Some(SessionPersistence {
@@ -3400,21 +3432,6 @@ mod tests {
             .get(&created.snapshot.worker_id.0)
             .context("missing persistent worker")?;
         let terminal_owner = if emulate_terminal {
-            let query_deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                let terminal = worker.terminal_snapshot(None).await?;
-                if [terminal.screen, terminal.replay]
-                    .concat()
-                    .windows(4)
-                    .any(|window| window == b"\x1b[6n")
-                {
-                    break;
-                }
-                if Instant::now() >= query_deadline {
-                    anyhow::bail!("Codex TUI did not emit its terminal capability query");
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
             let attachment = worker
                 .prepare_attachment("local_bearer".into(), None, None)
                 .await?;
@@ -3431,29 +3448,6 @@ mod tests {
                 )
                 .await?;
             let lease_id = lease.lease_id.context("terminal emulation lease missing")?;
-            let _ = worker
-                .write_input(
-                    attachment_id.clone(),
-                    lease_id.clone(),
-                    b"\x1b[1;1R".to_vec(),
-                )
-                .await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let _ = worker
-                .write_input(
-                    attachment_id.clone(),
-                    lease_id.clone(),
-                    b"\x1b[?1;2c".to_vec(),
-                )
-                .await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let _ = worker
-                .write_input(
-                    attachment_id.clone(),
-                    lease_id.clone(),
-                    b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec(),
-                )
-                .await;
             Some((attachment_id, lease_id))
         } else {
             None
@@ -4012,6 +4006,15 @@ mod tests {
                 false,
             )
             .await?;
+        let mut states = worker.subscribe_state();
+        worker.resize(attachment_id.clone(), 30, 100).await?;
+        assert!(states.has_changed()?);
+        states.borrow_and_update();
+        worker.resize(attachment_id.clone(), 30, 100).await?;
+        assert!(
+            !states.has_changed()?,
+            "an identical terminal size must not publish another Worker state"
+        );
         worker
             .write_input(
                 attachment_id.clone(),
@@ -4019,13 +4022,16 @@ mod tests {
                 b"hello\n".to_vec(),
             )
             .await?;
-        worker.resize(attachment_id, 30, 100).await?;
         let deadline = Instant::now() + Duration::from_secs(2);
-        while worker.snapshot().output_seq < 2 && Instant::now() < deadline {
+        let mut snapshot = worker.terminal_snapshot(None).await?;
+        let mut rendered = [snapshot.screen.clone(), snapshot.replay.clone()].concat();
+        while !String::from_utf8_lossy(&rendered).contains("ECHO:hello")
+            && Instant::now() < deadline
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
+            snapshot = worker.terminal_snapshot(None).await?;
+            rendered = [snapshot.screen.clone(), snapshot.replay.clone()].concat();
         }
-        let snapshot = worker.terminal_snapshot(None).await?;
-        let rendered = [snapshot.screen, snapshot.replay].concat();
         assert!(String::from_utf8_lossy(&rendered).contains("ECHO:hello"));
         assert_eq!((snapshot.rows, snapshot.cols), (30, 100));
         assert_eq!(worker.stop().await?.state, SessionWorkerState::Stopping);
@@ -4298,6 +4304,100 @@ mod tests {
             Some("SESSION_WORKER_NOT_READY")
         );
         assert!(snapshot.exit.is_some_and(|exit| exit.success));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protocol_connection_disarms_thread_readiness_timeout() -> Result<()> {
+        let temp = tempfile::Builder::new()
+            .prefix("session-protocol-wait-")
+            .tempdir_in("/private/tmp")?;
+        let executable = fake_cli(&temp)?;
+        let runtime_root = RuntimeRoot::prepare(temp.path().join("runtime"))?;
+        let worker_id = Uuid::new_v4().to_string();
+        let runtime_dir = runtime_root.create_worker_dir(&worker_id)?;
+        let worker = SessionWorkerHandle::spawn(
+            SessionWorkerId(worker_id),
+            SpawnSpec {
+                executable,
+                argv: Vec::new(),
+                canonical_cwd: fs::canonicalize(temp.path())?,
+                env_allowlist: safe_worker_environment(),
+                rows: 24,
+                cols: 80,
+            },
+            WorkerReadiness::AppServerProtocol,
+            Duration::from_millis(100),
+            runtime_root,
+            runtime_dir,
+            None,
+        )?;
+        let bridge = SessionProtocolBridge::default();
+        bridge.connected();
+        bridge.bind(worker.clone());
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let waiting = worker.snapshot();
+        assert_eq!(waiting.state, SessionWorkerState::Connecting);
+        assert_eq!(waiting.error_code, None);
+        assert!(waiting.exit.is_none());
+
+        worker.protocol_ready()?;
+        let ready_deadline = Instant::now() + Duration::from_secs(1);
+        while worker.snapshot().state != SessionWorkerState::Ready
+            && Instant::now() < ready_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(worker.snapshot().state, SessionWorkerState::Ready);
+
+        worker.stop().await?;
+        let exit_deadline = Instant::now() + Duration::from_secs(2);
+        while !worker.snapshot().state.is_terminal() && Instant::now() < exit_deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(worker.snapshot().state.is_terminal());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_protocol_connection_still_times_out() -> Result<()> {
+        let temp = tempfile::Builder::new()
+            .prefix("session-protocol-timeout-")
+            .tempdir_in("/private/tmp")?;
+        let executable = fake_cli(&temp)?;
+        let runtime_root = RuntimeRoot::prepare(temp.path().join("runtime"))?;
+        let worker_id = Uuid::new_v4().to_string();
+        let runtime_dir = runtime_root.create_worker_dir(&worker_id)?;
+        let worker = SessionWorkerHandle::spawn(
+            SessionWorkerId(worker_id),
+            SpawnSpec {
+                executable,
+                argv: Vec::new(),
+                canonical_cwd: fs::canonicalize(temp.path())?,
+                env_allowlist: safe_worker_environment(),
+                rows: 24,
+                cols: 80,
+            },
+            WorkerReadiness::AppServerProtocol,
+            Duration::from_millis(100),
+            runtime_root,
+            runtime_dir,
+            None,
+        )?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !worker.snapshot().state.is_terminal() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let timed_out = worker.snapshot();
+        assert_eq!(timed_out.state, SessionWorkerState::Failed);
+        assert_eq!(
+            timed_out.error_code.as_deref(),
+            Some("SESSION_WORKER_READINESS_TIMEOUT")
+        );
         Ok(())
     }
 

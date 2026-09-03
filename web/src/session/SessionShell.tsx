@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { lazy, Suspense } from 'preact/compat';
 
 import { Api, ApiError, reconnectingStream } from '../api';
-import type { ControllerSource, GatewayCommand, InputLease, SessionAttachment, SessionWorker, TerminalSnapshotFrame } from '../types';
+import type { ControllerSource, GatewayCommand, InputLease, SessionAttachment, SessionWorker, SessionWorkerSnapshot, TerminalSnapshotFrame } from '../types';
 
 const TerminalPanel = lazy(async () => ({ default: (await import('./TerminalPanel')).TerminalPanel }));
 
@@ -54,6 +54,17 @@ export function sessionOwnsInitialThread(worker: SessionWorker, initialThread?: 
     && worker.persistedWorker.sourceEpoch === initialThread.sourceEpoch
     && worker.threadLeases?.some((lease) => lease.codexThreadId === initialThread.codexThreadId
       && ['acquiring', 'active', 'releasing'].includes(lease.state)) === true;
+}
+
+export function mergeSessionWorkerSnapshot(current: SessionWorker, snapshot: SessionWorkerSnapshot): SessionWorker {
+  if (current.workerId !== snapshot.workerId) return current;
+  return {
+    ...current,
+    ...snapshot,
+    persistedWorker: current.persistedWorker,
+    threadLeases: current.threadLeases,
+    activeTurns: current.activeTurns
+  };
 }
 
 export function SessionShell({ api, defaultCwd, initialThread, onClose }: SessionShellProps) {
@@ -149,7 +160,7 @@ export function SessionShell({ api, defaultCwd, initialThread, onClose }: Sessio
       api,
       `/v2/sessions/${encodeURIComponent(worker.workerId)}/events`,
       (event) => {
-        if (event.type === 'session_state') updateWorker(event.data as SessionWorker);
+        if (event.type === 'session_state') updateWorkerView(event.data as SessionWorker);
       },
       () => undefined,
       controller.signal
@@ -257,16 +268,33 @@ export function SessionShell({ api, defaultCwd, initialThread, onClose }: Sessio
     finally { setBusy(false); }
   }
 
-  function updateWorker(next: SessionWorker) {
-    setWorker(next);
+  function updateLeaseFromSnapshot(next: SessionWorkerSnapshot) {
     if (next.inputLease.ownerAttachmentId === attachment?.attachmentId && next.inputLease.leaseId) setLease(next.inputLease);
     else if (next.inputLease.ownerAttachmentId && next.inputLease.ownerAttachmentId !== attachment?.attachmentId) setLease(undefined);
   }
 
+  function updateWorkerView(next: SessionWorker) {
+    setWorker(next);
+    updateLeaseFromSnapshot(next);
+  }
+
+  function updateWorkerSnapshot(next: SessionWorkerSnapshot) {
+    setWorker((current) => current ? mergeSessionWorkerSnapshot(current, next) : current);
+    updateLeaseFromSnapshot(next);
+  }
+
+  const primaryThreadId = worker?.persistedWorker?.primaryThreadId;
+  const sourceIdSummary = worker?.persistedWorker?.sourceId;
+  const activeThreadLeases = worker?.threadLeases?.filter((item) => item.state === 'active').length || 0;
+
   return <div class="session-shell-backdrop" role="presentation">
     <section class="session-shell" role="dialog" aria-modal="true" aria-label="Codex terminal session">
-      <header><div><p class="eyebrow">SESSION KERNEL · NATIVE TUI</p><h2>Codex 终端会话</h2></div>
-        <button type="button" onClick={onClose} aria-label="返回 History Viewer">返回历史</button></header>
+      <header class="session-shell-header">
+        <div class="session-shell-brand"><span class="session-shell-mark" aria-hidden="true">&gt;_</span><div>
+          <p class="eyebrow">CODEX · LIVE SESSION</p><h2>Codex Terminal</h2>
+        </div></div>
+        <button class="session-history-action" type="button" onClick={onClose} aria-label="返回 History Viewer"><span aria-hidden="true">←</span> History</button>
+      </header>
       {!worker && <form class="session-create" onSubmit={(event) => { event.preventDefault(); void createSession(); }}>
         <label>App Server source<select value={sourceId} onChange={(event) => setSourceId(event.currentTarget.value)}>
           {!sources.length && <option value="">没有 ready source</option>}
@@ -282,22 +310,28 @@ export function SessionShell({ api, defaultCwd, initialThread, onClose }: Sessio
         <button type="submit" disabled={busy || !cwd.startsWith('/') || !sourceId || (mode === 'resume' && !threadId.trim())}>{busy ? '正在连接…' : mode === 'resume' ? '恢复原生 TUI' : '启动原生 TUI'}</button>
       </form>}
       {worker && <div class="session-worker">
-        <div class="session-summary">
-          <span class={`badge badge-${worker.state}`}>{worker.state.replaceAll('_', ' ')}</span>
-          <code>{worker.workerId}</code><span>{worker.rows}×{worker.cols}</span>
-          <span>{lease?.leaseId ? '可输入' : '只读'}</span>
-          {worker.persistedWorker?.primaryThreadId && <code>{worker.persistedWorker.primaryThreadId}</code>}
-          {!!worker.threadLeases?.length && <span>{worker.threadLeases.filter((item) => item.state === 'active').length} 个 ThreadLease</span>}
-          {worker.activeTurns?.map((turn) => <button type="button" key={`${turn.codexThreadId}:${turn.codexTurnId}`}
+        <div class="session-toolbar">
+          <div class="session-status-cluster">
+            <span class={`badge badge-${worker.state}`} title={`Worker ${worker.workerId}`}>{worker.state.replaceAll('_', ' ')}</span>
+            <span class={`session-input-state ${lease?.leaseId ? 'session-input-active' : ''}`}><i />{lease?.leaseId ? '可输入' : '只读'}</span>
+            <span class="session-dimensions" aria-label={`终端尺寸 ${worker.rows} 行 ${worker.cols} 列`}>{worker.rows} × {worker.cols}</span>
+            <span class="session-lease-count">{activeThreadLeases} Thread{activeThreadLeases === 1 ? '' : 's'}</span>
+          </div>
+          <div class="session-toolbar-actions">{worker.activeTurns?.map((turn) => <button class="session-interrupt-action" type="button" key={`${turn.codexThreadId}:${turn.codexTurnId}`}
             onClick={() => void interrupt(turn.codexThreadId, turn.codexTurnId)} disabled={busy}>
             Interrupt {turn.codexTurnId.slice(0, 8)}
           </button>)}
-          <button type="button" onClick={() => void stop()} disabled={busy || ['stopping','exited'].includes(worker.state)}>停止 Worker</button>
+          <button class="session-stop-action" type="button" aria-label="停止 Worker" onClick={() => void stop()} disabled={busy || ['stopping','exited'].includes(worker.state)}><span aria-hidden="true">■</span> 停止</button></div>
+        </div>
+        <div class="session-context-strip" aria-label="Session context">
+          <span class="session-context-item session-context-cwd"><small>cwd</small><code title={worker.cwd}>{worker.cwd}</code></span>
+          {primaryThreadId && <span class="session-context-item"><small>thread</small><code title={primaryThreadId}>{primaryThreadId}</code></span>}
+          {sourceIdSummary && <span class="session-context-item"><small>source</small><code title={sourceIdSummary}>{sourceIdSummary}</code></span>}
         </div>
         {partial && <div class="terminal-partial" role="alert">terminal_partial：checkpoint 无法证明完整画面；请使用 History Viewer 核对持久历史。</div>}
         {attachment && <Suspense fallback={<div class="terminal-loading" role="status">正在加载 xterm…</div>}>
           <TerminalPanel key={attachment.descriptor} workerId={worker.workerId} attachment={attachment} leaseId={lease?.leaseId}
-            onConnected={acquireInput} onDisconnected={reconnect} onWorker={updateWorker}
+            onConnected={acquireInput} onDisconnected={reconnect} onWorker={updateWorkerSnapshot}
             onSnapshot={(snapshot: TerminalSnapshotFrame) => setPartial(!snapshot.complete)} onError={setError} />
         </Suspense>}
         {!attachment && !['stopping','exited','failed'].includes(worker.state) && <div class="terminal-loading" role="status">正在准备短期 terminal attachment…</div>}

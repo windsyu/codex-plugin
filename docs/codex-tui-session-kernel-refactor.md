@@ -107,6 +107,8 @@ cc-viewer 的限制同样是事实：其 IM worker 使用 `--dangerously-skip-pe
 - `codex-rs/tui/src/slash_command.rs:12`、`app/event_dispatch.rs:78` 和 `app/thread_goal_actions.rs:24` 分别证明 Slash catalog、`/clear` 和 `/goal` 的完整状态机存在于官方 TUI；
 - `codex-rs/app-server/src/outgoing_message.rs:295,383` 显示 server request 会投递给订阅连接，并由最先成功响应的 callback 解决；同一 Thread 存在两个控制 owner 会产生抢答风险；
 - `codex-rs/tui/src/app/thread_routing.rs`、`app/agent_navigation.rs` 和 `app/session_lifecycle.rs` 显示一个 TUI connection 会维护主 Thread、side/child Thread channel、订阅与切换；因此“每 Thread 一个 owner”不能错误实现为“每 worker 永远只有一个 Thread ID”；
+- `codex-rs/tui/src/history_cell/messages.rs` 将 reasoning summary 渲染为 `dim + italic`，工具标题和 Markdown heading/strong 按语义加粗，最终正文不整体加粗；`separators.rs` 只在发生实际工具/工作活动后输出 dim 的 `─` 分隔线；
+- `codex-rs/tui/src/terminal_probe.rs` 在启动后的 100 ms 窗口查询 `CSI 6n`、`OSC 10/11`、keyboard enhancement 和 primary DA；宿主若在浏览器 attach 前丢弃这些查询，TUI 无法获得前景/背景色并会降低用户消息背景和弱化色的适配质量；
 - 同目录的CLI parse tests、`outgoing_message.rs` callback/pending replay tests与TUI side-thread tests分别覆盖remote参数、request callback生命周期和child channel状态；设计事实由实现与测试共同支持，不只依赖帮助文案；
 - 本机 `codex-cli 0.146.1` 已验证 `resume --help` 支持 `--remote`、`-C` 与 `--no-alt-screen`。
 
@@ -132,7 +134,6 @@ cc-viewer 的限制同样是事实：其 IM worker 使用 `--dangerously-skip-pe
 - TUI 本地 Slash 注入可在 bracketed paste、IME、多行输入、当前 modal/picker 和 multi-agent Thread 导航下可靠串行；
 - server request 被 proxy 路由到 IM 而不转发给 TUI 时，TUI 能在后续通知到达后恢复一致；
 - 对 TUI→upstream request 做 raw/audit pre-commit 不会造成不可接受的交互延迟，且可从协议 method/Thread/Turn 字段确定归属而无需解析 ANSI；
-- 选定的 server-side VT checkpoint 实现可以在有限内存内生成安全、可重放的 terminal snapshot；
 - 目标 IM 平台能表达审批选项、问题表单、附件和超长消息。
 
 这些假设按分片使用 fake CLI、recorded fixture 和真实 App Server smoke test 验证。失败时优先缩小 capability，不允许以 ANSI 猜测伪造正确性。
@@ -150,7 +151,7 @@ cc-viewer 的限制同样是事实：其 IM worker 使用 `--dangerously-skip-pe
 | 浏览器重连 buffer 截断 | 终端画面不完整 | server-side VT checkpoint + watermark；无法证明完整时显式降级，历史走 V1 Viewer |
 | IM 平台重试 | 重复消息或重复审批 | platform message ID 去重、idempotency key、request CAS |
 | IM 全权限误操作 | 本机文件/命令受影响 | principal 绑定、Codex 原生 approval、清晰目标展示、审计、revoke |
-| ANSI/OSC 注入 | 浏览器或剪贴板风险 | xterm 安全配置、禁用危险 OSC、CSP、终端与 Markdown 隔离 |
+| ANSI/OSC 注入 | 浏览器或剪贴板风险 | xterm 文本渲染、禁用危险 OSC、CSP 禁止脚本/对象执行、终端与 Markdown 隔离；仅放行 DOM renderer 必需的内联样式 |
 
 ## 5. 目标组件与职责
 
@@ -192,6 +193,12 @@ codex resume -c check_for_update_on_startup=false --remote unix://<private-proxy
 此时 worker 尚无 ThreadLease，不能为了回答弹窗提前开放 terminal input。该覆盖不改变模型、
 approval 或 sandbox policy。具体参数必须由 compatibility manifest 生成，不允许拼接来自浏览器的任意 CLI flags。
 
+Hooks trust 等官方 TUI 启动交互由 terminal owner 处理，不能通过 ANSI/transcript 文本推断或自动回答。
+PTY 启动后的 10 秒超时只约束私有 App Server transport 始终未建立的情况；transport 一旦通过
+PID/UID 校验并连接成功，worker 保持 `Connecting` 并允许已认证 attachment 输入，直到用户完成交互、
+真实 Thread ID 到达后再进入 `Ready`。等待期间的进程退出、proxy 断线、source epoch 变化和显式 stop
+仍按原有 fail-closed 规则处理，也不得使用 bypass-hook-trust 参数替代用户决定。
+
 worker 有一个 `primaryThreadId` 和一个 `leasedThreadIds` 集合。普通 new/resume 初始只有主 Thread；官方 TUI 创建、订阅或导航到 side/child Thread 时，proxy 先为该 Thread 原子取得指向同一 worker 的租约，再允许继续控制。子 Thread 结束或 TUI 明确 unsubscribe 后才释放对应租约；切换当前显示 Thread 不等于释放仍被 TUI 持有的其他 Thread。
 
 ### 5.3 PTY 与 terminal transport
@@ -224,6 +231,14 @@ type TerminalServerFrame =
 ```
 
 输出 journal 是重连优化，不是审计记录。仅保存 byte ring buffer 不足以在前缀截断后重建 ANSI 状态，因此 worker 还必须维护有尺寸和序号边界的 server-side VT screen checkpoint。重连从最近 checkpoint 加后续 output replay；客户端 ack 只能推进该 attachment 的消费位置，不能删除其他 attachment 尚需的数据。checkpoint 或 replay 无法证明完整时返回 `truncated=true`/`terminal_partial`，只在目标 Codex 版本已验证的安全空闲状态请求 redraw；否则保留不完整提示并引导使用 V1 history，不注入可能回答 modal 的控制键。
+
+PTY output filter 将结果明确拆成 `display_bytes` 与 `terminal_replies`。SGR、光标、清屏、DEC synchronized-output 和其他正常 CSI 字节原样进入 journal/xterm；过滤器只消费精确匹配的 `OSC 10/11`、`CSI 6n`、keyboard/DA probe。前两类查询由服务端固定 capability 生成回复；`CSI ?u` 被消费，紧随其后的 primary DA 回复向 Codex 明确 xterm 不支持增强键盘。回复直接写回该 Worker 拥有的 PTY，不经过 InputLease，但浏览器数据永远不能进入此回复通道。OSC 8、52、标题、1337/文件传输以及超长、畸形的 OSC/CSI 继续跨 chunk 剥离且不产生回复；过滤器跟踪 UTF-8 continuation，不能把 CJK 字节误判为 8-bit OSC。
+
+终端宿主使用版本化 `codex-dark-v1` profile：前景 `#e8eaed`、背景 `#0d0f10` 和固定 ANSI 16 色由 Rust probe responder 与 Browser xterm 共同读取，TrueColor 不改写。VT checkpoint 使用 `vt100::Screen::state_formatted()` 保存可重建的颜色、bold/dim/italic、光标与输入模式；alternate-screen 或 scrollback 不能完整重建时仍显式标记 `terminal_partial`。
+
+Browser 只测量无 padding 的 xterm host，`ResizeObserver` 变化先合并到单个 animation frame，行列值稳定后才向 owner PTY 发送 resize；Browser 和 Worker 都忽略与最近一次相同的 `rows/cols`。宿主 toolbar/context strip 不得因长 source、Thread 或 Worker 标识换行并反向改变 terminal 高度。这样可以避免 `layout → fit → PTY resize → TUI redraw → layout` 反馈环，同时保留 owner 尺寸作为唯一 PTY geometry 来源。
+
+terminal WebSocket 的 `state` 只承载高频、易失的 Worker runtime snapshot；Browser 必须把这些字段合并到 REST/SSE 提供的完整 Session view，不能用轻量快照整体替换并丢失 persisted Worker、ThreadLease 或 active Turn 元数据。否则 PTY 输出与 SSE 更新交错时，Session chrome 会在完整/缺失状态之间闪烁。
 
 ### 5.4 私有 App Server proxy
 
@@ -263,6 +278,8 @@ Observer 继续以 Codex JSONL durable store 为主要历史事实源：
 - **History 面**：现有 V1 Timeline、搜索、安全 Markdown、Raw Inspector、completeness 和审计。
 
 Session 面不再实现 Slash parser、Goal/Plan picker、approval card 状态机、IME Composer 或乐观消息投影。需要原生语义的输入交给 TUI；宿主控件只调用封闭 Gateway lifecycle/lease API。
+
+Browser 使用 xterm 6、Fit 0.11 与 Unicode 11 addon，字重固定为 400/700，`minimumContrastRatio=1`，保留 xterm 的 dim opacity 与 bold-bright 行为；字体加载完成后重新 fit 并刷新全部行。所有 live output、checkpoint 和 replay 进入同一个 write coordinator，快照以 `CAN + RIS + checkpoint + replay` 的带内序列替换排队旧输出，禁止在 xterm 尚有待解析字节时调用带外 `terminal.reset()`。Session chrome 只保留连接、InputLease 和“回到底部”入口，不在 terminal canvas 内叠加图例、快捷键说明或品牌化文本。
 
 ### 5.7 V3 IM Bridge
 
@@ -412,6 +429,8 @@ starting|connecting|ready|detached
 
 terminal 输入原样写入 PTY，Slash、picker、快捷键、Plan、Goal、approval UI 均由官方 TUI 处理。Gateway 只验证 attachment 的 InputLease 和 frame 限额，不解释按键语义。
 
+Terminal 的视觉语义继承官方 TUI 的宿主终端模型：默认前景/背景、ANSI 16 色、dim 与 TrueColor 由 xterm 主题提供或透传，不解析 ANSI 来重绘品牌 UI。Session chrome 可使用独立的连接样式，但状态和控件必须位于 terminal canvas 外，不得遮挡 TUI，也不得通过动态高度造成 PTY resize 抖动；固定 chrome 只保留连接、InputLease 和“回到底部”入口，不展示输入/输出/Tip 图例、快捷键说明或复制 transcript。xterm 停留在历史滚动区时，近场引导必须明确提示输入位置在下方，并允许用户回到底部和恢复终端焦点；开始键盘输入也回到底部，避免输入实际生效但提示符不可见。危险 OSC 仍按安全边界过滤。
+
 ### 8.2 IM 与非终端 channel
 
 IM 不能简单等同为 ANSI 终端，采用两种受控路径：
@@ -548,7 +567,7 @@ channel_deliveries       # V3
 - private proxy 只允许当前用户中被授权的精确PTY child PID访问，worker exit 后清理；启动时 sweep orphan runtime dir 前验证 owner、路径和权限；
 - terminal WebSocket 使用现有认证、严格 Origin、短期 attach token 和 frame size/rate limit；
 - PTY output journal与VT checkpoint只保存在worker有界内存中，不写SQLite、日志或通用缓存；detach principal无权读取其他worker，worker exit立即清空；
-- 禁用或过滤 xterm 的危险 OSC（例如任意 URL、clipboard、文件下载），CSP 不允许终端内容执行 HTML；
+- 禁用或过滤 xterm 的危险 OSC（例如任意 URL、clipboard、文件下载）；CSP 的 `style-src` 放行 xterm DOM renderer 必需的内联样式，但继续禁止 inline script、外部脚本、对象和终端内容执行 HTML；
 - IM adapter secret 存于本机 secret/config 边界，不进入 SQLite、日志、fixture 或前端；
 - IM principal 必须经 allowlist/bind-first 或平台管理员确认后激活，并可撤销；
 - 绑定成功的 IM principal 与本机登录同权限，但每个危险操作仍执行 Codex 原生 permission/approval；

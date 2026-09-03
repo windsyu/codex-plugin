@@ -33,4 +33,25 @@ describe('responsive Viewer contract', () => {
     expect(css).toMatch(/\.project-heading\s*\{[^}]*justify-content:\s*flex-start/);
     expect(css).toMatch(/\.project-heading \.project-title\s*\{[^}]*flex:\s*1/);
   });
+
+  it('keeps the native terminal chrome stable and measures a padding-free xterm host', () => {
+    expect(css).toMatch(/\.session-toolbar\s*\{[^}]*white-space|\.session-status-cluster\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.session-context-strip\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.terminal-panel-wrap\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.terminal-stage\s*\{[^}]*padding:/);
+    expect(css).toMatch(/\.terminal-panel\s*\{[^}]*height:\s*100%/);
+    expect(css).not.toMatch(/\.terminal-panel\s*\{[^}]*padding:/);
+    expect(css).toMatch(/\.xterm-viewport\s*\{[^}]*scrollbar-gutter:\s*stable/);
+  });
+
+  it('keeps a single compact runtime status row outside the xterm canvas', () => {
+    expect(css).toMatch(/\.terminal-titlebar\s*\{[^}]*flex:\s*none/);
+    expect(css).toMatch(/\.terminal-runtime-status\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.terminal-runtime-status\s*\{[^}]*overflow-x:\s*auto/);
+    expect(css).toMatch(/\.terminal-panel-wrap:focus-within\s*\{[^}]*border-color:/);
+    expect(css).toMatch(/\.terminal-input-status\s*\{[^}]*flex:\s*none/);
+    expect(css).toMatch(/\.terminal-input-status-attention\s*\{[^}]*border-color:/);
+    expect(css).not.toContain('.terminal-legend');
+    expect(css).not.toContain('.terminal-input-guide');
+  });
 });

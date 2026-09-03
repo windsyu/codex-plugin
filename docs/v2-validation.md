@@ -1,6 +1,6 @@
 # V2.0 Validation Report
 
-> Date: 2026-09-02
+> Date: 2026-09-03
 > Version: `v0.2.0`
 > Result: Passed with the documented compatibility limits below
 
@@ -12,13 +12,13 @@ This report validates the first local V2 Control Plane release against [`codex-l
 
 | Gate | Command / evidence | Result |
 | --- | --- | --- |
-| Rust unit/integration | `cargo test --all-targets --all-features` | 211 passed; installed-Codex manual smoke and explicit 2M-event capacity test ignored; 0 failed |
+| Rust unit/integration | `cargo test --all-targets --all-features` | 221 passed; installed-Codex manual smoke and explicit 2M-event capacity test ignored; 0 failed |
 | Rust lint | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
 | Release build | `cargo build --release --all-features` | Passed; `codex-observerd 0.2.0` |
 | Web type check | `npm exec tsc -- --noEmit` | Passed |
-| Web unit | `npm test` | 65 passed; 0 failed |
+| Web unit | `npm test -- --run` | 79 passed; 0 failed |
 | Web production build | `npm run build` | Passed |
-| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 18 system-Chrome tests passed |
+| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 19 system-Chrome tests passed |
 | Patch hygiene | `git diff --check` | Passed |
 
 The ignored Rust tests are `writer::tests::two_million_event_capacity_path`, which is intentionally opt-in through `OBSERVER_RUN_CAPACITY=1`, and the installed-Codex smoke, which is run separately with an explicit executable. The ordinary bounded-writer, fan-out, scale-query, replay, backpressure and synthetic App Server tests remain enabled and passed.
@@ -108,15 +108,15 @@ This validation supersedes the Slice 1–3 implementation-status limits above wi
 
 | Gate | Command / evidence | Result |
 | --- | --- | --- |
-| Rust unit/integration | `cargo test --all-targets --all-features` | 211 passed; installed-Codex manual smoke and explicit 2M-event capacity test ignored; 0 failed |
+| Rust unit/integration | `cargo test --all-targets --all-features` | 221 passed; installed-Codex manual smoke and explicit 2M-event capacity test ignored; 0 failed |
 | Installed Codex TUI | `SESSION_REAL_CODEX_CLI=/opt/homebrew/bin/codex cargo test installed_codex_tui_new_and_resume_connect_through_private_session_proxy -- --ignored --nocapture` | Passed with `codex-cli 0.146.1`: new, native `/clear`, primary ThreadLease switch, resume |
 | Rust format | `cargo fmt --all -- --check` | Passed |
 | Rust lint | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
 | Rust release build | `cargo build --release --all-features` | Passed; `codex-observerd 0.2.0` |
 | Web type check | `npm exec tsc -- --noEmit` | Passed |
-| Web unit | `npm test` | 65 passed; 0 failed |
+| Web unit | `npm test` | 79 passed; 0 failed |
 | Web production build | `npm run build` | Passed |
-| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 18 system-Chrome tests passed |
+| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 19 system-Chrome tests passed |
 
 Slice 4 verifies a private `0600` one-downstream/one-upstream Unix WebSocket proxy, and authorizes the downstream against the exact PTY child PID in addition to same-user socket credentials. Tests reject symlink parents, a same-user process with the wrong PID, and a second downstream. They also cover preserved TUI initialize identity, distinct TUI/Gateway request-ID namespaces, numeric/string/null callback IDs, fragmented messages, back-to-back burst backpressure, reverse-order responses, one monotonic sequence across both directions, worker connection epochs, recoverable unknown envelopes, raw-first forwarding and write-after-audit ordering. Unattributed potential mutations fail closed; owner-attributed unknown requests and notifications are audited; a TUI or upstream disconnect after write becomes `outcome_unknown`; one worker disconnect does not rotate or stop a peer worker connection.
 
@@ -145,15 +145,53 @@ The Browser/xterm acceptance then verified all of the following against that rea
 - resume of the same Thread displayed its prior real TUI transcript, completed a second Turn, and recalled the code word supplied before the earlier Worker was stopped, proving durable Thread context continuity rather than UI-only replay;
 - the History view showed both completed Turns and the exact final answer after the Worker stopped.
 
-This live run also exposed that transient TUI→App Server JSON-RPC requests (`thread/read`, `thread/resume`, `thread/goal/get`, `turn/start`) were being projected as actionable pending server requests. Projection now admits only App Server→owner live requests. Migration 0020 removes already projected client requests by joining their raw event provenance and direction; the real database upgraded to schema 20, removed all four invalid rows, retained the raw envelopes, and the Viewer stopped showing a false pending-request count. Direction and cleanup regression tests are included in the 211-test Rust gate.
+This live run also exposed that transient TUI→App Server JSON-RPC requests (`thread/read`, `thread/resume`, `thread/goal/get`, `turn/start`) were being projected as actionable pending server requests. Projection now admits only App Server→owner live requests. Migration 0020 removes already projected client requests by joining their raw event provenance and direction; the real database upgraded to schema 20, removed all four invalid rows, retained the raw envelopes, and the Viewer stopped showing a false pending-request count. Direction and cleanup regression tests are included in the 221-test Rust gate.
 
 Migration 0019 was also exercised against the existing approximately 72,000-event database. Its stable FTS rowid rebuild removes the previous quadratic per-item delete path. A subsequent no-migration startup of the final debug binary opened the Viewer between 16 and 21 seconds after process launch (five-second observation resolution) while rescanning two local stores and 284 Threads. No release requirement currently defines a lower startup latency threshold.
 
 The App Server emitted non-fatal local-environment warnings for remote plugin catalog authentication and an older models-cache shape (`base_instructions` missing). They did not interrupt initialize, new/resume, Turn, `/clear`, reconnect or stop. No real pairing material, raw private payload, local database or rollout file is committed to the repository.
 
+### Hooks review readiness regression acceptance (2026-09-03)
+
+A subsequent real Browser/xterm run reproduced the official TUI `Hooks need review` gate before `thread/start` returned a Thread ID. The private proxy had already authenticated its exact PTY child PID/UID and was forwarding protocol envelopes, but the previous single ten-second readiness deadline still terminated that healthy Worker as `SESSION_WORKER_READINESS_TIMEOUT` while it waited for the operator decision.
+
+The Worker now treats authenticated private-proxy connection and Thread readiness as separate milestones: transport connection cancels only the startup kill timer, the Worker remains `connecting`, and only observation and persistence of the real primary Thread ID advances it to `ready`. A protocol connection loss, child exit, stale source or explicit stop continues to fail closed. The bridge also serializes bind and pending connected/ready/failure signals under one mutex so an early proxy event cannot be lost or reordered during Worker startup.
+
+The final live regression held `Hooks need review` open beyond the former ten-second limit. The persisted Worker remained `connecting`, retained an empty error code, and kept its xterm attachment and input lease. The operator then selected `Continue without trusting (hooks won't run)`; the same Worker advanced to `ready`, persisted one real primary Thread ID and one active primary ThreadLease, and remained usable in the native TUI. The Gateway did not trust hooks automatically, inspect ANSI to infer readiness, or use a hook-review bypass. The two deterministic 100 ms deadline tests prove that an authenticated protocol connection disarms the Thread-readiness timeout while a Worker that never establishes protocol transport still times out.
+
+### Browser xterm stability and visual acceptance (2026-09-03)
+
+The same real App Server and native TUI session was used to reproduce a visible terminal jitter. The cause was a browser layout/PTY feedback loop: `ResizeObserver` could schedule overlapping fits, the measured xterm host included layout padding, repeated equal row/column values were still propagated to the Worker, and toolbar wrapping changed the terminal height while the TUI was repainting for the resulting PTY resize.
+
+The Browser now coalesces observations into one animation-frame fit, waits for a stable size before sending PTY resize, and suppresses duplicate row/column values at both the TypeScript and Rust boundaries. The element measured by FitAddon has no padding; the one-line toolbar and separate context strip keep long identifiers from changing terminal height. Unit tests cover animation-frame coalescing, stabilization and duplicate suppression, while the Chrome E2E gate covers the responsive shell and terminal presentation.
+
+The terminal WebSocket's volatile `WorkerSnapshot` is merged into the latest complete REST/SSE Session view rather than replacing it. This keeps persisted source/Thread identity, ThreadLease count and active-Turn controls stable while PTY output publishes frequent runtime snapshots. Unit and Chrome E2E regressions inject the lightweight terminal state and assert that the complete Session chrome remains present.
+
+Live acceptance kept the real Worker `ready` with one active primary ThreadLease and sampled the rendered session 100 times over five seconds. The Session shell remained `1180 × 684`, terminal host `1120 × 442`, xterm screen `1104 × 437`, and PTY geometry `23 × 131` for every sample: no pixel-size or row/column oscillation was observed. The terminal now uses the shared versioned `codex-dark-v1` profile, a macOS monospace/CJK fallback stack, 14 px text and distinguishable 400/700 weights. xterm preserves native dim opacity and bold-bright behavior, while Codex TrueColor output remains untouched. Connection state and session metadata remain outside the terminal canvas and do not obscure or resize TUI content.
+
+The terminal interaction shell was then reduced without changing the native TUI boundary. It keeps only connection state, InputLease state and the return-to-bottom action; the input/output/Tip legend and shortcut guide were removed. No browser-owned brand, inferred role styling or synthetic separator is painted inside the terminal canvas. Browser acceptance covers active and conflict-read-only variants, 390 px containment and preservation of the existing xterm input path.
+
+The rebuilt debug binary was then restarted against the same existing App Server and exercised through system Chrome. The native TUI reached its real `Hooks need review` interaction while the compact host correctly showed connection and InputLease state. The acceptance Worker was stopped through the Session API afterward and persisted as `exited` with no error code.
+
+A follow-up screenshot exposed a usability failure after long output: xterm remained in its scrollback viewport, so the native bottom `›` prompt was outside the visible region even though the attachment still held InputLease and accepted input. TerminalPanel now tracks both xterm buffer scroll events and the concrete viewport geometry, changes the compact status to `input is below` while away from the bottom, and exposes a `return to bottom and input` focus action. Any leased keyboard input also returns the viewport to the prompt before forwarding the unchanged bytes. The Chrome regression writes 80 scrollback lines, uses a real wheel event, asserts the warning state, activates the recovery action, verifies bottom geometry and xterm focus, then verifies the original leased input frame.
+
+### Native Codex terminal presentation acceptance (2026-09-03)
+
+Source inspection used official checkout `41ece455b7fa7166f4fc38522952afdaa2604e18` (`rust-v0.146.1`) and the installed `codex-cli 0.146.1`. It confirmed that reasoning summaries are dim+italic, tools and Markdown headings/strong are semantically bold, final prose is not globally bold, and the dim horizontal separator is emitted only after concrete work. The implementation does not parse transcript roles or recreate these semantics in React.
+
+The server-side terminal output filter now consumes exact startup probes and returns only allowlisted terminal replies: `OSC 10/11` use `codex-dark-v1`, `CSI 6n` uses the server VT cursor, primary DA advertises the compatible xterm baseline, and enhanced-keyboard probing remains unsupported. Other CSI/DEC/SGR bytes pass unchanged; OSC links, clipboard, titles, file-transfer, malformed and oversized control strings remain stripped. Filter tests cover chunk boundaries, UTF-8 continuation bytes that overlap C1 controls, exact-query matching, unsafe OSC, ANSI/TrueColor foreground and background, bold/dim/italic, synchronized output, application cursor/bracketed paste modes, CJK/emoji width and alternate-screen partiality.
+
+Snapshot restoration uses `vt100::Screen::state_formatted()` and one serialized xterm write path for live output, checkpoint and replay. An in-band cancel/RIS sequence supersedes queued stale output, so no out-of-band `terminal.reset()` can race an older parser write. Current screen attributes and modes are restored; unavailable scrollback or alternate-screen state remains `terminal_partial`.
+
+The 79-test Web unit gate includes an actual xterm buffer oracle and write-coordinator races. The 19-test system-Chrome gate verifies visible dim+italic reasoning, 700-weight bold bright-cyan tool text, ANSI warning color, a dim separator, normal final text, one-copy snapshot restore while a stale live write is pending, return-to-bottom behavior and xterm focus.
+
+A live visual acceptance used an operator-started official App Server as an external prerequisite, an isolated Gateway database and the real native TUI. After the operator explicitly chose `Continue without trusting (hooks won't run)`, the TUI executed `printf NATIVE_STYLE_OK`. Stopping and resuming the same Thread restored that native history. A subsequent no-tool model request remained pending upstream and is not counted as a successful assertion.
+
+The release-browser inspection then found one host-only rendering gap: PTY bytes and xterm classes for bold, dim, italic and ANSI/TrueColor were intact, but the response CSP's original `style-src 'self'` prevented xterm 6 DOM renderer runtime style elements and inline cell colors from becoming CSSStyleSheets. The CSP now permits only the inline styles required by xterm while retaining `script-src 'self'`, `object-src 'none'`, `base-uri 'none'` and the existing unsafe-OSC filter. A response-header regression prevents inline script from being enabled. The rebuilt release resumed the dedicated Thread through a real App Server and verified computed `font-weight: 700`, italic style, 50% dim color and ANSI cyan, together with the native user-message background, headings and separators. The acceptance Worker, Gateway, App Server and temporary authentication/data directories were stopped and removed; no private payload, pairing material or screenshot was committed.
+
 ## Compatibility and known limits
 
-- The 2026-08-31 UI follow-up observed the configured official source checkout at `41ece455b7fa7166f4fc38522952afdaa2604e18`. The release protocol baseline remains the previously generated schema and fixture set from installed `codex-cli 0.149.1`; this UI-only follow-up did not retroactively rewrite the compatibility manifest's `sourceCommit: null` evidence.
+- The native-terminal acceptance inspected official source commit `41ece455b7fa7166f4fc38522952afdaa2604e18` (`rust-v0.146.1`) and installed `codex-cli 0.146.1`; that evidence is recorded in `codex-0.146.1-session-kernel.json`. The separate Controller schema baseline remains the generated `codex-cli 0.149.1` evidence in `codex-0.149.1-v2.json` with `sourceCommit: null`. Observations from a newer checkout are supplementary and do not expand either published compatibility claim.
 - Automated release validation remains deterministic and fixture-based. The additional manual E2E above exercised a real local App Server only through a dedicated test Thread and retained no private test payloads in the repository.
 - Tailscale behavior is covered by proxy/header/principal tests, not a live external Tailnet session.
 - The explicit 2M-event capacity test was not run in this gate. It remains available as an opt-in extended-capacity test.

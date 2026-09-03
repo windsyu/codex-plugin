@@ -1,8 +1,8 @@
 # Codex Local Gateway
 
-本机运行的 Codex Local Observer & Gateway。V1 store-first Observer 和 `v0.2.0` V2 Controller 基线已完成；当前开发主线是把活动会话重构为真实 Codex TUI + PTY Session Kernel，同时保持 V1历史与V2审计能力。固定边界见[核心约束](docs/codex-local-gateway-v2-development-constraints.md)，已验证实现见[V2详细设计](docs/codex-local-gateway-v2-detailed-design.md)。
+本机运行的 Codex Local Observer & Gateway。V1 store-first Observer、`v0.2.0` V2 Controller 和真实 Codex TUI + PTY Session Kernel Slice 1–9 已完成；当前交付重点是 V2 release validation 与兼容加固，同时保持 V1历史与V2审计能力。固定边界见[核心约束](docs/codex-local-gateway-v2-development-constraints.md)，已验证实现见[V2详细设计](docs/codex-local-gateway-v2-detailed-design.md)。
 
-目标架构、当前代码迁移映射与逐分片实施方案分别见[Session Kernel重构设计](docs/codex-tui-session-kernel-refactor.md)、[分片详细设计](docs/codex-tui-session-kernel-slices.md)和[ADR 0020](docs/decisions/0020-codex-tui-session-kernel.md)。Browser xterm和后续V3 IM共同接入唯一Thread owner：一个TUI的主/side/child Thread形成指向同一Session Worker的独占lease set，worker只持有一条private App Server connection；真实Codex TUI承担Slash、picker、Goal/Plan与终端交互，Gateway承担proxy、owner/lease、双向raw-first、CAS和audit。V2 Slice 1–9 已实现并通过合成协议、浏览器和已安装Codex CLI smoke；功能仍默认关闭，只有显式 `session_kernel="tui"` 才启用真实会话路径。V3 Slice 10–12 不在本次实现范围。
+目标架构、当前代码迁移映射与逐分片实施方案分别见[Session Kernel重构设计](docs/codex-tui-session-kernel-refactor.md)、[分片详细设计](docs/codex-tui-session-kernel-slices.md)、[ADR 0020](docs/decisions/0020-codex-tui-session-kernel.md)和[ADR 0021](docs/decisions/0021-terminal-capability-broker.md)。Browser xterm和后续V3 IM共同接入唯一Thread owner：一个TUI的主/side/child Thread形成指向同一Session Worker的独占lease set，worker只持有一条private App Server connection；真实Codex TUI承担Slash、picker、Goal/Plan与终端交互，Gateway承担proxy、owner/lease、双向raw-first、CAS和audit。V2 Slice 1–9 已实现，并通过合成协议、系统 Chrome、已安装Codex CLI smoke与真实既有 App Server new/resume/格式验收；功能仍默认关闭，只有显式 `session_kernel="tui"` 才启用真实会话路径。V3 Slice 10–12 不在本次实现范围。
 
 ## 已实现
 
@@ -32,7 +32,7 @@
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
 - live epoch 连续性/连接统计、capability/schema fingerprint、pending/resolved request 和断线 stale 状态持久化；durable/live 不一致会写入 `projection_conflicts`；
 - 合成 fixture，不读取或提交真实用户 rollout；
-- Session Kernel Slice 1–9：`controller.session_kernel` 默认 `off`；`preview` 保留固定 fake CLI 回退验证，`tui` 使用真实 `codex --remote` / `codex resume --remote`、PTY 和每 worker 私有 1:1 App Server proxy。private proxy同时校验Unix peer与精确PTY child PID；Worker/ThreadLease/InputLease/TurnOwner 与 connection epoch 持久化；双向 envelope raw-first，TUI mutation pre-write audit，写后断线为 `outcome_unknown`；Browser xterm 使用认证 terminal WebSocket、一次性 descriptor、control token、单赢家 InputLease、二进制 output frame 与 VT checkpoint 重连；
+- Session Kernel Slice 1–9：`controller.session_kernel` 默认 `off`；`preview` 保留固定 fake CLI 回退验证，`tui` 使用真实 `codex --remote` / `codex resume --remote`、PTY 和每 worker 私有 1:1 App Server proxy。private proxy同时校验Unix peer与精确PTY child PID；Worker/ThreadLease/InputLease/TurnOwner 与 connection epoch 持久化；双向 envelope raw-first，TUI mutation pre-write audit，写后断线为 `outcome_unknown`；Browser xterm 6 使用认证 terminal WebSocket、一次性 descriptor、control token、单赢家 InputLease、共享暗色terminal profile、受限terminal probe broker、串行write coordinator与带格式VT checkpoint重连；
 - 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
 `live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。V1 的设计、验证和已知限制已压缩到[开发历史归档](docs/archive/v1-development-history.md)。
@@ -248,4 +248,4 @@ POST /v2/sessions/{workerId}/stop
 
 V1 只读基础已完成。V2 `v0.2.0` 的九个纵向切片和发布门禁均已完成；自动化、临时 release E2E、安全负向测试、migration/rollback 与已知限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。
 
-2026-09-02，Session Kernel V2 Slice 1–9 已完成实现与本地验证：活动会话由真实Codex TUI + PTY驱动，一个Thread只有一个Session Worker和一条1:1 App Server owner connection；Browser主要承载xterm，V1 Viewer继续负责durable history。private proxy、持久化 lease/owner、raw-first audit、crash recovery、交互request路由、SessionShell默认入口和session-owned双写拒绝均已落地；Legacy Composer代码只在兼容回退窗口保留。最终真实 App Server 对话验收仍必须连接用户已经运行的 endpoint。V3 IM完整控制目标保持独立版本，不实现 Slice 10–12 adapter。
+2026-09-03，Session Kernel V2 Slice 1–9 已完成实现、自动化门禁和真实 App Server 验收：活动会话由真实Codex TUI + PTY驱动，一个Thread只有一个Session Worker和一条1:1 App Server owner connection；Browser主要承载xterm，V1 Viewer继续负责durable history。private proxy、持久化 lease/owner、raw-first audit、crash recovery、交互request路由、SessionShell默认入口、session-owned双写拒绝、Hooks readiness、稳定 resize/replay 和 Codex 原生 bold/dim/italic/ANSI/TrueColor 呈现均已验证；CSP只为 xterm DOM renderer 放行内联样式，inline script仍被禁止。Legacy Composer代码只在兼容回退窗口保留。V3 IM完整控制目标保持独立版本，不实现 Slice 10–12 adapter。

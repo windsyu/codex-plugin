@@ -1,6 +1,6 @@
 {
   "testedCodexCliVersion": "0.146.1",
-  "observedAt": "2026-09-02",
+  "observedAt": "2026-09-03",
   "sourceCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "transport": "private_1_to_1_websocket_over_unix_socket",
   "sessionKernelSlice": 9,
@@ -17,6 +17,19 @@
     "unknownEnvelopePolicy": "retain_redacted_raw_then_transparently_forward",
     "unattributedPotentialMutationPolicy": "fail_closed",
     "upstreamWriteDisconnectPolicy": "outcome_unknown"
+  },
+  "terminalHost": {
+    "profile": "codex-dark-v1",
+    "xterm": "6.0.0",
+    "fitAddon": "0.11.0",
+    "unicodeAddon": "0.9.0",
+    "unicodeVersion": "11",
+    "cspStylePolicy": "allow_inline_xterm_styles_block_inline_scripts",
+    "probeWindowMs": 100,
+    "supportedQueries": ["OSC 10", "OSC 11", "CSI 6n", "CSI ?u", "CSI c"],
+    "unsafeOscPolicy": "strip_without_reply",
+    "checkpoint": "vt100_state_formatted",
+    "alternateScreenCompleteness": "terminal_partial"
   },
   "fixtures": [
     "fixtures/app-server-session-proxy-0.146.1.jsonl"
@@ -43,6 +56,9 @@
     "exact_pty_child_peer_rejection",
     "all_supported_interactive_request_terminal_and_channel_routes",
     "unattributed_callback_explicit_terminal_handoff",
-    "xterm_unicode_paste_resize_disconnect_and_hostile_osc"
+    "xterm_unicode_paste_resize_disconnect_and_hostile_osc",
+    "codex_terminal_visual_attributes_and_startup_probe",
+    "serialized_checkpoint_live_output_restore",
+    "release_csp_computed_style_acceptance"
   ]
 }

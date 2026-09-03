@@ -2497,7 +2497,11 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert("content-security-policy", HeaderValue::from_static(
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        // xterm's DOM renderer generates scoped style elements and inline foreground/background
+        // colors at runtime. Blocking inline styles preserves the ANSI attributes in its buffer but
+        // prevents bold, dim, italic and color from reaching the rendered terminal. Terminal output
+        // remains text-only; inline scripts and external script sources stay blocked below.
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     ));
     response
 }
@@ -3817,6 +3821,26 @@ mod tests {
         assert!(constant_time_eq(b"token", b"token"));
         assert!(!constant_time_eq(b"token", b"other"));
         assert!(!constant_time_eq(b"token", b"token-long"));
+    }
+
+    #[tokio::test]
+    async fn security_headers_allow_xterm_runtime_styles_but_not_inline_scripts() -> Result<()> {
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(axum_middleware::from_fn(security_headers));
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+        let policy = response
+            .headers()
+            .get("content-security-policy")
+            .context("content-security-policy header")?
+            .to_str()?;
+
+        assert!(policy.contains("style-src 'self' 'unsafe-inline'"));
+        assert!(policy.contains("script-src 'self'"));
+        assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
+        Ok(())
     }
 
     #[tokio::test]
