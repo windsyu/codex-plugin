@@ -1,7 +1,7 @@
 # Codex TUI Session Kernel 分片详细设计
 
 > 状态：V2 Slice 1–9 implementation/validation complete；V3 Slice 10–12 pending
-> 日期：2026-09-01
+> 日期：2026-09-03
 > 总体设计：[`codex-tui-session-kernel-refactor.md`](codex-tui-session-kernel-refactor.md)
 > 约束：一个分片达到验收条件后，下一分片才能成为主线；每片都保持 `/v1` 可运行和可回退。
 
@@ -35,6 +35,23 @@ browser/IM => never receives raw App Server capability
 ### 1.3 共同测试门禁
 
 每片至少运行受影响模块的 unit/integration test、formatter、lint/type check 和 build。涉及 Web 的分片增加浏览器 E2E；涉及 storage 的分片增加 migration/reopen/crash test；涉及 PTY/proxy 的分片增加 fake process、断线和 backpressure test；涉及安全的分片必须有负向测试。
+
+### 1.4 当前开发进度（2026-09-03）
+
+| Slice | 状态 | 已完成结果 |
+| --- | --- | --- |
+| 1 | Complete | 决策边界、默认关闭的 `session_kernel`、health/settings capability 与模块依赖门禁。 |
+| 2 | Complete | 有界 PTY Worker、固定 argv、环境 allowlist、私有 runtime、readiness、resize 与安全 stop。 |
+| 3 | Complete | xterm 6 transport、一次性 attachment、InputLease、terminal probe broker、危险 OSC 过滤、带格式 VT checkpoint/replay；CSP 已允许 DOM renderer 所需内联样式但继续禁止 inline script。 |
+| 4 | Complete | 每 Worker 私有 1:1 App Server proxy、精确 PTY child peer 校验、双向 raw-first 与透明 ID 映射。 |
+| 5 | Complete | Worker/ThreadLease/InputLease/connection epoch 持久化，真实 Codex `new`、`/clear`、`resume` 与 fail-closed recovery。 |
+| 6 | Complete | Browser SessionShell 默认承载原生 TUI，History 保持 V1 durable 读取；IME、Slash、picker、滚动回到底部与只读 attachment 已验证。 |
+| 7 | Complete | TurnOwner、TUI mutation pre-write audit、crash-boundary reopen matrix、`outcome_unknown` 与单 Worker 断线隔离。 |
+| 8 | Complete | terminal/channel owner 的 approval、permission、question、MCP elicitation 路由与 request-version CAS；不包含真实 IM adapter。 |
+| 9 | Complete | `tui` 活动会话路径、session-owned 双写拒绝、Legacy Composer 回退边界及完整 release/真实 App Server 验收。 |
+| 10–12 | Pending（V3） | IM principal/binding、首个平台 adapter 与多平台完整交互，未混入 V2 交付。 |
+
+最终证据见 [`v2-validation.md`](v2-validation.md)；当前发布兼容基线见 [`../compatibility/codex-0.146.1-session-kernel.json`](../compatibility/codex-0.146.1-session-kernel.json)。
 
 ## 2. Slice 1 — 决策、边界与 feature flag
 
@@ -146,6 +163,11 @@ worker actor 使用有界 command channel，拥有 PTY handle，外部不能复�
 
 `create → Starting → Connecting` 由 fake CLI readiness marker 驱动；没有 readiness 不进入 `Ready`，10 秒超时进入显式 `SESSION_WORKER_READINESS_TIMEOUT` 并终止进程组。PTY EOF 与 child exit 分别记录，最终合并为一次 terminal state transition。`stop` 先拒绝输入，再向拥有的进程组发送 `SIGTERM`，1 秒后仍未退出则向同一进程组升级 `SIGKILL`。
 
+真实 TUI 的 10 秒 readiness 超时只持续到私有 App Server transport 通过 PID/UID 校验并连接；连接后即使
+Codex 正等待 Hooks trust 等 terminal-owned 启动交互，也保持 `Connecting` 而不终止进程。完成交互并观察到
+真实 Thread ID 后才进入 `Ready` 和升级 ThreadLease。未建立 transport 的进程仍按原 10 秒超时失败，
+已连接后的 proxy 断线或进程退出仍显式失败，不从终端文本猜测交互类型。
+
 ### 失败语义
 
 - executable 不存在：`SESSION_KERNEL_CLI_UNAVAILABLE`；
@@ -176,7 +198,7 @@ feature off 后不构造 worker registry；尚无数据库 schema 与真实 App 
 
 ## 4. Slice 3 — xterm transport、输出重放与输入租约雏形
 
-> 实现状态：Complete（2026-09-01）。采用 `@xterm/xterm 5.5`、`@xterm/addon-fit 0.10` 和 `vt100 0.16`；认证/Origin、一次性 descriptor、哈希保存的 attachment control token、刷新重附着、单赢家内存 InputLease、slow-consumer 隔离、VT checkpoint、OSC 隔离和窄屏 Playwright 已验证。
+> 实现状态：Complete（2026-09-03）。当前采用 `@xterm/xterm 6.0`、`@xterm/addon-fit 0.11`、`@xterm/addon-unicode11 0.9` 和 `vt100 0.16`；认证/Origin、一次性 descriptor、哈希保存的 attachment control token、刷新重附着、单赢家内存 InputLease、slow-consumer 隔离、完整 VT state checkpoint、受控 terminal probe 回复、危险 OSC 隔离和窄屏 Playwright 已验证。
 
 ### 用户可见结果
 
@@ -212,11 +234,11 @@ web/src/session/TerminalPanel.tsx
 web/src/session/terminalProtocol.ts
 ```
 
-SessionShell 显示 worker state、input owner、checkpoint/replay truncated 和 reconnect 状态。TerminalPanel 只处理 xterm 生命周期与 typed terminal frames，不解析 Slash 或 assistant output。
+SessionShell 显示 worker state、input owner、checkpoint/replay truncated 和 reconnect 状态。TerminalPanel 只处理 xterm 生命周期与 typed terminal frames，不解析 Slash 或 assistant output。FitAddon 只测量无 padding 的 terminal host；`ResizeObserver` 以 animation frame 合并，新的行列值稳定后才发送，Browser 与 Worker 均丢弃重复 geometry，避免 layout/PTY/TUI 重绘反馈环。terminal `state` 的轻量 Worker snapshot 只更新完整 REST/SSE Session view 的运行时字段，不能删除 persisted Worker、ThreadLease 或 active Turn 元数据。
 
-terminal snapshot必须携带`checkpointSeq`、`fromSeq`、`toSeq`、`rows`、`cols`和`complete`。服务端维护VT screen checkpoint并保留checkpoint之后的output journal；客户端先恢复checkpoint再应用后续output。若checkpoint损坏、尺寸不兼容或请求序号早于可恢复watermark，返回`complete=false`，不能把ANSI后缀标成完整screen。
+terminal snapshot必须携带`checkpointSeq`、`fromSeq`、`toSeq`、`rows`、`cols`和`complete`。服务端通过 `state_formatted()` 维护包含当前可见 cell 样式、光标和输入模式的VT screen checkpoint并保留checkpoint之后的output journal；客户端用单一串行 write coordinator 按 `CAN + RIS + checkpoint + replay` 恢复，不能在待解析 write 外调用 `terminal.reset()`。若checkpoint损坏、alternate-screen/scrollback不可完整重建、尺寸不兼容或请求序号早于可恢复watermark，返回`complete=false`，不能把ANSI后缀标成完整screen。
 
-Slice 3 冻结的 terminal wire format：client 使用 deny-unknown typed JSON text frame；server output 使用 `0x01 | outputSeq:u64 big-endian | raw PTY bytes` 二进制 frame；snapshot/state/error 使用 typed JSON，snapshot 的 `screen`/`replay` 为 Base64 bytes。output journal 上限 2 MiB/5 分钟，前缀回收前生成 `vt100` checkpoint；每个 Worker 最多保留 64 个 attachment，descriptor 有效 30 秒且只能建立一条连接，断线 InputLease grace 为 5 秒，过期且无 owner/连接的attachment自动回收。所有 7-bit/8-bit OSC 序列在服务端跨 frame 流式剥离，Browser 不注册 clipboard、link、title 或 download handler。
+Slice 3 冻结的 terminal wire format：client 使用 deny-unknown typed JSON text frame；server output 使用 `0x01 | outputSeq:u64 big-endian | raw PTY bytes` 二进制 frame；snapshot/state/error 使用 typed JSON，snapshot 的 `screen`/`replay` 为 Base64 bytes。output journal 上限 2 MiB/5 分钟，前缀回收前生成 `vt100` checkpoint；每个 Worker 最多保留 64 个 attachment，descriptor 有效 30 秒且只能建立一条连接，断线 InputLease grace 为 5 秒，过期且无 owner/连接的attachment自动回收。服务端跨 PTY chunk 保留全部正常 CSI/DEC/SGR，只消费精确匹配的 `OSC 10/11`、`CSI 6n` 和 keyboard/DA probe；颜色/光标查询得到服务端回复，`CSI ?u` 由 primary DA 回退明确为不支持增强键盘。OSC 8/52、标题、文件协议、超长及畸形序列继续剥离。Browser 不注册 clipboard、link、title 或 download handler。
 
 ### InputLease v0
 
@@ -237,13 +259,14 @@ Slice 3 冻结的 terminal wire format：client 使用 deny-unknown typed JSON t
 - attachment 数量上限、过期回收和重复创建限流；
 - 超大 frame、frame flood、无效 UTF-8/二进制边界；
 - OSC 52 clipboard、超链接、title、文件下载等危险控制序列；
+- `OSC 10/11`、DSR、DA 的精确回复、100 ms 启动窗口和跨 chunk 拆包；超长、畸形或不支持的 probe 不得回复；
 - terminal 内容不能逃逸到 React HTML/Markdown。
 
 ### 验收
 
 - 刷新能通过同一attachment安全重附着，并从最新VT checkpoint加保留journal恢复；journal截断后仍可恢复，checkpoint无法证明完整时有明确`terminal_partial`提示；ack sequence用于连接级进度/慢消费者诊断，不被误当成刷新后仍存在的浏览器screen；
 - 双浏览器输入不交织，非 owner可实时只读；
-- resize storm 有 debounce/上限，不阻塞 PTY；
+- resize storm 有 animation-frame 合并、稳定等待、重复值抑制和上限，不阻塞 PTY，也不在稳定 viewport 中持续重绘；
 - Rust actor/HTTP 测试覆盖双 attachment、active takeover 拒绝、control token 和 CAS；Playwright 覆盖连接、输入、刷新重附着、租约冲突只读状态和 390px 窄屏。
 
 ### 回退
@@ -460,10 +483,12 @@ proxy观察TUI产生的thread start/resume/fork/clear和multi-agent side/child s
 - session route只保留连接、owner、detach、interrupt、stop、history跳转；
 - Legacy Composer仍在独立 feature route，不与 xterm共享 input state；
 - 使用 xterm fit/search/accessibility addon前逐项审计，不启用危险 OSC handler。
+- terminal 采用共享、版本化的宿主前景/背景与 ANSI 16 色 profile，并原样保留官方 TUI TrueColor；使用可命中真实粗体的 400/700 字重，字体 ready 后重新 fit/refresh；session 状态、上下文和控件固定在 canvas 外，长标识不通过 toolbar 换行改变 terminal 高度。精简 shell 只保留连接、InputLease 和回到底部入口，不显示输入/输出/Tip 图例或快捷键说明，也不解析终端 transcript。
 
 ### 交互约束
 
 - 键盘输入、IME、paste、Slash 和 picker 全部进入 xterm；
+- 输入 owner 获得精简焦点状态，非 owner 明确显示实时只读；离开 xterm 底部时显示“输入框在下方”并可一键回到底部恢复焦点，键盘输入也自动回到底部；固定单行 chrome 在窄屏内部滚动且不改变 terminal 高度；
 - browser级快捷键不得截获 Codex TUI 常用组合；
 - terminal owner丢失时 xterm切为只读并在近场显示 owner；
 - 页面刷新只 detach/reconnect，不停止 worker；
@@ -474,8 +499,9 @@ proxy观察TUI产生的thread start/resume/fork/clear和multi-agent side/child s
 
 - Playwright：new、resume、`/clear`、`/goal`、Slash picker、model picker、审批、interrupt；
 - IME、多行 paste、窗口 resize、刷新、网络断开、双浏览器 owner；
-- terminal/history 切换、narrow viewport、screen reader label；
+- terminal/history 切换、narrow viewport、screen reader label、稳定 viewport 下无像素或行列振荡；
 - malicious ANSI/OSC、超长行、emoji/CJK width；
+- 合成 Codex 字节流的 dim+italic reasoning、bold 工具标题、ANSI/TrueColor、条件式横线，以及 snapshot/live-write 交错不重复；
 - legacy/session feature flag互斥与回退。
 
 ### 验收

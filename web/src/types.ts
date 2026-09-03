@@ -362,6 +362,11 @@ export interface SessionWorker {
   }>;
 }
 
+// The terminal WebSocket intentionally carries only the Worker actor's volatile snapshot.
+// Durable/session metadata is supplied by the REST/SSE SessionWorker view and must survive
+// every terminal state update.
+export type SessionWorkerSnapshot = Omit<SessionWorker, 'persistedWorker' | 'threadLeases' | 'activeTurns'>;
+
 export interface SessionAttachment {
   attachmentId: string;
   attachmentToken: string;

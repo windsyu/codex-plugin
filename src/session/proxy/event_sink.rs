@@ -114,54 +114,74 @@ pub struct WriterProxyEventSink {
 }
 
 #[derive(Default)]
+struct SessionProtocolBridgeState {
+    worker: Option<SessionWorkerHandle>,
+    pending_connected: bool,
+    pending_ready: bool,
+    pending_failure: Option<&'static str>,
+}
+
+#[derive(Default)]
 pub struct SessionProtocolBridge {
-    worker: Mutex<Option<SessionWorkerHandle>>,
-    pending_ready: Mutex<bool>,
-    pending_failure: Mutex<Option<&'static str>>,
+    state: Mutex<SessionProtocolBridgeState>,
 }
 
 impl SessionProtocolBridge {
     pub fn bind(&self, worker: SessionWorkerHandle) {
-        *self.worker.lock().expect("protocol bridge poisoned") = Some(worker.clone());
-        if let Some(error_code) = self
-            .pending_failure
-            .lock()
-            .expect("protocol bridge poisoned")
-            .take()
-        {
+        let (pending_failure, pending_ready, pending_connected) = {
+            let mut state = self.state.lock().expect("protocol bridge poisoned");
+            state.worker = Some(worker.clone());
+            (
+                state.pending_failure.take(),
+                std::mem::take(&mut state.pending_ready),
+                std::mem::take(&mut state.pending_connected),
+            )
+        };
+        if let Some(error_code) = pending_failure {
             let _ = worker.protocol_failed(error_code);
-        } else if std::mem::take(&mut *self.pending_ready.lock().expect("protocol bridge poisoned"))
-        {
+        } else if pending_ready {
             let _ = worker.protocol_ready();
+        } else if pending_connected {
+            let _ = worker.protocol_connected();
+        }
+    }
+
+    pub(crate) fn connected(&self) {
+        let worker = {
+            let mut state = self.state.lock().expect("protocol bridge poisoned");
+            if state.worker.is_none() {
+                state.pending_connected = true;
+            }
+            state.worker.clone()
+        };
+        if let Some(worker) = worker {
+            let _ = worker.protocol_connected();
         }
     }
 
     fn ready(&self) {
-        if let Some(worker) = self
-            .worker
-            .lock()
-            .expect("protocol bridge poisoned")
-            .clone()
-        {
+        let worker = {
+            let mut state = self.state.lock().expect("protocol bridge poisoned");
+            if state.worker.is_none() {
+                state.pending_ready = true;
+            }
+            state.worker.clone()
+        };
+        if let Some(worker) = worker {
             let _ = worker.protocol_ready();
-        } else {
-            *self.pending_ready.lock().expect("protocol bridge poisoned") = true;
         }
     }
 
     fn failed(&self, error_code: &'static str) {
-        if let Some(worker) = self
-            .worker
-            .lock()
-            .expect("protocol bridge poisoned")
-            .clone()
-        {
+        let worker = {
+            let mut state = self.state.lock().expect("protocol bridge poisoned");
+            if state.worker.is_none() {
+                state.pending_failure = Some(error_code);
+            }
+            state.worker.clone()
+        };
+        if let Some(worker) = worker {
             let _ = worker.protocol_failed(error_code);
-        } else {
-            *self
-                .pending_failure
-                .lock()
-                .expect("protocol bridge poisoned") = Some(error_code);
         }
     }
 }
@@ -1132,6 +1152,7 @@ impl ProxyEventSink for SessionProxyEventSink {
             None,
             None,
         )?;
+        self.bridge.connected();
         Ok(())
     }
 

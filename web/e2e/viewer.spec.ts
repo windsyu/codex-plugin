@@ -172,6 +172,7 @@ async function mockSessionKernel(
     inputLease:{leaseId:null,ownerAttachmentId:null,state:'none',version:0},
     persistedWorker:{workerId:'fake-worker',sourceId:'source-1',sourceEpoch:'epoch-1',state:'ready',version:4,
       inputLeaseVersion:0,primaryThreadId:'thread-fast'},
+    threadLeases:[{leaseId:'thread-lease-1',codexThreadId:'thread-fast',role:'primary',state:'active',version:1}],
     activeTurns:activeTurn ? [{codexThreadId:'thread-fast',codexTurnId:'turn-active'}] : [] };
   let attachCount = 0;
   let resumeControlValidated = false;
@@ -232,6 +233,7 @@ async function mockSessionKernel(
       terminalFrames: string[];
       disconnectTerminal?: () => void;
       pushTerminalOutput?: (text: string, outputSeq: number) => void;
+      pushTerminalSnapshot?: (screen: string, replay: string, toSeq: number) => void;
     };
     target.terminalFrames = [];
     class FixtureWebSocket {
@@ -250,6 +252,18 @@ async function mockSessionKernel(
           const bytes = new TextEncoder().encode(text); const output = new Uint8Array(9 + bytes.length);
           output[0] = 1; new DataView(output.buffer).setBigUint64(1, BigInt(outputSeq), false); output.set(bytes, 9);
           this.onmessage?.(new MessageEvent('message',{data:output.buffer}));
+        };
+        target.pushTerminalSnapshot = (screen, replay, toSeq) => {
+          const base64 = (value: string) => {
+            const bytes = new TextEncoder().encode(value);
+            let binary = '';
+            for (const byte of bytes) binary += String.fromCharCode(byte);
+            return btoa(binary);
+          };
+          this.onmessage?.(new MessageEvent('message',{data:JSON.stringify({
+            type:'snapshot',checkpointSeq:toSeq,fromSeq:toSeq + 1,toSeq,
+            rows:24,cols:80,screen:base64(screen),replay:base64(replay),encoding:'base64',complete:true,truncated:false
+          })}));
         };
         window.setTimeout(() => {
           this.readyState = 1; this.onopen?.(new Event('open'));
@@ -464,6 +478,26 @@ test('opens xterm preview, sends leased input, and reattaches after refresh on n
   await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('可输入')).toBeVisible();
+  await expect(dialog.locator('.terminal-title')).toContainText('Codex CLI');
+  await expect(dialog.locator('.terminal-runtime-status')).toContainText('输入已就绪');
+  await expect(dialog.getByRole('button',{name:'定位到输入框'})).toBeVisible();
+  await expect(dialog.locator('.terminal-legend')).toHaveCount(0);
+  await expect(dialog.locator('.terminal-input-guide')).toHaveCount(0);
+  await expect(dialog.locator('.session-context-strip')).toContainText('/fixture/project');
+  await expect(dialog.locator('.session-context-strip')).toContainText('thread-fast');
+  await expect(dialog.locator('.session-context-strip')).toContainText('source-1');
+  await expect(dialog.locator('.session-lease-count')).toHaveText('1 Thread');
+  await page.evaluate(() => (window as unknown as { pushTerminalOutput?: (text: string, seq: number) => void })
+    .pushTerminalOutput?.(Array.from({length:80},(_,index) => `history-${index}`).join('\r\n'), 50));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
+    .map((frame) => JSON.parse(frame))
+    .some((frame) => frame.type === 'ack' && frame.outputSeq === 50))).toBe(true);
+  await dialog.locator('.terminal-panel').hover();
+  await page.mouse.wheel(0,-5_000);
+  await expect(dialog.getByText('输入框在下方')).toBeVisible();
+  await dialog.getByRole('button',{name:'回到底部并输入'}).click();
+  await expect(dialog.getByText('输入已就绪')).toBeVisible();
+  await expect(dialog.locator('.xterm-helper-textarea')).toBeFocused();
   await dialog.locator('.xterm-helper-textarea').pressSequentially('hello');
   await expect.poll(() => page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
     .some((frame) => JSON.parse(frame).type === 'input'))).toBe(true);
@@ -475,6 +509,7 @@ test('opens xterm preview, sends leased input, and reattaches after refresh on n
   await expect.poll(fixture.getAttachCount).toBeGreaterThan(1);
   await expect.poll(fixture.getResumeControlValidated).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await expect(dialog.locator('.terminal-runtime-status')).toBeVisible();
   const stop = dialog.getByRole('button',{name:'停止 Worker'});
   expect(await stop.evaluate((button) => {
     const bounds = button.getBoundingClientRect();
@@ -502,7 +537,54 @@ test('keeps a second xterm attachment read-only when another attachment owns inp
   await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('只读',{exact:true})).toBeVisible();
+  await expect(dialog.locator('.terminal-input-status-readonly')).toContainText('实时只读');
   await expect(dialog.getByRole('alert')).toContainText('另一个浏览器持有输入租约');
+});
+
+test('renders Codex ANSI semantics and restores a snapshot once while a live write is pending', async ({ page }) => {
+  await mockSessionKernel(page);
+  await page.goto('/');
+  await page.getByRole('button',{name:'终端会话'}).click();
+  const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
+  await dialog.getByLabel('cwd').fill('/fixture/project');
+  await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
+  await expect(dialog.getByText('xterm 已连接')).toBeVisible();
+
+  await page.evaluate(() => {
+    const target = window as unknown as {
+      pushTerminalOutput?: (text: string, seq: number) => void;
+      pushTerminalSnapshot?: (screen: string, replay: string, toSeq: number) => void;
+    };
+    target.pushTerminalOutput?.(`${'STALE-LIVE-OUTPUT '.repeat(12_000)}\r\n`, 2);
+    target.pushTerminalSnapshot?.(
+      '\x1b[2;3mREASONING-DIM-ITALIC\x1b[0m\r\n\x1b[1;36mTOOL-BOLD-CYAN\x1b[0m\r\n',
+      '\x1b[33mWARNING-YELLOW\x1b[0m\r\n\x1b[2m────────\x1b[0m\r\nFINAL-NORMAL',
+      3
+    );
+  });
+
+  await expect.poll(() => page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
+    .map((frame) => JSON.parse(frame))
+    .some((frame) => frame.type === 'ack' && frame.outputSeq === 3))).toBe(true);
+  const terminalRows = dialog.locator('.xterm-rows');
+  await expect(terminalRows).toContainText('REASONING-DIM-ITALIC');
+  await expect(terminalRows).toContainText('TOOL-BOLD-CYAN');
+  await expect(terminalRows).toContainText('WARNING-YELLOW');
+  await expect(terminalRows).toContainText('────────');
+  await expect(terminalRows).toContainText('FINAL-NORMAL');
+  await expect(terminalRows).not.toContainText('STALE-LIVE-OUTPUT');
+  expect((await terminalRows.innerText()).match(/FINAL-NORMAL/g)).toHaveLength(1);
+
+  const styledRows = terminalRows.locator(':scope > div');
+  expect(await styledRows.nth(0).locator('span').first().evaluate((span) => ({
+    fontStyle:getComputedStyle(span).fontStyle,
+    opacity:getComputedStyle(span).color
+  }))).toMatchObject({fontStyle:'italic',opacity:'rgba(232, 234, 237, 0.5)'});
+  expect(await styledRows.nth(1).locator('span').first().evaluate((span) => ({
+    weight:getComputedStyle(span).fontWeight,
+    color:getComputedStyle(span).color
+  }))).toMatchObject({weight:'700',color:'rgb(111, 203, 214)'});
+  await expect(styledRows.nth(2).locator('span').first()).toHaveCSS('color','rgb(229, 192, 123)');
 });
 
 test('keeps IME-style Unicode, multiline paste, resize and disconnect recovery inside xterm', async ({ page }) => {
@@ -537,6 +619,12 @@ test('keeps IME-style Unicode, multiline paste, resize and disconnect recovery i
   await page.setViewportSize({width:760,height:720});
   await expect.poll(() => page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
     .some((serialized) => JSON.parse(serialized).type === 'resize'))).toBe(true);
+  await page.waitForTimeout(300);
+  const settledResizeCount = await page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
+    .filter((serialized) => JSON.parse(serialized).type === 'resize').length);
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => (window as unknown as { terminalFrames: string[] }).terminalFrames
+    .filter((serialized) => JSON.parse(serialized).type === 'resize').length)).toBe(settledResizeCount);
   await page.evaluate(() => (window as unknown as { pushTerminalOutput?: (text: string, seq: number) => void })
     .pushTerminalOutput?.(`安全中文🙂${'超长'.repeat(5000)}\r\n\x1b]8;;javascript:alert(1)\x07不可执行链接\x1b]8;;\x07`, 100));
   await expect(dialog.locator('.terminal-panel script, .terminal-panel img, .terminal-panel a[href^="javascript:"]')).toHaveCount(0);

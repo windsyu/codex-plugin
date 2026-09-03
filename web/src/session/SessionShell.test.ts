@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { SessionWorker } from '../types';
-import { sessionOwnsInitialThread } from './SessionShell';
+import type { SessionWorker, SessionWorkerSnapshot } from '../types';
+import { mergeSessionWorkerSnapshot, sessionOwnsInitialThread } from './SessionShell';
 
 const worker: SessionWorker = {
   workerId: 'worker-1',
@@ -44,5 +44,38 @@ describe('SessionShell ownership restore', () => {
     expect(sessionOwnsInitialThread({ ...worker, persistedWorker: undefined }, {
       sourceId: 'source-1', sourceEpoch: 'epoch-1', codexThreadId: 'thread-1'
     })).toBe(false);
+  });
+
+  it('merges volatile terminal state without dropping SSE session metadata', () => {
+    const snapshot: SessionWorkerSnapshot = {
+      workerId: 'worker-1',
+      state: 'ready',
+      cwd: '/fixture',
+      rows: 30,
+      cols: 100,
+      outputSeq: 8,
+      terminalRetainedBytes: 256,
+      terminalCheckpointBytes: 128,
+      ptyEof: false,
+      inputLease: {
+        leaseId: 'input-1',
+        ownerAttachmentId: 'attachment-1',
+        version: 1,
+        state: 'active'
+      }
+    };
+
+    const merged = mergeSessionWorkerSnapshot(worker, snapshot);
+
+    expect(merged).toMatchObject({ rows: 30, cols: 100, outputSeq: 8 });
+    expect(merged.persistedWorker).toBe(worker.persistedWorker);
+    expect(merged.threadLeases).toBe(worker.threadLeases);
+    expect(merged.activeTurns).toBe(worker.activeTurns);
+  });
+
+  it('ignores a late terminal snapshot from a different Worker', () => {
+    const snapshot = { ...worker, workerId: 'worker-stale', persistedWorker: undefined,
+      threadLeases: undefined, activeTurns: undefined } as SessionWorkerSnapshot;
+    expect(mergeSessionWorkerSnapshot(worker, snapshot)).toBe(worker);
   });
 });
