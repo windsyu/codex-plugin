@@ -34,6 +34,7 @@ mod pool;
 mod projection;
 mod query;
 mod schema;
+mod session;
 mod write;
 
 pub(crate) use gateway::{
@@ -646,8 +647,9 @@ impl Database {
                 "INSERT INTO raw_events(
                    event_id,source_id,epoch_id,source_seq,dedupe_key,observed_at_ms,event_at_ms,
                    thread_key,codex_thread_id,turn_id,item_id,method,phase,durability,
-                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id,blob_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                   source_fingerprint,stored_raw_hash,raw_json,redaction_json,decode_status,decode_error,request_id,store_source_id,blob_id,
+                   protocol_direction,worker_id,worker_connection_epoch,proxy_seq)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
                 params![
                     stored_event.event_id, stored_event.source_id, stored_event.epoch_id, stored_event.source_seq,
                     stored_event.dedupe_key, stored_event.observed_at_ms, stored_event.event_at_ms,
@@ -655,6 +657,8 @@ impl Database {
                     stored_event.method, stored_event.phase, stored_event.durability, stored_event.source_fingerprint, stored_event.stored_raw_hash,
                     stored_event.raw_json, stored_event.redaction_json, stored_event.decode_status, stored_event.decode_error,
                     stored_event.request_id, stored_event.store_source_id, stored_event.blob_id,
+                    stored_event.protocol_direction, stored_event.worker_id,
+                    stored_event.worker_connection_epoch, stored_event.proxy_seq,
                 ],
             )?;
             let event_seq = transaction.last_insert_rowid();
@@ -1269,7 +1273,11 @@ impl Database {
              (SELECT event_seq FROM raw_events WHERE thread_key=?1)",
             [thread_key],
         )?;
-        transaction.execute("DELETE FROM search_index WHERE thread_key=?1", [thread_key])?;
+        transaction.execute(
+            "DELETE FROM search_index WHERE rowid IN
+             (SELECT rowid FROM items WHERE thread_key=?1)",
+            [thread_key],
+        )?;
         transaction.execute(
             "DELETE FROM pending_requests WHERE thread_key=?1",
             [thread_key],
@@ -1523,6 +1531,10 @@ impl Database {
                         item_id: row.get(11)?,
                         request_id: row.get(21)?,
                         blob_id,
+                        protocol_direction: None,
+                        worker_id: None,
+                        worker_connection_epoch: None,
+                        proxy_seq: None,
                         method,
                         phase: phase.clone(),
                         durability,
@@ -1822,7 +1834,7 @@ fn recompute_all_completeness(connection: &Connection) -> Result<()> {
                SUM(CASE WHEN decode_status='error' THEN 1 ELSE 0 END),
                SUM(CASE WHEN decode_status='unknown' THEN 1 ELSE 0 END),
                MAX(CASE WHEN durability='durable' AND method IN ('event/task_started','event/turn_started') THEN 1 ELSE 0 END),
-               MAX(CASE WHEN durability='durable' AND method IN ('event/task_complete','event/turn_complete') THEN 1 ELSE 0 END)
+               MAX(CASE WHEN durability='durable' AND method IN ('event/task_complete','event/turn_complete','event/turn_aborted') THEN 1 ELSE 0 END)
              FROM raw_events WHERE thread_key=?1 AND turn_id=?2",
             params![thread_key, turn_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -2053,12 +2065,37 @@ fn project_event(
                     "UPDATE threads SET runtime_status='idle' WHERE thread_key=?1",
                     [&event.thread_key],
                 )?;
+            } else if nested_type == "turn_aborted"
+                && let Some(turn_id) = event.turn_id.as_deref()
+            {
+                upsert_turn(
+                    transaction,
+                    event,
+                    event_seq,
+                    TurnUpdate {
+                        turn_id,
+                        status: "interrupted",
+                        started: event
+                            .payload
+                            .get("started_at")
+                            .and_then(Value::as_i64)
+                            .map(|v| v * 1000)
+                            .unwrap_or(time),
+                        completed: Some(time),
+                        durable_started: true,
+                    },
+                )?;
+                transaction.execute(
+                    "UPDATE threads SET runtime_status='idle' WHERE thread_key=?1",
+                    [&event.thread_key],
+                )?;
             }
         }
         _ => {}
     }
 
     if event.phase == "request"
+        && event.protocol_direction.as_deref() != Some("tui_to_upstream")
         && let Some(request_id) = event.request_id.as_deref()
     {
         let method = event.method.to_ascii_lowercase();
@@ -2136,22 +2173,20 @@ fn project_event(
                     projection, json!({"eventSeq":event_seq,"source":provenance_source,"epoch":event.epoch_id}).to_string(), event_seq,
                     append_delta],
         )?;
-        let indexed_summary = transaction
-            .query_row(
-                "SELECT summary_text FROM items WHERE thread_key=?1 AND turn_scope=?2 AND item_id=?3",
-                params![event.thread_key, turn_scope, item_id],
-                |row| row.get::<_, Option<String>>(0),
-            )?
-            .filter(|text| !text.trim().is_empty());
+        let (item_rowid, indexed_summary) = transaction.query_row(
+            "SELECT rowid,summary_text FROM items
+             WHERE thread_key=?1 AND turn_scope=?2 AND item_id=?3",
+            params![event.thread_key, turn_scope, item_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?;
+        transaction.execute("DELETE FROM search_index WHERE rowid=?1", [item_rowid])?;
+        let indexed_summary = indexed_summary.filter(|text| !text.trim().is_empty());
         if let Some(summary) = indexed_summary.as_deref() {
             let entity_key = format!("{}:{}:{}", event.thread_key, turn_scope, item_id);
             transaction.execute(
-                "DELETE FROM search_index WHERE entity_key=?1",
-                [&entity_key],
-            )?;
-            transaction.execute(
-                "INSERT INTO search_index(entity_key,thread_key,item_id,text) VALUES (?1,?2,?3,?4)",
-                params![entity_key, event.thread_key, item_id, summary],
+                "INSERT INTO search_index(rowid,entity_key,thread_key,item_id,text)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![item_rowid, entity_key, event.thread_key, item_id, summary],
             )?;
             transaction.execute(
                 "UPDATE threads SET last_message_preview=?1 WHERE thread_key=?2",
@@ -2590,6 +2625,189 @@ mod tests {
     use crate::ingest::Importer;
     use tempfile::TempDir;
 
+    fn message_event(event_id: &str, source_seq: i64, summary: &str) -> NormalizedEvent {
+        let payload = json!({"type":"agent_message","message":summary});
+        NormalizedEvent {
+            event_id: event_id.into(),
+            source_id: "source".into(),
+            store_source_id: "source".into(),
+            epoch_id: "epoch".into(),
+            source_seq,
+            dedupe_key: event_id.into(),
+            observed_at_ms: source_seq,
+            event_at_ms: Some(source_seq),
+            thread_key: "thread-key".into(),
+            codex_thread_id: "thread-1".into(),
+            turn_id: Some("turn-1".into()),
+            item_id: Some("item-1".into()),
+            request_id: None,
+            blob_id: None,
+            protocol_direction: None,
+            worker_id: None,
+            worker_connection_epoch: None,
+            proxy_seq: None,
+            method: "item/completed".into(),
+            phase: "completed".into(),
+            durability: "durable".into(),
+            projectable: true,
+            source_fingerprint: "fingerprint".into(),
+            stored_raw_hash: blake3::hash(payload.to_string().as_bytes())
+                .to_hex()
+                .to_string(),
+            raw_json: payload.to_string(),
+            redaction_json: "{}".into(),
+            decode_status: "decoded".into(),
+            decode_error: None,
+            top_type: "event_msg".into(),
+            item_type: Some("agent_message".into()),
+            item_status: Some("completed".into()),
+            summary_text: Some(summary.into()),
+            payload,
+        }
+    }
+
+    fn protocol_request_event(
+        event_id: &str,
+        source_seq: i64,
+        request_id: &str,
+        method: &str,
+        direction: &str,
+    ) -> NormalizedEvent {
+        let payload = json!({"threadId":"thread-1"});
+        NormalizedEvent {
+            event_id: event_id.into(),
+            source_id: "source".into(),
+            store_source_id: "source".into(),
+            epoch_id: "epoch".into(),
+            source_seq,
+            dedupe_key: event_id.into(),
+            observed_at_ms: source_seq,
+            event_at_ms: Some(source_seq),
+            thread_key: "thread-key".into(),
+            codex_thread_id: "thread-1".into(),
+            turn_id: None,
+            item_id: None,
+            request_id: Some(request_id.into()),
+            blob_id: None,
+            protocol_direction: Some(direction.into()),
+            worker_id: Some("worker-1".into()),
+            worker_connection_epoch: Some("connection-1".into()),
+            proxy_seq: Some(source_seq),
+            method: method.into(),
+            phase: "request".into(),
+            durability: "transient".into(),
+            projectable: true,
+            source_fingerprint: format!("fingerprint-{event_id}"),
+            stored_raw_hash: blake3::hash(payload.to_string().as_bytes())
+                .to_hex()
+                .to_string(),
+            raw_json: payload.to_string(),
+            redaction_json: "{}".into(),
+            decode_status: "decoded".into(),
+            decode_error: None,
+            top_type: "app_server_proxy".into(),
+            item_type: None,
+            item_status: None,
+            summary_text: None,
+            payload,
+        }
+    }
+
+    #[test]
+    fn only_upstream_server_requests_enter_pending_request_projection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.upsert_source("source", "fixture", &json!({}), "ready")?;
+        database.ingest_batch(&OwnedIngestBatch {
+            source_id: "source".into(),
+            epoch_id: "epoch".into(),
+            checkpoint_key: "proxy:worker-1:connection-1".into(),
+            file_identity: "worker:worker-1".into(),
+            byte_offset: 0,
+            ordinal: 2,
+            current_turn_id: None,
+            clean_eof: false,
+            events: vec![
+                protocol_request_event("client-request", 1, "1", "thread/read", "tui_to_upstream"),
+                protocol_request_event(
+                    "server-request",
+                    2,
+                    "2",
+                    "item/tool/requestUserInput",
+                    "upstream_to_tui",
+                ),
+            ],
+        })?;
+
+        let connection = database.connect()?;
+        let client_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pending_requests WHERE request_id='1'",
+            [],
+            |row| row.get(0),
+        )?;
+        let server: (i64, String, String) = connection.query_row(
+            "SELECT COUNT(*),request_type,state FROM pending_requests WHERE request_id='2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(client_count, 0);
+        assert_eq!(server, (1, "user_input".into(), "pending".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn migration_twenty_removes_legacy_client_requests_from_pending_projection() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.upsert_source("source", "fixture", &json!({}), "ready")?;
+        database.ingest_batch(&OwnedIngestBatch {
+            source_id: "source".into(),
+            epoch_id: "epoch".into(),
+            checkpoint_key: "proxy:worker-1:connection-1".into(),
+            file_identity: "worker:worker-1".into(),
+            byte_offset: 0,
+            ordinal: 1,
+            current_turn_id: None,
+            clean_eof: false,
+            events: vec![protocol_request_event(
+                "client-request",
+                1,
+                "1",
+                "thread/read",
+                "tui_to_upstream",
+            )],
+        })?;
+        let connection = database.connect()?;
+        let request_event_seq: i64 = connection.query_row(
+            "SELECT event_seq FROM raw_events WHERE dedupe_key='client-request'",
+            [],
+            |row| row.get(0),
+        )?;
+        connection.execute(
+            "INSERT INTO pending_requests(source_id,epoch_id,request_id,thread_key,request_type,
+               state,request_event_seq,payload_json)
+             VALUES ('source','epoch','1','thread-key','unknown','pending',?1,'{}')",
+            [request_event_seq],
+        )?;
+        connection.pragma_update(None, "user_version", 19)?;
+        drop(connection);
+
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let pending_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pending_requests WHERE request_id='1'",
+            [],
+            |row| row.get(0),
+        )?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(pending_count, 0);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn database_and_data_directory_are_private_on_disk() -> Result<()> {
@@ -2622,6 +2840,101 @@ mod tests {
         connection.execute_batch(MIGRATION_4)?;
         drop(connection);
         Ok(database)
+    }
+
+    #[test]
+    fn durable_turn_aborted_is_an_interrupted_terminal_turn() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.upsert_source("source", "fixture", &json!({}), "ready")?;
+        let event = |id: &str, source_seq: i64, nested_type: &str| {
+            let payload = json!({"type":nested_type,"turn_id":"turn-1"});
+            NormalizedEvent {
+                event_id: id.into(),
+                source_id: "source".into(),
+                store_source_id: "source".into(),
+                epoch_id: "epoch".into(),
+                source_seq,
+                dedupe_key: id.into(),
+                observed_at_ms: source_seq,
+                event_at_ms: Some(source_seq),
+                thread_key: "thread-key".into(),
+                codex_thread_id: "thread-1".into(),
+                turn_id: Some("turn-1".into()),
+                item_id: None,
+                request_id: None,
+                blob_id: None,
+                protocol_direction: None,
+                worker_id: None,
+                worker_connection_epoch: None,
+                proxy_seq: None,
+                method: format!("event/{nested_type}"),
+                phase: if nested_type == "task_started" {
+                    "started"
+                } else {
+                    "completed"
+                }
+                .into(),
+                durability: "durable".into(),
+                projectable: true,
+                source_fingerprint: "fingerprint".into(),
+                stored_raw_hash: blake3::hash(payload.to_string().as_bytes())
+                    .to_hex()
+                    .to_string(),
+                raw_json: payload.to_string(),
+                redaction_json: "{}".into(),
+                decode_status: "decoded".into(),
+                decode_error: None,
+                top_type: "event_msg".into(),
+                item_type: None,
+                item_status: None,
+                summary_text: None,
+                payload,
+            }
+        };
+        database.ingest_batch(&OwnedIngestBatch {
+            source_id: "source".into(),
+            epoch_id: "epoch".into(),
+            checkpoint_key: "fixture".into(),
+            file_identity: "fixture".into(),
+            byte_offset: 2,
+            ordinal: 2,
+            current_turn_id: Some("turn-1".into()),
+            clean_eof: true,
+            events: vec![
+                event("started", 1, "task_started"),
+                event("aborted", 2, "turn_aborted"),
+            ],
+        })?;
+
+        let connection = database.connect()?;
+        let (status, completeness, reasons): (String, String, String) = connection.query_row(
+            "SELECT status,capture_completeness,completeness_reasons_json FROM turns
+             WHERE thread_key='thread-key' AND turn_id='turn-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(status, "interrupted");
+        assert_eq!(completeness, "durable_complete");
+        assert_eq!(reasons, "[]");
+
+        let mut coverage = load_coverage(&connection, "thread-key", "turn-1")?;
+        coverage.durable_terminal = false;
+        connection.execute(
+            "UPDATE turns SET coverage_json=?1,capture_completeness='durable_partial',
+             completeness_reasons_json='[\"durable_turn_not_terminal\"]'
+             WHERE thread_key='thread-key' AND turn_id='turn-1'",
+            [serde_json::to_string(&coverage)?],
+        )?;
+        recompute_all_completeness(&connection)?;
+        let recomputed: String = connection.query_row(
+            "SELECT capture_completeness FROM turns WHERE thread_key='thread-key' AND turn_id='turn-1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(recomputed, "durable_complete");
+        Ok(())
     }
 
     #[test]
@@ -2767,7 +3080,7 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(version, 15);
+        assert_eq!(version, schema::LATEST_SCHEMA_VERSION);
         assert!(exists);
         Ok(())
     }
@@ -2798,6 +3111,347 @@ mod tests {
         )?;
         assert_eq!(version, 14);
         assert!(!table_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_sixteen_adds_proxy_provenance_schema_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, schema::LATEST_SCHEMA_VERSION);
+        for column in [
+            "protocol_direction",
+            "worker_id",
+            "worker_connection_epoch",
+            "proxy_seq",
+        ] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('raw_events') WHERE name=?1)",
+                [column],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing Slice 4 raw provenance column {column}");
+        }
+        let origin_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('gateway_commands') WHERE name='origin')",
+            [],
+            |row| row.get(0),
+        )?;
+        let connection_table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='worker_connection_epochs')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(origin_exists);
+        assert!(connection_table_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_sixteen_rolls_back_proxy_columns_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 16 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute(
+            "CREATE INDEX raw_events_worker_connection_seq ON raw_events(event_seq)",
+            [],
+        )?;
+        drop(connection);
+
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let proxy_column_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('raw_events') WHERE name='protocol_direction')",
+            [],
+            |row| row.get(0),
+        )?;
+        let origin_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('gateway_commands') WHERE name='origin')",
+            [],
+            |row| row.get(0),
+        )?;
+        let connection_table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='worker_connection_epochs')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 15);
+        assert!(!proxy_column_exists);
+        assert!(!origin_exists);
+        assert!(!connection_table_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_seventeen_adds_exclusive_session_lease_schema_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, schema::LATEST_SCHEMA_VERSION);
+        for table in [
+            "session_workers",
+            "session_worker_transitions",
+            "thread_leases",
+            "thread_lease_transitions",
+            "terminal_attachments",
+            "input_leases",
+            "input_lease_transitions",
+        ] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing Slice 5 table {table}");
+        }
+
+        connection.execute(
+            "INSERT INTO gateway_commands(
+               command_id,principal_id,capability,idempotency_key,payload_hash,source_id,source_epoch,
+               input_summary_json,origin,state,created_at_ms,updated_at_ms)
+             VALUES ('command-1','principal-1','session.create','key-1','hash-1','source-1',
+               'epoch-1','{}','worker_control','received',1,1)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO session_workers(
+               worker_id,create_command_id,principal_id,source_id,source_epoch,mode,state,version,canonical_cwd,rows,cols,
+               runtime_dir_name,created_at_ms,updated_at_ms)
+             VALUES ('worker-1','command-1','principal-1','source-1','epoch-1','resume','ready',1,'/synthetic',24,80,
+               'worker-1',1,1)",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO thread_leases(
+               lease_id,source_id,source_epoch,codex_thread_id,worker_id,role,state,version,
+               created_at_ms,updated_at_ms)
+             VALUES ('lease-1','source-1','epoch-1','thread-1','worker-1','primary','active',1,1,1)",
+            [],
+        )?;
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO thread_leases(
+                       lease_id,source_id,source_epoch,codex_thread_id,worker_id,role,state,version,
+                       created_at_ms,updated_at_ms)
+                     VALUES ('lease-2','source-1','epoch-1','thread-1','worker-1','side','active',1,1,1)",
+                    [],
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migration_seventeen_rolls_back_all_session_tables_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 17 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute("CREATE TABLE input_leases(conflict INTEGER)", [])?;
+        drop(connection);
+
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let worker_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='session_workers')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 16);
+        assert!(!worker_table);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_eighteen_adds_turn_owner_schema_idempotently() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        database.migrate()?;
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, schema::LATEST_SCHEMA_VERSION);
+        for table in ["turn_owners", "turn_owner_transitions"] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing Slice 7 table {table}");
+        }
+        for trigger in [
+            "turn_owner_transitions_no_update",
+            "turn_owner_transitions_no_delete",
+        ] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1)",
+                [trigger],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing append-only trigger {trigger}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn migration_eighteen_rolls_back_turn_owner_tables_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 18 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute(
+            "CREATE INDEX turn_owner_transitions_turn ON session_workers(worker_id)",
+            [],
+        )?;
+        drop(connection);
+
+        assert!(database.migrate().is_err());
+        let connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let owner_table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='turn_owners')",
+            [],
+            |row| row.get(0),
+        )?;
+        let transitions_table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='turn_owner_transitions')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 17);
+        assert!(!owner_table_exists);
+        assert!(!transitions_table_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_nineteen_rebuilds_search_index_with_stable_item_rowids() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 19 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute_batch(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+               capture_completeness,completeness_reasons_json,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','source','thread-1',0,'durable_complete','[]','{}','{}',1);
+             INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,summary_text,
+               projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','turn-1','item-1','turn-1','agent_message','completed',
+               'original needle','{}','{}',1);
+             INSERT INTO search_index(rowid,entity_key,thread_key,item_id,text)
+             VALUES (9001,'thread-key:turn-1:item-1','thread-key','item-1','original needle');",
+        )?;
+        drop(connection);
+
+        database.migrate()?;
+        database.migrate()?;
+        let mut connection = database.connect()?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let (item_rowid, search_rowid): (i64, i64) = connection.query_row(
+            "SELECT items.rowid,search_index.rowid FROM items JOIN search_index
+               ON search_index.entity_key=items.thread_key || ':' || items.turn_scope || ':' || items.item_id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
+        assert_eq!(item_rowid, search_rowid);
+        assert_ne!(search_rowid, 9001);
+
+        let transaction = connection.transaction()?;
+        project_event(
+            &transaction,
+            &message_event("updated", 2, "updated needle"),
+            2,
+        )?;
+        transaction.commit()?;
+        let indexed: String = connection.query_row(
+            "SELECT text FROM search_index WHERE rowid=?1",
+            [item_rowid],
+            |row| row.get(0),
+        )?;
+        let matches: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_index WHERE search_index MATCH 'updated'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(indexed, "updated needle");
+        assert_eq!(matches, 1);
+
+        let transaction = connection.transaction()?;
+        project_event(&transaction, &message_event("cleared", 3, ""), 3)?;
+        transaction.commit()?;
+        let indexed: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_index WHERE rowid=?1",
+            [item_rowid],
+            |row| row.get(0),
+        )?;
+        assert_eq!(indexed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_nineteen_rolls_back_search_rebuild_on_late_failure() -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        let connection = database.connect()?;
+        for (version, migration) in schema::migrations() {
+            if version < 19 {
+                connection.execute_batch(migration)?;
+            }
+        }
+        connection.execute_batch(
+            "INSERT INTO threads(thread_key,store_source_id,codex_thread_id,archived,
+               capture_completeness,completeness_reasons_json,projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','source','thread-1',0,'durable_complete','[]','{}','{}',1);
+             INSERT INTO items(thread_key,turn_scope,item_id,item_type,status,summary_text,
+               projection_json,provenance_json,last_event_seq)
+             VALUES ('thread-key','turn-1','item-1','agent_message','completed',
+               'original needle','{}','{}',1);
+             INSERT INTO search_index(rowid,entity_key,thread_key,item_id,text)
+             VALUES (9001,'thread-key:turn-1:item-1','thread-key','item-1','original needle');",
+        )?;
+        let failing = MIGRATION_19.replace(
+            "PRAGMA user_version = 19;",
+            "SELECT no_such_function();\nPRAGMA user_version = 19;",
+        );
+        assert!(connection.execute_batch(&failing).is_err());
+        connection.execute_batch("ROLLBACK;")?;
+
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let search_rowid: i64 = connection.query_row(
+            "SELECT rowid FROM search_index WHERE search_index MATCH 'original'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(version, 18);
+        assert_eq!(search_rowid, 9001);
         Ok(())
     }
 

@@ -15,6 +15,12 @@ https_port = 443
 # accepted by Serve has the same V2 mutation authority as a local session.
 [controller]
 enabled = false
+# off keeps every Session mutation disabled; tui enables the real Codex TUI
+# Session Kernel and requires an existing App Server socket below.
+session_kernel = "off"
+# Development/test only; when session_kernel="preview" this must point to one fixed
+# executable. Browser requests can never supply an executable or argv.
+# session_fixture_cli = "tests/fixtures/fake_codex_cli.sh"
 
 [storage]
 database = "observer-data/observer.sqlite"

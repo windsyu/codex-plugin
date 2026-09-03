@@ -88,6 +88,9 @@ fn visit(
             } else if let Some(redacted_url) = redact_url(text) {
                 *value = Value::String(redacted_url);
                 record(changes, pointer, "url_query", "sensitive-url-query-v2");
+            } else if let Some(redacted_markup) = redact_local_image_markup(text) {
+                *value = Value::String(redacted_markup);
+                record(changes, pointer, "local_image_path", "local-image-path-v2");
             } else if let Some((media_type, estimated_bytes)) = media_payload(text, media_type_hint)
             {
                 let fingerprint = blake3::keyed_hash(fingerprint_key, text.as_bytes())
@@ -124,10 +127,16 @@ fn visit_object(
         })
         .and_then(|(_, value)| value.as_str())
         .map(str::to_string);
+    let local_image_object = map
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| normalize_name(value) == "localimage");
     for (key, child) in map.iter_mut() {
         let child_pointer = format!("{pointer}/{}", escape_pointer(key));
         let normalized = normalize_name(key);
-        if SECRET_KEYS.iter().any(|candidate| normalized == *candidate)
+        if (local_image_object && normalized == "path") || normalized == "localimages" {
+            redact_local_image_reference(child, &child_pointer, changes);
+        } else if SECRET_KEYS.iter().any(|candidate| normalized == *candidate)
             || (normalized == "token" && !child.is_null())
         {
             replace(
@@ -183,6 +192,32 @@ fn visit_object(
                 media_type.as_deref(),
             );
         }
+    }
+}
+
+fn redact_local_image_reference(value: &mut Value, pointer: &str, changes: &mut Vec<Value>) {
+    match value {
+        Value::Array(values) => {
+            for (index, child) in values.iter_mut().enumerate() {
+                if child.is_string() {
+                    replace(
+                        child,
+                        &format!("{pointer}/{index}"),
+                        "local_image_path",
+                        "local-image-path-v2",
+                        changes,
+                    );
+                }
+            }
+        }
+        Value::String(_) => replace(
+            value,
+            pointer,
+            "local_image_path",
+            "local-image-path-v2",
+            changes,
+        ),
+        _ => {}
     }
 }
 
@@ -279,6 +314,32 @@ fn redact_url(text: &str) -> Option<String> {
             .unwrap_or_default();
         format!("{base}?{redacted}{fragment}")
     })
+}
+
+fn redact_local_image_markup(text: &str) -> Option<String> {
+    let mut output = text.to_string();
+    let mut cursor = 0;
+    let mut changed = false;
+    while let Some(image_offset) = output[cursor..].find("<image ") {
+        let image_start = cursor + image_offset;
+        let Some(tag_end_offset) = output[image_start..].find('>') else {
+            break;
+        };
+        let tag_end = image_start + tag_end_offset;
+        let Some(path_offset) = output[image_start..tag_end].find(" path=\"") else {
+            cursor = tag_end + 1;
+            continue;
+        };
+        let value_start = image_start + path_offset + " path=\"".len();
+        let Some(value_end_offset) = output[value_start..tag_end].find('"') else {
+            break;
+        };
+        let value_end = value_start + value_end_offset;
+        output.replace_range(value_start..value_end, "[local-image]");
+        cursor = value_start + "[local-image]".len();
+        changed = true;
+    }
+    changed.then_some(output)
 }
 
 fn percent_decode_key(value: &str) -> String {
@@ -396,5 +457,26 @@ mod tests {
         let (redacted, audit) = redact(&value, &[1; 32]);
         assert_eq!(redacted, value);
         assert!(audit["pointers"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn redacts_local_image_paths_but_retains_safe_placeholders() {
+        let value = json!({
+            "live":{"type":"localImage","path":"/private/staging/image.bin"},
+            "event":{"type":"user_message","local_images":["/private/staging/image.bin"]},
+            "response":{"type":"input_text","text":"<image name=[Image #1] path=\"/private/staging/image.bin\">"}
+        });
+        let (redacted, audit) = redact(&value, &[2; 32]);
+        assert_eq!(redacted["live"]["path"]["kind"], "local_image_path");
+        assert_eq!(
+            redacted["event"]["local_images"][0]["kind"],
+            "local_image_path"
+        );
+        assert_eq!(
+            redacted["response"]["text"],
+            "<image name=[Image #1] path=\"[local-image]\">"
+        );
+        assert!(!redacted.to_string().contains("/private/staging"));
+        assert_eq!(audit["pointers"].as_array().unwrap().len(), 3);
     }
 }

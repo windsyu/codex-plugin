@@ -22,17 +22,20 @@
 - V2：在安全、可审计的前提下控制确定的 Codex live source；
 - V3：通过 Telegram、飞书、企业微信、Discord 等 IM 接入 V2 Gateway。
 
-V1 本地 MVP 已完成其只读基础目标。当前交付重点是 **V2 Local Gateway 对话与控制能力**；V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md`，同时保持 V1 只读能力兼容。
+V1 本地 MVP 已完成其只读基础目标，`v0.2.0` V2 Controller也已形成验证基线。Session Kernel Slice 1–9 已完成实现与本地验证，当前交付重点是 **V2 release validation 与真实既有 App Server 验收**。V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md` 与Session Kernel设计，同时保持 V1 只读能力和现有V2 ledger/CAS/audit兼容。Slice 10–12 属于 V3，不得作为 V2 收尾提前实现 IM adapter。
 
 V1 的历史设计、ADR 和验证记录已经压缩到 `docs/archive/v1-development-history.md`。该归档只用于解释现有代码和兼容性，不是当前开发指令，也不得作为恢复 V1 开发范围的依据。
 
-V2 必须继续保持 `/v1` 只读兼容和 store-first 观察能力，但控制、对话、权限、source、cwd、附件和 Slash commands 的当前决定只以 V2 核心约束为准。V3 除非用户明确授权，不得提前混入 V2 实现。
+V2 必须继续保持 `/v1` 只读兼容和 store-first 观察能力，但控制、对话、权限、source、cwd、附件和 Slash commands 的当前决定只以 V2 核心约束及其链接的Session Kernel设计为准。用户已明确授权V3 IM完整控制目标的设计；V3平台adapter仍不得提前混入V2实现。
 
 ## 3. 事实与设计依据
 
 项目文档：
 
 - `docs/codex-local-gateway-v2-development-constraints.md`：V2 当前开发核心约束；
+- `docs/codex-tui-session-kernel-refactor.md`：真实Codex TUI活动会话内核、当前代码迁移与V3 IM总体设计；
+- `docs/codex-tui-session-kernel-slices.md`：Session Kernel与V3 IM逐分片实施、验收和回退；
+- `docs/decisions/0020-codex-tui-session-kernel.md`：活动会话所有权和交互内核ADR；
 - `docs/archive/v1-development-history.md`：非规范性的 V1 历史归档，仅用于兼容性和追溯。
 
 Codex 官方源码的本地参考路径：
@@ -170,7 +173,7 @@ ADR 至少包含：Context、Decision、Alternatives、Consequences、Status、D
 
 ### 7.1 推荐切片
 
-V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` 第 12 节的纵向切片推进。只有前一个切片达到验收条件后，才把下一个切片作为主线。允许并行准备 fixture 或文档，但不要维持多个长期未集成的大分支。
+V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` 第 12 节和 `docs/codex-tui-session-kernel-slices.md` 的纵向切片推进。只有前一个切片达到验收条件后，才把下一个切片作为主线。允许并行准备 fixture 或文档，但不要维持多个长期未集成的大分支。
 
 ### 7.2 编码要求
 
@@ -204,6 +207,7 @@ V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` �
 - storage/migration：幂等 migration + crash/replay 测试；
 - API：契约测试、分页/cursor、错误码；
 - UI：关键状态渲染、unknown item、安全转义；
+- Playwright/E2E：本机已安装 Chrome，测试应复用本机 Chrome，不额外下载 Chromium 或其他浏览器二进制；
 - 安全相关：负向测试必须存在；
 - bug fix：先增加能复现问题的回归测试。
 
@@ -361,11 +365,17 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 当前 V2 已确认的关键边界：
 
 - V1 是已完成的只读兼容基础，历史说明只存在于非规范性归档；
+- `v0.2.0` source-global LiveSourceActor/Web Composer是已验证迁移基线，不再是活动会话目标架构；
 - V2 只连接已存在的 App Server，不负责启动或守护进程；
+- 活动会话目标内核是真实Codex TUI + PTY；每个活动Thread只能属于一个Session Worker，一个TUI的主/side/child Thread可形成指向同一worker的lease set，worker只有一条私有1:1 App Server owner connection；
+- Browser当前会话主要承载xterm，Slash、picker、Goal/Plan和terminal-owned交互交给官方TUI；V1 Viewer继续承载durable history、搜索和安全渲染；
+- Gateway继续负责SourceSupervisor、source epoch、Thread/InputLease、raw-first、command/audit ledger、pending request CAS和fail-closed recovery；
+- source epoch表示Supervisor共享generation，worker connection epoch表示单条proxy连接；双向protocol envelope和TUI mutation write boundary必须先持久化，单worker断线不无条件拖垮其他Session；
 - V2 复用 V1 bearer、Cookie 和 Tailscale 登录，不增加 control token；
 - 所有已验证的 Tailnet 用户拥有与本机登录相同的 V2 mutation 能力；
 - `/v1` 保持只读，V2 mutation 只注册在 `/v2`；
 - V2 首版范围、任意 cwd、图片和 Slash commands 以核心约束为准；
-- V3 IM Bridge 保持独立未来范围。
+- V3 IM Bridge保持独立未来版本，但目标已确认为完整控制面；绑定后的IM principal与本机登录具有相同Gateway控制能力，并保留原生approval/question/elicitation、CAS和审计；
+- V3可借鉴cc-viewer的worker、队列、binding、dedup和输出缓冲，不采用skip-permissions、自动approval、regex hard deny、禁止交互或transcript/ANSI推断。
 
 默认技术基线可以通过 Issue、设计评审和 ADR 调整。任何变化都应在同一个 PR 中更新本节和对应设计文档。

@@ -1,0 +1,27 @@
+{
+  "id": "codex-dark-v1",
+  "background": "#0d0f10",
+  "foreground": "#e8eaed",
+  "cursor": "#f7f7f8",
+  "cursorAccent": "#0d0f10",
+  "selectionBackground": "#315a7380",
+  "selectionForeground": "#ffffff",
+  "ansi": {
+    "black": "#16181a",
+    "red": "#e06c75",
+    "green": "#98c379",
+    "yellow": "#e5c07b",
+    "blue": "#61afef",
+    "magenta": "#c678dd",
+    "cyan": "#56b6c2",
+    "white": "#d7dae0",
+    "brightBlack": "#747a80",
+    "brightRed": "#ff7b86",
+    "brightGreen": "#b3db8e",
+    "brightYellow": "#f2cf83",
+    "brightBlue": "#74bfff",
+    "brightMagenta": "#d990ee",
+    "brightCyan": "#6fcbd6",
+    "brightWhite": "#ffffff"
+  }
+}

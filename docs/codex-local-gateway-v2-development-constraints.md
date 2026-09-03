@@ -2,8 +2,10 @@
 
 > 状态：Approved  
 > 日期：2026-08-29  
-> 目标版本：`v0.2.0`  
+> 已验证基线：`v0.2.0`；当前状态：Session Kernel Slice 1–9 implementation/validation complete，等待既有真实 App Server 最终验收
 > 适用范围：V2 设计、开发、测试、文档和交付
+
+> 架构演进（2026-09-02）：本文第 1–15 节同时包含已经由 `v0.2.0` 验证的 Controller 基线和其后续重构约束。活动会话现在以真实 Codex TUI + PTY 为内核，按 Thread 由唯一 Session Worker 经私有 1:1 proxy 连接已有 App Server；详细契约与迁移顺序分别见 [`codex-tui-session-kernel-refactor.md`](codex-tui-session-kernel-refactor.md)、[`codex-tui-session-kernel-slices.md`](codex-tui-session-kernel-slices.md) 和 [ADR 0020](decisions/0020-codex-tui-session-kernel.md)。Slice 1–9 已实现并通过 fixture、浏览器及已安装 `codex-cli 0.146.1` 的隔离 smoke；完整证据和仍需既有真实 App Server endpoint 的验收边界记录在 [`v2-validation.md`](v2-validation.md)。Slice 10–12 仍是 V3 非目标。
 
 ## 1. 文档目的与约束级别
 
@@ -39,7 +41,7 @@
 - V2 取代 V1 成为当前产品开发主线，但必须复用并保持 V1 能力；
 - `/v1` 继续保持只读兼容，不得因 V2 引入 mutation；
 - V2 mutation 只能注册在 `/v2`；
-- V3 IM Bridge 不属于 V2 交付范围，除非用户另行明确授权；
+- V3 IM Bridge 仍不属于 V2 代码交付范围；用户已经明确授权其目标设计，V3 必须在 Session Worker 之上提供完整控制能力，并保持独立版本、adapter 与验证门禁；
 - pre-1.0 版本使用语义化版本，V2 首个目标版本为 `v0.2.0`。
 
 ## 3. V2 产品目标与非目标
@@ -66,7 +68,7 @@ V2 将只读 Viewer 增强为类似 ChatGPT/Codex 应用的本地对话与控制
 - 不伪造 App Server 不支持的命令或能力；
 - 不实现 `/cloud`、`/cloud-environment`、`/pet`、`/feedback` 等仅属于云端或特定宿主 UI 的等价替代物；
 - 不把 App Server JSON-RPC 原样暴露给浏览器；
-- 不实现 V3 Telegram、飞书、企业微信或 Discord 接入；
+- V2 不实现 Telegram、飞书、企业微信或 Discord 的平台 adapter；只允许提供 V3 所需的 channel-neutral owner/binding 边界；
 - 不实现多用户角色和独立 control token；
 - 不允许自然语言或快捷路由绕过 source epoch、幂等、CAS、确认或审计；
 - 不把模型生成的自然语言当作权限提升或控制指令。
@@ -83,33 +85,35 @@ V2 将只读 Viewer 增强为类似 ChatGPT/Codex 应用的本地对话与控制
 - reconnect 必须创建新 epoch，旧 epoch 的未派发命令失败；
 - 已写入 socket 但无法确认结果的命令进入 `outcome_unknown`，不得自动重放。
 
-### 4.2 Live Source Actor
+### 4.2 Source Supervisor、Session Worker 与所有权
 
-每个可控 source 必须由一个独占 WebSocket 的 `LiveSourceActor` 管理：
+`v0.2.0` 已验证的 source-global `LiveSourceActor` 是迁移基线，不再是活动会话的目标 owner。重构完成后每个可控 source 由一个 `SourceSupervisor` 管理，每个活动 Thread 由唯一 `Thread Session Worker` 控制：
 
-- 分配上游 JSON-RPC request ID；
-- 关联 response、notification、server request 和 command；
-- 串行化同一 Thread 的状态相关 mutation；
-- 将所有收到的 envelope 先写入 V1 raw event，再更新 projection；
-- 保存 source capability catalog、活动 Turn、pending request 和最后 source sequence；
-- 通过有界 channel 接收 Gateway command；
-- 在关闭前拒绝新命令并处理未决命令状态。
-
-`LiveSourceRegistry` 负责按 `sourceId + sourceEpoch` 查找 actor，不得直接持有或复制 WebSocket。
+- Supervisor 维护 App Server endpoint、`sourceEpoch`、capability catalog、worker registry 和 ThreadLease；
+- 每个 worker 启动一个真实 Codex TUI PTY，并只通过 worker 专属私有 proxy 连接 configured existing App Server；
+- 一个 worker 只有一个上游 owner connection；多个浏览器附着同一 PTY，不复制连接；
+- 同一 `sourceId + sourceEpoch + codexThreadId` 只有一个 active ThreadLease；一个TUI持有主/side/child Thread时可有多个指向同一worker的lease，但任何Thread不得属于两个worker；
+- proxy 分配上游 JSON-RPC request ID，关联 TUI/Gateway response、notification、server request、Turn owner 和 command；
+- TUI→upstream与upstream→TUI envelope均按worker connection epoch和单调proxy sequence先写append-only raw event；TUI mutation在socket write前记录owner/audit与dispatch boundary，再更新projection/worker state或产生可见完成；
+- pending request 根据 Turn/Input owner 只投递给 terminal 或 channel 中的一个 owner，并继续使用 request-version CAS；
+- InputLease是worker级单赢家，TurnOwner是`ThreadId + TurnId`级映射；并发side/child Turn继承明确parent/initiating Turn的owner，不能用一个worker级单值覆盖；
+- Supervisor 的 metadata/control connection 不得 resume、订阅或响应 worker-owned Thread；
+- 单worker upstream断线只隔离该worker connection epoch；Supervisor确认endpoint generation改变时才轮换共享source epoch，此时全部旧worker进入`stale_epoch`并拒绝新输入和request action；
+- 浏览器和 IM 不获得 App Server endpoint、private proxy socket、raw JSON-RPC 或 worker capability。
 
 ```mermaid
 flowchart LR
-    UI["V2 Web Composer"] --> API["V2 Command API"]
-    API --> POLICY["Auth / Origin / Idempotency / CAS"]
-    POLICY --> REG["LiveSourceRegistry"]
-    REG --> ACTOR["LiveSourceActor"]
-    ACTOR <--> APP["Existing Codex App Server"]
-    ACTOR --> RAW["V1 Raw Event + Projection"]
-    API --> AUDIT["Command Transition + Audit"]
-    RAW --> STREAM["Replayable V2 Stream"]
-    AUDIT --> STREAM
-    STREAM --> UI
+    WEB["Browser xterm"] <-->|"PTY frames"| WORKER["Thread Session Worker"]
+    IM["V3 IM Adapter"] <-->|"binding / queue / owner"| WORKER
+    WORKER <-->|"PTY"| TUI["real Codex TUI"]
+    TUI <-->|"private JSON-RPC"| PROXY["1:1 App Server proxy"]
+    WORKER --> PROXY
+    PROXY <-->|"single upstream"| APP["Existing Codex App Server"]
+    PROXY --> RAW["V1 Raw Event + Projection"]
+    WORKER --> AUDIT["Command / Lease / Audit"]
 ```
+
+Session Worker 和 private proxy 的状态、权限、恢复和切片验收以 Session Kernel 设计为准。ADR 0013 中“每 source 一个 actor 独占全部 Thread mutation”的部分由 ADR 0020 supersede；单一认证、`/v1` 只读、typed capability、epoch、ledger 和 audit 约束继续有效。
 
 ### 4.3 Capability 检测
 
@@ -169,28 +173,30 @@ tailscale:<verified-login>
 
 ### 7.1 普通消息
 
-- 空闲 Thread 的普通输入映射为 `turn/start`；
-- 活动 Turn 的普通输入映射为 `turn/steer`，必须携带 `expectedTurnId`；
-- stale Turn 返回 `TURN_STATE_CONFLICT`，不得静默排队；
-- 每条输入必须带 `clientUserMessageId`，用于乐观 UI 与投影对账；
-- `//text` 表示发送字面 `/text`；
-- 未知 `/command` 返回 `UNKNOWN_COMMAND`，不得作为普通消息发送给模型。
+- Browser Session 的键盘、IME、paste、Slash 和 picker 输入原样进入真实 Codex TUI PTY；Web 不再解释为 `turn/start`、`turn/steer` 或本地 Slash 状态机；
+- terminal input 仍必须经过 InputLease，并以 fingerprint、字符数、principal、worker、source epoch 和后续真实 Turn ID进行审计对账；
+- V3 IM 等非终端 channel 的普通输入经 Session Worker 单飞队列派发；具体 capability 由 manifest 固定为 `tui_input`、`protocol_action` 或 `channel_native`，adapter 不得自行选择 raw JSON-RPC；
+- protocol-backed `turn/steer` 和 `turn/interrupt` 必须携带 `expectedTurnId`；stale Turn 返回 `TURN_STATE_CONFLICT`，不得静默排队；
+- channel input 必须携带稳定 platform message fingerprint/idempotency key，重复投递不能创建第二个 Turn；
+- `//text` 表示发送字面 `/text`；未知 `/command` 返回 `UNKNOWN_COMMAND`，不得作为普通消息发送给模型；
+- completion 和最终答复只以 App Server Turn/Item event与 durable projection为事实源，不从 ANSI prompt或 transcript尾部猜测。
 
-### 7.2 首版命令范围
+### 7.2 命令范围与迁移
 
-Slash 菜单只展示当前 source 和 Thread 状态下实际可执行的命令：
+现有 typed command table 是 `v0.2.0` 已验证的 capability 基线。迁移后 Browser terminal 直接使用当前 Codex TUI 实际提供的 Slash菜单；Gateway/IM 的非终端 command registry 只展示当前 source、Codex version、channel presentation 和 Thread 状态下实际可执行的能力：
 
 | 命令 | 必须映射的行为 |
 | --- | --- |
 | `/new` | `thread/start`，选择 source、cwd 和初始设置 |
-| `/resume` | `thread/resume` |
+| `/clear` | Browser 交给真实 TUI `/clear` 状态机；Session Worker 观察新 Thread并原子切换 ThreadLease；非终端 channel使用 manifest指定的 TUI input/closed lifecycle action，不提示词模拟 |
+| `/resume` | Browser 交给真实 TUI `/resume`；非终端 channel通过受审计的 session resume lifecycle |
 | `/fork` | `thread/fork` |
 | `/rename` | `thread/name/set` |
 | `/archive` | `thread/archive` |
 | `/compact` | `thread/compact/start` |
 | `/review` | `review/start` |
 | `/interrupt` | `turn/interrupt` |
-| `/plan [prompt]` | 切换真实 Plan collaboration mode；有 prompt 时继续发起或 steer Turn |
+| `/plan [prompt]` | 切换真实 Plan collaboration mode；进入前缓存当前 Default model/effort；有 prompt 时继续发起或 steer Turn；`/plan off` 将 catalog Default preset 合并到缓存设置后退出，preset 未指定字段不得被误解释为清空 |
 | `/goal` | `thread/goal/get` |
 | `/goal <objective>` | `thread/goal/set` |
 | `/goal pause\|resume` | 更新 goal status |
@@ -205,15 +211,17 @@ Slash 菜单只展示当前 source 和 Thread 状态下实际可执行的命令�
 | `/status` | 返回 source、Thread、Turn、goal 和 command 状态卡 |
 | `/usage` | 读取账号 token usage 和 rate limit |
 
-无参数且需要选择值的命令返回结构化 `INTERACTION_REQUIRED`，由 Web picker 完成；服务端仍必须再次校验所选值。
+Browser terminal 中无参数 picker 由真实 TUI完成。非终端 channel 可返回结构化 `INTERACTION_REQUIRED` 并用平台按钮/表单完成；服务端仍必须再次校验所选值。
 
 ### 7.3 Approval 与 Question
 
-- approval、question 和 MCP elicitation 使用时间线操作卡；
+- terminal owner 的 approval、question 和 MCP elicitation 只由真实 TUI原生界面响应，Web不得同时显示第二个可响应卡片；
+- V3 channel owner 使用平台交互卡/按钮/表单；平台无法安全表现的schema必须handoff到terminal，不能默认选择或提示词回答；
 - action 请求必须包含 `requestKey + expectedRequestVersion + sourceEpoch`；
 - 多客户端竞争时只有第一个合法响应成功；
 - 已解决请求返回 `REQUEST_ALREADY_RESOLVED`；
 - source epoch 改变后所有旧 action 立即失效；
+- proxy必须根据Turn/Input owner只投递一个可响应callback，避免terminal与channel抢答；
 - 不复用官方 `/approve` 名称表达不同语义。
 
 ## 8. 图片输入约束
@@ -243,11 +251,23 @@ POST /v2/threads/{threadKey}/inputs
 POST /v2/uploads/images
 POST /v2/requests/{requestKey}/actions
 GET  /v2/stream
+POST /v2/sessions
+GET  /v2/sessions/{workerId}
+POST /v2/sessions/{workerId}/attach
+POST /v2/sessions/{workerId}/input-lease
+DELETE /v2/sessions/{workerId}/input-lease/{leaseId}
+POST /v2/sessions/{workerId}/interrupt
+POST /v2/sessions/{workerId}/stop
+GET  /v2/sessions/{workerId}/terminal
+GET  /v2/sessions/{workerId}/events
 ```
 
 快捷路由必须转换为同一个 `GatewayCommand`，不得绕过授权、幂等、CAS 或审计。
+`terminal` 是 authenticated WebSocket，不是 raw App Server transport；它只承载 typed PTY frames。session mutation仍必须复用同一principal、Origin、idempotency、epoch、expected version和audit边界。
 
 ### 9.2 GatewayCommand
+
+Gateway/IM 的 closed typed action、lifecycle、interrupt、request resolution和附件继续使用 `GatewayCommand`。Browser terminal的单个PTY frame不是一个`GatewayCommand`；它只经过InputLease和frame限额。proxy观察到TUI→upstream request后，按目标TurnOwner或当前InputOwner在write前创建`origin=tui` command/audit；unknown potential mutation没有owner时fail closed。不得解析Enter/ANSI猜测submit，也不得为了满足ledger形状把每个按键伪装成上游mutation。
 
 ```ts
 interface GatewayCommand {
@@ -321,9 +341,21 @@ gateway_commands
 command_transitions
 control_audit
 image_uploads
+session_workers
+session_worker_transitions
+thread_leases
+thread_lease_transitions
+terminal_attachments
+input_leases
+input_lease_transitions
+worker_connection_epochs
 ```
 
 并为 `pending_requests` 增加 request version 和 resolving CAS 字段。
+
+Session Kernel migration还要为现有`raw_events`增加nullable的direction/worker/connection epoch/proxy sequence provenance，为`gateway_commands`增加closed origin；不得复制raw payload到第二套事实表。
+
+V3 通过后续 additive migration 增加 `channel_principals`、`channel_bindings`、`channel_message_dedup` 和 `channel_deliveries`；V2 不保存真实平台secret。
 
 必须满足：
 
@@ -340,28 +372,34 @@ image_uploads
 ## 11. Web 交互约束
 
 - 保留 V1 项目、最近会话、搜索、Raw Inspector、completeness 和安全 Markdown；
-- 增加新对话入口、source/cwd 选择、model/reasoning/permission 设置栏；
-- Thread 页面增加底部固定 Composer、图片预览、Slash palette、发送/steer 状态和 interrupt 控件；
-- 显示 Plan mode、Goal 状态、活动 Turn、pending request 和 command 状态；
-- source 离线或 epoch 变化时输入控件必须禁用并解释原因；
-- `/status`、`/mcp`、`/usage` 等本地结果显示为 Gateway 状态卡，不伪装成模型消息；
+- 活动会话使用 `SessionShell + xterm TerminalPanel`，历史与搜索继续使用结构化 Viewer；
+- TerminalPanel 只收发 PTY output/input/resize/ack/snapshot frame，不解析 Slash、Markdown、assistant delta或ANSI prompt；
+- `/clear`、`/resume`、`/goal`、Plan、picker、快捷键和terminal-owned pending request由真实Codex TUI呈现；
+- SessionShell只显示source/Thread/cwd摘要、worker/transport/input owner、detach/interrupt/stop和history入口等宿主状态；
+- 控制完成、失败、lease冲突、buffer截断、刷新和复制等反馈必须显示在当前Session操作区并保持可见；
+- source离线、epoch变化或失去InputLease时xterm必须只读并解释原因；多个浏览器可只读附着，只有一个输入owner；
+- `/status`、`/mcp`、`/usage` 等非终端channel结果显示为Gateway状态卡，不伪装成模型消息；
 - `outcome_unknown` 不得显示为成功或普通失败；
-- 用户消息可以乐观显示，但必须通过 `clientUserMessageId` 与真实投影对账；
-- 桌面和窄屏必须支持键盘完成创建 Thread、选择命令、发送、interrupt 和处理 pending request。
+- output buffer只用于重连；截断必须标记，不得当作完整历史；
+- 桌面和窄屏必须支持键盘完成创建/恢复Session、terminal操作、interrupt和terminal-owned pending request；
+- Legacy Composer只在迁移flag下保留，达到Session Kernel门禁后退役，不与active worker同时写同一Thread。
 
 ## 12. 实施顺序
 
-V2 必须按可运行纵向切片推进：
+`v0.2.0` 的九个 LiveSourceActor/Web Composer切片已经完成并作为迁移基线。后续活动会话重构必须按[`codex-tui-session-kernel-slices.md`](codex-tui-session-kernel-slices.md)推进：
 
-1. 文档、ADR、配置和 protocol fixture；
-2. 可收发 RPC 的 LiveSourceActor 与 capability catalog；
-3. command persistence、idempotency、audit 和基础 `/v2` API；
-4. new/resume、turn start/steer、interrupt、fork 的最小对话闭环；
-5. model/reasoning/personality/permissions 与 Slash registry；
-6. Plan、Goal、compact、review、MCP/status/usage；
-7. approval/question/elicitation CAS；
-8. Web Composer、fetch SSE 和图片 staging；
-9. crash recovery、安全、兼容和发布加固。
+1. 决策、边界和feature flag；
+2. PTY Session Worker与fake CLI；
+3. xterm transport、输出重放和InputLease；
+4. 1:1 App Server proxy；
+5. 持久化ThreadLease和真实Codex start/resume；
+6. 原生TUI当前会话UI；
+7. 协议事件、审计和crash recovery；
+8. approval/question owner路由；
+9. 默认切换并退役Legacy Composer；
+10. V3 channel principal、binding和队列；
+11. 首个真实IM adapter与完整Turn控制；
+12. 完整交互、附件和多平台加固。
 
 每个切片完成时必须保持 `/v1` 可构建、可测试、可演示。不得长期维护多个未集成的大分支。
 
@@ -369,7 +407,7 @@ V2 必须按可运行纵向切片推进：
 
 ### 13.1 必须覆盖的测试
 
-- Source Actor：RPC correlation、通知穿插、断线、epoch 轮换、timeout 和 outcome unknown；
+- Legacy Source Actor迁移回归：RPC correlation、通知穿插、断线、epoch轮换、timeout和outcome unknown；
 - command：幂等重放、payload 冲突、状态机、crash/replay 和 cursor；
 - Thread/Turn：start、steer、interrupt、fork、stale Turn 和 source offline；
 - Slash commands：每个已发布命令至少一个成功 fixture，并覆盖 capability 缺失时隐藏；
@@ -379,8 +417,13 @@ V2 必须按可运行纵向切片推进：
 - 认证：bearer、Cookie 和真实 Tailscale principal 均可 mutation，未认证为 401，非法 Origin 为 403；
 - cwd：相对路径、不存在目录和 canonicalization；
 - 图片：合法格式、伪造 MIME、SVG、超限、symlink、路径穿越和 orphan cleanup；
-- UI：Composer、Slash picker、model picker、Goal、Plan、审批卡、乐观对账、SSE 重连、离线禁用和响应式布局；
-- V1 回归：所有 `/v1` 契约、导入、投影、搜索和 Viewer 测试继续通过。
+- 迁移期Legacy UI：Composer、Slash picker、model picker、Goal、Plan、审批卡、乐观对账、SSE重连、离线禁用和响应式布局；
+- V1 回归：所有 `/v1` 契约、导入、投影、搜索和 Viewer 测试继续通过；
+- PTY/worker：argv/env/cwd、resize、EOF、backpressure、process/runtime-dir cleanup和fake CLI；
+- proxy：initialize透明性、ID collision、unknown envelope、server request路由、upstream/downstream断线和raw-first；
+- lease：双worker、主/side/child Thread set、同worker多Turn owner继承、双browser、terminal/channel竞争、Thread switch、worker connection隔离和source epoch stale；
+- terminal：xterm重连、VT checkpoint/buffer watermark、slow consumer、IME/CJK、危险OSC、attachment control token伪造和跨principal负向测试；
+- V3 channel：principal/binding/revoke、平台重试去重、single-flight、delivery ledger、完整approval/question/attachment和adapter contract。
 
 ### 13.2 `v0.2.0` Definition of Done
 
@@ -393,10 +436,17 @@ V2 必须按可运行纵向切片推进：
 - README、示例配置、API 文档、migration 和兼容基线与代码同步；
 - Git diff 不包含 secret、真实 rollout、真实上传图片、本机数据库或构建垃圾。
 
+### 13.3 Session Kernel 与 V3 Definition of Done
+
+V2 Session Kernel的完成门禁以分片设计第16节为准，至少要求真实Codex TUI默认承载活动会话、exclusive ThreadLease/owner、private 1:1 proxy、xterm重连、raw-first/audit/CAS/recovery和V1全量回归全部通过；关闭feature flag可回退且不需要数据库downgrade。
+
+V3只有在principal/binding/revoke、完整session/Turn/settings/thread控制、approval/question/elicitation、附件、App Server event最终回复、browser/IM owner竞争和至少两个adapter contract全部验证，并确认没有skip-permissions、自动approval、regex hard deny或禁止交互后，才能声明完整控制完成。
+
 ## 14. 默认配置与兼容策略
 
 - `controller.enabled` 默认 `false`，避免旧配置升级后自动获得 mutation；
-- 启用 Controller 时，配置了 App Server socket 的 source 才参与 V2；
+- `controller.session_kernel` 默认 `off`；`preview`只运行固定 fake fixture，`tui`显式启用真实 Codex TUI Session Kernel；
+- 启用 Controller 时，配置了 App Server socket 的 source 才参与真实 V2 Session；`preview + session_fixture_cli` fake-only 演示可不配置 socket，此例外不开放Legacy source mutation或真实Codex能力；
 - 旧数据库通过 additive migration 原地升级，不重写 V1 raw event；
 - `/v1` 路由、cursor 和认证行为保持兼容；
 - capability manifest 必须记录实际验证的 Codex commit/version 和 method；
@@ -415,6 +465,8 @@ V2 必须按可运行纵向切片推进：
 - Slash command 首版范围；
 - `/v1` 只读兼容承诺；
 - command/audit 的持久化和重放语义；
-- 图片或其他附件的安全边界。
+- 图片或其他附件的安全边界；
+- 活动会话是否使用真实Codex TUI，以及Thread/worker/proxy所有权模型；
+- V3 IM principal的完整控制权限、binding与原生approval/question边界。
 
 不得以临时实现便利为由绕过本文约束。无法满足时应停止对应 capability、记录明确错误，并创建待决 ADR，而不是静默降级为不同语义。

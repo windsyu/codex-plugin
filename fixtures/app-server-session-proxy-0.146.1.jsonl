@@ -1,0 +1,13 @@
+{"direction":"tui_to_upstream","message":{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex_tui","title":"Codex TUI","version":"0.146.1"},"capabilities":{"experimentalApi":true}}}}
+{"direction":"upstream_to_tui","message":{"id":1,"result":{"codexHome":"/synthetic/codex-home","userAgent":"codex_cli_rs/0.146.1"}}}
+{"direction":"tui_to_upstream","message":{"method":"initialized"}}
+{"direction":"tui_to_upstream","message":{"method":"thread/start","id":"new-1","params":{"cwd":"/synthetic/workspace","experimentalRawEvents":false}}}
+{"direction":"upstream_to_tui","message":{"method":"thread/started","params":{"thread":{"id":"00000000-0000-7000-8000-000000000401","turns":[]}}}}
+{"direction":"upstream_to_tui","message":{"id":"new-1","result":{"thread":{"id":"00000000-0000-7000-8000-000000000401","turns":[]}}}}
+{"direction":"tui_to_upstream","message":{"method":"thread/resume","id":2,"params":{"threadId":"00000000-0000-7000-8000-000000000401"}}}
+{"direction":"upstream_to_tui","message":{"id":2,"result":{"thread":{"id":"00000000-0000-7000-8000-000000000401","turns":[]}}}}
+{"direction":"upstream_to_tui","message":{"method":"item/tool/requestUserInput","id":null,"params":{"threadId":"00000000-0000-7000-8000-000000000401","turnId":"00000000-0000-7000-8000-000000000402","itemId":"00000000-0000-7000-8000-000000000403","isBlocking":true,"questions":[{"id":"choice","header":"Choice","question":"Select a synthetic option","isOther":false,"isSecret":false,"options":[{"label":"A","description":"Synthetic option"}]}]}}}
+{"direction":"tui_to_upstream","message":{"id":null,"result":{"answers":{"choice":{"answers":["A"]}}}}}
+{"direction":"tui_to_upstream","message":{"method":"future/tuiMutation","id":"future-1","params":{"threadId":"00000000-0000-7000-8000-000000000401","futureField":{"preserve":true}}}}
+{"direction":"upstream_to_tui","message":{"id":"future-1","result":{"futureVariant":{"preserve":true}}}}
+{"direction":"upstream_to_tui","message":{"method":"future/notification","params":{"unknownField":{"preserve":true}}}}

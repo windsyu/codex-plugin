@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde_json::{Value, json};
@@ -25,11 +24,17 @@ use crate::controller::{
     SourceControlCatalog, ThreadSetting, actor_channel, catalog_request_params,
 };
 use crate::credentials::load_or_create_key;
+#[cfg(test)]
+use crate::domain::gateway::GatewayCommandOrigin;
 use crate::domain::gateway::{GatewayCommandRecord, GatewayTransition};
-use crate::domain::identity::{stable_source_id, thread_key};
-use crate::domain::live::{classify_live_item, live_summary};
+use crate::domain::identity::{app_server_source_id, stable_source_id, thread_key};
+use crate::domain::live::{
+    classify_live_item, live_summary, validate_app_server_envelope as validate_envelope,
+};
 use crate::domain::model::{NormalizedEvent, OwnedIngestBatch};
 use crate::domain::redact;
+use crate::domain::session::SourceEpochStale;
+use crate::permissions::validate_private_unix_socket;
 use crate::store::Database;
 use crate::store::PendingRequestClaim;
 use crate::writer::WriterHandle;
@@ -64,8 +69,11 @@ struct LiveSession {
     fingerprint_key: [u8; 32],
     attached_threads: BTreeSet<String>,
     active_turns: BTreeMap<String, String>,
+    thread_statuses: BTreeMap<String, String>,
     thread_models: BTreeMap<String, String>,
+    thread_reasoning_efforts: BTreeMap<String, Value>,
     thread_collaboration_modes: BTreeMap<String, Value>,
+    thread_default_collaboration_modes: BTreeMap<String, Value>,
     thread_goals: BTreeMap<String, Value>,
     pending_requests: BTreeMap<String, PendingServerRequest>,
     turn_commands: BTreeMap<String, String>,
@@ -380,6 +388,8 @@ pub struct LiveRuntime {
 #[derive(Clone)]
 struct ActorRuntimeConfig {
     registry: ControllerRegistry,
+    database: Arc<Database>,
+    source_stale_sender: Option<mpsc::UnboundedSender<SourceEpochStale>>,
     controller_enabled: bool,
     fingerprint_key: [u8; 32],
     keep_reasoning: bool,
@@ -388,7 +398,9 @@ struct ActorRuntimeConfig {
 
 pub fn spawn_enabled(
     config: &Config,
+    database: Arc<Database>,
     writer: WriterHandle,
+    source_stale_sender: Option<mpsc::UnboundedSender<SourceEpochStale>>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<LiveRuntime> {
     let fingerprint_key = load_or_create_key(&config.storage.fingerprint_key_file)?;
@@ -405,6 +417,8 @@ pub fn spawn_enabled(
     {
         let runtime = ActorRuntimeConfig {
             registry: controller.clone(),
+            database: database.clone(),
+            source_stale_sender: source_stale_sender.clone(),
             controller_enabled: config.controller.enabled,
             fingerprint_key,
             keep_reasoning: config.capture.keep_reasoning,
@@ -483,7 +497,7 @@ async fn run_with_reconnect(
         .app_server_socket
         .clone()
         .expect("validated live source has a socket");
-    let app_source_id = app_source_id(&socket_path);
+    let app_source_id = app_server_source_id(&socket_path);
     let stable_identity = socket_path.to_string_lossy().to_string();
     if let Err(error) = writer.upsert_source_kind(
         &app_source_id,
@@ -509,8 +523,8 @@ async fn run_with_reconnect(
             &source,
             &writer,
             &runtime.registry,
-            actor_sender,
-            actor_receiver,
+            &runtime.database,
+            (actor_sender, actor_receiver),
             LiveSession {
                 app_source_id: app_source_id.clone(),
                 store_source_id: stable_source_id(&source.codex_home.to_string_lossy()),
@@ -520,8 +534,11 @@ async fn run_with_reconnect(
                 fingerprint_key: runtime.fingerprint_key,
                 attached_threads: BTreeSet::new(),
                 active_turns: BTreeMap::new(),
+                thread_statuses: BTreeMap::new(),
                 thread_models: BTreeMap::new(),
+                thread_reasoning_efforts: BTreeMap::new(),
                 thread_collaboration_modes: BTreeMap::new(),
+                thread_default_collaboration_modes: BTreeMap::new(),
                 thread_goals: BTreeMap::new(),
                 pending_requests: BTreeMap::new(),
                 turn_commands: BTreeMap::new(),
@@ -550,6 +567,12 @@ async fn run_with_reconnect(
             .err()
             .map(|error| format!("{error:#}"))
             .unwrap_or_else(|| "connection_closed".into());
+        if let Some(source_stale_sender) = &runtime.source_stale_sender {
+            let _ = source_stale_sender.send(SourceEpochStale {
+                source_id: app_source_id.clone(),
+                source_epoch: epoch_id.clone(),
+            });
+        }
         runtime
             .registry
             .mark_unavailable(&app_source_id, &epoch_id, &reason);
@@ -577,11 +600,12 @@ async fn connect_once(
     source: &SourceConfig,
     writer: &WriterHandle,
     registry: &ControllerRegistry,
-    actor_sender: mpsc::Sender<ActorRequest>,
-    mut actor_receiver: mpsc::Receiver<ActorRequest>,
+    database: &Database,
+    actor_channel: (mpsc::Sender<ActorRequest>, mpsc::Receiver<ActorRequest>),
     mut session: LiveSession,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let (actor_sender, mut actor_receiver) = actor_channel;
     validate_socket(&session.socket_path)?;
     writer.update_source_status(&session.app_source_id, "connecting", None)?;
     let stream = UnixStream::connect(&session.socket_path)
@@ -658,7 +682,7 @@ async fn connect_once(
     if source.live_mode != "off" {
         reconcile_threads(&mut websocket, writer, &mut session).await?;
         if source.live_mode == "attach_loaded" {
-            attach_loaded_threads(&mut websocket, writer, &mut session).await?;
+            attach_loaded_threads(&mut websocket, writer, database, &mut session).await?;
         }
     }
 
@@ -686,6 +710,7 @@ async fn connect_once(
                             let (record, close_source) = dispatch_actor_command(
                                 &mut websocket,
                                 writer,
+                                database,
                                 &mut session,
                                 command,
                             ).await?;
@@ -709,10 +734,21 @@ async fn connect_once(
                     continue;
                 }
                 _ = reconcile.tick() => {
+                    detach_worker_owned_threads(
+                        &mut websocket,
+                        writer,
+                        database,
+                        &mut session,
+                    ).await?;
                     if source.live_mode != "off" {
                         reconcile_threads(&mut websocket, writer, &mut session).await?;
                         if source.live_mode == "attach_loaded" {
-                            attach_loaded_threads(&mut websocket, writer, &mut session).await?;
+                            attach_loaded_threads(
+                                &mut websocket,
+                                writer,
+                                database,
+                                &mut session,
+                            ).await?;
                         }
                     }
                     continue;
@@ -723,7 +759,20 @@ async fn connect_once(
                 Message::Text(text) => {
                     let envelope: Value = serde_json::from_str(&text)?;
                     let observation = ingest_envelope(writer, &mut session, &envelope, None, None)?;
+                    let idle_thread_id = (observation.method == "thread/status/changed"
+                        && observation.thread_status.as_deref() == Some("idle"))
+                    .then(|| observation.thread_id.clone())
+                    .flatten();
                     apply_control_observation(writer, &mut session, observation)?;
+                    if let Some(thread_id) = idle_thread_id {
+                        reconcile_idle_thread_turn(
+                            &mut websocket,
+                            writer,
+                            &mut session,
+                            &thread_id,
+                        )
+                        .await?;
+                    }
                 }
                 Message::Close(_) => break,
                 Message::Ping(payload) => websocket.send(Message::Pong(payload)).await?,
@@ -747,6 +796,7 @@ impl LiveSession {
         SourceActorSnapshot {
             source_id: self.app_source_id.clone(),
             source_epoch: self.epoch_id.clone(),
+            supervisor_version: 1,
             state: state.into(),
             experimental_api: self.controller_enabled && EXPERIMENTAL_API_ENABLED,
             catalog: self.capability_catalog.clone(),
@@ -818,6 +868,13 @@ impl LiveSession {
             }
         }
         if thread_loaded {
+            if active_turn_id.is_none() {
+                slash_commands.push(SlashCommandEntry {
+                    name: "/clear".into(),
+                    capability: "thread.clear".into(),
+                    interaction_required_without_argument: false,
+                });
+            }
             if self.method_available("thread/settings/update") {
                 for (name, capability) in [
                     ("/model", "thread.settings.model"),
@@ -847,7 +904,19 @@ impl LiveSession {
                 self.method_available("thread/settings/update")
                     && self
                         .capability_catalog
-                        .collaboration_mode("plan", self.thread_models.get(id).map(String::as_str))
+                        .collaboration_mode(
+                            "plan",
+                            self.thread_models.get(id).map(String::as_str),
+                            self.thread_reasoning_efforts.get(id),
+                        )
+                        .is_some()
+                    && self
+                        .capability_catalog
+                        .collaboration_mode(
+                            "default",
+                            self.thread_models.get(id).map(String::as_str),
+                            self.thread_reasoning_efforts.get(id),
+                        )
                         .is_some()
             }) {
                 slash_commands.push(SlashCommandEntry {
@@ -1049,6 +1118,7 @@ async fn reconcile_threads(
 async fn attach_loaded_threads(
     websocket: &mut WebSocketStream<UnixStream>,
     writer: &WriterHandle,
+    database: &Database,
     session: &mut LiveSession,
 ) -> Result<()> {
     let mut cursor: Option<String> = None;
@@ -1078,6 +1148,12 @@ async fn attach_loaded_threads(
             .unwrap_or_default();
         for thread_id in thread_ids.iter().filter_map(Value::as_str) {
             if session.attached_threads.contains(thread_id) {
+                continue;
+            }
+            if database
+                .active_thread_lease_owner(&session.app_source_id, &session.epoch_id, thread_id)?
+                .is_some()
+            {
                 continue;
             }
             request_id += 1;
@@ -1118,11 +1194,69 @@ async fn attach_loaded_threads(
     Ok(())
 }
 
-async fn discover_loaded_threads(
+async fn detach_worker_owned_threads(
     websocket: &mut WebSocketStream<UnixStream>,
     writer: &WriterHandle,
+    database: &Database,
     session: &mut LiveSession,
 ) -> Result<()> {
+    let mut leased = Vec::new();
+    for thread_id in &session.attached_threads {
+        if database
+            .active_thread_lease_owner(&session.app_source_id, &session.epoch_id, thread_id)?
+            .is_some()
+        {
+            leased.push(thread_id.clone());
+        }
+    }
+    for thread_id in leased {
+        session.rpc_request_id += 1;
+        let request_id = session.rpc_request_id;
+        websocket
+            .send(Message::Text(
+                json!({
+                    "method":"thread/unsubscribe",
+                    "id":request_id,
+                    "params":{"threadId":thread_id}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await?;
+        match wait_for_response(
+            websocket,
+            writer,
+            session,
+            json!(request_id),
+            "thread/unsubscribe/response",
+            Some(&thread_id),
+        )
+        .await
+        {
+            Ok(_) => {
+                session.attached_threads.remove(&thread_id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    source_id = %session.app_source_id,
+                    thread_id,
+                    error = %error,
+                    "failed to detach Supervisor from Session-owned Thread"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn discover_loaded_threads<S>(
+    websocket: &mut WebSocketStream<S>,
+    writer: &WriterHandle,
+    session: &mut LiveSession,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut cursor: Option<String> = None;
     loop {
         session.rpc_request_id += 1;
@@ -1163,7 +1297,7 @@ async fn discover_loaded_threads(
                         .into(),
                 ))
                 .await?;
-            let response = wait_for_response(
+            let response = wait_for_correlated_response(
                 websocket,
                 writer,
                 session,
@@ -1172,6 +1306,17 @@ async fn discover_loaded_threads(
                 Some(&thread_id),
             )
             .await?;
+            if unmaterialized_thread_read(&response) {
+                continue;
+            }
+            if let Some(error) = response.get("error") {
+                if error.get("code").and_then(Value::as_i64) == Some(-32601) {
+                    bail!(
+                        "incompatible protocol: stable method thread/read/response is unavailable"
+                    );
+                }
+                bail!("app-server request failed: {error}");
+            }
             update_thread_runtime_from_result(session, &response);
             refresh_thread_goal(websocket, writer, session, &thread_id).await?;
         }
@@ -1184,6 +1329,17 @@ async fn discover_loaded_threads(
         }
     }
     Ok(())
+}
+
+fn unmaterialized_thread_read(response: &Value) -> bool {
+    response.pointer("/error/code").and_then(Value::as_i64) == Some(-32600)
+        && response
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("is not materialized yet")
+                    && message.contains("includeTurns is unavailable before first user message")
+            })
 }
 
 async fn refresh_thread_goal<S>(
@@ -1243,6 +1399,15 @@ fn update_thread_runtime_from_result(
     } else {
         session.active_turns.remove(&thread_id);
     }
+    if let Some(status) = thread
+        .pointer("/status/type")
+        .or_else(|| thread.get("status"))
+        .and_then(Value::as_str)
+    {
+        session
+            .thread_statuses
+            .insert(thread_id.clone(), status.to_string());
+    }
     if let Some(model) = envelope
         .pointer("/result/model")
         .or_else(|| thread.get("model"))
@@ -1251,6 +1416,15 @@ fn update_thread_runtime_from_result(
         session
             .thread_models
             .insert(thread_id.clone(), model.to_string());
+    }
+    if let Some(effort) = envelope
+        .pointer("/result/reasoningEffort")
+        .or_else(|| envelope.pointer("/result/effort"))
+        .cloned()
+    {
+        session
+            .thread_reasoning_efforts
+            .insert(thread_id.clone(), effort);
     }
     Some(thread_id)
 }
@@ -1347,6 +1521,7 @@ where
 async fn dispatch_actor_command<S>(
     websocket: &mut WebSocketStream<S>,
     writer: &WriterHandle,
+    database: &Database,
     session: &mut LiveSession,
     command: ActorCommand,
 ) -> Result<(GatewayCommandRecord, bool)>
@@ -1364,6 +1539,23 @@ where
                 Some("THREAD_NOT_LOADED"),
                 Some("the selected Thread does not belong to this source"),
                 Some("THREAD_NOT_LOADED"),
+                "deny",
+                "rejected",
+            )?;
+            return Ok((record, false));
+        }
+        if database
+            .active_thread_lease_owner(&session.app_source_id, &session.epoch_id, thread_id)?
+            .is_some()
+        {
+            let record = transition_gateway(
+                writer,
+                &command.command_id,
+                "rejected",
+                None,
+                Some("THREAD_OWNED_BY_SESSION"),
+                Some("the selected Thread is owned by a Session Worker; attach to that Session"),
+                Some("THREAD_OWNED_BY_SESSION"),
                 "deny",
                 "rejected",
             )?;
@@ -1491,6 +1683,7 @@ where
         }
         ControllerOperation::Plan {
             thread_id,
+            mode,
             expected_turn_id,
             prompt,
             ..
@@ -1503,14 +1696,20 @@ where
             } else if session
                 .capability_catalog
                 .collaboration_mode(
-                    "plan",
+                    mode,
                     session.thread_models.get(thread_id).map(String::as_str),
+                    session.thread_reasoning_efforts.get(thread_id),
                 )
                 .is_none()
             {
                 Some((
                     "CAPABILITY_UNAVAILABLE",
-                    "Plan collaboration mode is not available for this source and Thread",
+                    "the selected collaboration mode is not available for this source and Thread",
+                ))
+            } else if mode != "plan" && prompt.is_some() {
+                Some((
+                    "COMMAND_INVALID",
+                    "only Plan collaboration mode accepts a prompt",
                 ))
             } else if prompt.is_some()
                 && session.active_turns.get(thread_id).map(String::as_str)
@@ -1619,11 +1818,40 @@ where
         "allow",
         "dispatching",
     )?;
-    let plan_mode = if let ControllerOperation::Plan { thread_id, .. } = &command.operation {
-        session.capability_catalog.collaboration_mode(
-            "plan",
-            session.thread_models.get(thread_id).map(String::as_str),
-        )
+    let plan_mode = if let ControllerOperation::Plan {
+        thread_id, mode, ..
+    } = &command.operation
+    {
+        if mode == "default" {
+            session
+                .thread_default_collaboration_modes
+                .get(thread_id)
+                .cloned()
+                .or_else(|| {
+                    session.capability_catalog.collaboration_mode(
+                        mode,
+                        session.thread_models.get(thread_id).map(String::as_str),
+                        session.thread_reasoning_efforts.get(thread_id),
+                    )
+                })
+        } else {
+            let default_mode = session.capability_catalog.collaboration_mode(
+                "default",
+                session.thread_models.get(thread_id).map(String::as_str),
+                session.thread_reasoning_efforts.get(thread_id),
+            );
+            if let Some(default_mode) = default_mode {
+                session
+                    .thread_default_collaboration_modes
+                    .entry(thread_id.clone())
+                    .or_insert(default_mode);
+            }
+            session.capability_catalog.collaboration_mode(
+                mode,
+                session.thread_models.get(thread_id).map(String::as_str),
+                session.thread_reasoning_efforts.get(thread_id),
+            )
+        }
     } else {
         None
     };
@@ -1728,14 +1956,15 @@ where
             );
         }
         session.dispatching_turn_command = None;
+        let (error_code, error_message) = safe_upstream_rejection(&command.operation, &response);
         let record = transition_gateway(
             writer,
             &command.command_id,
             "rejected",
             None,
-            Some("UPSTREAM_REJECTED"),
-            Some("the App Server rejected the requested operation"),
-            Some("UPSTREAM_REJECTED"),
+            Some(error_code),
+            Some(error_message),
+            Some(error_code),
             "allow",
             "rejected",
         )?;
@@ -1812,12 +2041,20 @@ where
                 .turn_commands
                 .insert(turn_id.clone(), command.command_id.clone());
             session.dispatching_turn_command = None;
+            let reconciled =
+                if session.thread_statuses.get(thread_id).map(String::as_str) == Some("idle") {
+                    reconcile_idle_thread_turn(websocket, writer, session, thread_id).await?
+                } else {
+                    None
+                };
             let response_status = result.pointer("/turn/status").and_then(Value::as_str);
             let terminal_status = response_status
                 .filter(|status| *status != "inProgress")
                 .map(str::to_string)
                 .or_else(|| session.terminal_turns.get(&turn_id).cloned());
-            if let Some(status) = terminal_status {
+            if let Some(record) = reconciled {
+                record
+            } else if let Some(status) = terminal_status {
                 session.active_turns.remove(thread_id);
                 session.turn_commands.remove(&turn_id);
                 session.terminal_turns.remove(&turn_id);
@@ -1892,22 +2129,23 @@ where
         }
         ControllerOperation::Plan {
             thread_id,
+            mode: requested_mode,
             expected_turn_id,
             prompt,
             ..
         } => {
-            let mode = plan_mode
+            let collaboration_mode = plan_mode
                 .as_ref()
                 .expect("Plan precondition resolved a collaboration mode");
             session
                 .thread_collaboration_modes
-                .insert(thread_id.clone(), mode.clone());
+                .insert(thread_id.clone(), collaboration_mode.clone());
             match (prompt.as_ref(), expected_turn_id.as_ref()) {
                 (None, _) => transition_gateway(
                     writer,
                     &command.command_id,
                     "completed",
-                    Some(json!({"collaborationMode":"plan"})),
+                    Some(json!({"collaborationMode":requested_mode})),
                     None,
                     None,
                     None,
@@ -1941,13 +2179,22 @@ where
                         .turn_commands
                         .insert(turn_id.clone(), command.command_id.clone());
                     session.dispatching_turn_command = None;
+                    let reconciled = if session.thread_statuses.get(thread_id).map(String::as_str)
+                        == Some("idle")
+                    {
+                        reconcile_idle_thread_turn(websocket, writer, session, thread_id).await?
+                    } else {
+                        None
+                    };
                     let terminal_status = result
                         .pointer("/turn/status")
                         .and_then(Value::as_str)
                         .filter(|status| *status != "inProgress")
                         .map(str::to_string)
                         .or_else(|| session.terminal_turns.get(&turn_id).cloned());
-                    if let Some(status) = terminal_status {
+                    if let Some(record) = reconciled {
+                        record
+                    } else if let Some(status) = terminal_status {
                         session.active_turns.remove(thread_id);
                         session.turn_commands.remove(&turn_id);
                         session.terminal_turns.remove(&turn_id);
@@ -2136,13 +2383,21 @@ where
                 .turn_commands
                 .insert(turn_id.clone(), command.command_id.clone());
             session.dispatching_turn_command = None;
+            let reconciled =
+                if session.thread_statuses.get(thread_id).map(String::as_str) == Some("idle") {
+                    reconcile_idle_thread_turn(websocket, writer, session, thread_id).await?
+                } else {
+                    None
+                };
             let terminal_status = result
                 .pointer("/turn/status")
                 .and_then(Value::as_str)
                 .filter(|status| *status != "inProgress")
                 .map(str::to_string)
                 .or_else(|| session.terminal_turns.get(&turn_id).cloned());
-            if let Some(status) = terminal_status {
+            if let Some(record) = reconciled {
+                record
+            } else if let Some(status) = terminal_status {
                 session.active_turns.remove(thread_id);
                 session.turn_commands.remove(&turn_id);
                 session.terminal_turns.remove(&turn_id);
@@ -2195,6 +2450,31 @@ where
     };
     let _ = accepted;
     Ok((record, false))
+}
+
+fn safe_upstream_rejection(
+    operation: &ControllerOperation,
+    response: &Value,
+) -> (&'static str, &'static str) {
+    let message = response.pointer("/error/message").and_then(Value::as_str);
+    if matches!(operation, ControllerOperation::ThreadResume { .. }) {
+        if message.is_some_and(|value| value.contains("already has an active writer")) {
+            return (
+                "THREAD_IN_USE",
+                "the selected Thread is already open in another Codex client",
+            );
+        }
+        if message.is_some_and(|value| value.contains(" is archived")) {
+            return (
+                "THREAD_ARCHIVED",
+                "the selected Thread must be unarchived before it can be resumed",
+            );
+        }
+    }
+    (
+        "UPSTREAM_REJECTED",
+        "the App Server rejected the requested operation",
+    )
 }
 
 async fn dispatch_pending_request_action<S>(
@@ -2407,14 +2687,17 @@ where
     }
 }
 
-async fn wait_for_response(
-    websocket: &mut WebSocketStream<UnixStream>,
+async fn wait_for_response<S>(
+    websocket: &mut WebSocketStream<S>,
     writer: &WriterHandle,
     session: &mut LiveSession,
     expected_id: Value,
     response_method: &str,
     thread_hint: Option<&str>,
-) -> Result<Value> {
+) -> Result<Value>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let envelope = wait_for_correlated_response(
         websocket,
         writer,
@@ -2481,7 +2764,9 @@ struct ControlObservation {
     thread_id: Option<String>,
     turn_id: Option<String>,
     turn_status: Option<String>,
+    thread_status: Option<String>,
     thread_model: Option<String>,
+    thread_reasoning_effort: Option<Value>,
     collaboration_mode: Option<Value>,
     goal: Option<Value>,
     goal_cleared: bool,
@@ -2533,11 +2818,21 @@ fn ingest_envelope(
             .get("status")
             .and_then(|status| status.get("type").unwrap_or(status).as_str())
             .map(str::to_string),
+        thread_status: (event.method == "thread/status/changed")
+            .then(|| {
+                event
+                    .payload
+                    .get("status")
+                    .and_then(|status| status.get("type").unwrap_or(status).as_str())
+                    .map(str::to_string)
+            })
+            .flatten(),
         thread_model: event
             .payload
             .pointer("/threadSettings/model")
             .and_then(Value::as_str)
             .map(str::to_string),
+        thread_reasoning_effort: event.payload.pointer("/threadSettings/effort").cloned(),
         collaboration_mode: event
             .payload
             .pointer("/threadSettings/collaborationMode")
@@ -2586,6 +2881,11 @@ fn apply_control_observation(
         session.pending_requests.remove(request_id);
     }
     if let Some(thread_id) = observation.thread_id.as_deref() {
+        if let Some(status) = observation.thread_status.as_deref() {
+            session
+                .thread_statuses
+                .insert(thread_id.to_string(), status.to_string());
+        }
         if observation.goal_cleared {
             session.thread_goals.remove(thread_id);
         } else if let Some(goal) = observation.goal.as_ref() {
@@ -2605,6 +2905,16 @@ fn apply_control_observation(
             .insert(thread_id.to_string(), model.to_string());
     }
     if observation.method == "thread/settings/updated"
+        && let (Some(thread_id), Some(effort)) = (
+            observation.thread_id.as_deref(),
+            observation.thread_reasoning_effort.as_ref(),
+        )
+    {
+        session
+            .thread_reasoning_efforts
+            .insert(thread_id.to_string(), effort.clone());
+    }
+    if observation.method == "thread/settings/updated"
         && let (Some(thread_id), Some(mode)) = (
             observation.thread_id.as_deref(),
             observation.collaboration_mode.as_ref(),
@@ -2613,6 +2923,11 @@ fn apply_control_observation(
         session
             .thread_collaboration_modes
             .insert(thread_id.to_string(), mode.clone());
+        if mode.get("mode").and_then(Value::as_str) != Some("plan") {
+            session
+                .thread_default_collaboration_modes
+                .insert(thread_id.to_string(), mode.clone());
+        }
     }
     if observation.method == "thread/started"
         && let Some(thread_id) = observation.thread_id.as_deref()
@@ -2665,6 +2980,71 @@ fn apply_control_observation(
         }
     }
     Ok(())
+}
+
+async fn reconcile_idle_thread_turn<S>(
+    websocket: &mut WebSocketStream<S>,
+    writer: &WriterHandle,
+    session: &mut LiveSession,
+    thread_id: &str,
+) -> Result<Option<GatewayCommandRecord>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(turn_id) = session.active_turns.get(thread_id).cloned() else {
+        return Ok(None);
+    };
+    if session.thread_statuses.get(thread_id).map(String::as_str) != Some("idle") {
+        return Ok(None);
+    }
+
+    session.rpc_request_id += 1;
+    let request_id = session.rpc_request_id;
+    websocket
+        .send(Message::Text(
+            json!({"method":"thread/read","id":request_id,
+                "params":{"threadId":thread_id,"includeTurns":true}})
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let response = wait_for_correlated_response(
+        websocket,
+        writer,
+        session,
+        json!(request_id),
+        "thread/read/response",
+        Some(thread_id),
+    )
+    .await?;
+    if response.get("error").is_some() {
+        tracing::warn!(thread_id, "thread/read could not reconcile an idle Turn");
+        return Ok(None);
+    }
+
+    let terminal_status = response
+        .pointer("/result/thread/turns")
+        .and_then(Value::as_array)
+        .and_then(|turns| {
+            turns
+                .iter()
+                .find(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id.as_str()))
+        })
+        .and_then(|turn| turn.get("status"))
+        .and_then(Value::as_str)
+        .filter(|status| *status != "inProgress")
+        .map(str::to_string);
+    update_thread_runtime_from_result(session, &response);
+    let Some(status) = terminal_status else {
+        return Ok(None);
+    };
+
+    session.active_turns.remove(thread_id);
+    session.terminal_turns.remove(&turn_id);
+    let Some(command_id) = session.turn_commands.remove(&turn_id) else {
+        return Ok(None);
+    };
+    transition_turn_terminal(writer, &command_id, &turn_id, &status).map(Some)
 }
 
 fn transition_turn_terminal(
@@ -2761,30 +3141,6 @@ fn mark_inflight_outcome_unknown(
         }
     }
     session.turn_commands.clear();
-}
-
-fn validate_envelope(envelope: &Value) -> Result<()> {
-    let object = envelope.as_object().ok_or_else(|| {
-        anyhow::anyhow!("incompatible protocol: JSON-RPC envelope is not an object")
-    })?;
-    if let Some(method) = object.get("method") {
-        if !method.is_string() {
-            bail!("incompatible protocol: JSON-RPC method is not a string");
-        }
-        if let Some(params) = object.get("params")
-            && !params.is_object()
-            && !params.is_null()
-        {
-            bail!("incompatible protocol: JSON-RPC params is not an object");
-        }
-        return Ok(());
-    }
-    if !object.contains_key("id")
-        || (!object.contains_key("result") && !object.contains_key("error"))
-    {
-        bail!("incompatible protocol: response lacks id and result/error");
-    }
-    Ok(())
 }
 
 fn normalize_envelope(
@@ -2891,6 +3247,10 @@ fn normalize_envelope(
         item_id,
         request_id,
         blob_id: None,
+        protocol_direction: None,
+        worker_id: None,
+        worker_connection_epoch: None,
+        proxy_seq: None,
         method,
         phase: phase.clone(),
         durability: "transient".into(),
@@ -2933,11 +3293,6 @@ fn id_string(value: Option<&Value>) -> Option<String> {
             .map(str::to_string)
             .unwrap_or_else(|| value.to_string())
     })
-}
-
-fn app_source_id(path: &Path) -> String {
-    URL_SAFE_NO_PAD
-        .encode(blake3::hash(format!("app-server\0{}", path.display()).as_bytes()).as_bytes())
 }
 
 fn canonical_existing(path: &Path) -> Result<PathBuf> {
@@ -2984,35 +3339,19 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 
 #[cfg(unix)]
 fn validate_socket(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect app-server socket {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
-        bail!("configured app-server endpoint is not a direct Unix socket");
-    }
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        bail!("configured app-server socket is not owned by the current user");
-    }
-    if metadata.mode() & 0o077 != 0 {
-        bail!("configured app-server socket permissions are broader than 0600");
-    }
-    let parent = path.parent().context("app-server socket has no parent")?;
-    let parent_metadata = fs::metadata(parent)?;
-    if parent_metadata.uid() != unsafe { libc::geteuid() } || parent_metadata.mode() & 0o022 != 0 {
-        bail!("configured app-server socket directory is not private");
-    }
-    Ok(())
+    validate_private_unix_socket(path, "configured app-server endpoint")
 }
 
 #[cfg(not(unix))]
-fn validate_socket(_path: &Path) -> Result<()> {
-    bail!("App Server live mode is currently supported on Unix only")
+fn validate_socket(path: &Path) -> Result<()> {
+    validate_private_unix_socket(path, "configured app-server endpoint")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::gateway::{GatewayCommandTarget, NewGatewayCommand};
+    use crate::domain::session::{RegisterSessionWorker, SessionWorkerRegistration};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::io::duplex;
@@ -3028,8 +3367,11 @@ mod tests {
             fingerprint_key: [1_u8; 32],
             attached_threads: BTreeSet::new(),
             active_turns: BTreeMap::new(),
+            thread_statuses: BTreeMap::new(),
             thread_models: BTreeMap::new(),
+            thread_reasoning_efforts: BTreeMap::new(),
             thread_collaboration_modes: BTreeMap::new(),
+            thread_default_collaboration_modes: BTreeMap::new(),
             thread_goals: BTreeMap::new(),
             pending_requests: BTreeMap::new(),
             turn_commands: BTreeMap::new(),
@@ -3083,6 +3425,7 @@ mod tests {
             payload_hash: format!("hash-{command_id}"),
             target,
             input_summary_json: json!({"textBytes":5}).to_string(),
+            origin: GatewayCommandOrigin::LegacyApi,
         })?;
         transition_gateway(
             writer,
@@ -3120,6 +3463,7 @@ mod tests {
                 expected_request_version: Some(request_version),
             },
             input_summary_json: json!({"jsonBytes":84}).to_string(),
+            origin: GatewayCommandOrigin::LegacyApi,
         })?;
         transition_gateway(
             writer,
@@ -3294,6 +3638,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "request-command".into(),
@@ -3354,6 +3699,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "timeout-command".into(),
@@ -3484,6 +3830,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut session,
             ActorCommand {
                 command_id: "command".into(),
@@ -3531,6 +3878,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_thread_status_reconciles_terminal_turn_when_notifications_are_missing()
+    -> Result<()> {
+        let (_temp, database, writer) = gateway_writer()?;
+        authorize_test_command(&writer, "command", "turn.start", Some("thread"))?;
+        let (client_io, server_io) = duplex(32 * 1024);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let server = tokio::spawn(async move {
+            let request = server.next().await.context("missing turn request")??;
+            let Message::Text(request) = request else {
+                bail!("expected text request");
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            let id = request["id"].clone();
+            server
+                .send(Message::Text(
+                    json!({"id":id,"result":{"turn":{"id":"turn","status":"inProgress","items":[]}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            for status in ["active", "idle"] {
+                server
+                    .send(Message::Text(
+                        json!({"method":"thread/status/changed","params":{
+                            "threadId":"thread","status":{"type":status}}})
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
+            }
+            let request = server
+                .next()
+                .await
+                .context("missing reconciliation read")??;
+            let Message::Text(request) = request else {
+                bail!("expected thread/read request");
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            assert_eq!(request["method"], "thread/read");
+            assert_eq!(request["params"]["threadId"], "thread");
+            assert_eq!(request["params"]["includeTurns"], true);
+            server
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{"thread":{
+                        "id":"thread","status":{"type":"idle"},
+                        "turns":[{"id":"turn","status":"completed","items":[]}]}}})
+                    .to_string()
+                    .into(),
+                ))
+                .await?;
+            Result::<()>::Ok(())
+        });
+
+        let mut session = session();
+        session.attached_threads.insert("thread".into());
+        let (record, close) = dispatch_actor_command(
+            &mut client,
+            &writer,
+            &database,
+            &mut session,
+            ActorCommand {
+                command_id: "command".into(),
+                operation: ControllerOperation::TurnStart {
+                    thread_id: "thread".into(),
+                    thread_key: thread_key("store-source", "thread"),
+                    client_user_message_id: "client-message".into(),
+                    text: "hello".into(),
+                    image_paths: Vec::new(),
+                },
+            },
+        )
+        .await?;
+        assert_eq!(record.state, "running");
+        assert!(!close);
+
+        for expected_status in ["active", "idle"] {
+            let message = client.next().await.context("missing status event")??;
+            let Message::Text(message) = message else {
+                bail!("expected status text event");
+            };
+            let envelope: Value = serde_json::from_str(&message)?;
+            let observation = ingest_envelope(&writer, &mut session, &envelope, None, None)?;
+            assert_eq!(observation.thread_status.as_deref(), Some(expected_status));
+            apply_control_observation(&writer, &mut session, observation)?;
+        }
+        let reconciled =
+            reconcile_idle_thread_turn(&mut client, &writer, &mut session, "thread").await?;
+        server.await??;
+
+        assert_eq!(
+            reconciled.as_ref().map(|record| record.state.as_str()),
+            Some("completed")
+        );
+        assert!(!session.active_turns.contains_key("thread"));
+        assert!(!session.turn_commands.contains_key("turn"));
+        assert_eq!(
+            database
+                .gateway_command("command")?
+                .context("missing command")?
+                .state,
+            "completed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn turn_start_rejects_unloaded_thread_without_writing_upstream() -> Result<()> {
         let (_temp, database, writer) = gateway_writer()?;
         authorize_test_command(&writer, "unloaded", "turn.start", Some("thread"))?;
@@ -3540,6 +3994,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut session(),
             ActorCommand {
                 command_id: "unloaded".into(),
@@ -3565,6 +4020,71 @@ mod tests {
                 .context("missing command")?
                 .state,
             "rejected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn supervisor_rejects_mutation_for_session_owned_thread_without_writing_upstream()
+    -> Result<()> {
+        let (_temp, database, writer) = gateway_writer()?;
+        authorize_test_command(
+            &writer,
+            "create-session-owner",
+            "session.create",
+            Some("thread"),
+        )?;
+        assert!(matches!(
+            writer.register_session_worker(SessionWorkerRegistration {
+                worker_id: "worker-owner".into(),
+                create_command_id: "create-session-owner".into(),
+                principal_id: "local_bearer".into(),
+                source_id: "app-source".into(),
+                source_epoch: "epoch".into(),
+                mode: "resume".into(),
+                canonical_cwd: "/synthetic".into(),
+                rows: 24,
+                cols: 80,
+                runtime_dir_name: "worker-owner".into(),
+                primary_lease_id: "lease-owner".into(),
+                codex_thread_id: Some("thread".into()),
+                reservation_id: None,
+            })?,
+            RegisterSessionWorker::Created { .. }
+        ));
+        authorize_test_command(&writer, "blocked", "turn.start", Some("thread"))?;
+        let (client_io, server_io) = duplex(4096);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let mut live = session();
+        live.attached_threads.insert("thread".into());
+        let (record, close) = dispatch_actor_command(
+            &mut client,
+            &writer,
+            &database,
+            &mut live,
+            ActorCommand {
+                command_id: "blocked".into(),
+                operation: ControllerOperation::TurnStart {
+                    thread_id: "thread".into(),
+                    thread_key: thread_key("store-source", "thread"),
+                    client_user_message_id: "client-message".into(),
+                    text: "must not be written".into(),
+                    image_paths: Vec::new(),
+                },
+            },
+        )
+        .await?;
+        assert!(!close);
+        assert_eq!(record.state, "rejected");
+        assert_eq!(
+            record.error.as_ref().map(|error| error.code.as_str()),
+            Some("THREAD_OWNED_BY_SESSION")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.next())
+                .await
+                .is_err()
         );
         Ok(())
     }
@@ -3596,6 +4116,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "rejected".into(),
@@ -3630,6 +4151,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "unknown".into(),
@@ -3656,9 +4178,78 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn resume_rejections_are_safely_classified_without_thread_identifiers() {
+        let operation = ControllerOperation::ThreadResume {
+            thread_id: "private-thread-id".into(),
+            thread_key: "private-thread-key".into(),
+        };
+        let active_writer = json!({"error":{"code":-32600,"message":"thread private-thread-id already has an active writer"}});
+        let archived = json!({"error":{"code":-32600,"message":"session private-thread-id is archived. Run a private command"}});
+        let private = json!({"error":{"code":-32000,"message":"private upstream payload"}});
+
+        assert_eq!(
+            safe_upstream_rejection(&operation, &active_writer),
+            (
+                "THREAD_IN_USE",
+                "the selected Thread is already open in another Codex client"
+            )
+        );
+        assert_eq!(
+            safe_upstream_rejection(&operation, &archived),
+            (
+                "THREAD_ARCHIVED",
+                "the selected Thread must be unarchived before it can be resumed"
+            )
+        );
+        assert_eq!(
+            safe_upstream_rejection(&operation, &private),
+            (
+                "UPSTREAM_REJECTED",
+                "the App Server rejected the requested operation"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn unmaterialized_loaded_thread_does_not_disconnect_the_source() -> Result<()> {
+        let (_temp, _database, writer) = gateway_writer()?;
+        let (client_io, server_io) = duplex(8192);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let server_task = tokio::spawn(async move {
+            let request = server
+                .next()
+                .await
+                .context("missing loaded list request")??;
+            let Message::Text(request) = request else {
+                bail!("expected loaded list request")
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            server.send(Message::Text(json!({"id":request["id"],"result":{"data":["empty-thread"],"nextCursor":null}}).to_string().into())).await?;
+
+            let request = server
+                .next()
+                .await
+                .context("missing thread read request")??;
+            let Message::Text(request) = request else {
+                bail!("expected thread read request")
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            server.send(Message::Text(json!({"id":request["id"],"error":{"code":-32600,
+                "message":"thread empty-thread is not materialized yet; includeTurns is unavailable before first user message"}}).to_string().into())).await?;
+            Result::<()>::Ok(())
+        });
+        let mut live = session();
+        discover_loaded_threads(&mut client, &writer, &mut live).await?;
+        server_task.await??;
+        assert!(live.attached_threads.contains("empty-thread"));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn command_timeout_after_write_is_outcome_unknown_without_replay() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         authorize_test_command(&writer, "timeout", "turn.start", Some("thread"))?;
         let (client_io, server_io) = duplex(8192);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
@@ -3673,6 +4264,7 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "timeout".into(),
@@ -3695,7 +4287,7 @@ mod tests {
     #[tokio::test]
     async fn typed_conversation_and_slice_six_operations_use_only_published_protocols() -> Result<()>
     {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         let cases = vec![
             (
                 "new",
@@ -3869,6 +4461,7 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut live,
                 ActorCommand {
                     command_id: command_id.into(),
@@ -3885,7 +4478,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_active_turn_rejects_steer_and_interrupt_before_upstream_write() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         for (command_id, capability, operation) in [
             (
                 "stale-steer",
@@ -3919,6 +4512,7 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut live,
                 ActorCommand {
                     command_id: command_id.into(),
@@ -3940,6 +4534,8 @@ mod tests {
         let mut live = session();
         live.attached_threads.insert("thread".into());
         live.thread_models.insert("thread".into(), "model-a".into());
+        live.thread_reasoning_efforts
+            .insert("thread".into(), json!("high"));
         live.capability_catalog.record_response(
             "model/list",
             false,
@@ -3961,12 +4557,20 @@ mod tests {
         live.capability_catalog.record_response(
             "collaborationMode/list",
             true,
-            &json!({"result":{"data":[{
-                "name":"Plan",
-                "mode":"plan",
-                "model":"model-a",
-                "reasoning_effort":"high"
-            }]}}),
+            &json!({"result":{"data":[
+                {
+                    "name":"Plan",
+                    "mode":"plan",
+                    "model":"model-a",
+                    "reasoning_effort":"high"
+                },
+                {
+                    "name":"Default",
+                    "mode":"default",
+                    "model":"model-a",
+                    "reasoning_effort":null
+                }
+            ]}}),
         );
         for (method, result) in [
             ("mcpServerStatus/list", json!({"data":[]})),
@@ -3981,16 +4585,37 @@ mod tests {
 
     #[tokio::test]
     async fn plan_dispatch_uses_catalog_mode_for_settings_and_idle_turn() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
-        for (command_id, prompt, expected_method) in [
-            ("plan-settings", None, "thread/settings/update"),
-            ("plan-turn", Some("Create a plan"), "turn/start"),
+        let (_temp, database, writer) = gateway_writer()?;
+        for (command_id, mode, prompt, expected_method, expected_effort) in [
+            (
+                "plan-settings",
+                "plan",
+                None,
+                "thread/settings/update",
+                Some("high"),
+            ),
+            (
+                "default-settings",
+                "default",
+                None,
+                "thread/settings/update",
+                Some("high"),
+            ),
+            (
+                "plan-turn",
+                "plan",
+                Some("Create a plan"),
+                "turn/start",
+                Some("high"),
+            ),
         ] {
             authorize_test_command(&writer, command_id, "thread.plan", Some("thread"))?;
             let (client_io, server_io) = duplex(16 * 1024);
             let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
             let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
             let expected_method = expected_method.to_string();
+            let expected_mode = mode.to_string();
+            let expected_effort = expected_effort.map(str::to_string);
             let server_task = tokio::spawn(async move {
                 let request = server.next().await.context("missing Plan request")??;
                 let Message::Text(request) = request else {
@@ -3998,12 +4623,15 @@ mod tests {
                 };
                 let request: Value = serde_json::from_str(&request)?;
                 assert_eq!(request["method"], expected_method);
-                assert_eq!(request["params"]["collaborationMode"]["mode"], "plan");
+                assert_eq!(
+                    request["params"]["collaborationMode"]["mode"],
+                    expected_mode
+                );
                 assert_eq!(
                     request["params"]["collaborationMode"]["settings"],
                     json!({
                         "model":"model-a",
-                        "reasoning_effort":"high",
+                        "reasoning_effort":expected_effort,
                         "developer_instructions":null,
                     })
                 );
@@ -4026,12 +4654,14 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut live,
                 ActorCommand {
                     command_id: command_id.into(),
                     operation: ControllerOperation::Plan {
                         thread_id: "thread".into(),
                         thread_key: thread_key("store-source", "thread"),
+                        mode: mode.into(),
                         expected_turn_id: None,
                         client_user_message_id: prompt.map(|_| "plan-message".into()),
                         prompt: prompt.map(str::to_string),
@@ -4041,14 +4671,157 @@ mod tests {
             .await?;
             server_task.await??;
             assert_eq!(record.state, "completed");
+            if prompt.is_none() {
+                assert_eq!(
+                    record
+                        .result
+                        .as_ref()
+                        .and_then(|value| value["collaborationMode"].as_str()),
+                    Some(mode)
+                );
+            }
             assert!(!close);
         }
         Ok(())
     }
 
     #[tokio::test]
+    async fn leaving_plan_restores_the_pre_plan_reasoning_effort() -> Result<()> {
+        let (_temp, database, writer) = gateway_writer()?;
+        let mut live = settings_session();
+        live.thread_reasoning_efforts
+            .insert("thread".into(), json!("low"));
+        live.capability_catalog.record_response(
+            "model/list",
+            false,
+            &json!({"result":{"data":[{
+                "id":"model-a",
+                "hidden":false,
+                "supportsPersonality":true,
+                "supportedReasoningEfforts":[
+                    {"reasoningEffort":"low","description":"Low"},
+                    {"reasoningEffort":"high","description":"High"}
+                ]
+            }]}}),
+        );
+
+        authorize_test_command(&writer, "enter-plan", "thread.plan", Some("thread"))?;
+        let (client_io, server_io) = duplex(16 * 1024);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let server_task = tokio::spawn(async move {
+            let request = server
+                .next()
+                .await
+                .context("missing enter Plan request")??;
+            let Message::Text(request) = request else {
+                bail!("expected enter Plan text request");
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            assert_eq!(
+                request["params"]["collaborationMode"]["settings"]["reasoning_effort"],
+                "high"
+            );
+            server
+                .send(Message::Text(
+                    json!({
+                        "method":"thread/settings/updated",
+                        "params":{
+                            "threadId":"thread",
+                            "threadSettings":{
+                                "model":"model-a",
+                                "effort":"high",
+                                "collaborationMode":request["params"]["collaborationMode"].clone()
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await?;
+            server
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{}}).to_string().into(),
+                ))
+                .await?;
+            Result::<()>::Ok(())
+        });
+        let (record, close) = dispatch_actor_command(
+            &mut client,
+            &writer,
+            &database,
+            &mut live,
+            ActorCommand {
+                command_id: "enter-plan".into(),
+                operation: ControllerOperation::Plan {
+                    thread_id: "thread".into(),
+                    thread_key: thread_key("store-source", "thread"),
+                    mode: "plan".into(),
+                    expected_turn_id: None,
+                    client_user_message_id: None,
+                    prompt: None,
+                },
+            },
+        )
+        .await?;
+        server_task.await??;
+        assert_eq!(record.state, "completed");
+        assert!(!close);
+        assert_eq!(live.thread_reasoning_efforts["thread"], "high");
+        assert_eq!(
+            live.thread_default_collaboration_modes["thread"]["settings"]["reasoning_effort"],
+            "low"
+        );
+
+        authorize_test_command(&writer, "exit-plan", "thread.plan", Some("thread"))?;
+        let (client_io, server_io) = duplex(16 * 1024);
+        let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let server_task = tokio::spawn(async move {
+            let request = server.next().await.context("missing exit Plan request")??;
+            let Message::Text(request) = request else {
+                bail!("expected exit Plan text request");
+            };
+            let request: Value = serde_json::from_str(&request)?;
+            assert_eq!(request["params"]["collaborationMode"]["mode"], "default");
+            assert_eq!(
+                request["params"]["collaborationMode"]["settings"]["reasoning_effort"],
+                "low"
+            );
+            server
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{}}).to_string().into(),
+                ))
+                .await?;
+            Result::<()>::Ok(())
+        });
+        let (record, close) = dispatch_actor_command(
+            &mut client,
+            &writer,
+            &database,
+            &mut live,
+            ActorCommand {
+                command_id: "exit-plan".into(),
+                operation: ControllerOperation::Plan {
+                    thread_id: "thread".into(),
+                    thread_key: thread_key("store-source", "thread"),
+                    mode: "default".into(),
+                    expected_turn_id: None,
+                    client_user_message_id: None,
+                    prompt: None,
+                },
+            },
+        )
+        .await?;
+        server_task.await??;
+        assert_eq!(record.state, "completed");
+        assert!(!close);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn active_plan_applies_mode_then_steers_and_partial_rejection_is_unknown() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         for (command_id, reject_steer, expected_state) in [
             ("plan-steer", false, "completed"),
             ("plan-steer-rejected", true, "outcome_unknown"),
@@ -4093,12 +4866,14 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut live,
                 ActorCommand {
                     command_id: command_id.into(),
                     operation: ControllerOperation::Plan {
                         thread_id: "thread".into(),
                         thread_key: thread_key("store-source", "thread"),
+                        mode: "plan".into(),
                         expected_turn_id: Some("turn".into()),
                         client_user_message_id: Some("plan-steer-message".into()),
                         prompt: Some("Refine the plan".into()),
@@ -4123,7 +4898,7 @@ mod tests {
     #[tokio::test]
     async fn plan_is_rejected_before_write_when_experimental_catalog_is_unavailable() -> Result<()>
     {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         authorize_test_command(&writer, "plan-unavailable", "thread.plan", Some("thread"))?;
         let (client_io, server_io) = duplex(4096);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
@@ -4137,12 +4912,14 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "plan-unavailable".into(),
                 operation: ControllerOperation::Plan {
                     thread_id: "thread".into(),
                     thread_key: thread_key("store-source", "thread"),
+                    mode: "plan".into(),
                     expected_turn_id: None,
                     client_user_message_id: None,
                     prompt: None,
@@ -4162,7 +4939,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_protocol_rejection_is_sanitized_without_claiming_mode_change() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         authorize_test_command(&writer, "plan-rejected", "thread.plan", Some("thread"))?;
         let (client_io, server_io) = duplex(8192);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
@@ -4189,12 +4966,14 @@ mod tests {
         let (record, close) = dispatch_actor_command(
             &mut client,
             &writer,
+            &database,
             &mut live,
             ActorCommand {
                 command_id: "plan-rejected".into(),
                 operation: ControllerOperation::Plan {
                     thread_id: "thread".into(),
                     thread_key: thread_key("store-source", "thread"),
+                    mode: "plan".into(),
                     expected_turn_id: None,
                     client_user_message_id: None,
                     prompt: None,
@@ -4241,6 +5020,7 @@ mod tests {
             assert!(names.contains(name), "missing {name}");
         }
         assert!(!names.contains("/resume"));
+        assert!(!names.contains("/clear"));
 
         let unloaded = live.control_catalog(Some("other"));
         let names = unloaded
@@ -4278,6 +5058,12 @@ mod tests {
         assert!(!names.contains("/usage"));
 
         live.active_turns.remove("thread");
+        assert!(
+            live.control_catalog(Some("thread"))
+                .slash_commands
+                .iter()
+                .any(|entry| entry.name == "/clear")
+        );
         for method in [
             "thread/name/set",
             "thread/archive",
@@ -4315,7 +5101,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_dispatch_uses_catalog_gated_official_update_fields() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         for (command_id, capability, setting, expected_key, expected_value) in [
             (
                 "setting-model",
@@ -4377,6 +5163,7 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut live,
                 ActorCommand {
                     command_id: command_id.into(),
@@ -4397,7 +5184,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_reject_hidden_unsupported_and_disallowed_catalog_values() -> Result<()> {
-        let (_temp, _database, writer) = gateway_writer()?;
+        let (_temp, database, writer) = gateway_writer()?;
         for (command_id, capability, setting) in [
             (
                 "hidden-model",
@@ -4422,6 +5209,7 @@ mod tests {
             let (record, close) = dispatch_actor_command(
                 &mut client,
                 &writer,
+                &database,
                 &mut settings_session(),
                 ActorCommand {
                     command_id: command_id.into(),

@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::domain::gateway::GatewayCommandRecord;
+use crate::domain::gateway::{GatewayCommandRecord, PendingRequestAction};
 
 pub(crate) const ACTOR_CHANNEL_CAPACITY: usize = 64;
 
@@ -76,6 +76,7 @@ pub(crate) enum ControllerOperation {
     Plan {
         thread_id: String,
         thread_key: String,
+        mode: String,
         expected_turn_id: Option<String>,
         client_user_message_id: Option<String>,
         prompt: Option<String>,
@@ -135,25 +136,6 @@ pub(crate) enum ReviewTarget {
     BaseBranch(String),
     Commit { sha: String, title: Option<String> },
     Custom(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PendingRequestAction {
-    Approval {
-        decision: String,
-    },
-    Permissions {
-        grant: bool,
-        scope: String,
-        strict_auto_review: Option<bool>,
-    },
-    UserInput {
-        answers: BTreeMap<String, Vec<String>>,
-    },
-    McpElicitation {
-        action: String,
-        content: Option<Value>,
-    },
 }
 
 impl ReviewTarget {
@@ -519,6 +501,7 @@ impl CapabilityCatalog {
         &self,
         mode: &str,
         current_model: Option<&str>,
+        current_effort: Option<&Value>,
     ) -> Option<Value> {
         let preset = self
             .catalog_items("collaborationMode/list")?
@@ -531,8 +514,16 @@ impl CapabilityCatalog {
         if !self.selectable_id("model/list", model) {
             return None;
         }
-        let effort = preset.get("reasoning_effort").and_then(Value::as_str);
-        if effort.is_some_and(|effort| !self.model_supports_effort(model, effort)) {
+        let effort = preset
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .map(|effort| Value::String(effort.to_string()))
+            .or_else(|| current_effort.cloned())
+            .unwrap_or(Value::Null);
+        if effort
+            .as_str()
+            .is_some_and(|effort| !self.model_supports_effort(model, effort))
+        {
             return None;
         }
         Some(json!({
@@ -560,6 +551,7 @@ impl CapabilityCatalog {
 pub(crate) struct SourceActorSnapshot {
     pub source_id: String,
     pub source_epoch: String,
+    pub supervisor_version: u64,
     pub state: String,
     pub experimental_api: bool,
     pub catalog: CapabilityCatalog,
@@ -635,6 +627,7 @@ impl ControllerRegistry {
             return;
         }
         entry.snapshot.state = "unavailable".into();
+        entry.snapshot.supervisor_version = entry.snapshot.supervisor_version.saturating_add(1);
         entry.snapshot.unavailable_reason = Some(reason.into());
         entry.sender = None;
     }
@@ -743,6 +736,7 @@ mod tests {
         SourceActorSnapshot {
             source_id: "source".into(),
             source_epoch: epoch.into(),
+            supervisor_version: 1,
             state: "ready".into(),
             experimental_api: true,
             catalog: CapabilityCatalog::default(),
@@ -793,7 +787,7 @@ mod tests {
             }]}}),
         );
         let mode = catalog
-            .collaboration_mode("plan", None)
+            .collaboration_mode("plan", None, None)
             .expect("advertised Plan mode");
         assert_eq!(mode["mode"], "plan");
         assert_eq!(mode["settings"]["model"], "model-a");
@@ -805,7 +799,7 @@ mod tests {
             "hidden":true,
             "supportedReasoningEfforts":[{"reasoningEffort":"high"}]
         }]}));
-        assert!(catalog.collaboration_mode("plan", None).is_none());
+        assert!(catalog.collaboration_mode("plan", None, None).is_none());
     }
 
     #[tokio::test]
