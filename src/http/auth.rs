@@ -41,6 +41,10 @@ pub fn redeem_pair_code(token: &str, code: &str, now: i64) -> Result<String> {
     if payload.kind != "pair" {
         anyhow::bail!("signed value has the wrong purpose");
     }
+    issue_session(token, now)
+}
+
+pub fn issue_session(token: &str, now: i64) -> Result<String> {
     let mut nonce = [0_u8; 24];
     rand::rng().fill_bytes(&mut nonce);
     sign(

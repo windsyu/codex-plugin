@@ -1,6 +1,8 @@
 # Codex Local Gateway
 
-本机运行的 Codex Local Observer & Gateway。V1 store-first Observer 已完成；当前开发主线是目标版本 `v0.2.0` 的 V2 本地对话与控制能力。V2 的固定边界见[核心约束](docs/codex-local-gateway-v2-development-constraints.md)，当前实现切片见[详细设计](docs/codex-local-gateway-v2-detailed-design.md)。
+本机运行的 Codex Local Observer & Gateway。V1 store-first Observer、`v0.2.0` V2 Controller 和真实 Codex TUI + PTY Session Kernel Slice 1–9 已完成；当前交付重点是 V2 release validation 与兼容加固，同时保持 V1历史与V2审计能力。固定边界见[核心约束](docs/codex-local-gateway-v2-development-constraints.md)，已验证实现见[V2详细设计](docs/codex-local-gateway-v2-detailed-design.md)。
+
+目标架构、当前代码迁移映射与逐分片实施方案分别见[Session Kernel重构设计](docs/codex-tui-session-kernel-refactor.md)、[分片详细设计](docs/codex-tui-session-kernel-slices.md)、[ADR 0020](docs/decisions/0020-codex-tui-session-kernel.md)和[ADR 0021](docs/decisions/0021-terminal-capability-broker.md)。Browser xterm和后续V3 IM共同接入唯一Thread owner：一个TUI的主/side/child Thread形成指向同一Session Worker的独占lease set，worker只持有一条private App Server connection；真实Codex TUI承担Slash、picker、Goal/Plan与终端交互，Gateway承担proxy、owner/lease、双向raw-first、CAS和audit。V2 Slice 1–9 已实现，并通过合成协议、系统 Chrome、已安装Codex CLI smoke与真实既有 App Server new/resume/格式验收；功能仍默认关闭，只有显式 `session_kernel="tui"` 才启用真实会话路径。V3 Slice 10–12 不在本次实现范围。
 
 ## 已实现
 
@@ -30,9 +32,12 @@
 - live notification、response 和 server request 先入 raw event，再更新运行态投影；approval/question 只展示，Observer 永不响应；
 - live epoch 连续性/连接统计、capability/schema fingerprint、pending/resolved request 和断线 stale 状态持久化；durable/live 不一致会写入 `projection_conflicts`；
 - 合成 fixture，不读取或提交真实用户 rollout；
+- Session Kernel Slice 1–9：`controller.session_kernel` 默认 `off`；`preview` 保留固定 fake CLI 回退验证，`tui` 使用真实 `codex --remote` / `codex resume --remote`、PTY 和每 worker 私有 1:1 App Server proxy。private proxy同时校验Unix peer与精确PTY child PID；Worker/ThreadLease/InputLease/TurnOwner 与 connection epoch 持久化；双向 envelope raw-first，TUI mutation pre-write audit，写后断线为 `outcome_unknown`；Browser xterm 6 使用认证 terminal WebSocket、一次性 descriptor、control token、单赢家 InputLease、共享暗色terminal profile、受限terminal probe broker、串行write coordinator与带格式VT checkpoint重连；
 - 10,000 Thread + 10,000 Item/FTS 查询规模冒烟测试；容量 SLA 按详细设计在更大原型数据集测量后冻结。
 
 `live_mode` 默认仍为 `off`，开启后属于 opt-in preview；`attach_loaded` 会调用官方 `thread/resume`，可能影响 Thread loaded 生命周期并触发上游恢复行为。Store-first durable history 仍是正确性主链路。V1 的设计、验证和已知限制已压缩到[开发历史归档](docs/archive/v1-development-history.md)。
+
+`open` 只为使用同一配置且已完成启动期 token 轮换的运行中实例生成配对链接。若 `serve` 使用了 `--config /path/to/custom.toml`，必须同样执行 `codex-observerd --config /path/to/custom.toml open`；配置不匹配、实例未运行或仍处于启动窗口时命令会直接报错，不再输出无法兑换的链接。
 
 V2 九个纵向切片已经落地：Controller foundation、LiveSourceActor、command ledger、最小对话闭环、capability-aware settings/Slash、Plan/Goal、本地控制卡、pending request CAS、Web Composer/fetch SSE/图片 staging，以及 crash recovery/安全/兼容/发布加固。固定配置默认关闭，开启后每个配置 socket 的 source 由一个独占 WebSocket actor 连接，以 `experimentalApi:true` 初始化并逐项探测 catalog。`/v2/commands` 提供认证、Origin、幂等、exact epoch、append-only transition/audit 和签名分页；全部已发布操作使用固定 typed mapping，response/notification 先入 V1 raw event。approval、permission、user question 和 MCP elicitation 通过签名 `requestKey` 与 request-version CAS 处理。Composer 支持文本、本地图片、Slash、steer/interrupt 和请求卡；fetch SSE 通过请求头认证并以签名复合 cursor 重连。图片采用私有 staging、keyed fingerprint、主体绑定和终态/expiry 清理。写入后无法确认仍明确记录 `outcome_unknown`，不会自动重放；进程重启时同样只做 fail-closed reconciliation，绝不重派发 mutation。完整发布证据和已知兼容限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。
 
@@ -51,6 +56,8 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
+
+Playwright 的隔离 Chromium 尚未安装、但机器已安装 Google Chrome 时，可用 `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` 运行同一组浏览器测试；未设置该变量时仍使用 Playwright 默认浏览器，CI 行为不变。
 
 测试只使用临时目录和 `fixtures/` 中的合成数据，不会写入 `~/.codex`。
 `cargo build` 会检查 `web/dist/index.html` 是否已生成且不早于 Viewer 源文件；缺失或过期时会提示先完成前端构建。Viewer 静态资源嵌入 Rust 可执行文件，修改 `web/src` 后必须依次运行 `npm run build --prefix web` 和 `cargo build`（发布构建则使用 `cargo build --release`），仅重启旧二进制不会加载新页面或执行新 migration。
@@ -71,6 +78,7 @@ cp observer.example.toml observer.toml
 - Observer 数据：`./observer-data`；
 - Live Adapter：关闭。
 - V2 Controller：关闭。
+- Session Kernel：关闭。
 
 所有相对路径以配置文件所在目录为基准。V1 拒绝非 loopback bind；live 仅支持当前用户拥有、权限不宽于 `0600` 且位于私有目录中的直接 Unix socket。
 
@@ -100,9 +108,18 @@ V2 Controller 的显式开关为：
 ```toml
 [controller]
 enabled = false
+session_kernel = "off"
 ```
 
-启用时必须保持 `strict_origin=true`，并至少为一个 source 配置 `app_server_socket`。Controller 复用现有 bearer、配对 Cookie 和经验证的 Tailscale 身份，不创建第二套 control token。开启后已发布的 `/v2` 对话 mutation 可控制该 socket 对应的 Codex source；若同时开启 Tailscale Serve，任何通过 Tailnet ACL 和 Serve 身份验证的用户都获得相同 mutation 权限，health、配置快照和 UI 会明确显示该风险。保持 `false` 即为兼容的只读默认值。
+启用真实 Session Kernel 时把 `enabled` 设为 `true`、`session_kernel` 设为 `"tui"`，保持 `strict_origin=true`，并至少为一个 source 配置指向**已存在** App Server 的 `app_server_socket`；Gateway不会启动或守护 App Server。唯一无 socket 例外是 `session_kernel="preview"` 与固定 `session_fixture_cli` 的 fake-only 演示。Controller 复用现有 bearer、配对 Cookie 和经验证的 Tailscale 身份，不创建第二套 control token。若同时开启 Tailscale Serve，任何通过 Tailnet ACL 和 Serve 身份验证的用户都获得相同 mutation 权限。`off` 保持兼容的只读默认值。
+
+本地 fake PTY 回退演示使用显式 fixture 配置，不允许 Browser 提供 executable、argv 或环境变量：
+
+```bash
+cargo run -- --config fixtures/session-kernel-preview.toml serve
+```
+
+打开启动日志中的配对 URL 后，点击“终端会话”并填写服务端可访问的绝对测试 cwd。attachment ID+control token 仅保存在当前 tab 的 `sessionStorage`，一次性 WebSocket descriptor 不进入 URL；health 只报告 CLI 可用性和类型化错误，不暴露 executable 绝对路径。该入口只证明 PTY/xterm/lease/reconnect，不连接真实 App Server。
 
 ## 使用
 
@@ -200,6 +217,16 @@ POST /v2/threads/{threadKey}/inputs
 POST /v2/uploads/images
 POST /v2/requests/{requestKey}/actions
 GET /v2/stream
+POST /v2/sessions
+POST /v2/sessions/fake
+GET /v2/sessions/{workerId}
+GET /v2/sessions/{workerId}/events
+POST /v2/sessions/{workerId}/attach
+POST /v2/sessions/{workerId}/input-lease
+DELETE /v2/sessions/{workerId}/input-lease/{leaseId}
+GET /v2/sessions/{workerId}/terminal
+POST /v2/sessions/{workerId}/interrupt
+POST /v2/sessions/{workerId}/stop
 ```
 
 响应绑定当前 `sourceId + sourceEpoch`，并区分 `ready` 与 `unavailable`。catalog 只把 RPC 成功的 catalog method 标记为可用；experimental method 探测失败或 typed method 明确返回 method-not-found 时单项关闭，不影响 V1 浏览。Mutation 仅在 Controller 启用时注册，必须携带允许的 `Origin` 与 8—200 字符的 `Idempotency-Key`。快捷路由也进入相同 `GatewayCommand`、审计和 epoch/Turn/request precondition；所有发布 capability 都使用 closed typed mapping，不提供通用 JSON-RPC passthrough。`/v2/stream` 使用 fetch SSE 和签名复合 cursor，Bearer 只放在 Authorization header 中。
@@ -220,3 +247,5 @@ GET /v2/stream
 ## 项目状态
 
 V1 只读基础已完成。V2 `v0.2.0` 的九个纵向切片和发布门禁均已完成；自动化、临时 release E2E、安全负向测试、migration/rollback 与已知限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。
+
+2026-09-03，Session Kernel V2 Slice 1–9 已完成实现、自动化门禁和真实 App Server 验收：活动会话由真实Codex TUI + PTY驱动，一个Thread只有一个Session Worker和一条1:1 App Server owner connection；Browser主要承载xterm，V1 Viewer继续负责durable history。private proxy、持久化 lease/owner、raw-first audit、crash recovery、交互request路由、SessionShell默认入口、session-owned双写拒绝、Hooks readiness、稳定 resize/replay 和 Codex 原生 bold/dim/italic/ANSI/TrueColor 呈现均已验证；CSP只为 xterm DOM renderer 放行内联样式，inline script仍被禁止。Legacy Composer代码只在兼容回退窗口保留。V3 IM完整控制目标保持独立版本，不实现 Slice 10–12 adapter。

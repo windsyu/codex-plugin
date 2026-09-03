@@ -5,7 +5,7 @@
   "sourceCommitReason": "The configured reference checkout was unavailable; schemas were generated from the installed codex-cli binary.",
   "transport": "websocket_over_existing_unix_socket",
   "controllerDefaultEnabled": false,
-  "observerSchemaVersion": 15,
+  "observerSchemaVersion": 20,
   "initialize": {
     "experimentalApi": true
   },

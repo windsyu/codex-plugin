@@ -78,6 +78,64 @@ pub(crate) struct PendingRequestTarget {
 }
 
 impl Database {
+    pub(crate) fn open_worker_connection_on(
+        &self,
+        connection: &mut Connection,
+        worker_id: &str,
+        source_id: &str,
+        source_epoch: &str,
+        connection_epoch: &str,
+    ) -> Result<()> {
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO worker_connection_epochs(
+               worker_id,connection_epoch,source_id,source_epoch,state,opened_at_ms)
+             VALUES (?1,?2,?3,?4,'open',?5)",
+            params![
+                worker_id,
+                connection_epoch,
+                source_id,
+                source_epoch,
+                now_ms()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn close_worker_connection_on(
+        &self,
+        connection: &mut Connection,
+        worker_id: &str,
+        connection_epoch: &str,
+        last_proxy_seq: u64,
+        reason: &str,
+    ) -> Result<()> {
+        let last_proxy_seq = i64::try_from(last_proxy_seq).context("proxy sequence overflow")?;
+        let state = match reason {
+            "connection_failed" => "failed",
+            "outcome_unknown" => "outcome_unknown",
+            _ => "closed",
+        };
+        let changed = connection.execute(
+            "UPDATE worker_connection_epochs
+             SET state=?1,closed_at_ms=?2,close_reason=?3,last_proxy_seq=?4
+             WHERE worker_id=?5 AND connection_epoch=?6 AND state='open'",
+            params![
+                state,
+                now_ms(),
+                reason,
+                last_proxy_seq,
+                worker_id,
+                connection_epoch
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("worker connection epoch is not open");
+        }
+        Ok(())
+    }
+
     pub(crate) fn image_staging_dir(&self) -> std::path::PathBuf {
         self.path
             .parent()
@@ -593,6 +651,79 @@ impl Database {
         Ok(PendingRequestClaim::Claimed(Box::new(record)))
     }
 
+    pub(crate) fn complete_pending_request_action_on(
+        &self,
+        connection: &mut Connection,
+        command_id: &str,
+        request_id: &str,
+    ) -> Result<GatewayCommandRecord> {
+        let transaction = connection.transaction()?;
+        let command = gateway_command_with_private_on(&transaction, command_id)?
+            .context("Gateway command not found")?;
+        if command.record.state == "completed" {
+            return Ok(command.record);
+        }
+        if command.record.state != "accepted_by_source" {
+            bail!("pending request completion requires an accepted Gateway command");
+        }
+        if command.record.target.expected_request_id.as_deref() != Some(request_id) {
+            bail!("pending request completion does not match Gateway command target");
+        }
+        let occurred_at_ms = now_ms();
+        let pending_changed = transaction.execute(
+            "UPDATE pending_requests
+             SET state='resolved',request_version=request_version+1,resolving_started_at_ms=NULL
+             WHERE source_id=?1 AND epoch_id=?2 AND request_id=?3
+               AND state='resolving' AND resolving_command_id=?4",
+            params![
+                command.record.target.source_id,
+                command.record.target.source_epoch,
+                request_id,
+                command_id,
+            ],
+        )?;
+        if pending_changed != 1 {
+            bail!("pending request is no longer resolving for this command");
+        }
+        let command_changed = transaction.execute(
+            "UPDATE gateway_commands
+             SET state='completed',result_summary_json=?1,updated_at_ms=?2
+             WHERE command_id=?3 AND state='accepted_by_source'",
+            params![
+                json!({"requestId":request_id,"resolved":true}).to_string(),
+                occurred_at_ms,
+                command_id
+            ],
+        )?;
+        if command_changed != 1 {
+            bail!("Gateway command state changed during request completion");
+        }
+        append_transition(
+            &transaction,
+            command_id,
+            Some("accepted_by_source"),
+            "completed",
+            occurred_at_ms,
+            Some("pending_request_response_written"),
+        )?;
+        append_audit_fields(
+            &transaction,
+            command_id,
+            &command.record.principal_id,
+            &command.record.capability,
+            &command.record.target,
+            occurred_at_ms,
+            "allow",
+            "completed",
+            &command.payload_hash,
+            &command.input_summary_json,
+        )?;
+        let record = gateway_command_on(&transaction, command_id)?
+            .context("completed request command disappeared")?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
     pub(crate) fn receive_gateway_command_on(
         &self,
         connection: &mut Connection,
@@ -626,8 +757,8 @@ impl Database {
             "INSERT INTO gateway_commands(
                command_id,principal_id,capability,idempotency_key,payload_hash,source_id,source_epoch,
                thread_key,codex_thread_id,expected_turn_id,expected_request_id,
-               expected_request_version,input_summary_json,state,created_at_ms,updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'received',?14,?14)",
+               expected_request_version,input_summary_json,origin,state,created_at_ms,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'received',?15,?15)",
             params![
                 command.command_id,
                 command.principal_id,
@@ -642,6 +773,7 @@ impl Database {
                 command.target.expected_request_id,
                 command.target.expected_request_version,
                 command.input_summary_json,
+                command.origin.as_str(),
                 occurred_at_ms,
             ],
         )?;
@@ -716,6 +848,27 @@ impl Database {
             &current.payload_hash,
             &current.input_summary_json,
         )?;
+        if current.record.target.expected_request_id.is_some() {
+            match transition.to_state.as_str() {
+                "rejected" | "failed" | "cancelled" if current.record.state == "dispatching" => {
+                    transaction.execute(
+                        "UPDATE pending_requests
+                         SET state='pending',resolving_command_id=NULL,resolving_started_at_ms=NULL
+                         WHERE state='resolving' AND resolving_command_id=?1",
+                        [&transition.command_id],
+                    )?;
+                }
+                "outcome_unknown" => {
+                    transaction.execute(
+                        "UPDATE pending_requests
+                         SET state='outcome_unknown',resolving_started_at_ms=NULL
+                         WHERE state='resolving' AND resolving_command_id=?1",
+                        [&transition.command_id],
+                    )?;
+                }
+                _ => {}
+            }
+        }
         let record = gateway_command_on(&transaction, &transition.command_id)?
             .context("transitioned Gateway command disappeared")?;
         transaction.commit()?;
@@ -990,7 +1143,7 @@ fn append_audit_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::gateway::{GatewayCommandTarget, NewGatewayCommand};
+    use crate::domain::gateway::{GatewayCommandOrigin, GatewayCommandTarget, NewGatewayCommand};
     use tempfile::TempDir;
 
     fn command(id: &str, key: &str, hash: &str) -> NewGatewayCommand {
@@ -1010,6 +1163,7 @@ mod tests {
                 expected_request_version: None,
             },
             input_summary_json: json!({"textBytes":12}).to_string(),
+            origin: GatewayCommandOrigin::LegacyApi,
         }
     }
 
@@ -1178,6 +1332,28 @@ mod tests {
         assert_eq!(request_state, "resolving");
         assert_eq!(resolver.as_deref(), Some("first"));
         assert_eq!(command_state, "dispatching");
+        database.transition_gateway_command_on(
+            &mut connection,
+            &GatewayTransition {
+                command_id: "first".into(),
+                to_state: "accepted_by_source".into(),
+                result_summary_json: None,
+                error_code: None,
+                error_message: None,
+                reason_code: Some("request_response_written".into()),
+                decision: "allow".into(),
+                outcome: "accepted_by_source".into(),
+            },
+        )?;
+        let completed =
+            database.complete_pending_request_action_on(&mut connection, "first", "request")?;
+        assert_eq!(completed.state, "completed");
+        let (request_state, request_version): (String, i64) = connection.query_row(
+            "SELECT state,request_version FROM pending_requests WHERE request_id='request'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!((request_state.as_str(), request_version), ("resolved", 4));
         Ok(())
     }
 
@@ -1210,6 +1386,82 @@ mod tests {
         assert_eq!(
             database.claim_pending_request_on(&mut connection, "old-epoch")?,
             PendingRequestClaim::SourceEpochStale
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_request_claim_is_retryable_before_write_and_terminal_after_unknown_write()
+    -> Result<()> {
+        let temp = TempDir::new()?;
+        let database = Database::open(&temp.path().join("observer.sqlite"))?;
+        database.migrate()?;
+        let mut connection = database.connect()?;
+        connection.execute(
+            "INSERT INTO pending_requests(source_id,epoch_id,request_id,thread_key,request_type,
+               state,request_event_seq,payload_json,request_version)
+             VALUES ('source','epoch','request','thread-key','approval','pending',1,'{}',1)",
+            [],
+        )?;
+        authorize(
+            &database,
+            &mut connection,
+            &request_command("before-write", "key-before", "epoch", "request", 1),
+        )?;
+        assert!(matches!(
+            database.claim_pending_request_on(&mut connection, "before-write")?,
+            PendingRequestClaim::Claimed(_)
+        ));
+        database.transition_gateway_command_on(
+            &mut connection,
+            &GatewayTransition {
+                command_id: "before-write".into(),
+                to_state: "rejected".into(),
+                result_summary_json: None,
+                error_code: Some("REQUEST_NOT_PENDING".into()),
+                error_message: None,
+                reason_code: Some("pre_write_abort".into()),
+                decision: "deny".into(),
+                outcome: "rejected".into(),
+            },
+        )?;
+        let reset: (String, Option<String>) = connection.query_row(
+            "SELECT state,resolving_command_id FROM pending_requests WHERE request_id='request'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(reset, ("pending".into(), None));
+
+        authorize(
+            &database,
+            &mut connection,
+            &request_command("after-write", "key-after", "epoch", "request", 1),
+        )?;
+        assert!(matches!(
+            database.claim_pending_request_on(&mut connection, "after-write")?,
+            PendingRequestClaim::Claimed(_)
+        ));
+        database.transition_gateway_command_on(
+            &mut connection,
+            &GatewayTransition {
+                command_id: "after-write".into(),
+                to_state: "outcome_unknown".into(),
+                result_summary_json: None,
+                error_code: Some("OUTCOME_UNKNOWN".into()),
+                error_message: None,
+                reason_code: Some("write_outcome_unknown".into()),
+                decision: "allow".into(),
+                outcome: "outcome_unknown".into(),
+            },
+        )?;
+        let unknown: (String, Option<String>) = connection.query_row(
+            "SELECT state,resolving_command_id FROM pending_requests WHERE request_id='request'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            unknown,
+            ("outcome_unknown".into(), Some("after-write".into()))
         );
         Ok(())
     }

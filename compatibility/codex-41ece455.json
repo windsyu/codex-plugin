@@ -1,8 +1,8 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
   "observerVersion": "0.2.0",
-  "observerSchemaVersion": 15,
-  "liveMode": "opt_in_preview",
+  "observerSchemaVersion": 20,
+  "liveMode": "opt_in_tui",
   "rolloutTopLevelTypes": [
     "session_meta",
     "response_item",
@@ -58,6 +58,13 @@
     "projectionConflicts": true,
     "pairingCookie": true,
     "runtimeSnapshotExport": true,
-    "capturePolicies": true
+    "capturePolicies": true,
+    "sessionKernelSlice9": true,
+    "privateWorkerProxy": true,
+    "exactPtyChildPeerAuthorization": true,
+    "fragmentedAndOutOfOrderProxyTransport": true,
+    "persistentExclusiveThreadLeases": true,
+    "installedCodexTuiNewClearResume": true,
+    "sessionCrashRecoveryWithoutReplay": true
   }
 }

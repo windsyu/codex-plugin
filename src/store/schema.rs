@@ -19,8 +19,14 @@ pub(super) const MIGRATION_12: &str = include_str!("../../migrations/0012_contex
 pub(super) const MIGRATION_13: &str = include_str!("../../migrations/0013_projectless_threads.sql");
 pub(super) const MIGRATION_14: &str = include_str!("../../migrations/0014_gateway_commands.sql");
 pub(super) const MIGRATION_15: &str = include_str!("../../migrations/0015_thread_goals.sql");
+pub(super) const MIGRATION_16: &str = include_str!("../../migrations/0016_session_proxy.sql");
+pub(super) const MIGRATION_17: &str = include_str!("../../migrations/0017_session_leases.sql");
+pub(super) const MIGRATION_18: &str = include_str!("../../migrations/0018_turn_owners.sql");
+pub(super) const MIGRATION_19: &str = include_str!("../../migrations/0019_search_rowid.sql");
+pub(super) const MIGRATION_20: &str =
+    include_str!("../../migrations/0020_pending_request_direction.sql");
 
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 20;
 
 pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION as usize] {
     [
@@ -39,6 +45,11 @@ pub(super) const fn migrations() -> [(i64, &'static str); LATEST_SCHEMA_VERSION 
         (13, MIGRATION_13),
         (14, MIGRATION_14),
         (15, MIGRATION_15),
+        (16, MIGRATION_16),
+        (17, MIGRATION_17),
+        (18, MIGRATION_18),
+        (19, MIGRATION_19),
+        (20, MIGRATION_20),
     ]
 }
 

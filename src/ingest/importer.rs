@@ -406,6 +406,10 @@ impl<'a> Importer<'a> {
             item_id,
             request_id: None,
             blob_id: None,
+            protocol_direction: None,
+            worker_id: None,
+            worker_connection_epoch: None,
+            proxy_seq: None,
             method,
             phase,
             durability: "durable".into(),
@@ -624,7 +628,10 @@ fn classify_phase(kind: &str) -> String {
         "started"
     } else if kind.ends_with("_delta") || kind.contains("updated") {
         "delta"
-    } else if kind.ends_with("_end") || kind.ends_with("_complete") || kind.ends_with("_completed")
+    } else if kind == "turn_aborted"
+        || kind.ends_with("_end")
+        || kind.ends_with("_complete")
+        || kind.ends_with("_completed")
     {
         "completed"
     } else if kind.contains("request") || kind.contains("approval") {
