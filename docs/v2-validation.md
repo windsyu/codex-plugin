@@ -1,24 +1,43 @@
 # V2.0 Validation Report
 
-> Date: 2026-09-03
+> Date: 2026-09-04
 > Version: `v0.2.0`
-> Result: Passed with the documented compatibility limits below
+> Result: Official-CLI single-path runtime passed automated gates and isolated lifecycle smoke, with the documented compatibility limits below
 
 ## Scope
 
-This report validates the first local V2 Control Plane release against [`codex-local-gateway-v2-development-constraints.md`](codex-local-gateway-v2-development-constraints.md). V1 remains the store-first, read-only baseline. V2 mutation remains default-off, uses the existing bearer/Cookie/verified Tailscale identity, binds every command to an exact live source epoch, and exposes only closed typed capabilities under `/v2`.
+This report validates the V2 Control Plane against [`codex-local-gateway-v2-development-constraints.md`](codex-local-gateway-v2-development-constraints.md). V1 remains the store-first, read-only baseline. V2 mutation remains default-off, uses the existing bearer/Cookie/verified Tailscale identity, binds every command to an exact Session Source epoch, and exposes only closed typed capabilities under `/v2`.
+
+Sections dated 2026-08-31 through 2026-09-03 are retained as historical evidence for the superseded source-global/existing-App-Server implementation. They do not describe the current production assembly. [ADR 0022](decisions/0022-gateway-owned-app-server-session.md) is authoritative: the Gateway no longer discovers, connects to, or adopts an existing App Server.
+
+## Official-CLI single-path runtime validation (2026-09-04)
+
+The runtime was validated against official source checkout `/Users/windsyu/magicproject/codex` at `633ab199cfd724aa78013c006b27a2b3d049fc3b` and installed `codex-cli 0.146.1` at its canonical executable path. The production launch chain is now exactly one path per Worker: guarded dedicated App Server, audited private proxy, then `codex --remote ... -C <canonical-cwd>` in a PTY. No configured or discovered external socket participates in capability or startup.
+
+The isolated smoke used a temporary `CODEX_HOME`, Observer database, cwd, Cookie jar and loopback port. It verified:
+
+- `GET /v2/session-sources` returns the stable store ID, deterministically derived Session Source ID, one Gateway-startup epoch shared by the configured stores, supervisor version, canonical default cwd and `ready`, without exposing `CODEX_HOME`, executable, argv, environment, socket or PID;
+- the derived `session_runtime` source and its startup epoch are persisted before the first proxy envelope, so `raw_events` foreign-key integrity remains intact;
+- the guard launches canonical `codex app-server --listen unix://.../upstream-app-server.sock`, and the PTY launches canonical `codex -c check_for_update_on_startup=false --remote unix://.../app-server.sock -C <cwd>` with no shell;
+- the real TUI and dedicated App Server complete WebSocket initialization through the proxy; six initial envelopes were persisted in one monotonic Worker connection epoch, including `initialize`, its response, `initialized` and `account/read`;
+- because the temporary `CODEX_HOME` intentionally contained no credentials, the native TUI remained at its authentication surface and the new-Thread reservation correctly stayed `acquiring`; no real account, rollout or `~/.codex` data was read or written;
+- API stop closed the connection as `worker_stopping`, terminated and reaped the TUI, App Server and guard, finalized the Worker as `exited`, removed both Unix sockets and removed the marked Worker runtime directory;
+- Gateway shutdown left no owned process and restart generated a new Session Source epoch without adopting or replaying an earlier Worker.
+
+The first macOS smoke exposed the 104-byte `sockaddr_un.sun_path` limit. Runtime roots are now a deterministic short `/tmp/co-<12>` path, with a regression assertion covering the longest owned socket suffix. The same run exposed two additional lifecycle defects that now have regression coverage: a missing Session Source epoch caused the first raw envelope to fail its foreign key, and competing guard/Gateway cleanup could recreate an empty Worker directory. Startup now registers the epoch before any Worker can launch, and runtime cleanup is idempotent and never creates a missing path.
 
 ## Automated gates
 
 | Gate | Command / evidence | Result |
 | --- | --- | --- |
-| Rust unit/integration | `cargo test --all-targets --all-features` | 221 passed; installed-Codex manual smoke and explicit 2M-event capacity test ignored; 0 failed |
-| Rust lint | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
-| Release build | `cargo build --release --all-features` | Passed; `codex-observerd 0.2.0` |
+| Rust format | `cargo fmt --check` | Passed |
+| Rust unit/integration | `cargo test` | 198 passed; installed-Codex fixture smoke and explicit 2M-event capacity test ignored; 0 failed |
+| Rust lint | `cargo clippy --all-targets -- -D warnings` | Passed |
+| Debug build | `cargo build` | Passed; `codex-observerd 0.2.0` |
 | Web type check | `npm exec tsc -- --noEmit` | Passed |
-| Web unit | `npm test -- --run` | 79 passed; 0 failed |
+| Web unit | `npm test` | 80 passed; 0 failed |
 | Web production build | `npm run build` | Passed |
-| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 19 system-Chrome tests passed |
+| Browser E2E | `PLAYWRIGHT_USE_SYSTEM_CHROME=1 npm run test:e2e` | 15 system-Chrome tests passed |
 | Patch hygiene | `git diff --check` | Passed |
 
 The ignored Rust tests are `writer::tests::two_million_event_capacity_path`, which is intentionally opt-in through `OBSERVER_RUN_CAPACITY=1`, and the installed-Codex smoke, which is run separately with an explicit executable. The ordinary bounded-writer, fan-out, scale-query, replay, backpressure and synthetic App Server tests remain enabled and passed.
@@ -57,6 +76,8 @@ A fresh temporary release run validated:
 - disabled mutation boundary: `POST /v2/commands` returned `404`.
 
 ### Real local App Server E2E (2026-08-31 and 2026-09-01)
+
+> Historical/superseded by ADR 0022. This evidence describes the former source-global Controller and is not a supported current launch path.
 
 An additional manual browser E2E used an already-running official local App Server over its Unix socket. The Gateway did not start, stop, or modify the App Server process. The run used an isolated temporary Gateway database and a dedicated test Thread; no real identifiers, pairing material, message bodies, rollout files, or uploaded image bytes are committed to this repository.
 
@@ -132,6 +153,8 @@ The freshly built release binary was also started on an isolated loopback port w
 
 ### Real existing App Server acceptance (2026-09-02)
 
+> Historical/superseded by ADR 0022. Current code never connects to this operator-started endpoint.
+
 The final acceptance used an operator-started official `codex-cli 0.146.1` App Server with `codex app-server --listen unix://`, the public Unix-listener form documented in [OpenAI Developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli). This was an out-of-process test prerequisite: the Gateway connected to the existing endpoint but did not start, supervise, restart or stop it. The installed `codex remote-control start` path was unavailable because this CLI was not an installer-managed standalone installation. The Desktop app's private stdio App Server and a stale configured Unix socket therefore could not serve as the V2 source.
 
 The Browser/xterm acceptance then verified all of the following against that real endpoint:
@@ -197,7 +220,7 @@ The release-browser inspection then found one host-only rendering gap: PTY bytes
 - The explicit 2M-event capacity test was not run in this gate. It remains available as an opt-in extended-capacity test.
 - App Server control is experimental and capability-gated. A schema/method mismatch disables the affected V2 capability while V1 store-first browsing remains available.
 - Session Kernel Slice 1–9 state is persisted where correctness requires it. Gateway restart intentionally orphans rather than adopts an old TUI/PTY, freezes its leases, and requires explicit user start/resume; terminal journal and live attachments are not treated as durable history.
-- Automated Session Kernel protocol validation uses a synthetic App Server plus the real installed TUI. Full live acceptance additionally used the operator-started compatible endpoint documented above; the Gateway still never starts or guards that process. The pre-existing configured `~/.codex/app-server-control/app-server-control.sock` had no owning process and rejected a Unix connect probe, so it was treated as stale and left untouched rather than being deleted or replaced.
+- Current automated protocol validation uses synthetic fixtures where determinism is required, while the 2026-09-04 isolated smoke uses the installed real TUI and a Worker-owned real App Server. Earlier operator-started existing-App-Server acceptance is historical only. Current runtime code does not parse, probe, delete, replace or connect to configured external App Server sockets.
 - The macOS SDK lookup emitted a non-failing sandbox warning about `DARWIN_USER_TEMP_DIR`; all Rust test, lint, and release commands completed successfully.
 
 ## Migration and rollback

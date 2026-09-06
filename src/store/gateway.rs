@@ -148,7 +148,7 @@ impl Database {
         let open_epochs = {
             let mut statement = connection.prepare(
                 "SELECT e.source_id,e.epoch_id FROM source_epochs e JOIN sources s ON s.source_id=e.source_id
-                 WHERE s.kind='app_server' AND e.closed_at_ms IS NULL",
+                 WHERE s.kind IN ('app_server','session_runtime') AND e.closed_at_ms IS NULL",
             )?;
             statement
                 .query_map([], |row| {
@@ -161,7 +161,7 @@ impl Database {
         }
         connection.execute(
             "UPDATE sources SET status='offline',last_error_json=?1,updated_at_ms=?2
-             WHERE kind='app_server'",
+             WHERE kind IN ('app_server','session_runtime')",
             params![
                 json!({"message":"gateway restarted; live source must reconnect"}).to_string(),
                 now_ms()
@@ -415,6 +415,7 @@ impl Database {
         }))
     }
 
+    #[allow(dead_code)] // Retained for legacy image-staging migration tests.
     pub(crate) fn image_upload(&self, upload_id: &str) -> Result<Option<ImageUploadRecord>> {
         let connection = self.read_connection()?;
         image_upload_on(&connection, upload_id)
@@ -488,6 +489,7 @@ impl Database {
             .collect())
     }
 
+    #[allow(dead_code)] // Retained for legacy image-staging migration tests.
     pub(crate) fn cleanup_turn_images_on(
         &self,
         connection: &mut Connection,

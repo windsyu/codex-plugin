@@ -25,6 +25,7 @@ use crate::domain::session::{
 use crate::store::{Database, PendingRequestClaim};
 use crate::writer::WriterHandle;
 
+use super::owned_app_server::OwnedAppServer;
 use super::proxy::{
     ProxyConfig, ProxyHandle, ProxyOwner, ProxyOwnerHandle, ProxyServer, SessionProtocolBridge,
     SessionProxyEventSink,
@@ -63,6 +64,7 @@ pub enum SessionWorkerState {
     Detached,
     Stopping,
     Exited,
+    #[allow(dead_code)] // Persisted orphan recovery can still expose this legacy terminal state.
     StaleEpoch,
     Failed,
 }
@@ -157,6 +159,7 @@ pub struct CreateFakeSession {
 
 #[derive(Debug, Clone)]
 pub struct CreateSession {
+    pub store_source_id: String,
     pub source_id: String,
     pub source_epoch: String,
     pub expected_supervisor_version: u64,
@@ -170,9 +173,24 @@ pub struct CreateSession {
 #[derive(Debug, Clone)]
 pub struct SessionSource {
     pub source_id: String,
+    pub source_epoch: String,
+    pub supervisor_version: u64,
     pub store_source_id: String,
     pub codex_home: PathBuf,
-    pub upstream_socket: PathBuf,
+    pub default_cwd: PathBuf,
+    #[cfg(test)]
+    pub test_upstream_socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSourceView {
+    pub store_source_id: String,
+    pub source_id: String,
+    pub source_epoch: String,
+    pub supervisor_version: u64,
+    pub default_cwd: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +243,7 @@ impl SessionError {
     fn unavailable() -> Self {
         Self::new(
             "SESSION_KERNEL_CLI_UNAVAILABLE",
-            "the configured fake Session Kernel CLI is unavailable",
+            "the canonical Codex CLI is unavailable for this Session Runtime",
         )
     }
 }
@@ -269,6 +287,7 @@ impl std::fmt::Debug for SessionWorkerHandle {
 }
 
 impl SessionWorkerHandle {
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         id: SessionWorkerId,
         spec: SpawnSpec,
@@ -277,6 +296,7 @@ impl SessionWorkerHandle {
         runtime_root: RuntimeRoot,
         runtime_dir: PathBuf,
         persistence: Option<SessionPersistence>,
+        owned_app_server: Option<OwnedAppServer>,
     ) -> Result<Self, SessionError> {
         let cwd = spec.canonical_cwd.to_string_lossy().into_owned();
         let rows = spec.rows;
@@ -354,6 +374,7 @@ impl SessionWorkerHandle {
                     runtime_root,
                     runtime_dir,
                     persistence,
+                    owned_app_server,
                 )
                 .run();
             })
@@ -555,6 +576,7 @@ impl SessionWorkerHandle {
         self.send(WorkerCommand::ProtocolFailed { error_code })
     }
 
+    #[cfg(test)]
     fn source_stale(&self) -> Result<(), SessionError> {
         self.send(WorkerCommand::SourceStale)
     }
@@ -583,6 +605,7 @@ async fn receive_reply<T>(
 enum WorkerCommand {
     ProtocolConnected,
     ProtocolReady,
+    #[cfg(test)]
     SourceStale,
     ProtocolFailed {
         error_code: &'static str,
@@ -691,6 +714,7 @@ impl InputLease {
 
 struct WorkerActor {
     process: PtyProcess,
+    owned_app_server: Option<OwnedAppServer>,
     commands: Receiver<WorkerCommand>,
     priority: Receiver<PriorityCommand>,
     reader: Receiver<ReaderEvent>,
@@ -727,6 +751,7 @@ impl WorkerActor {
         runtime_root: RuntimeRoot,
         runtime_dir: PathBuf,
         persistence: Option<SessionPersistence>,
+        owned_app_server: Option<OwnedAppServer>,
     ) -> Self {
         let journal = TerminalJournal::new(
             state.rows,
@@ -737,6 +762,7 @@ impl WorkerActor {
         let input_lease_version = state.input_lease.version;
         Self {
             process,
+            owned_app_server,
             commands,
             priority,
             reader,
@@ -789,6 +815,7 @@ impl WorkerActor {
             self.cleanup_attachments();
             self.enforce_readiness_timeout();
             self.poll_child();
+            self.poll_owned_app_server();
             if self
                 .stop_deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
@@ -844,6 +871,9 @@ impl WorkerActor {
                 );
             }
         }
+        if let Some(server) = &mut self.owned_app_server {
+            server.stop_and_reap(STOP_GRACE + STOP_GRACE);
+        }
         let _ = self.runtime_root.cleanup_worker_dir(&self.runtime_dir);
     }
 
@@ -862,6 +892,9 @@ impl WorkerActor {
                     if let Err(error) = self.process.terminate() {
                         self.state.error_code = Some("SESSION_WORKER_STOP_FAILED".into());
                         tracing::warn!(error = %error, worker_id = %self.state.worker_id.0, "failed to terminate Session Worker gracefully");
+                    }
+                    if let Some(server) = &mut self.owned_app_server {
+                        server.terminate();
                     }
                     self.stop_deadline = Some(Instant::now() + STOP_GRACE);
                 }
@@ -889,6 +922,7 @@ impl WorkerActor {
                     self.transition(SessionWorkerState::Ready, None);
                 }
             }
+            #[cfg(test)]
             WorkerCommand::SourceStale => {
                 if !self.state.state.is_terminal()
                     && self.state.state != SessionWorkerState::Stopping
@@ -1520,6 +1554,41 @@ impl WorkerActor {
         }
     }
 
+    fn poll_owned_app_server(&mut self) {
+        let Some(server) = &mut self.owned_app_server else {
+            return;
+        };
+        match server.try_wait() {
+            Ok(Some(status))
+                if !self.state.state.is_terminal()
+                    && self.state.state != SessionWorkerState::Stopping =>
+            {
+                tracing::warn!(worker_id = %self.state.worker_id.0, success = status.success(), "owned App Server exited before TUI");
+                self.readiness_deadline = None;
+                self.transition(
+                    SessionWorkerState::Failed,
+                    Some("SESSION_APP_SERVER_EXITED"),
+                );
+                let _ = self.process.terminate();
+                self.stop_deadline = Some(Instant::now() + STOP_GRACE);
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, worker_id = %self.state.worker_id.0, "failed to poll owned App Server guard");
+                if !self.state.state.is_terminal()
+                    && self.state.state != SessionWorkerState::Stopping
+                {
+                    self.transition(
+                        SessionWorkerState::Failed,
+                        Some("SESSION_APP_SERVER_WAIT_FAILED"),
+                    );
+                    let _ = self.process.terminate();
+                    self.stop_deadline = Some(Instant::now() + STOP_GRACE);
+                }
+            }
+        }
+    }
+
     fn expire_detached_lease(&mut self) {
         let Some(owner) = self.input_lease.attachment_id.clone() else {
             return;
@@ -1682,6 +1751,53 @@ struct RegistryInner {
     creates: Mutex<HashMap<(String, String), (blake3::Hash, String)>>,
 }
 
+struct StartupRollback {
+    writer: WriterHandle,
+    runtime_root: RuntimeRoot,
+    runtime_dir: PathBuf,
+    worker_id: String,
+    command_id: String,
+    armed: bool,
+}
+
+impl StartupRollback {
+    fn new(
+        writer: WriterHandle,
+        runtime_root: RuntimeRoot,
+        runtime_dir: PathBuf,
+        worker_id: String,
+        command_id: String,
+    ) -> Self {
+        Self {
+            writer,
+            runtime_root,
+            runtime_dir,
+            worker_id,
+            command_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupRollback {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        fail_session_before_write(
+            &self.writer,
+            &self.worker_id,
+            &self.command_id,
+            "SESSION_START_CANCELLED",
+        );
+        let _ = self.runtime_root.cleanup_worker_dir(&self.runtime_dir);
+    }
+}
+
 impl SessionRegistry {
     #[cfg(test)]
     pub fn new(runtime_root: RuntimeRoot, fixture_cli: Option<PathBuf>) -> Self {
@@ -1728,6 +1844,25 @@ impl SessionRegistry {
                 creates: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    pub fn session_sources(&self) -> Vec<SessionSourceView> {
+        let available = self.inner.real_cli.is_some();
+        let mut sources = self
+            .inner
+            .sources
+            .values()
+            .map(|source| SessionSourceView {
+                store_source_id: source.store_source_id.clone(),
+                source_id: source.source_id.clone(),
+                source_epoch: source.source_epoch.clone(),
+                supervisor_version: source.supervisor_version,
+                default_cwd: source.default_cwd.to_string_lossy().into_owned(),
+                status: if available { "ready" } else { "unavailable" }.into(),
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.store_source_id.cmp(&right.store_source_id));
+        sources
     }
 
     pub async fn create_fake(
@@ -1830,6 +1965,7 @@ impl SessionRegistry {
             self.inner.runtime_root.clone(),
             runtime_dir,
             None,
+            None,
         )?;
         self.inner
             .workers
@@ -1868,7 +2004,27 @@ impl SessionRegistry {
             .sources
             .get(&request.source_id)
             .cloned()
-            .ok_or_else(|| SessionError::new("SOURCE_NOT_LIVE", "Session source is unavailable"))?;
+            .ok_or_else(|| {
+                SessionError::new("SOURCE_NOT_CONFIGURED", "Session source is unavailable")
+            })?;
+        if source.store_source_id != request.store_source_id {
+            return Err(SessionError::new(
+                "SOURCE_NOT_CONFIGURED",
+                "Session source does not match the configured Codex store",
+            ));
+        }
+        if source.source_epoch != request.source_epoch {
+            return Err(SessionError::new(
+                "SOURCE_EPOCH_STALE",
+                "the selected Session source epoch is stale",
+            ));
+        }
+        if source.supervisor_version != request.expected_supervisor_version {
+            return Err(SessionError::new(
+                "SUPERVISOR_VERSION_STALE",
+                "the selected Session source version is stale",
+            ));
+        }
         let executable = self
             .inner
             .real_cli
@@ -1897,6 +2053,7 @@ impl SessionRegistry {
             ));
         }
         let payload = json!({
+            "storeSourceId":request.store_source_id,
             "sourceId":request.source_id,
             "sourceEpoch":request.source_epoch,
             "expectedSupervisorVersion":request.expected_supervisor_version,
@@ -2077,6 +2234,74 @@ impl SessionRegistry {
             }
             RegisterSessionWorker::Created { .. } => {}
         }
+        let mut startup_rollback = StartupRollback::new(
+            writer.clone(),
+            self.inner.runtime_root.clone(),
+            runtime_dir.clone(),
+            worker_id.clone(),
+            command_id.clone(),
+        );
+
+        #[cfg(test)]
+        let test_upstream_socket = source.test_upstream_socket.clone();
+        #[cfg(not(test))]
+        let test_upstream_socket: Option<PathBuf> = None;
+        let (upstream_socket, owned_app_server) = if let Some(socket) = test_upstream_socket {
+            (socket, None)
+        } else {
+            let socket = runtime_dir.join("upstream-app-server.sock");
+            let launch_executable = executable.clone();
+            let launch_cwd = canonical_cwd.clone();
+            let launch_socket = socket.clone();
+            let launch_environment = real_worker_environment(&source.codex_home);
+            let launched = tokio::task::spawn_blocking(move || {
+                let mut server = OwnedAppServer::spawn(
+                    &launch_executable,
+                    &launch_cwd,
+                    launch_socket,
+                    launch_environment,
+                )?;
+                server.wait_ready(READINESS_TIMEOUT)?;
+                Ok::<OwnedAppServer, anyhow::Error>(server)
+            })
+            .await;
+            match launched {
+                Ok(Ok(server)) => (socket, Some(server)),
+                Ok(Err(error)) => {
+                    tracing::error!(worker_id, error = %format!("{error:#}"), "failed to start owned App Server");
+                    let detail = format!("{error:#}");
+                    let error_code = if detail.contains("spawn Codex App Server")
+                        || detail.contains("exited before readiness")
+                    {
+                        "SESSION_APP_SERVER_SPAWN_FAILED"
+                    } else {
+                        "SESSION_APP_SERVER_NOT_READY"
+                    };
+                    fail_session_before_write(&writer, &worker_id, &command_id, error_code);
+                    let _ = self.inner.runtime_root.cleanup_worker_dir(&runtime_dir);
+                    startup_rollback.disarm();
+                    return Err(SessionError::new(
+                        error_code,
+                        "failed to start the Worker-owned Codex App Server",
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(worker_id, error = %error, "owned App Server launch task failed");
+                    fail_session_before_write(
+                        &writer,
+                        &worker_id,
+                        &command_id,
+                        "SESSION_APP_SERVER_SPAWN_FAILED",
+                    );
+                    let _ = self.inner.runtime_root.cleanup_worker_dir(&runtime_dir);
+                    startup_rollback.disarm();
+                    return Err(SessionError::new(
+                        "SESSION_APP_SERVER_SPAWN_FAILED",
+                        "failed to start the Worker-owned Codex App Server",
+                    ));
+                }
+            }
+        };
 
         let bridge = Arc::new(SessionProtocolBridge::default());
         let sink = Arc::new(SessionProxyEventSink::new(
@@ -2095,7 +2320,7 @@ impl SessionRegistry {
             source_id: request.source_id.clone(),
             store_source_id: source.store_source_id.clone(),
             source_epoch: request.source_epoch.clone(),
-            upstream_socket: source.upstream_socket.clone(),
+            upstream_socket,
             private_socket: private_socket.clone(),
             event_sink: sink,
         }) {
@@ -2113,6 +2338,7 @@ impl SessionRegistry {
                     "SESSION_PROXY_BIND_FAILED",
                 );
                 let _ = self.inner.runtime_root.cleanup_worker_dir(&runtime_dir);
+                startup_rollback.disarm();
                 return Err(SessionError::new(
                     "SESSION_PROXY_BIND_FAILED",
                     "failed to create private Session Worker proxy",
@@ -2146,13 +2372,14 @@ impl SessionRegistry {
             WorkerReadiness::AppServerProtocol,
             READINESS_TIMEOUT,
             self.inner.runtime_root.clone(),
-            runtime_dir,
+            runtime_dir.clone(),
             Some(SessionPersistence {
                 writer: writer.clone(),
                 worker_id: worker_id.clone(),
                 proxy_owner,
                 initial_input_lease_version: 0,
             }),
+            owned_app_server,
         ) {
             Ok(worker) => worker,
             Err(error) => {
@@ -2163,6 +2390,7 @@ impl SessionRegistry {
                     "SESSION_WORKER_SPAWN_FAILED",
                 );
                 drop(proxy);
+                startup_rollback.disarm();
                 return Err(error);
             }
         };
@@ -2175,6 +2403,7 @@ impl SessionRegistry {
             );
             let _ = worker.stop().await;
             drop(proxy);
+            startup_rollback.disarm();
             return Err(SessionError::new(
                 "SESSION_WORKER_PID_UNAVAILABLE",
                 "failed to identify the Session Worker child process",
@@ -2190,27 +2419,58 @@ impl SessionRegistry {
             );
             let _ = worker.stop().await;
             drop(proxy);
+            startup_rollback.disarm();
             return Err(SessionError::new(
                 "SESSION_PROXY_PEER_AUTH_FAILED",
                 "failed to authorize the Session Worker proxy peer",
             ));
         }
-        if let Some(persisted) = database
-            .session_worker(&worker_id)
-            .map_err(session_store_error)?
+        let persisted = match database.session_worker(&worker_id) {
+            Ok(Some(persisted)) => persisted,
+            Ok(None) | Err(_) => {
+                fail_session_before_write(
+                    &writer,
+                    &worker_id,
+                    &command_id,
+                    "SESSION_PERSISTENCE_FAILED",
+                );
+                startup_rollback.disarm();
+                let _ = worker.stop().await;
+                let _ = proxy.shutdown().await;
+                let _ = self.inner.runtime_root.cleanup_worker_dir(&runtime_dir);
+                return Err(SessionError::new(
+                    "SESSION_PERSISTENCE_FAILED",
+                    "Session Worker persistence disappeared after TUI startup",
+                ));
+            }
+        };
+        if writer
+            .transition_session_worker(crate::domain::session::SessionWorkerTransition {
+                worker_id: worker_id.clone(),
+                expected_version: persisted.version,
+                to_state: persisted.state,
+                pid: worker.snapshot().pid,
+                primary_thread_id: None,
+                error_code: persisted.error_code,
+                reason_code: Some("pty_spawned".into()),
+                command_id: Some(command_id.clone()),
+            })
+            .is_err()
         {
-            writer
-                .transition_session_worker(crate::domain::session::SessionWorkerTransition {
-                    worker_id: worker_id.clone(),
-                    expected_version: persisted.version,
-                    to_state: persisted.state,
-                    pid: worker.snapshot().pid,
-                    primary_thread_id: None,
-                    error_code: persisted.error_code,
-                    reason_code: Some("pty_spawned".into()),
-                    command_id: Some(command_id),
-                })
-                .map_err(session_store_error)?;
+            fail_session_before_write(
+                &writer,
+                &worker_id,
+                &command_id,
+                "SESSION_PERSISTENCE_FAILED",
+            );
+            startup_rollback.disarm();
+            let _ = worker.stop().await;
+            let _ = proxy.shutdown().await;
+            let _ = self.inner.runtime_root.cleanup_worker_dir(&runtime_dir);
+            return Err(SessionError::new(
+                "SESSION_PERSISTENCE_FAILED",
+                "failed to persist the started Session Worker PID",
+            ));
         }
         bridge.bind(worker.clone());
         self.inner
@@ -2222,7 +2482,9 @@ impl SessionRegistry {
             .proxies
             .lock()
             .expect("proxy registry poisoned")
-            .insert(worker_id, proxy);
+            .insert(worker_id.clone(), proxy);
+        self.monitor_worker_cleanup(worker_id.clone(), worker.clone(), runtime_dir.clone());
+        startup_rollback.disarm();
         Ok(CreateSessionOutcome {
             snapshot: worker.snapshot(),
             replayed: false,
@@ -2237,6 +2499,44 @@ impl SessionRegistry {
             .expect("worker registry poisoned")
             .get(worker_id)
             .cloned()
+    }
+
+    fn monitor_worker_cleanup(
+        &self,
+        worker_id: String,
+        worker: SessionWorkerHandle,
+        runtime_dir: PathBuf,
+    ) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if worker.snapshot().state.is_terminal() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let proxy = registry
+                .inner
+                .proxies
+                .lock()
+                .expect("proxy registry poisoned")
+                .remove(&worker_id);
+            if let Some(proxy) = proxy
+                && let Err(error) = proxy.shutdown().await
+            {
+                let snapshot = worker.snapshot();
+                if snapshot.state == SessionWorkerState::Exited && snapshot.error_code.is_none() {
+                    tracing::debug!(worker_id, error = %format!("{error:#}"), "terminal Session proxy closed with the stopped Worker");
+                } else {
+                    tracing::warn!(worker_id, error = %format!("{error:#}"), "failed to shut down terminal Session proxy");
+                }
+            }
+            if runtime_dir.exists()
+                && let Err(error) = registry.inner.runtime_root.cleanup_worker_dir(&runtime_dir)
+            {
+                tracing::warn!(worker_id, error = %error, "failed to clean terminal Session runtime directory");
+            }
+        });
     }
 
     pub fn view(&self, worker_id: &str) -> Result<SessionView, SessionError> {
@@ -2877,6 +3177,7 @@ impl SessionRegistry {
             .is_some_and(|path| canonical_executable(path).is_ok())
     }
 
+    #[cfg(test)]
     pub async fn stale_source(&self, source_id: &str, source_epoch: &str) {
         let (Some(database), Some(writer)) = (&self.inner.database, &self.inner.writer) else {
             return;
@@ -3403,9 +3704,12 @@ mod tests {
             Some(cli),
             vec![SessionSource {
                 source_id: "source-stop".into(),
+                source_epoch: "epoch-stop".into(),
+                supervisor_version: 1,
                 store_source_id: "store-stop".into(),
                 codex_home: temp.path().join("codex-home"),
-                upstream_socket: upstream_path,
+                default_cwd: temp.path().to_path_buf(),
+                test_upstream_socket: Some(upstream_path),
             }],
             writer.clone(),
             database.clone(),
@@ -3416,6 +3720,7 @@ mod tests {
                 "local_bearer".into(),
                 "persistent-stop-create".into(),
                 CreateSession {
+                    store_source_id: "store-stop".into(),
                     source_id: "source-stop".into(),
                     source_epoch: "epoch-stop".into(),
                     expected_supervisor_version: 1,
@@ -3762,9 +4067,12 @@ mod tests {
             Some(remote_cli),
             vec![SessionSource {
                 source_id: "source-real".into(),
+                source_epoch: "epoch-real".into(),
+                supervisor_version: 1,
                 store_source_id: "store-real".into(),
                 codex_home: temp.path().join("codex-home"),
-                upstream_socket: upstream_path,
+                default_cwd: temp.path().to_path_buf(),
+                test_upstream_socket: Some(upstream_path),
             }],
             writer.clone(),
             database.clone(),
@@ -3776,6 +4084,7 @@ mod tests {
                 "local_bearer".into(),
                 "session-create-new-0001".into(),
                 CreateSession {
+                    store_source_id: "store-real".into(),
                     source_id: "source-real".into(),
                     source_epoch: "epoch-real".into(),
                     expected_supervisor_version: 1,
@@ -3899,6 +4208,7 @@ mod tests {
             "local_bearer".into(),
             "session-resume-existing-0002".into(),
             CreateSession {
+                store_source_id: "store-real".into(),
                 source_id: "source-real".into(),
                 source_epoch: "epoch-real".into(),
                 expected_supervisor_version: 1,
@@ -3913,6 +4223,7 @@ mod tests {
             "local_cookie".into(),
             "session-resume-existing-0003".into(),
             CreateSession {
+                store_source_id: "store-real".into(),
                 source_id: "source-real".into(),
                 source_epoch: "epoch-real".into(),
                 expected_supervisor_version: 1,
@@ -4332,6 +4643,7 @@ mod tests {
             runtime_root,
             runtime_dir,
             None,
+            None,
         )?;
         let bridge = SessionProtocolBridge::default();
         bridge.connected();
@@ -4385,6 +4697,7 @@ mod tests {
             Duration::from_millis(100),
             runtime_root,
             runtime_dir,
+            None,
             None,
         )?;
 

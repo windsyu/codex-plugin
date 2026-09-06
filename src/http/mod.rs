@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Removed legacy handlers remain exercised by migration contract tests.
+
 use std::convert::Infallible;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, broadcast, watch};
+use tokio::sync::{Semaphore, broadcast, oneshot, watch};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -103,7 +105,7 @@ struct ApiState {
     live_modes: Arc<Vec<String>>,
     blob_downloads: Arc<Semaphore>,
     writer: WriterHandle,
-    controller: ControllerRegistry,
+    controller: Option<ControllerRegistry>,
     session_kernel: SessionKernel,
     settings: Arc<Value>,
     tailscale: Option<Arc<ServeAccess>>,
@@ -112,15 +114,26 @@ struct ApiState {
 #[derive(Debug, Clone)]
 struct AuditPrincipal(String);
 
+pub struct ServeReady {
+    pub bound_address: SocketAddr,
+    pub viewer_url: String,
+    pub tailscale_viewer_url: Option<String>,
+}
+
+pub struct ServeLifecycle {
+    pub ready: oneshot::Sender<ServeReady>,
+    pub shutdown: watch::Receiver<bool>,
+}
+
 pub async fn serve(
     config: Config,
     database: Arc<Database>,
     writer: WriterHandle,
-    controller: ControllerRegistry,
     session_kernel: SessionKernel,
     token: String,
-    mut shutdown: watch::Receiver<bool>,
+    lifecycle: ServeLifecycle,
 ) -> Result<()> {
+    let mut shutdown = lifecycle.shutdown;
     let controller_enabled = config.controller.enabled;
     let settings_snapshot = settings_snapshot(&config);
     let listener = TcpListener::bind(config.server.bind).await?;
@@ -149,17 +162,10 @@ pub async fn serve(
         fingerprint_key,
         strict_origin: config.server.strict_origin,
         allowed_origins: Arc::new(allowed_origins),
-        live_modes: Arc::new(
-            config
-                .sources
-                .iter()
-                .filter(|source| source.live_mode != "off")
-                .map(|source| source.live_mode.clone())
-                .collect(),
-        ),
+        live_modes: Arc::new(Vec::new()),
         blob_downloads: Arc::new(Semaphore::new(4)),
         writer,
-        controller,
+        controller: None,
         session_kernel,
         settings: Arc::new(settings_snapshot),
         tailscale: tailscale.clone(),
@@ -184,16 +190,12 @@ pub async fn serve(
             state.clone(),
             authorize,
         ));
-    let mut v2 = Router::new()
-        .route("/control/sources", get(controller_sources))
-        .route("/control/catalog", get(controller_catalog))
-        .route("/stream", get(v2_stream))
-        .route_layer(axum_middleware::from_fn_with_state(
-            state.clone(),
-            authorize,
-        ));
+    let mut v2 = Router::new().route("/stream", get(v2_stream)).route_layer(
+        axum_middleware::from_fn_with_state(state.clone(), authorize),
+    );
     v2 = v2.merge(
         Router::new()
+            .route("/session-sources", get(session_routes::session_sources))
             .route("/sessions", post(session_routes::create_session))
             .route("/sessions/fake", post(session_routes::create_fake_session))
             .route("/sessions/{worker_id}", get(session_routes::get_session))
@@ -234,27 +236,13 @@ pub async fn serve(
     if controller_enabled {
         v2 = v2.merge(
             Router::new()
-                .route(
-                    "/commands",
-                    get(list_gateway_commands).post(create_gateway_command),
-                )
+                .route("/commands", get(list_gateway_commands))
                 .route("/commands/{command_id}", get(get_gateway_command))
-                .route("/threads", post(create_gateway_thread))
-                .route("/threads/{thread_key}/inputs", post(create_thread_input))
                 .route(
                     "/requests/{request_key}/actions",
                     post(create_pending_request_action),
                 )
                 .route_layer(DefaultBodyLimit::max(256 * 1024))
-                .route_layer(axum_middleware::from_fn_with_state(
-                    state.clone(),
-                    authorize,
-                )),
-        );
-        v2 = v2.merge(
-            Router::new()
-                .route("/uploads/images", post(upload_image))
-                .route_layer(DefaultBodyLimit::max(20 * 1024 * 1024))
                 .route_layer(axum_middleware::from_fn_with_state(
                     state.clone(),
                     authorize,
@@ -277,10 +265,11 @@ pub async fn serve(
         .layer(TraceLayer::new_for_http())
         .layer(axum_middleware::from_fn(security_headers));
 
-    println!("Local Viewer: {viewer_url}");
-    if let Some(access) = &tailscale {
-        println!("Tailscale Viewer: {}", access.viewer_url);
-    }
+    let _ = lifecycle.ready.send(ServeReady {
+        bound_address,
+        viewer_url,
+        tailscale_viewer_url: tailscale.as_ref().map(|access| access.viewer_url.clone()),
+    });
     tracing::info!(address = %bound_address, tailscale = tailscale.is_some(), token_file = %config.server.bearer_token_file.display(), "Observer Web Viewer ready");
     axum::serve(
         listener,
@@ -539,7 +528,10 @@ fn staged_image_integrity_error() -> Response {
 }
 
 async fn controller_sources(State(state): State<ApiState>) -> Response {
-    let sources = state.controller.resolved_snapshots().await;
+    let sources = match &state.controller {
+        Some(controller) => controller.resolved_snapshots().await,
+        None => Vec::new(),
+    };
     Json(json!({
         "apiVersion":"v2",
         "data":sources,
@@ -695,8 +687,15 @@ async fn controller_catalog(
             Err(error) => return v2_internal_error(error),
         },
     };
-    match state
-        .controller
+    let Some(controller) = &state.controller else {
+        return v2_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SOURCE_NOT_LIVE",
+            "legacy Controller runtime is disabled",
+            None,
+        );
+    };
+    match controller
         .catalog(&source_id, thread_id, query.thread_key)
         .await
     {
@@ -1098,8 +1097,17 @@ async fn create_gateway_command_core(
             }),
         );
     }
-    match state
-        .controller
+    let Some(controller) = &state.controller else {
+        cleanup_command_image_files(state, &command.command_id);
+        return reject_gateway_command(
+            state,
+            &command.command_id,
+            "SOURCE_NOT_LIVE",
+            "legacy Controller runtime is disabled",
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    };
+    match controller
         .dispatch(
             &command.target.source_id,
             &command.target.source_epoch,
@@ -1643,25 +1651,152 @@ async fn create_pending_request_action(
             None,
         );
     };
-    create_gateway_command_core(
-        &state,
-        principal,
-        &headers,
-        CreateGatewayCommandRequest {
-            capability: "request.action".into(),
-            target: CreateGatewayCommandTarget {
-                source_id: key.source_id,
-                source_epoch: key.source_epoch,
-                thread_key: Some(thread_key),
-                codex_thread_id: Some(codex_thread_id),
-                expected_turn_id: None,
-                expected_request_id: Some(key.request_id),
-                expected_request_version: Some(request.expected_request_version),
-            },
-            input: serde_json::to_value(request.action).unwrap_or(Value::Null),
+    match state.database.active_thread_lease_owner(
+        &key.source_id,
+        &key.source_epoch,
+        &codex_thread_id,
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return v2_error(
+                StatusCode::CONFLICT,
+                "THREAD_NOT_LOADED",
+                "the pending request Thread has no active Session Worker",
+                None,
+            );
+        }
+        Err(error) => return v2_internal_error(error),
+    }
+    let Some(idempotency_key) = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (8..=200).contains(&value.len()) && value.is_ascii())
+        .map(str::to_string)
+    else {
+        return v2_error(
+            StatusCode::BAD_REQUEST,
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "Idempotency-Key must contain 8 to 200 ASCII characters",
+            None,
+        );
+    };
+    let action = match &request.action {
+        PendingRequestActionInput::Approval { decision } => PendingRequestAction::Approval {
+            decision: decision.clone(),
         },
-    )
-    .await
+        PendingRequestActionInput::Permissions {
+            grant,
+            scope,
+            strict_auto_review,
+        } => PendingRequestAction::Permissions {
+            grant: *grant,
+            scope: scope.clone(),
+            strict_auto_review: *strict_auto_review,
+        },
+        PendingRequestActionInput::UserInput { answers } => PendingRequestAction::UserInput {
+            answers: answers.clone(),
+        },
+        PendingRequestActionInput::McpElicitation { action, content } => {
+            PendingRequestAction::McpElicitation {
+                action: action.clone(),
+                content: content.clone(),
+            }
+        }
+    };
+    let canonical = match serde_json::to_vec(&json!({
+        "requestKey":request_key,
+        "sourceEpoch":request.source_epoch,
+        "expectedRequestVersion":request.expected_request_version,
+        "action":request.action,
+    })) {
+        Ok(canonical) => canonical,
+        Err(error) => return v2_internal_error(error.into()),
+    };
+    let command_id = uuid::Uuid::now_v7().to_string();
+    let received = match state.writer.receive_gateway_command(NewGatewayCommand {
+        command_id: command_id.clone(),
+        principal_id: principal.0,
+        capability: "request.action".into(),
+        idempotency_key,
+        payload_hash: blake3::hash(&canonical).to_hex().to_string(),
+        target: GatewayCommandTarget {
+            source_id: key.source_id.clone(),
+            source_epoch: key.source_epoch.clone(),
+            thread_key: Some(thread_key),
+            codex_thread_id: Some(codex_thread_id.clone()),
+            expected_turn_id: None,
+            expected_request_id: Some(key.request_id.clone()),
+            expected_request_version: Some(request.expected_request_version),
+        },
+        input_summary_json: json!({"jsonBytes":canonical.len()}).to_string(),
+        origin: GatewayCommandOrigin::WorkerControl,
+    }) {
+        Ok(received) => received,
+        Err(error) => return v2_internal_error(error),
+    };
+    match received {
+        ReceiveGatewayCommand::Existing(command) => {
+            return gateway_command_response(StatusCode::OK, command);
+        }
+        ReceiveGatewayCommand::Conflict => {
+            return v2_error(
+                StatusCode::CONFLICT,
+                "IDEMPOTENCY_CONFLICT",
+                "Idempotency-Key is already bound to a different payload",
+                None,
+            );
+        }
+        ReceiveGatewayCommand::Created(_) => {}
+    }
+    if let Err(error) = state.writer.transition_gateway_command(gateway_transition(
+        &command_id,
+        "authorized",
+        "allow",
+        "authorized",
+    )) {
+        return v2_internal_error(error);
+    }
+    let registry = match state.session_kernel.registry() {
+        Ok(registry) => registry,
+        Err(error) => {
+            return reject_gateway_command(
+                &state,
+                &command_id,
+                error.code,
+                &error.message,
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+    };
+    match registry
+        .resolve_pending_request(
+            &command_id,
+            &key.source_id,
+            &key.source_epoch,
+            &codex_thread_id,
+            &key.request_id,
+            action,
+        )
+        .await
+    {
+        Ok(record) => gateway_dispatch_response(record),
+        Err(error) => reject_gateway_command(
+            &state,
+            &command_id,
+            error.code,
+            &error.message,
+            match error.code {
+                "REQUEST_ALREADY_RESOLVED"
+                | "REQUEST_NOT_PENDING"
+                | "REQUEST_OWNED_BY_TERMINAL"
+                | "SOURCE_EPOCH_STALE"
+                | "THREAD_NOT_LOADED" => StatusCode::CONFLICT,
+                "OUTCOME_UNKNOWN" => StatusCode::BAD_GATEWAY,
+                "SESSION_PROXY_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_REQUEST,
+            },
+        ),
+    }
 }
 
 fn decode_command_input<T: for<'de> Deserialize<'de>>(
@@ -1984,8 +2119,15 @@ async fn local_control_card(
     thread_id: &str,
     card_type: &str,
 ) -> Response {
-    let catalog = match state
-        .controller
+    let Some(controller) = &state.controller else {
+        return v2_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SOURCE_NOT_LIVE",
+            "legacy Controller runtime is disabled",
+            None,
+        );
+    };
+    let catalog = match controller
         .catalog(
             source_id,
             Some(thread_id.to_string()),
@@ -3850,7 +3992,7 @@ mod tests {
         database.migrate()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("read-token".into()),
@@ -3904,7 +4046,7 @@ mod tests {
     ) -> Result<ApiState> {
         Ok(ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(token.into()),
@@ -4284,19 +4426,21 @@ mod tests {
                     .body(Body::from(body))?,
             )
             .await?;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         let error = response_json(response).await?;
-        assert_eq!(error["error"]["code"], "SOURCE_NOT_LIVE");
+        assert_eq!(error["error"]["code"], "THREAD_NOT_LOADED");
 
         let connection = database.connect()?;
-        let stored: String = connection.query_row(
-            "SELECT group_concat(value,' ') FROM (
-               SELECT input_summary_json AS value FROM gateway_commands
-               UNION ALL SELECT input_summary_json FROM control_audit)",
+        let stored: i64 = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM gateway_commands) +
+                    (SELECT COUNT(*) FROM control_audit)",
             [],
             |row| row.get(0),
         )?;
-        assert!(!stored.contains("PRIVATE-MCP-CONTENT"));
+        assert_eq!(
+            stored, 0,
+            "unowned request content must not reach the ledger"
+        );
         Ok(())
     }
 
@@ -4650,7 +4794,7 @@ mod tests {
             },
             sender,
         );
-        state.controller = registry;
+        state.controller = Some(registry);
         let actor_writer = state.writer.clone();
         let actor = tokio::spawn(async move {
             for expected in ["turn", "default-mode"] {
@@ -4794,7 +4938,7 @@ mod tests {
             },
             sender,
         );
-        state.controller = registry;
+        state.controller = Some(registry);
         let actor = tokio::spawn(async move {
             let Some(ActorRequest::Catalog {
                 thread_id,
@@ -4927,7 +5071,7 @@ mod tests {
             },
             sender,
         );
-        state.controller = registry;
+        state.controller = Some(registry);
         let actor = tokio::spawn(async move {
             let mut capabilities = CapabilityCatalog::default();
             for (method, result) in [
@@ -5265,7 +5409,7 @@ mod tests {
         }
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
@@ -5362,7 +5506,7 @@ mod tests {
         transaction.commit()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([6_u8; 32])),
@@ -5445,7 +5589,7 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([8_u8; 32])),
@@ -5589,7 +5733,7 @@ mod tests {
         )?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
@@ -5638,7 +5782,7 @@ mod tests {
         )?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([5_u8; 32])),
@@ -5710,7 +5854,7 @@ mod tests {
         database.migrate()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("token".into()),
@@ -5766,7 +5910,7 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new("token".into()),
@@ -5817,7 +5961,7 @@ mod tests {
         drop(connection);
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
@@ -5876,7 +6020,7 @@ mod tests {
         Importer::new(&config, database.as_ref())?.import_all()?;
         let state = ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel: SessionKernel::disabled(),
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([9_u8; 32])),
