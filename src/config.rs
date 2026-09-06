@@ -63,14 +63,55 @@ pub struct StorageConfig {
     pub blob_retention_days: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(default)]
 pub struct SourceConfig {
     pub name: String,
     pub codex_home: PathBuf,
-    pub app_server_socket: Option<PathBuf>,
-    pub live_mode: String,
     pub scan_interval_seconds: u64,
+}
+
+impl<'de> Deserialize<'de> for SourceConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct SourceConfigInput {
+            name: String,
+            codex_home: PathBuf,
+            scan_interval_seconds: u64,
+            app_server_socket: Option<PathBuf>,
+            live_mode: Option<String>,
+        }
+
+        impl Default for SourceConfigInput {
+            fn default() -> Self {
+                let source = SourceConfig::default();
+                Self {
+                    name: source.name,
+                    codex_home: source.codex_home,
+                    scan_interval_seconds: source.scan_interval_seconds,
+                    app_server_socket: None,
+                    live_mode: None,
+                }
+            }
+        }
+
+        let input = SourceConfigInput::deserialize(deserializer)?;
+        if input.app_server_socket.is_some() || input.live_mode.is_some() {
+            tracing::warn!(
+                source = %input.name,
+                "app_server_socket and live_mode are deprecated and ignored; terminal sessions own their App Server"
+            );
+        }
+        Ok(Self {
+            name: input.name,
+            codex_home: input.codex_home,
+            scan_interval_seconds: input.scan_interval_seconds,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,8 +197,6 @@ impl Default for SourceConfig {
         Self {
             name: "default".into(),
             codex_home: PathBuf::from("~/.codex"),
-            app_server_socket: None,
-            live_mode: "off".into(),
             scan_interval_seconds: 30,
         }
     }
@@ -216,10 +255,6 @@ impl Config {
         for source in &mut self.sources {
             let resolved_home = resolve_path(&base, &source.codex_home)?;
             source.codex_home = canonicalize_allow_missing(&resolved_home)?;
-            if let Some(socket) = &source.app_server_socket {
-                let resolved = resolve_path(&base, socket)?;
-                source.app_server_socket = Some(canonicalize_parent(&resolved)?);
-            }
         }
         Ok(())
     }
@@ -247,18 +282,10 @@ impl Config {
         {
             bail!("controller.session_fixture_cli requires controller.session_kernel=preview");
         }
-        let fake_session_preview = self.controller.session_kernel == SessionKernelMode::Preview
-            && self.controller.session_fixture_cli.is_some();
-        if self.controller.enabled
-            && !fake_session_preview
-            && !self
-                .sources
-                .iter()
-                .any(|source| source.app_server_socket.is_some())
+        if self.controller.session_kernel == SessionKernelMode::Preview
+            && self.controller.session_fixture_cli.is_none()
         {
-            bail!(
-                "V2 Controller requires at least one source with app_server_socket unless fixed fake Session Kernel preview is configured"
-            );
+            bail!("controller.session_kernel=preview requires controller.session_fixture_cli");
         }
         if self.sources.is_empty() {
             bail!("at least one source is required");
@@ -269,21 +296,6 @@ impl Config {
                 bail!(
                     "duplicate source codex_home {}",
                     source.codex_home.display()
-                );
-            }
-            if !matches!(
-                source.live_mode.as_str(),
-                "off" | "observe_new" | "attach_loaded"
-            ) {
-                bail!(
-                    "live_mode must be off, observe_new, or attach_loaded; got {}",
-                    source.live_mode
-                );
-            }
-            if source.live_mode != "off" && source.app_server_socket.is_none() {
-                bail!(
-                    "source {} enables live mode without app_server_socket",
-                    source.name
                 );
             }
             if source.scan_interval_seconds == 0 {
@@ -331,18 +343,6 @@ impl Config {
             .min()
             .unwrap_or(30)
     }
-}
-
-fn canonicalize_parent(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("configured path has no parent")?;
-    let name = path
-        .file_name()
-        .context("configured path has no file name")?;
-    Ok(if parent.exists() {
-        fs::canonicalize(parent)?.join(name)
-    } else {
-        path.to_path_buf()
-    })
 }
 
 fn canonicalize_allow_missing(path: &Path) -> Result<PathBuf> {
@@ -407,18 +407,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn canonicalizes_existing_socket_parent() -> Result<()> {
-        let temp = TempDir::new()?;
-        let nested = temp.path().join("nested");
-        fs::create_dir_all(&nested)?;
-        let represented = nested.join("..").join("nested").join("control.sock");
-        let normalized = canonicalize_parent(&represented)?;
-        assert_eq!(normalized, fs::canonicalize(&nested)?.join("control.sock"));
-        assert!(!normalized.to_string_lossy().contains(".."));
-        Ok(())
-    }
-
-    #[test]
     fn canonicalizes_missing_paths_through_existing_ancestor() -> Result<()> {
         let temp = TempDir::new()?;
         let nested = temp.path().join("a/../b/database.sqlite");
@@ -479,16 +467,13 @@ mod tests {
     }
 
     #[test]
-    fn controller_is_default_off_and_requires_strict_origin_and_a_socket() {
+    fn controller_is_default_off_and_owned_sessions_require_only_strict_origin() {
         let mut config = Config::default();
         assert!(!config.controller.enabled);
         assert_eq!(config.controller.session_kernel, SessionKernelMode::Off);
         assert!(config.validate().is_ok());
 
         config.controller.enabled = true;
-        assert!(config.validate().is_err());
-
-        config.sources[0].app_server_socket = Some(PathBuf::from("/tmp/app-server.sock"));
         assert!(config.validate().is_ok());
 
         config.server.strict_origin = false;
@@ -520,5 +505,25 @@ mod tests {
             "#,
         );
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn deprecated_live_source_keys_are_accepted_but_not_retained() -> Result<()> {
+        let config = toml::from_str::<Config>(
+            r#"
+            [[sources]]
+            name = "legacy"
+            codex_home = "/tmp/codex-home"
+            scan_interval_seconds = 7
+            app_server_socket = "/tmp/never-connected.sock"
+            live_mode = "attach_loaded"
+            "#,
+        )?;
+        assert_eq!(config.sources[0].name, "legacy");
+        assert_eq!(config.sources[0].scan_interval_seconds, 7);
+        let serialized = toml::to_string(&config.sources[0])?;
+        assert!(!serialized.contains("app_server_socket"));
+        assert!(!serialized.contains("live_mode"));
+        Ok(())
     }
 }

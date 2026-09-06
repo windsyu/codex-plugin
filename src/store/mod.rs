@@ -43,7 +43,7 @@ pub(crate) use gateway::{
 
 pub use blob::BlobRecord;
 use blob::PreparedBlob;
-use maintenance::{read_only_mode, socket_status, write_private_new};
+use maintenance::{read_only_mode, write_private_new};
 use pool::{ReadConnection, ReadPool};
 use projection::{projection_reference_key, truncate};
 use query::query_json_connection;
@@ -849,21 +849,15 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn update_source_status_on(
+    pub(crate) fn open_source_epoch_on(
         &self,
         connection: &Connection,
         source_id: &str,
-        status: &str,
-        error: Option<&str>,
+        epoch_id: &str,
     ) -> Result<()> {
         connection.execute(
-            "UPDATE sources SET status=?1,last_error_json=?2,updated_at_ms=?3 WHERE source_id=?4",
-            params![
-                status,
-                error.map(|message| json!({"message":message}).to_string()),
-                now_ms(),
-                source_id
-            ],
+            "INSERT OR IGNORE INTO source_epochs(source_id,epoch_id,opened_at_ms) VALUES (?1,?2,?3)",
+            params![source_id, epoch_id, now_ms()],
         )?;
         Ok(())
     }
@@ -1394,10 +1388,9 @@ impl Database {
                     } else {
                         "archive_unreadable".into()
                     },
-                    live_socket_status: source
-                        .app_server_socket
-                        .as_ref()
-                        .map_or_else(|| "not_configured".into(), |socket| socket_status(socket)),
+                    // The store layer only checks durable rollout access. The command layer
+                    // fills this process-runtime check without introducing an upward dependency.
+                    session_runtime_status: "unchecked".into(),
                 }
             })
             .collect();

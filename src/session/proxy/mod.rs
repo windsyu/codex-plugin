@@ -95,7 +95,7 @@ pub struct ProxyHandle {
     expected_downstream_pid: watch::Sender<Option<u32>>,
     control: ProxyControlHandle,
     shutdown: Option<oneshot::Sender<()>>,
-    task: JoinHandle<Result<()>>,
+    task: Option<JoinHandle<Result<()>>>,
 }
 
 #[derive(Clone)]
@@ -281,7 +281,16 @@ impl ProxyHandle {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        self.task.await.context("proxy task panicked")?
+        let task = self.task.take().context("proxy task is unavailable")?;
+        task.await.context("proxy task panicked")?
+    }
+}
+
+impl Drop for ProxyHandle {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
     }
 }
 
@@ -327,7 +336,7 @@ impl ProxyServer {
             expected_downstream_pid,
             control: ProxyControlHandle { sender: control_tx },
             shutdown: Some(shutdown_tx),
-            task,
+            task: Some(task),
         })
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::permissions::{create_private_file, prepare_private_dir, prepare_private_file};
+use crate::permissions::{create_private_file, prepare_private_dir};
 
 const MARKER: &str = "codex-local-observer-session-v1\n";
 const MARKER_NAME: &str = ".session-owner";
@@ -37,9 +37,24 @@ impl RuntimeRoot {
     }
 
     pub fn cleanup_worker_dir(&self, path: &Path) -> Result<()> {
-        self.verify_managed_worker_dir(path)?;
-        fs::remove_dir_all(path)
-            .with_context(|| format!("remove Session Worker runtime directory {}", path.display()))
+        match self.verify_managed_worker_dir(path) {
+            Ok(()) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!("remove Session Worker runtime directory {}", path.display())
+            }),
+        }
     }
 
     pub fn sweep_orphans(&self) -> Result<usize> {
@@ -70,14 +85,59 @@ impl RuntimeRoot {
             .strip_prefix("worker-")
             .context("Session Worker runtime has an unmanaged name")?;
         validate_worker_id(worker_id)?;
-        prepare_private_dir(path, "Session Worker runtime")?;
+        let metadata = fs::symlink_metadata(path).with_context(|| {
+            format!(
+                "inspect Session Worker runtime directory {}",
+                path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("Session Worker runtime must be a direct directory");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o700 {
+                anyhow::bail!(
+                    "Session Worker runtime must be owned by the current user with mode 0700"
+                );
+            }
+        }
         let marker = path.join(MARKER_NAME);
-        prepare_private_file(&marker, "Session Worker marker")?;
+        let marker_metadata = fs::symlink_metadata(&marker)
+            .with_context(|| format!("inspect Session Worker marker {}", marker.display()))?;
+        if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+            anyhow::bail!("Session Worker marker must be a direct regular file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if marker_metadata.uid() != unsafe { libc::geteuid() }
+                || marker_metadata.mode() & 0o777 != 0o600
+            {
+                anyhow::bail!(
+                    "Session Worker marker must be owned by the current user with mode 0600"
+                );
+            }
+        }
         if fs::read_to_string(&marker)? != MARKER {
             anyhow::bail!("Session Worker marker is invalid");
         }
         Ok(())
     }
+}
+
+pub(super) fn cleanup_guard_worker_dir(upstream_socket: &Path) -> Result<()> {
+    let worker_dir = upstream_socket
+        .parent()
+        .context("guard upstream socket has no Worker directory")?;
+    let root = worker_dir
+        .parent()
+        .context("guard Worker directory has no runtime root")?;
+    RuntimeRoot {
+        root: root.to_path_buf(),
+    }
+    .cleanup_worker_dir(worker_dir)
 }
 
 fn validate_worker_id(worker_id: &str) -> Result<()> {
@@ -128,6 +188,17 @@ mod tests {
         assert!(symlink_worker.is_symlink());
         assert!(symlink_target.exists());
         assert!(invalid_marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_is_idempotent_and_never_recreates_a_removed_worker_dir() -> Result<()> {
+        let temp = TempDir::new()?;
+        let root = RuntimeRoot::prepare(temp.path().join("runtime"))?;
+        let managed = root.create_worker_dir(&Uuid::new_v4().to_string())?;
+        root.cleanup_worker_dir(&managed)?;
+        root.cleanup_worker_dir(&managed)?;
+        assert!(!managed.exists());
         Ok(())
     }
 }

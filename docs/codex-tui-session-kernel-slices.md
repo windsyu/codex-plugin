@@ -1,5 +1,7 @@
 # Codex TUI Session Kernel 分片详细设计
 
+> 2026-09-04 单路径修订：[ADR 0022](decisions/0022-gateway-owned-app-server-session.md) 将 Slice 1–9 的既有 App Server/Legacy Composer 迁移基线收敛为唯一 Worker-owned App Server runtime。下文旧切片中的相反表述仅保留为历史验收记录，不再是当前实现选择。
+
 > 状态：V2 Slice 1–9 implementation/validation complete；V3 Slice 10–12 pending
 > 日期：2026-09-03
 > 总体设计：[`codex-tui-session-kernel-refactor.md`](codex-tui-session-kernel-refactor.md)
@@ -48,7 +50,7 @@ browser/IM => never receives raw App Server capability
 | 6 | Complete | Browser SessionShell 默认承载原生 TUI，History 保持 V1 durable 读取；IME、Slash、picker、滚动回到底部与只读 attachment 已验证。 |
 | 7 | Complete | TurnOwner、TUI mutation pre-write audit、crash-boundary reopen matrix、`outcome_unknown` 与单 Worker 断线隔离。 |
 | 8 | Complete | terminal/channel owner 的 approval、permission、question、MCP elicitation 路由与 request-version CAS；不包含真实 IM adapter。 |
-| 9 | Complete | `tui` 活动会话路径、session-owned 双写拒绝、Legacy Composer 回退边界及完整 release/真实 App Server 验收。 |
+| 9 | Complete | `tui` 活动会话路径、History 只读边界及完整 release/真实 App Server 验收。 |
 | 10–12 | Pending（V3） | IM principal/binding、首个平台 adapter 与多平台完整交互，未混入 V2 交付。 |
 
 最终证据见 [`v2-validation.md`](v2-validation.md)；当前发布兼容基线见 [`../compatibility/codex-0.146.1-session-kernel.json`](../compatibility/codex-0.146.1-session-kernel.json)。
@@ -82,7 +84,7 @@ enabled = false
 session_kernel = "off" # off | preview
 ```
 
-非法枚举、`enabled=false + preview`、非 loopback 等组合 fail closed。普通 Controller 仍要求至少一个 App Server socket；仅当 `preview + session_fixture_cli` 同时显式配置时允许 fake-only 模式没有 socket，从而不会启动 Legacy source 重连循环。`preview` 只开放给既有认证用户，且不改变 `/v1`。
+非法枚举、`enabled=false + preview`、非 loopback 等组合 fail closed。真实 `tui` 只要求配置 durable store 与 canonical `codex`，不接受 App Server socket；`preview + session_fixture_cli` 仍可用于 fake-only 测试。两种模式都只开放给既有认证用户，且不改变 `/v1`。
 
 ### 失败语义
 
@@ -690,7 +692,7 @@ CAS winner经proxy回写原始ID。若channel delivery失败，请求保持pendi
 4. 保留后端typed command API用于worker control、非终端channel和兼容期；
 5. 删除只服务于Web TUI模拟、且无IM/审计价值的actor分支；
 6. 将巨型文件拆为session/http/proxy/store边界；
-7. 下一小版本确认无回退需求后再删除Legacy Composer代码；feature flag至少保留一个验证版本。
+7. 2026-09-04 已确认结束回退窗口并删除Legacy Composer生产入口；失败时降级为 History 只读。
 
 ### 不删除的能力
 

@@ -6,10 +6,11 @@
 > 实施分片：[`codex-tui-session-kernel-slices.md`](codex-tui-session-kernel-slices.md)
 > 架构决策：[`0020-codex-tui-session-kernel.md`](decisions/0020-codex-tui-session-kernel.md)
 > 现有 V2 验证基线：[`codex-local-gateway-v2-detailed-design.md`](codex-local-gateway-v2-detailed-design.md)
+> 2026-09-04 单路径修订：[ADR 0022](decisions/0022-gateway-owned-app-server-session.md) 已删除连接既有 App Server、source-global Controller 与 Legacy Composer 回退路径；本文中相反的历史迁移措辞均由该 ADR 取代。
 
 ## 1. 结论
 
-活动会话不再由 Web Composer 重建 Codex TUI 的输入、Slash、picker、Plan、Goal、审批和快捷键状态机。目标架构以真实 `codex` TUI 进程作为每个活动会话的交互内核，以 PTY 承载终端语义，以 Session Worker 管理生命周期、重连、输入所有权和审计，并在 TUI 与已有 Codex App Server 之间放置一条私有的 1:1 App Server proxy。
+活动会话不再由 Web Composer 重建 Codex TUI 的输入、Slash、picker、Plan、Goal、审批和快捷键状态机。目标架构以真实 `codex` TUI 进程作为每个活动会话的交互内核，以 PTY 承载终端语义，以 Session Worker 管理生命周期、重连、输入所有权和审计；每个 Worker 启动一个专属 Codex App Server，并在 TUI 与该进程之间放置一条私有的 1:1 audited proxy。
 
 V1 durable history、搜索、投影、安全 Markdown 和 Raw Inspector 保留。Gateway 也不退化为无状态终端转发器：它继续负责认证、source epoch、append-only raw event、command/audit ledger、pending request CAS、channel binding 和故障恢复。
 
@@ -22,7 +23,7 @@ flowchart LR
     WORKER <-->|"PTY"| TUI["real codex TUI"]
     TUI <-->|"private JSON-RPC"| PROXY["1:1 App Server proxy"]
     WORKER --> PROXY
-    PROXY <-->|"single upstream connection"| APP["existing Codex App Server"]
+    PROXY <-->|"single upstream connection"| APP["Worker-owned Codex App Server"]
     PROXY --> RAW["raw event / projection"]
     WORKER --> AUDIT["command / lease / audit"]
     STORE["durable Codex store"] --> OBS["V1 Observer"]
@@ -44,7 +45,7 @@ flowchart LR
 
 ### 2.2 成功标准
 
-1. 可针对一个已存在的 App Server source 启动或恢复一个真实 Codex TUI；
+1. 可从配置的 durable store Session Source 自动启动专属 App Server，并启动或恢复一个真实 Codex TUI；
 2. 浏览器 xterm 可收发原始终端数据、resize、重连并重放有限输出；
 3. `/clear`、`/resume`、`/goal` 至少通过真实 TUI 行为验证，不再经过 Web 自建 Slash 状态机；
 4. 一个 Codex Thread 同一时刻最多属于一个活动 Session Worker；一个 TUI 因 multi-agent/side-thread 能力持有多个 Thread 时，这些 Thread 分别持有指向同一 worker 的独占租约，但 worker 仍只有一条上游所有权连接；
@@ -52,7 +53,7 @@ flowchart LR
 6. approval、question、MCP elicitation 在 terminal 与 IM 之间按输入 owner 路由，并继续执行 request-version CAS；
 7. worker、浏览器或 Gateway 异常时不自动重放可能已写入的 mutation；
 8. `controller.enabled=false` 时保持 V1 只读行为；
-9. 原有 Web Composer 可通过 feature flag 回退，直至新内核达到迁移门禁；
+9. Web Composer 与 source-global mutation 路径已删除，活动输入只有 Session Runtime；
 10. V3 IM 不以跳过权限或禁止交互换取“看起来能用”。
 11. TUI→App Server 的 mutation 在写入上游前已有可审计记录，write-complete 后失联可明确进入 `outcome_unknown`；
 12. 单个 worker connection 故障只隔离该 worker；只有 Supervisor 判定 source generation 已改变时才轮换共享 `sourceEpoch` 并使该 source 的全部 worker stale。
@@ -71,7 +72,7 @@ flowchart LR
 
 ### 3.2 非目标
 
-- 不启动、停止或守护 Codex App Server；只连接配置中已存在的 endpoint；
+- 不发现、连接、复用或接管外部 App Server；仅管理 Worker 自己启动的专属进程；
 - 不修改或 fork Codex 官方 TUI 源码作为首选方案；
 - 不把 TUI 的 ANSI 输出作为 durable history 或最终答复的唯一事实源；
 - 不让浏览器直接接触 App Server JSON-RPC、私有 socket 或 capability token；
@@ -100,7 +101,7 @@ cc-viewer 的限制同样是事实：其 IM worker 使用 `--dangerously-skip-pe
 
 ### 4.2 Codex 源码与 CLI 事实
 
-官方源码研究基线为 `/Users/windsyu/workspace/codex` commit `41ece455b7fa7166f4fc38522952afdaa2604e18`：
+本次官方 CLI 单路径研究基线为 `/Users/windsyu/magicproject/codex` commit `633ab199cfd724aa78013c006b27a2b3d049fc3b`；早期 Session Kernel 验证曾使用 `/Users/windsyu/workspace/codex` 的 `41ece455b7fa7166f4fc38522952afdaa2604e18`，只作为历史兼容证据：
 
 - `codex-rs/cli/src/main.rs:319` 支持 `codex resume <SESSION_ID> --remote <endpoint>`；
 - `codex-rs/tui/src/lib.rs:411` 使用正式 `RemoteAppServerClient` 接入 App Server；
@@ -415,7 +416,7 @@ starting|connecting|ready|detached
 
 ### 7.2 创建、恢复与清理
 
-创建流程：canonicalize cwd → 验证 source/epoch → 创建 reservation/ledger → private runtime dir → proxy listen → PTY spawn TUI → observe initialize/thread started → upgrade primary ThreadLease → claim已订阅side/child ThreadLease set → mark ready。
+创建流程：canonicalize cwd → 验证 Session Source四元组 → 创建 ledger、Worker 与 reservation/resume lease → private runtime dir → guard启动专属 App Server并校验 upstream socket → proxy listen → PTY spawn TUI并授权精确child PID → observe initialize/thread started → upgrade primary ThreadLease → claim已订阅side/child ThreadLease set → mark ready。Session Source及其Gateway启动epoch必须在任何Worker启动前写入 `sources/source_epochs`，保证第一条raw envelope满足外键与raw-first边界。
 
 恢复流程：验证 Thread 不被租赁 → `codex resume ... <thread-id>` → observe resume/loaded state → acquire active lease → attach channel。
 
@@ -606,7 +607,7 @@ Codex Turn 结果与平台投递分开建账。平台发送失败只重试幂等
 
 ## 13. 当前实现改动映射
 
-本节是迁移清单，不表示一次性删除。Slice 1–9 已完成 `src/session/` 边界、fake/real PTY Worker、private 1:1 proxy、持久化 Worker/ThreadLease/InputLease/TurnOwner、terminal WS、SessionShell/TerminalPanel、raw-first audit/recovery、交互 owner 路由和 TUI 默认入口。Legacy Composer 实现仅在兼容/回退窗口保留；`tui` 模式不把它作为 session-owned Thread 的写入口。
+本节保留迁移追踪。Slice 1–9 已完成 `src/session/` 边界、fake/real PTY Worker、private 1:1 proxy、持久化 Worker/ThreadLease/InputLease/TurnOwner、terminal WS、SessionShell/TerminalPanel、raw-first audit/recovery、交互 owner 路由和 TUI 默认入口。ADR 0022 已结束回退窗口：Legacy Composer 与 source-global transport 不再是生产路径。
 
 | 当前区域 | 保留 | 重构/新增 | 最终退役 |
 | --- | --- | --- | --- |
@@ -622,7 +623,7 @@ Codex Turn 结果与平台投递分开建账。平台发送失败只重试幂等
 | `web/src/style.css` | Viewer 与响应式基础 | xterm host、session chrome | Composer 专属大块样式 |
 | Web/Rust tests | V1 regression、ledger/CAS/security fixture | fake CLI/PTY/proxy/lease/terminal/IM contract tests | 只证明手工 TUI 模拟正确的测试 |
 
-为了控制风险，`LegacyComposer` 与 `TuiSessionKernel` 至少跨一个验证版本并存，由服务端 capability 与本机 feature flag 决定入口；数据库和 `/v1` 不因切换回退。
+`LegacyComposer` 与 `TuiSessionKernel` 的并存验证窗口已经结束。数据库和 `/v1` 保持兼容，但 V2 mutation 不再回退到 Composer 或既有 App Server。
 
 ## 14. V2/V3 边界
 
@@ -663,7 +664,7 @@ V3 已由用户明确授权为完整控制目标，因此本设计可以固定�
 
 ### 15.3 回退
 
-若新内核无法满足门禁：停止创建新 worker，detach/停止现有 worker，将 UI feature flag 切回 Legacy Composer；保留新表和审计记录。不得删除可能仍运行的 App Server，不得重写 Codex Thread，也不得自动重放 `outcome_unknown` command。
+若新内核无法满足门禁：停止创建新 Worker，detach/停止现有 Worker，并保持 History 只读；保留新表和审计记录。不得切回 Legacy Composer，不得接管外部 App Server，不得重写 Codex Thread，也不得自动重放 `outcome_unknown` command。
 
 ## 16. 需求追踪
 

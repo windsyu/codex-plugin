@@ -1,5 +1,7 @@
 # ADR 0020: Use the real Codex TUI as the active session kernel
 
+> Amended by [ADR 0022](0022-gateway-owned-app-server-session.md): the TUI/PTY, Worker, lease and audited-proxy decisions remain; every Worker now starts and owns a dedicated App Server, and the source-global Controller/Composer rollback path is removed.
+
 ## Context
 
 The validated V2 implementation controls an existing Codex App Server through one source-global `LiveSourceActor` and reconstructs a Codex-like conversation surface in React. This proved the command ledger, exact source epoch, typed protocol mapping, pending-request CAS, image staging, crash recovery, and read-only V1 compatibility. It also concentrated a growing amount of session behavior in `src/live/transport.rs`, `src/http/mod.rs`, and `web/src/App.tsx`.
@@ -14,8 +16,8 @@ Codex already provides a real TUI that can connect to a remote App Server. The o
 
 - Make a real `codex` TUI process running in a PTY the interaction kernel for each active session.
 - Create one `Thread Session Worker` per TUI session. Every primary, side, or child Thread controlled by that TUI has an exclusive `ThreadLease` pointing to the same worker; one Thread can never be leased by two workers. Multiple browsers attach to that worker's single PTY instead of creating another TUI or App Server owner.
-- Place a private 1:1 App Server proxy between the TUI and the configured existing App Server. The proxy owns one upstream connection, transparently forwards protocol envelopes, maps request IDs, persists both protocol directions before observable forwarding, records the upstream write boundary for TUI-originated mutation, and exposes only a closed typed internal control port.
-- Keep a `SourceSupervisor` for endpoint health, source epoch, catalogs, worker registry, and lease coordination. It must not resume or respond for a worker-owned Thread.
+- Place a private 1:1 App Server proxy between the TUI and the Worker's dedicated App Server. The proxy owns one upstream connection, transparently forwards protocol envelopes, maps request IDs, persists both protocol directions before observable forwarding, records the upstream write boundary for TUI-originated mutation, and exposes only a closed typed internal control port.
+- Keep a Session Source supervisor generation for source epoch, worker registry, and lease coordination; there is no shared endpoint health/catalog connection.
 - Treat `sourceEpoch` as the Supervisor's shared source generation and give each proxy a separate worker connection epoch. One worker disconnect is isolated; only evidence that the configured source generation changed makes all workers stale.
 - Use persistent `ThreadLease`, `InputLease`, and Turn owner state to prevent multiple workers, browsers, or channels from concurrently controlling one Thread/PTY.
 - Send browser terminal input to the PTY without interpreting Slash or picker semantics. Keep only minimal host controls such as attach, lease, resize, interrupt, detach, and stop.
@@ -23,7 +25,7 @@ Codex already provides a real TUI that can connect to a remote App Server. The o
 - Retain the transactional command/audit ledger, exact source epoch, raw-event-first ingestion, pending-request CAS, typed closed actions, redaction, and `outcome_unknown` recovery semantics.
 - For V3, put platform-neutral IM adapters above Session Worker. Bind an authenticated channel principal and conversation to a worker/Thread, serialize input through the same lease, and derive Turn completion/final replies from App Server events rather than ANSI or transcript tail inference.
 - Give an enrolled IM principal the same Gateway control authority as the existing local login. Do not use skip-permissions, automatic approval, regex hard-deny policies, or prompts that disable native questions and elicitation. Codex managed requirements, sandbox, OS permissions, and native approvals still apply.
-- Migrate behind a default-off feature flag. Keep the legacy Composer for at least one validation release; retire its write path only after PTY, proxy, lease, request-routing, recovery, security, and V1 regression gates pass.
+- Keep the runtime default-off, but expose only the Session Worker path when enabled. The legacy Composer write path has completed its validation window and is retired.
 
 This decision changes the ownership portion of ADR 0013 and supersedes the Web-emulated conversation portions of ADRs 0015, 0016, and 0017. Their closed typed mappings and capability evidence remain useful for worker control and non-terminal channels. ADR 0014 (ledger/audit), ADR 0018 (pending request CAS), and ADR 0019 (restart reconciliation) remain in force, with Session Worker/proxy taking the former source actor's ownership role.
 
@@ -70,7 +72,7 @@ Rejected for the browser session experience because it retains the current reimp
 
 ## Status
 
-Accepted
+Accepted, amended by ADR 0022
 
 ## Date
 

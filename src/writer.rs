@@ -66,6 +66,7 @@ impl EventBudget {
     }
 }
 
+#[allow(dead_code)] // Legacy source/image commands remain for migration contract tests.
 enum ControlCommand {
     UpsertSource {
         source_id: String,
@@ -73,6 +74,11 @@ enum ControlCommand {
         stable_identity: String,
         config: Value,
         status: String,
+        reply: mpsc::Sender<Result<()>>,
+    },
+    OpenSourceEpoch {
+        source_id: String,
+        source_epoch: String,
         reply: mpsc::Sender<Result<()>>,
     },
     MarkLocation {
@@ -88,18 +94,6 @@ enum ControlCommand {
         source_id: String,
         epoch_id: String,
         capabilities: Value,
-        reply: mpsc::Sender<Result<()>>,
-    },
-    UpdateSourceStatus {
-        source_id: String,
-        status: String,
-        error: Option<String>,
-        reply: mpsc::Sender<Result<()>>,
-    },
-    CloseEpoch {
-        source_id: String,
-        epoch_id: String,
-        reason: String,
         reply: mpsc::Sender<Result<()>>,
     },
     OpenWorkerConnection {
@@ -247,10 +241,6 @@ enum ControlCommand {
         command_id: String,
         reply: mpsc::Sender<Result<Vec<String>>>,
     },
-    CleanupTurnImages {
-        turn_id: String,
-        reply: mpsc::Sender<Result<Vec<String>>>,
-    },
     Shutdown,
 }
 
@@ -269,6 +259,7 @@ pub struct WriterHandle {
     committed: broadcast::Sender<i64>,
 }
 
+#[allow(dead_code)] // Legacy source/image commands remain for migration contract tests.
 impl WriterHandle {
     pub fn start(
         database: Arc<Database>,
@@ -410,6 +401,18 @@ impl WriterHandle {
         self.upsert_source_kind(source_id, "rollout", stable_identity, config, status)
     }
 
+    pub fn open_source_epoch(&self, source_id: &str, source_epoch: &str) -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        self.control(
+            ControlCommand::OpenSourceEpoch {
+                source_id: source_id.into(),
+                source_epoch: source_epoch.into(),
+                reply: tx,
+            },
+            rx,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn mark_location(
         &self,
@@ -447,37 +450,6 @@ impl WriterHandle {
                 source_id: source_id.into(),
                 epoch_id: epoch_id.into(),
                 capabilities: capabilities.clone(),
-                reply: tx,
-            },
-            rx,
-        )
-    }
-
-    pub fn update_source_status(
-        &self,
-        source_id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<()> {
-        let (tx, rx) = mpsc::channel();
-        self.control(
-            ControlCommand::UpdateSourceStatus {
-                source_id: source_id.into(),
-                status: status.into(),
-                error: error.map(str::to_string),
-                reply: tx,
-            },
-            rx,
-        )
-    }
-
-    pub fn close_live_epoch(&self, source_id: &str, epoch_id: &str, reason: &str) -> Result<()> {
-        let (tx, rx) = mpsc::channel();
-        self.control(
-            ControlCommand::CloseEpoch {
-                source_id: source_id.into(),
-                epoch_id: epoch_id.into(),
-                reason: reason.into(),
                 reply: tx,
             },
             rx,
@@ -907,17 +879,6 @@ impl WriterHandle {
             .context("Observer DbWriter is unavailable")?;
         response.recv().context("Observer DbWriter stopped")?
     }
-
-    pub fn cleanup_turn_images(&self, turn_id: &str) -> Result<Vec<String>> {
-        let (reply, response) = mpsc::channel();
-        self.control
-            .send(ControlCommand::CleanupTurnImages {
-                turn_id: turn_id.into(),
-                reply,
-            })
-            .context("Observer DbWriter is unavailable")?;
-        response.recv().context("Observer DbWriter stopped")?
-    }
 }
 
 fn writer_loop(
@@ -1249,10 +1210,6 @@ fn execute_control(
             let _ = reply.send(database.cleanup_command_images_on(connection, &command_id));
             return false;
         }
-        ControlCommand::CleanupTurnImages { turn_id, reply } => {
-            let _ = reply.send(database.cleanup_turn_images_on(connection, &turn_id));
-            return false;
-        }
         command => command,
     };
     let (result, reply) = match command {
@@ -1272,6 +1229,14 @@ fn execute_control(
                 &config,
                 &status,
             ),
+            reply,
+        ),
+        ControlCommand::OpenSourceEpoch {
+            source_id,
+            source_epoch,
+            reply,
+        } => (
+            database.open_source_epoch_on(connection, &source_id, &source_epoch),
             reply,
         ),
         ControlCommand::MarkLocation {
@@ -1301,24 +1266,6 @@ fn execute_control(
             reply,
         } => (
             database.record_live_capabilities_on(connection, &source_id, &epoch_id, &capabilities),
-            reply,
-        ),
-        ControlCommand::UpdateSourceStatus {
-            source_id,
-            status,
-            error,
-            reply,
-        } => (
-            database.update_source_status_on(connection, &source_id, &status, error.as_deref()),
-            reply,
-        ),
-        ControlCommand::CloseEpoch {
-            source_id,
-            epoch_id,
-            reason,
-            reply,
-        } => (
-            database.close_live_epoch_on(connection, &source_id, &epoch_id, &reason),
             reply,
         ),
         ControlCommand::OpenWorkerConnection {
@@ -1402,8 +1349,7 @@ fn execute_control(
         | ControlCommand::CompletePendingRequestAction { .. }
         | ControlCommand::StageImageUpload { .. }
         | ControlCommand::ClaimImageUploads { .. }
-        | ControlCommand::CleanupCommandImages { .. }
-        | ControlCommand::CleanupTurnImages { .. } => {
+        | ControlCommand::CleanupCommandImages { .. } => {
             unreachable!("Gateway commands are handled before unit control commands")
         }
         ControlCommand::Shutdown => return true,

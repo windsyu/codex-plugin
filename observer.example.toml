@@ -16,7 +16,7 @@ https_port = 443
 [controller]
 enabled = false
 # off keeps every Session mutation disabled; tui enables the real Codex TUI
-# Session Kernel and requires an existing App Server socket below.
+# Session Runtime and starts one dedicated App Server for each Worker.
 session_kernel = "off"
 # Development/test only; when session_kernel="preview" this must point to one fixed
 # executable. Browser requests can never supply an executable or argv.
@@ -33,8 +33,6 @@ blob_retention_days = 14
 [[sources]]
 name = "default"
 codex_home = "~/.codex"
-app_server_socket = "~/.codex/app-server-control/app-server-control.sock"
-live_mode = "off"
 scan_interval_seconds = 30
 
 [capture]

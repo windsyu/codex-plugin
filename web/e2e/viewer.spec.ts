@@ -150,15 +150,10 @@ async function mockSessionKernel(
   activeTurn = false
 ) {
   await mockApi(page);
-  await page.route('**/v2/control/sources', async (route) => {
+  await page.route('**/v2/session-sources', async (route) => {
     await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
-      apiVersion:'v2',data:[{sourceId:'source-1',sourceEpoch:'epoch-1',supervisorVersion:1,state:'ready'}]
-    })});
-  });
-  await page.route('**/v2/control/catalog**', async (route) => {
-    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
-      apiVersion:'v2',data:{sourceId:'source-1',sourceEpoch:'epoch-1',threadLoaded:true,
-        capabilities:{entries:{}},slashCommands:[]}
+      apiVersion:'v2',data:[{storeSourceId:'source-1',sourceId:'session-source-1',sourceEpoch:'epoch-1',supervisorVersion:1,
+        defaultCwd:'/fixture/project',status:'ready'}]
     })});
   });
   await page.route('**/v1/health', async (route) => {
@@ -170,8 +165,8 @@ async function mockSessionKernel(
   const worker = { workerId:'fake-worker',state:'ready',pid:123,cwd:'/fixture/project',rows:24,cols:80,outputSeq:1,
     terminalRetainedBytes:16,terminalCheckpointBytes:15,ptyEof:false,errorCode:null,
     inputLease:{leaseId:null,ownerAttachmentId:null,state:'none',version:0},
-    persistedWorker:{workerId:'fake-worker',sourceId:'source-1',sourceEpoch:'epoch-1',state:'ready',version:4,
-      inputLeaseVersion:0,primaryThreadId:'thread-fast'},
+    persistedWorker:{workerId:'fake-worker',sourceId:'session-source-1',sourceEpoch:'epoch-1',state:'ready',version:4,
+      inputLeaseVersion:0,primaryThreadId:'thread-fast',mode:'new',canonicalCwd:'/fixture/project'},
     threadLeases:[{leaseId:'thread-lease-1',codexThreadId:'thread-fast',role:'primary',state:'active',version:1}],
     activeTurns:activeTurn ? [{codexThreadId:'thread-fast',codexTurnId:'turn-active'}] : [] };
   let attachCount = 0;
@@ -185,7 +180,8 @@ async function mockSessionKernel(
     if (url.pathname === '/v2/sessions') {
       const body = request.postDataJSON() as Record<string, unknown>;
       createBodies.push(body);
-      expect(body).toMatchObject({ sourceId:'source-1',sourceEpoch:'epoch-1',expectedSupervisorVersion:1 });
+      expect(body).toMatchObject({ storeSourceId:'source-1',sourceId:'session-source-1',sourceEpoch:'epoch-1',expectedSupervisorVersion:1 });
+      worker.persistedWorker.mode = body.mode as 'new' | 'resume';
       await route.fulfill({status:201,contentType:'application/json',body:JSON.stringify({apiVersion:'v2',data:worker})});
     } else if (url.pathname === '/v2/sessions/fake-worker/events' && request.method() === 'GET') {
       await route.fulfill({status:200,contentType:'text/event-stream',body:`event: session_state\nid: ${worker.outputSeq}\ndata: ${JSON.stringify(worker)}\n\n`});
@@ -363,86 +359,6 @@ test('shows projectless conversations in Recent without exposing generated cwd n
   await expect(page.getByText('generated-name')).toHaveCount(0);
 });
 
-test('controls a live thread with image Composer, interrupt, approval and cursor reconnect', async ({ page }) => {
-  const capture = await mockControlApi(page);
-  await page.goto('/');
-  await page.getByText('Fast thread').first().click();
-  await expect(page.getByLabel('Codex 控制 Composer')).toContainText('在当前 Turn 中追加指令');
-  await page.locator('.image-picker input').setInputFiles({ name:'fixture.png',mimeType:'image/png',buffer:Buffer.from('\x89PNG\r\n\x1a\nfixture') });
-  await expect(page.locator('.image-preview')).toContainText('fixture.png');
-  await page.getByPlaceholder('继续引导当前任务…').fill('image message');
-  await expect(page.getByRole('button', { name:'停止当前 Turn' })).toBeVisible();
-  await expect(page.getByRole('button', { name:'发送追加指令', exact:true })).toBeVisible();
-  await page.getByRole('button', { name:'发送追加指令', exact:true }).click();
-  await expect.poll(() => capture.uploadedBytes).toBeGreaterThan(8);
-  await expect.poll(() => capture.input?.uploadIds).toEqual(['upload-1']);
-  expect(capture.input?.sourceEpoch).toBe('epoch-1');
-  await expect(page.locator('.optimistic-message')).toContainText('image message');
-  await expect(page.locator('.optimistic-message')).toContainText('等待投影');
-  await expect(page.locator('.optimistic-message')).toHaveCount(0, { timeout:4_000 });
-
-  const composer = page.getByPlaceholder('继续引导当前任务…');
-  await composer.press('ArrowUp');
-  await expect(composer).toHaveValue('image message');
-  await composer.fill('中断时保留这段草稿');
-  await composer.press('Escape');
-  await expect.poll(() => capture.input?.text).toBe('/interrupt');
-  await expect(composer).toHaveValue('中断时保留这段草稿');
-  await expect(page.getByText('cargo test')).toBeVisible();
-  await expect(page.getByText('/fixture/project')).toBeVisible();
-  await page.getByRole('button', { name:'允许', exact:true }).click();
-  await expect.poll(() => capture.action).toMatchObject({ sourceEpoch:'epoch-1',expectedRequestVersion:1,action:{type:'approval',decision:'accept'} });
-  await expect.poll(() => capture.streamPaths.some((path) => new URL(path, 'http://fixture').searchParams.get('cursor') === 'signed-stream-cursor')).toBe(true);
-
-  await page.getByText('Slow thread').first().click();
-  await expect(page.getByRole('heading', { name:'Slow thread' })).toBeVisible();
-  await expect(page.getByPlaceholder('继续引导当前任务…')).toHaveValue('');
-});
-
-test('shows outcome_unknown as non-replayed uncertainty', async ({ page }) => {
-  await mockControlApi(page);
-  await page.goto('/');
-  await page.getByText('Fast thread').first().click();
-  await page.getByPlaceholder('继续引导当前任务…').fill('simulate uncertainty');
-  await page.getByRole('button', { name:'发送追加指令', exact:true }).click();
-  await expect(page.locator('.notice')).toContainText('操作结果未知');
-  await expect(page.locator('.notice')).toContainText('不会自动重放');
-});
-
-test('creates a new exact-epoch Thread and changes only catalog-advertised settings', async ({ page }) => {
-  const capture = await mockControlApi(page);
-  await page.goto('/');
-  await page.getByRole('button', { name:'新建对话' }).click();
-  const dialog = page.getByRole('dialog', { name:'新建 Codex Thread' });
-  await expect(dialog).toBeVisible();
-  await dialog.getByLabel('cwd').fill('/fixture/project');
-  await dialog.getByLabel('New thread model').selectOption('fixture');
-  await dialog.getByLabel('New thread permissions').selectOption('workspace');
-  await dialog.getByRole('button', { name:'创建 Thread' }).click();
-  await expect.poll(() => capture.createdThread).toMatchObject({sourceId:'source-1',sourceEpoch:'epoch-1',cwd:'/fixture/project',model:'fixture',permissions:'workspace'});
-  await expect(dialog).toBeHidden();
-
-  await page.getByText('Fast thread').first().click();
-  await page.locator('.control-settings > summary').click();
-  await page.getByLabel('Reasoning').selectOption('high');
-  await expect.poll(() => capture.setting).toMatchObject({capability:'thread.settings.reasoning',target:{sourceId:'source-1',sourceEpoch:'epoch-1',threadKey:'thread-fast'},input:{value:'high'}});
-  await page.getByRole('button', { name:'进入 Plan' }).click();
-  await expect.poll(() => capture.input?.text).toBe('/plan');
-});
-
-test('executes /clear as an audited new Thread and switches away from the old conversation', async ({ page }) => {
-  const capture = await mockControlApi(page, false);
-  await page.goto('/');
-  await page.getByText('Fast thread').first().click();
-  const composer = page.getByPlaceholder('询问 Codex，输入 / 查看命令');
-  await composer.fill('/clear');
-  await composer.press('Enter');
-  await expect.poll(() => capture.createdThread).toMatchObject({sourceId:'source-1',sourceEpoch:'epoch-1',model:'fixture'});
-  expect(capture.input).toBeUndefined();
-  await expect(page.getByRole('heading',{name:'Cleared thread'})).toBeVisible();
-  await expect(page.locator('.notice')).toContainText('已清空当前界面并开始新对话');
-});
-
 test('redeems a pairing fragment, clears it, and does not persist a bearer token', async ({ page }) => {
   let paired = false;
   let suppliedCode = '';
@@ -474,9 +390,11 @@ test('opens xterm preview, sends leased input, and reattaches after refresh on n
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
-  await dialog.getByLabel('cwd').fill('/fixture/project');
-  await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
+  await expect.poll(() => fixture.getCreateBodies()[0]).toMatchObject({
+    storeSourceId:'source-1',sourceId:'session-source-1',sourceEpoch:'epoch-1',mode:'new',
+    codexThreadId:null,cwd:'/fixture/project'
+  });
   await expect(dialog.getByText('可输入')).toBeVisible();
   await expect(dialog.locator('.terminal-title')).toContainText('Codex CLI');
   await expect(dialog.locator('.terminal-runtime-status')).toContainText('输入已就绪');
@@ -533,8 +451,6 @@ test('keeps a second xterm attachment read-only when another attachment owns inp
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
-  await dialog.getByLabel('cwd').fill('/fixture/project');
-  await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('只读',{exact:true})).toBeVisible();
   await expect(dialog.locator('.terminal-input-status-readonly')).toContainText('实时只读');
@@ -546,8 +462,6 @@ test('renders Codex ANSI semantics and restores a snapshot once while a live wri
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
-  await dialog.getByLabel('cwd').fill('/fixture/project');
-  await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
 
   await page.evaluate(() => {
@@ -592,8 +506,6 @@ test('keeps IME-style Unicode, multiline paste, resize and disconnect recovery i
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
-  await dialog.getByLabel('cwd').fill('/fixture/project');
-  await dialog.getByRole('button',{name:'启动原生 TUI'}).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('可输入')).toBeVisible();
 
@@ -653,11 +565,9 @@ test('resumes through native TUI and sends Slash, picker keys and interrupt only
   await page.getByText('Fast thread').first().click();
   await page.getByRole('button', { name: '继续终端会话' }).click();
   const dialog = page.getByRole('dialog', { name: 'Codex terminal session' });
-  await expect(dialog.getByLabel('Codex Thread ID')).toHaveValue('thread-fast');
-  await dialog.getByRole('button', { name: '恢复原生 TUI' }).click();
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect.poll(() => fixture.getCreateBodies()[0]).toMatchObject({
-    mode:'resume',codexThreadId:'thread-fast',sourceEpoch:'epoch-1'
+    storeSourceId:'source-1',mode:'resume',codexThreadId:'thread-fast',sourceEpoch:'epoch-1'
   });
 
   const terminal = dialog.locator('.xterm-helper-textarea');

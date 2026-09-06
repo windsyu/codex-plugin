@@ -75,16 +75,6 @@ export class Api {
     return payload as ApiEnvelope<T>;
   }
 
-  async uploadImage(file: File, idempotencyKey: string, signal?: AbortSignal) {
-    const response = await fetch('/v2/uploads/images', {
-      method: 'POST', headers: { ...this.headers(), 'Content-Type': file.type, 'Idempotency-Key': idempotencyKey },
-      credentials: 'same-origin', cache: 'no-store', body: file, signal
-    });
-    const payload = await response.json().catch(() => undefined);
-    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
-    return payload as ApiEnvelope<import('./types').ImageUpload>;
-  }
-
   async stream(path: string, onEvent: (event: StreamEvent) => void, signal: AbortSignal, onOpen?: () => void) {
     const response = await fetch(path, {
       headers: { ...this.headers(), Accept: 'text/event-stream' }, credentials: 'same-origin', cache: 'no-store', signal

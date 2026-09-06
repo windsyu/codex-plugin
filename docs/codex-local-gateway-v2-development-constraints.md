@@ -2,10 +2,10 @@
 
 > 状态：Approved  
 > 日期：2026-08-29  
-> 已验证基线：`v0.2.0`；当前状态：Session Kernel Slice 1–9 implementation/validation complete，等待既有真实 App Server 最终验收
+> 已验证基线：`v0.2.0`；当前状态：官方 CLI 单路径 Session Runtime 实现与 release validation
 > 适用范围：V2 设计、开发、测试、文档和交付
 
-> 架构演进（2026-09-02）：本文第 1–15 节同时包含已经由 `v0.2.0` 验证的 Controller 基线和其后续重构约束。活动会话现在以真实 Codex TUI + PTY 为内核，按 Thread 由唯一 Session Worker 经私有 1:1 proxy 连接已有 App Server；详细契约与迁移顺序分别见 [`codex-tui-session-kernel-refactor.md`](codex-tui-session-kernel-refactor.md)、[`codex-tui-session-kernel-slices.md`](codex-tui-session-kernel-slices.md) 和 [ADR 0020](decisions/0020-codex-tui-session-kernel.md)。Slice 1–9 已实现并通过 fixture、浏览器及已安装 `codex-cli 0.146.1` 的隔离 smoke；完整证据和仍需既有真实 App Server endpoint 的验收边界记录在 [`v2-validation.md`](v2-validation.md)。Slice 10–12 仍是 V3 非目标。
+> 架构收敛（2026-09-04）：[ADR 0022](decisions/0022-gateway-owned-app-server-session.md) 删除 source-global Controller、Web Composer 与“连接既有 App Server”路径。每个活动 Session Worker 启动并拥有一个专属 App Server，经私有 audited proxy 连接真实 Codex TUI。V1 History 继续从 rollout watcher 与周期扫描增量同步，不依赖共享 App Server，也不需要重启服务。Slice 10–12 仍是 V3 非目标。
 
 ## 1. 文档目的与约束级别
 
@@ -64,7 +64,7 @@ V2 将只读 Viewer 增强为类似 ChatGPT/Codex 应用的本地对话与控制
 
 ### 3.2 明确非目标
 
-- Gateway 不负责启动、停止或守护 Codex App Server 进程；
+- 不发现、连接、接管或复用其他 Desktop/CLI/VS Code/Gateway 创建的 App Server；
 - 不伪造 App Server 不支持的命令或能力；
 - 不实现 `/cloud`、`/cloud-environment`、`/pet`、`/feedback` 等仅属于云端或特定宿主 UI 的等价替代物；
 - 不把 App Server JSON-RPC 原样暴露给浏览器；
@@ -75,22 +75,22 @@ V2 将只读 Viewer 增强为类似 ChatGPT/Codex 应用的本地对话与控制
 
 ## 4. Source 与协议控制约束
 
-### 4.1 只连接现有 App Server
+### 4.1 Worker-owned App Server 单路径
 
-- V2 只连接 `SourceConfig.app_server_socket` 指定的现有 App Server；
-- 未配置 socket、连接失败或 source 不为 `ready` 时，所有 V2 mutation 必须禁用；
-- 不允许静默启动 `codex app-server` 作为 fallback；
-- 不允许 source 断线时转为 cold resume 或控制另一个进程；
-- 所有命令必须绑定精确的 `sourceId + sourceEpoch`；
-- reconnect 必须创建新 epoch，旧 epoch 的未派发命令失败；
-- 已写入 socket 但无法确认结果的命令进入 `outcome_unknown`，不得自动重放。
+- 每个真实 Session Worker 启动一个专属 `codex app-server`，不存在共享或既有 endpoint 路径；
+- `app_server_socket`、`live_mode` 只在一版配置迁移期产生警告并被忽略，不得探测或影响 capability；
+- 所有命令必须绑定服务端发布的 `storeSourceId + sourceId + sourceEpoch + supervisorVersion`；
+- `sourceEpoch` 是每次 Gateway 启动生成的共享 generation；每个 proxy 另有独立 connection epoch；
+- App Server 或 TUI 任一方退出都会停止另一方，回收 proxy、lease、guard、进程和 runtime dir；
+- Gateway 重启只执行 orphan recovery，不 adopt 旧进程，不自动重放 mutation；
+- 已写入上游但无法确认结果的命令进入 `outcome_unknown`。
 
 ### 4.2 Source Supervisor、Session Worker 与所有权
 
 `v0.2.0` 已验证的 source-global `LiveSourceActor` 是迁移基线，不再是活动会话的目标 owner。重构完成后每个可控 source 由一个 `SourceSupervisor` 管理，每个活动 Thread 由唯一 `Thread Session Worker` 控制：
 
-- Supervisor 维护 App Server endpoint、`sourceEpoch`、capability catalog、worker registry 和 ThreadLease；
-- 每个 worker 启动一个真实 Codex TUI PTY，并只通过 worker 专属私有 proxy 连接 configured existing App Server；
+- Supervisor 维护启动 generation、Session Source、worker registry 和 ThreadLease，不持有 App Server transport；
+- 每个 worker 启动一个专属 App Server 与真实 Codex TUI PTY，TUI 只通过 worker 私有 audited proxy 连接该 App Server；
 - 一个 worker 只有一个上游 owner connection；多个浏览器附着同一 PTY，不复制连接；
 - 同一 `sourceId + sourceEpoch + codexThreadId` 只有一个 active ThreadLease；一个TUI持有主/side/child Thread时可有多个指向同一worker的lease，但任何Thread不得属于两个worker；
 - proxy 分配上游 JSON-RPC request ID，关联 TUI/Gateway response、notification、server request、Turn owner 和 command；
@@ -108,7 +108,7 @@ flowchart LR
     WORKER <-->|"PTY"| TUI["real Codex TUI"]
     TUI <-->|"private JSON-RPC"| PROXY["1:1 App Server proxy"]
     WORKER --> PROXY
-    PROXY <-->|"single upstream"| APP["Existing Codex App Server"]
+    PROXY <-->|"single upstream"| APP["Worker-owned Codex App Server"]
     PROXY --> RAW["V1 Raw Event + Projection"]
     WORKER --> AUDIT["Command / Lease / Audit"]
 ```
@@ -382,7 +382,7 @@ V3 通过后续 additive migration 增加 `channel_principals`、`channel_bindin
 - `outcome_unknown` 不得显示为成功或普通失败；
 - output buffer只用于重连；截断必须标记，不得当作完整历史；
 - 桌面和窄屏必须支持键盘完成创建/恢复Session、terminal操作、interrupt和terminal-owned pending request；
-- Legacy Composer只在迁移flag下保留，达到Session Kernel门禁后退役，不与active worker同时写同一Thread。
+- Legacy Composer迁移窗口已经结束；相关生产入口和 mutation route 已删除，不与 Session Runtime 并存。
 
 ## 12. 实施顺序
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { SessionWorker, SessionWorkerSnapshot } from '../types';
-import { mergeSessionWorkerSnapshot, sessionOwnsInitialThread } from './SessionShell';
+import type { SessionSource, SessionWorker, SessionWorkerSnapshot } from '../types';
+import { mergeSessionWorkerSnapshot, sessionMatchesIntent, sessionOwnsInitialThread } from './SessionShell';
 
 const worker: SessionWorker = {
   workerId: 'worker-1',
@@ -18,6 +18,8 @@ const worker: SessionWorker = {
     version: 4,
     sourceId: 'source-1',
     sourceEpoch: 'epoch-1',
+    mode: 'resume',
+    canonicalCwd: '/fixture',
     primaryThreadId: 'thread-1'
   },
   threadLeases: [{
@@ -30,6 +32,17 @@ const worker: SessionWorker = {
 };
 
 describe('SessionShell ownership restore', () => {
+  const source: SessionSource = { storeSourceId:'store-1',sourceId:'source-1',sourceEpoch:'epoch-1',
+    supervisorVersion:1,defaultCwd:'/fixture',status:'ready' };
+
+  it('reattaches only for an exact source generation, intent, cwd and active lease', () => {
+    expect(sessionMatchesIntent(worker, source, {mode:'resume',storeSourceId:'store-1',codexThreadId:'thread-1',cwd:'/fixture'}, '/fixture')).toBe(true);
+    expect(sessionMatchesIntent(worker, {...source,sourceEpoch:'epoch-stale'}, {mode:'resume',storeSourceId:'store-1',codexThreadId:'thread-1',cwd:'/fixture'}, '/fixture')).toBe(false);
+    expect(sessionMatchesIntent(worker, source, {mode:'resume',storeSourceId:'store-1',codexThreadId:'thread-2',cwd:'/fixture'}, '/fixture')).toBe(false);
+    expect(sessionMatchesIntent(worker, source, {mode:'resume',storeSourceId:'store-1',codexThreadId:'thread-1',cwd:'/other'}, '/other')).toBe(false);
+    expect(sessionMatchesIntent({...worker,state:'failed'}, source, {mode:'resume',storeSourceId:'store-1',codexThreadId:'thread-1',cwd:'/fixture'}, '/fixture')).toBe(false);
+  });
+
   it('reattaches only when the stored worker owns the exact source epoch and Thread', () => {
     expect(sessionOwnsInitialThread(worker)).toBe(true);
     expect(sessionOwnsInitialThread(worker, {

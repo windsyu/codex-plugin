@@ -269,82 +269,6 @@ impl ControllerOperation {
             Self::PendingRequestAction { .. } => return None,
         })
     }
-
-    pub(crate) fn thread_target(&self) -> Option<(&str, &str)> {
-        match self {
-            Self::ThreadStart { .. } => None,
-            Self::ThreadResume {
-                thread_id,
-                thread_key,
-            }
-            | Self::ThreadFork {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::TurnStart {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::TurnSteer {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::TurnInterrupt {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::ThreadSettingsUpdate {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::Plan {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::ThreadNameSet {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::ThreadArchive {
-                thread_id,
-                thread_key,
-            }
-            | Self::ThreadCompact {
-                thread_id,
-                thread_key,
-            }
-            | Self::ReviewStart {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::GoalGet {
-                thread_id,
-                thread_key,
-            }
-            | Self::GoalSet {
-                thread_id,
-                thread_key,
-                ..
-            }
-            | Self::GoalClear {
-                thread_id,
-                thread_key,
-            }
-            | Self::PendingRequestAction {
-                thread_id,
-                thread_key,
-                ..
-            } => Some((thread_id, thread_key)),
-        }
-    }
 }
 
 fn turn_input(text: &str, image_paths: &[String]) -> Vec<Value> {
@@ -410,34 +334,6 @@ impl CapabilityCatalog {
         );
     }
 
-    pub(crate) fn record_availability(
-        &mut self,
-        method: &str,
-        experimental: bool,
-        envelope: &Value,
-    ) {
-        let available = envelope.get("result").is_some();
-        let error_code = (!available).then(|| {
-            envelope
-                .pointer("/error/code")
-                .map(|code| {
-                    code.as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| code.to_string())
-                })
-                .unwrap_or_else(|| "UPSTREAM_REJECTED".into())
-        });
-        self.entries.insert(
-            method.into(),
-            CapabilityEntry {
-                available,
-                experimental,
-                data: None,
-                error_code,
-            },
-        );
-    }
-
     pub(crate) fn summary(&self) -> Value {
         Value::Object(
             self.entries
@@ -481,18 +377,6 @@ impl CapabilityCatalog {
                                 entry.get("reasoningEffort").and_then(Value::as_str) == Some(effort)
                             })
                         })
-            })
-        })
-    }
-
-    pub(crate) fn model_supports_personality(&self, model_id: &str) -> bool {
-        self.catalog_items("model/list").is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry.get("id").and_then(Value::as_str) == Some(model_id)
-                    && entry
-                        .get("supportsPersonality")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
             })
         })
     }

@@ -12,7 +12,3 @@ pub(crate) use actor::{
     RegistryError, ReviewTarget, SlashCommandEntry, SourceActorSnapshot, SourceControlCatalog,
     ThreadSetting, actor_channel,
 };
-pub(crate) use protocol::{
-    EXPERIMENTAL_API_ENABLED, EXPERIMENTAL_CATALOG_METHODS, SERVER_REQUEST_METHODS,
-    STABLE_CATALOG_METHODS, catalog_request_params,
-};
