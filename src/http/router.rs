@@ -17,7 +17,7 @@ pub(super) fn settings_snapshot(config: &Config) -> Value {
           "warning":if config.controller.enabled && config.server.tailscale_serve.enabled {
             Some("verified Tailscale users have the same V2 mutation authority as local sessions")
           } else { None }},
-        "sources":config.sources.iter().map(|source| json!({"name":source.name,"liveMode":source.live_mode,
+        "sources":config.sources.iter().map(|source| json!({"name":source.name,
           "scanIntervalSeconds":source.scan_interval_seconds})).collect::<Vec<_>>()
     })
 }

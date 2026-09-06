@@ -3,6 +3,7 @@ import { Api, ApiError, connect, loadDashboard, loadEventPage, loadThread, recon
 import { renderMarkdown } from './lib/markdown';
 import { coalesceActivities, itemPayload, presentItem, summarizeActivities } from './presentation';
 import { SessionShell } from './session/SessionShell';
+import type { SessionIntent } from './session/SessionShell';
 import type { ActivityEntry } from './presentation';
 import type { ControlCatalog, ControllerSource, GatewayCommand, GatewayStatusCard, Health, Item, PendingRequest, ProjectSummary, RawEvent, SearchResult, Source, Thread, ThreadDetail, Turn } from './types';
 
@@ -554,10 +555,12 @@ export function ConversationFollowButton({ unseenUpdates, onJump }: { unseenUpda
   </button>;
 }
 
-function CurrentSessionOverview({ thread, catalog, controlError, turnCount, pendingCount }: {
-  thread: Thread; catalog?: ControlCatalog; controlError?: string; turnCount: number; pendingCount: number;
+function CurrentSessionOverview({ thread, turnCount, pendingCount }: {
+  thread: Thread; turnCount: number; pendingCount: number;
 }) {
-  const presence = currentSessionPresence(thread, catalog, controlError);
+  const presence = thread.archived
+    ? { label:'已归档', tone:'muted', detail:'该会话当前仅供浏览' }
+    : { label:'History 只读', tone:'muted', detail:'活动输入由终端 Session Runtime 承载' };
   return <div class="session-overview" aria-label="当前会话状态">
     <span class="session-kicker">{thread.archived ? '归档会话' : '当前会话'}</span>
     <span class={`session-presence session-presence-${presence.tone}`} title={presence.detail}><i />{presence.label}</span>
@@ -914,21 +917,14 @@ function RawInspector({ events, state, hasMore, onOpen, onMore, onRetry, onClose
 }
 
 function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawState, rawHasMore, onRawOpen, onRawMore,
-  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId, catalog, controlBusy, controlError,
-  latestCommand, latestControlCard, optimisticMessages, notice, onNoticeClose, onSend, onInterrupt, onSetting, onRequestAction,
+  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId, notice, onNoticeClose,
   tuiSessionMode, onOpenSession }: {
   detail: ThreadDetail; turns: Turn[]; items: Item[]; token: string; health?: Health; rawEvents: RawEvent[]; rawState: RequestState;
   rawHasMore: boolean; onRawOpen: () => void; onRawMore: () => void; onRawRetry: () => void; onRawCloseError: () => void;
   onCopy: (event: RawEvent) => void;
   onBack: () => void; onNavigate: (key: string) => void; onBlob: (message: string) => void; focusedItemId?: string;
-  catalog?: ControlCatalog; controlBusy: boolean; controlError?: string; onSend: (text: string, images: File[]) => void; onInterrupt: () => void;
-  latestCommand?: GatewayCommand;
-  latestControlCard?: GatewayStatusCard;
-  optimisticMessages: OptimisticMessage[];
   notice?: string;
   onNoticeClose: () => void;
-  onSetting: (capability: string, value: string) => void;
-  onRequestAction: (request: PendingRequest, action: Record<string, unknown>) => void;
   tuiSessionMode: boolean;
   onOpenSession: () => void;
 }) {
@@ -943,8 +939,7 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
   const conversationTail = useRef<HTMLDivElement>(null); const followLatest = useRef(true);
   const previousActivityKey = useRef(''); const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [unseenUpdates, setUnseenUpdates] = useState(0);
-  const latestOptimisticId = optimisticMessages.at(-1)?.clientUserMessageId || '';
-  const activityKey = `${items.at(-1)?.itemId || ''}:${items.at(-1)?.lastEventSeq || 0}:${items.length}:${latestOptimisticId}:${catalog?.activeTurnId || ''}`;
+  const activityKey = `${items.at(-1)?.itemId || ''}:${items.at(-1)?.lastEventSeq || 0}:${items.length}`;
   const pendingCount = detail.pendingRequests.filter((request) => request.state !== 'resolved').length;
   useEffect(() => {
     const scroller = conversationTail.current?.closest('.detail') as HTMLElement | null;
@@ -967,7 +962,6 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     const scroller = conversationTail.current?.closest('.detail') as HTMLElement | null;
     const changed = previousActivityKey.current !== activityKey;
     previousActivityKey.current = activityKey;
-    if (latestOptimisticId) followLatest.current = true;
     if (!scroller || focusedItemId) return;
     if (!followLatest.current) {
       if (changed) setUnseenUpdates((current) => current + 1);
@@ -986,7 +980,7 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
       <h2>{copy.title}</h2></div></div><p class="thread-meta">{[
         thread.context.runtime.model, thread.context.session.agentNickname, thread.context.session.agentRole,
         thread.project?.name, thread.source, `会话 ${shortThreadId(thread.codexThreadId)}`
-      ].filter(Boolean).join(' · ')}</p><CurrentSessionOverview thread={thread} catalog={catalog} controlError={controlError}
+      ].filter(Boolean).join(' · ')}</p><CurrentSessionOverview thread={thread}
         turnCount={turns.length} pendingCount={pendingCount} /><div class="thread-relations">
         {relations.parent && <RelationLink label="父会话" relation={relations.parent} onNavigate={onNavigate} />}
         {relations.forkedFrom && <RelationLink label="分支来源" relation={relations.forkedFrom} onNavigate={onNavigate} />}
@@ -995,16 +989,12 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     {thread.captureCompleteness !== 'durable_complete' && <div class="capture-banner">{badge(thread.captureCompleteness, 'Thread 捕获完整性')}
       <span>{thread.completenessReasons.length ? thread.completenessReasons.join(' · ') : '该 Thread 的捕获完整性需要关注'}</span></div>}
     <div class="conversation-utilities"><DiagnosticsSummary detail={detail} health={health} /><ContextPanel thread={thread} /></div>
-    <div class="timeline">{grouped.length === 0 && optimisticMessages.length === 0 && <p class="empty-list">此 Thread 尚无可投影 Item。</p>}
+    <div class="timeline">{grouped.length === 0 && <p class="empty-list">此 Thread 尚无可投影 Item。</p>}
       {grouped.map(([key, group], index) => <TurnSection key={key} turn={group.turn} items={group.items} token={token} onBlob={onBlob}
-        focusedItemId={focusedItemId} ordinal={index + 1} />)}
-      {optimisticMessages.map((message) => <OptimisticMessageCard key={message.clientUserMessageId} message={message} />)}</div>
-    {!tuiSessionMode && <div class="request-card-list">{detail.pendingRequests.filter((request) => request.state !== 'resolved').map((request) =>
-      <PendingRequestCard request={request} busy={controlBusy} onAction={onRequestAction} />)}</div>
-    }
-    {latestCommand && <div class={`command-status command-${latestCommand.state}`} role="status"><strong>最近命令</strong>
-      <span>{latestCommand.commandId.slice(0, 8)} · {statusLabel(latestCommand.state)}</span>{latestCommand.error && <span>{latestCommand.error.code} · {latestCommand.error.message}</span>}</div>}
-    {latestControlCard && <GatewayStatusCardView card={latestControlCard} />}
+        focusedItemId={focusedItemId} ordinal={index + 1} />)}</div>
+    {detail.pendingRequests.some((request) => request.state !== 'resolved') && <div class="request-card-list">
+      <div class="notice notice-warning" role="status">此 Thread 有待处理交互；请打开拥有该 Thread 的终端，由官方 TUI 响应。</div>
+    </div>}
     <RawInspector events={rawEvents} state={rawState} hasMore={rawHasMore} onOpen={onRawOpen} onMore={onRawMore} onRetry={onRawRetry}
       onCloseError={onRawCloseError} onCopy={onCopy} />
     <div ref={conversationTail} class="conversation-tail" aria-hidden="true" />
@@ -1014,12 +1004,8 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
       {tuiSessionMode ? <div class="session-default-entry" role="status">
         <div><strong>活动输入由真实 Codex TUI 承载</strong><span>Slash、picker、Goal、Plan 与交互请求只在终端会话中响应；History 保持只读。</span></div>
         <button type="button" onClick={onOpenSession}>继续终端会话</button>
-      </div> : <>
-        {catalog?.activeTurnId && <ActiveTurnIndicator command={latestCommand} />}
-        {catalog?.goal && <GoalStatusBar catalog={catalog} busy={controlBusy} onSlash={(command) => { void onSend(command, []); }} />}
-        <Composer key={thread.threadKey} catalog={catalog} thread={thread} busy={controlBusy} disabledReason={controlError || (!catalog?.threadLoaded ? '当前 Thread 尚未加载到 App Server' : undefined)}
-          onSend={onSend} onInterrupt={onInterrupt} onSetting={onSetting} onSlash={(command) => { void onSend(command, []); }} />
-      </>}
+      </div> : <div class="session-default-entry" role="status"><div><strong>History 只读</strong>
+        <span>启用 V2 Session Runtime 后可从这里继续该 Thread。</span></div></div>}
     </div>
   </div>;
 }
@@ -1161,25 +1147,14 @@ export function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searchState, setSearchState] = useState<RequestState>({ phase: 'idle' });
   const [notice, setNotice] = useState('');
-  const [controlCatalog, setControlCatalog] = useState<ControlCatalog>();
-  const [controlError, setControlError] = useState('Controller 状态尚未加载');
-  const [controlBusy, setControlBusy] = useState(false);
-  const [latestCommand, setLatestCommand] = useState<GatewayCommand>();
-  const [latestControlCard, setLatestControlCard] = useState<GatewayStatusCard>();
-  const [optimisticMessages, setOptimisticMessages] = useState<OptimisticMessage[]>([]);
-  const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [sessionPreviewOpen, setSessionPreviewOpen] = useState(false);
-  const [newThreadSources, setNewThreadSources] = useState<ControllerSource[]>([]);
-  const [newThreadCatalog, setNewThreadCatalog] = useState<ControlCatalog>();
-  const [newThreadError, setNewThreadError] = useState('');
+  const [sessionIntent, setSessionIntent] = useState<SessionIntent>({ mode:'new' });
   const [focusTarget, setFocusTarget] = useState<{ turnId?: string; itemId?: string }>();
   const refreshTimer = useRef<number>();
-  const commandRefreshTimer = useRef<number>();
   const detailController = useRef<AbortController>();
   const searchController = useRef<AbortController>();
   const rawController = useRef<AbortController>();
   const selectedRef = useRef<string>();
-  const latestCommandRef = useRef<GatewayCommand>();
 
   function unauthorize(message: string) {
     sessionStorage.removeItem('observer-token'); setToken(''); setApi(null); setAuthError(message); setAuthChecking(false);
@@ -1230,23 +1205,7 @@ export function App() {
 
   useEffect(() => () => {
     detailController.current?.abort(); searchController.current?.abort(); rawController.current?.abort();
-    window.clearTimeout(commandRefreshTimer.current);
   }, []);
-  useEffect(() => {
-    const previous = latestCommandRef.current;
-    latestCommandRef.current = latestCommand;
-    if (previous && latestCommand && previous.commandId === latestCommand.commandId
-      && previous.state !== latestCommand.state) {
-      setNotice(commandNotice(latestCommand));
-      if (['completed','rejected','failed','cancelled','outcome_unknown'].includes(latestCommand.state)) {
-        window.clearTimeout(commandRefreshTimer.current);
-        commandRefreshTimer.current = window.setTimeout(() => {
-          const threadKey = selectedRef.current;
-          if (threadKey) void selectThread(threadKey, undefined, true);
-        }, 300);
-      }
-    }
-  }, [latestCommand]);
   useEffect(() => {
     const target = focusTarget;
     if (detailState.phase !== 'success' || !target) return;
@@ -1260,173 +1219,18 @@ export function App() {
     selectedRef.current = threadKey;
     if (!preserve) {
       rawController.current?.abort(); setSelected(threadKey); setFocusTarget(target); setDetail(undefined); setTurns([]); setItems([]); setRawEvents([]);
-      setControlCatalog(undefined); setLatestCommand(undefined); setLatestControlCard(undefined); setControlError('正在匹配可控 source');
       setRawState({ phase: 'idle' }); setRawHasMore(false); setDetailState({ phase: 'loading' });
     }
     try {
       const loaded = await loadThread(api, threadKey, controller.signal);
       if (controller.signal.aborted) return;
       setDetail(loaded.detail.data); setTurns(loaded.turns.data); setItems(loaded.items.data); setDetailState({ phase: 'success' });
-      setOptimisticMessages((current) => reconcileOptimisticMessages(current, threadKey, loaded.items.data));
-      try {
-        const snapshots = await api.get<ControllerSource[]>('/v2/control/sources', controller.signal);
-        const catalogs = await Promise.allSettled(snapshots.data.filter((source) => source.state === 'ready').map((source) =>
-          api.get<ControlCatalog>(`/v2/control/catalog?sourceId=${encodeURIComponent(source.sourceId)}&threadKey=${encodeURIComponent(threadKey)}`, controller.signal)));
-        const matched = selectThreadControlCatalog(catalogs.flatMap((result) => result.status === 'fulfilled' ? [result.value.data] : []));
-        if (matched) {
-          setControlCatalog(matched); setControlError('');
-          try {
-            const commands = await api.get<GatewayCommand[]>(`/v2/commands?threadKey=${encodeURIComponent(threadKey)}&limit=1`, controller.signal);
-            setLatestCommand(commands.data[0]);
-          } catch (error) { if (isAbort(error)) return; }
-        }
-        else setControlError(snapshots.data.length ? '当前 Thread 未加载到可控 source' : 'Controller 已关闭或 source 离线');
-      } catch (error) { if (!isAbort(error)) setControlError(requestMessage(error)); }
     } catch (error) {
       if (isAbort(error)) return;
       if (error instanceof ApiError && error.status === 401) return unauthorize(error.message);
       if (preserve) setNotice(`实时刷新失败：${requestMessage(error)}`);
       else setDetailState({ phase: 'error', message: requestMessage(error) });
     }
-  }
-
-  async function runControl(path: string, body: unknown) {
-    if (!api) return undefined;
-    setControlBusy(true); setNotice('');
-    try {
-      const response = await api.post<GatewayCommand | GatewayStatusCard>(path, body, crypto.randomUUID());
-      if (isGatewayStatusCard(response.data)) {
-        setLatestControlCard(response.data);
-        setNotice(`Gateway /${response.data.cardType} 已刷新`);
-        return response.data;
-      }
-      setLatestCommand(response.data);
-      setNotice(commandNotice(response.data));
-      if (selected) await selectThread(selected, focusTarget, true);
-      return response.data;
-    } catch (error) { setNotice(`控制失败：${requestMessage(error)}`); return undefined; }
-    finally { setControlBusy(false); }
-  }
-
-  async function sendInput(text: string, images: File[] = []) {
-    if (!detail || !controlCatalog) return false;
-    if (text.trim() === '/clear' && images.length === 0) return clearCurrentThread();
-    const threadKey = detail.thread.threadKey;
-    const clientUserMessageId = crypto.randomUUID();
-    const optimistic = !text.startsWith('/') || text.startsWith('//');
-    if (optimistic) {
-      setFocusTarget(undefined);
-      const optimisticMessage: OptimisticMessage = {
-        threadKey, clientUserMessageId, text, imageCount:images.length, createdAtMs:Date.now(), state:'sending'
-      };
-      setOptimisticMessages((current) => [...current, optimisticMessage].slice(-50));
-    }
-    setControlBusy(true);
-    try {
-      const uploads = await Promise.all(images.map((image) => api!.uploadImage(image, crypto.randomUUID())));
-      const result = await runControl(`/v2/threads/${encodeURIComponent(threadKey)}/inputs`, {
-      sourceId: controlCatalog.sourceId, sourceEpoch: controlCatalog.sourceEpoch,
-      codexThreadId: detail.thread.codexThreadId, expectedTurnId: controlCatalog.activeTurnId,
-      clientUserMessageId, text, uploadIds: uploads.map((upload) => upload.data.uploadId)
-      });
-      const command = result && 'state' in result ? result : undefined;
-      if (optimistic) setOptimisticMessages((current) => current.map((message) => message.clientUserMessageId === clientUserMessageId
-        ? { ...message, state:command?.state === 'outcome_unknown' ? 'outcome_unknown'
-          : command && !['failed','rejected','cancelled'].includes(command.state) ? 'accepted' : 'failed', error:command?.error?.message }
-        : message));
-      return Boolean(result) && (!command || !['failed','rejected','cancelled'].includes(command.state));
-    } catch (error) {
-      const message = requestMessage(error); setNotice(`图片上传失败：${message}`); setControlBusy(false);
-      if (optimistic) setOptimisticMessages((current) => current.map((entry) => entry.clientUserMessageId === clientUserMessageId
-        ? { ...entry, state:'failed', error:message } : entry));
-      return false;
-    }
-  }
-
-  function interruptTurn() {
-    if (!controlCatalog?.activeTurnId) return;
-    void sendInput('/interrupt');
-  }
-
-  function changeSetting(capability: string, value: string) {
-    if (!detail || !controlCatalog) return;
-    void runControl('/v2/commands', {
-      capability,
-      target: { sourceId:controlCatalog.sourceId,sourceEpoch:controlCatalog.sourceEpoch,threadKey:detail.thread.threadKey,
-        codexThreadId:detail.thread.codexThreadId,expectedTurnId:null,expectedRequestId:null,expectedRequestVersion:null },
-      input:{ value }
-    });
-  }
-
-  async function selectNewThreadSource(sourceId: string) {
-    if (!api) return;
-    setNewThreadError(''); setNewThreadCatalog(undefined);
-    try {
-      const catalog = await api.get<ControlCatalog>(`/v2/control/catalog?sourceId=${encodeURIComponent(sourceId)}`);
-      setNewThreadCatalog(catalog.data);
-    } catch (error) { setNewThreadError(requestMessage(error)); }
-  }
-
-  async function openNewThread() {
-    if (!api) return;
-    setNewThreadOpen(true); setNewThreadError(''); setNewThreadCatalog(undefined);
-    try {
-      const response = await api.get<ControllerSource[]>('/v2/control/sources');
-      const ready = response.data.filter((source) => source.state === 'ready'); setNewThreadSources(ready);
-      if (ready[0]) await selectNewThreadSource(ready[0].sourceId);
-      else setNewThreadError('Controller 已关闭或没有 ready source');
-    } catch (error) { setNewThreadError(requestMessage(error)); }
-  }
-
-  async function selectCreatedThread(threadId: string) {
-    if (!api) return false;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const dashboard = await loadDashboard(api); setThreads(dashboard.threads.data); setProjects(dashboard.projects.data);
-      const created = dashboard.threads.data.find((thread) => thread.codexThreadId === threadId);
-      if (created) { await selectThread(created.threadKey); return true; }
-      await new Promise((resolve) => window.setTimeout(resolve, 125));
-    }
-    return false;
-  }
-
-  async function clearCurrentThread() {
-    if (!api || !detail || !controlCatalog) return false;
-    if (controlCatalog.activeTurnId) { setNotice('当前 Turn 正在运行；请先中断或等待完成，再执行 /clear'); return false; }
-    const input = clearThreadInput(detail.thread, turns, controlCatalog);
-    if (!input) { setNotice('无法执行 /clear：当前会话没有可复用的本机绝对 cwd'); return false; }
-    setControlBusy(true); setNotice('');
-    try {
-      const response = await api.post<GatewayCommand>('/v2/threads', input, crypto.randomUUID());
-      setLatestCommand(response.data);
-      if (response.data.state !== 'completed') { setNotice(commandNotice(response.data)); return false; }
-      const threadId = String(record(response.data.result).threadId || '');
-      if (!threadId) { setNotice('新会话已创建，但 Source 未返回 threadId'); return false; }
-      const selectedCreated = await selectCreatedThread(threadId);
-      setNotice(selectedCreated ? '已清空当前界面并开始新对话' : '新会话已创建，列表仍在同步；请稍后刷新');
-      return true;
-    } catch (error) { setNotice(`/clear 执行失败：${requestMessage(error)}`); return false; }
-    finally { setControlBusy(false); }
-  }
-
-  async function createNewThread(input: NewThreadInput) {
-    if (!api) return;
-    setControlBusy(true); setNewThreadError('');
-    try {
-      const response = await api.post<GatewayCommand>('/v2/threads', input, crypto.randomUUID());
-      setLatestCommand(response.data);
-      setNotice(commandNotice(response.data));
-      if (response.data.state !== 'completed') return;
-      const threadId = record(response.data.result).threadId;
-      setNewThreadOpen(false);
-      if (typeof threadId === 'string' && threadId) await selectCreatedThread(threadId);
-    } catch (error) { setNewThreadError(requestMessage(error)); }
-    finally { setControlBusy(false); }
-  }
-
-  function respondToRequest(request: PendingRequest, action: Record<string, unknown>) {
-    void runControl(`/v2/requests/${encodeURIComponent(request.requestKey)}/actions`, {
-      sourceEpoch: request.sourceEpoch, expectedRequestVersion: request.requestVersion, action
-    });
   }
 
   async function loadRaw(reset = false) {
@@ -1483,7 +1287,7 @@ export function App() {
   return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1>
     <span class="readonly-label">{health?.control?.enabled ? 'V2 控制' : '只读'}</span></div>
     <div class="status-stack">{health?.sessionKernel?.workerAvailable && health.sessionKernel.cliAvailable &&
-      <button type="button" class="session-preview-button" onClick={() => setSessionPreviewOpen(true)}>终端会话</button>}
+      <button type="button" class="session-preview-button" onClick={() => { setSessionIntent({mode:'new'}); setSessionPreviewOpen(true); }}>终端会话</button>}
       <div class={`health health-${health?.status || 'loading'}`} title={`后端 ${health?.status || 'loading'} · event ${health?.asOfEventSeq || 0}`}>
       <span class="status-dot" />本机数据</div><div class={`transport transport-${transport}`}>{transportText}</div></div></header>
     {dashboardState.phase === 'loading' && !health && <div class="page-status" role="status">正在加载 Dashboard…</div>}
@@ -1491,22 +1295,15 @@ export function App() {
       onClose={() => setDashboardState({ phase: 'idle' })} />}
     {tailscaleViewer && health?.control?.tailscaleMutationAccess && <div class="control-risk" role="alert">Tailscale 风险：当前经验证身份拥有与本机登录相同的 V2 mutation 权限。</div>}
     {notice && !detail && <div class="page-notice-dock"><FeedbackNotice message={notice} onClose={() => setNotice('')} /></div>}
-    {newThreadOpen && <NewThreadDialog sources={newThreadSources} catalog={newThreadCatalog} busy={controlBusy} error={newThreadError}
-      onSource={(sourceId) => void selectNewThreadSource(sourceId)} onClose={() => setNewThreadOpen(false)} onCreate={(input) => void createNewThread(input)} />}
-    {sessionPreviewOpen && <SessionShell api={api} defaultCwd={detail?.thread.context.runtime.cwd || detail?.thread.cwdDisplay || ''}
-      initialThread={detail && controlCatalog ? {
-        sourceId: controlCatalog.sourceId,
-        sourceEpoch: controlCatalog.sourceEpoch,
-        codexThreadId: detail.thread.codexThreadId
-      } : undefined}
+    {sessionPreviewOpen && <SessionShell api={api} intent={sessionIntent}
       onClose={() => setSessionPreviewOpen(false)} />}
     <div class={`workspace${selected ? ' detail-active' : ''}`}><Sidebar health={health} projects={projects} threads={filteredThreads} sources={sources}
       filters={filters} setFilters={(value) => { setFilters(value); if (!value.q) setSearchResults(null); }} searchResults={visibleSearchResults}
       searchState={searchState} selected={selected} onSearch={handleSearch}
       onSearchResult={(result) => selectThread(result.threadKey, { turnId: result.turnId, itemId: result.itemId })} onSelect={(key) => selectThread(key)}
       canCreateThread={health?.control?.enabled} onNewThread={() => {
-        if (tuiSessionMode) setSessionPreviewOpen(true);
-        else void openNewThread();
+        if (tuiSessionMode) { setSessionIntent({mode:'new'}); setSessionPreviewOpen(true); }
+        else setNotice('Session Runtime 未启用；History 保持只读');
       }} />
       <section class="detail" aria-busy={detailState.phase === 'loading'}><div class="detail-inner">
         {detailState.phase === 'loading' && <div class="detail-loading" role="status"><p class="eyebrow">THREAD → TURN → ITEM</p><h2>正在加载所选 Thread…</h2></div>}
@@ -1521,11 +1318,12 @@ export function App() {
             .then(() => setNotice('已复制脱敏 JSON')).catch(() => setNotice('复制失败'))}
           onBack={() => { detailController.current?.abort(); rawController.current?.abort(); selectedRef.current = undefined; setSelected(undefined); setDetail(undefined); setDetailState({ phase: 'idle' }); }}
           onNavigate={(key) => selectThread(key)} onBlob={setNotice} focusedItemId={focusTarget?.itemId}
-          catalog={controlCatalog} controlBusy={controlBusy} controlError={controlError} onSend={sendInput} onInterrupt={interruptTurn}
-          latestCommand={latestCommand} latestControlCard={latestControlCard}
           notice={notice} onNoticeClose={() => setNotice('')}
-          optimisticMessages={optimisticMessages.filter((message) => message.threadKey === detail.thread.threadKey)} onSetting={changeSetting}
-          onRequestAction={respondToRequest} tuiSessionMode={Boolean(tuiSessionMode)} onOpenSession={() => setSessionPreviewOpen(true)} />}
+          tuiSessionMode={Boolean(tuiSessionMode)} onOpenSession={() => {
+            const cwd = detail.thread.context.runtime.cwd || detail.thread.cwdDisplay || '';
+            setSessionIntent({mode:'resume',storeSourceId:detail.thread.storeSourceId,codexThreadId:detail.thread.codexThreadId,cwd});
+            setSessionPreviewOpen(true);
+          }} />}
       </div></section>
     </div>
   </main>;

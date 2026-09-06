@@ -169,5 +169,5 @@ pub struct DoctorSource {
     pub name: String,
     pub path: String,
     pub status: String,
-    pub live_socket_status: String,
+    pub session_runtime_status: String,
 }

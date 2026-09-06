@@ -563,6 +563,43 @@ async fn private_socket_is_removed_when_upstream_validation_fails() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+async fn dropping_proxy_handle_requests_shutdown_and_removes_private_socket() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("codex-proxy-drop-cleanup-")
+        .tempdir_in("/private/tmp")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    }
+    let upstream_path = temp.path().join("upstream.sock");
+    let _upstream = UnixListener::bind(&upstream_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&upstream_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let proxy_path = temp.path().join("proxy.sock");
+    let proxy = ProxyServer::bind(ProxyConfig {
+        worker_id: "worker-drop-cleanup".into(),
+        source_id: "source-drop-cleanup".into(),
+        store_source_id: "store-drop-cleanup".into(),
+        source_epoch: "epoch-drop-cleanup".into(),
+        upstream_socket: upstream_path,
+        private_socket: proxy_path.clone(),
+        event_sink: Arc::new(RecordingEventSink::default()),
+    })?;
+    assert!(proxy_path.exists());
+    drop(proxy);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while proxy_path.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!proxy_path.exists());
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn private_proxy_rejects_symlink_parent_and_non_worker_peer_pid() -> Result<()> {

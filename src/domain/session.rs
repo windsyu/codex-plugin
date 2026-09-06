@@ -17,12 +17,6 @@ pub struct SessionWorkerRegistration {
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceEpochStale {
-    pub source_id: String,
-    pub source_epoch: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionWorkerRecord {

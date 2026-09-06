@@ -4,13 +4,13 @@
 mod architecture;
 mod clock;
 mod config;
+#[allow(dead_code, unused_imports)] // Legacy Controller remains only as migration-test evidence.
 mod controller;
 mod credentials;
 mod domain;
 mod http;
 mod ingest;
 mod instance_lock;
-mod live;
 mod permissions;
 mod session;
 mod store;
@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tokio::sync::watch;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info};
 
 use crate::config::Config;
@@ -82,6 +84,15 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    #[command(hide = true)]
+    OwnedAppServerGuard {
+        #[arg(long)]
+        codex_executable: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -95,18 +106,26 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Command::OwnedAppServerGuard {
+        codex_executable,
+        cwd,
+        socket,
+    } = &cli.command
+    {
+        return session::run_owned_app_server_guard(codex_executable, cwd, socket);
+    }
     let config = Config::load(&cli.config)?;
     config.validate()?;
     if let Command::Doctor { json } = &cli.command {
         let mut report = Database::doctor_read_only(&config)?;
-        for (source, diagnosis) in config.sources.iter().zip(report.sources.iter_mut()) {
-            diagnosis.live_socket_status = live::doctor_probe(source).await;
-            if diagnosis
-                .live_socket_status
-                .starts_with("incompatible_or_unreachable")
-            {
-                report.status = "degraded".into();
-            }
+        let runtime_status = if session::codex_cli_available().is_some() {
+            "ready"
+        } else {
+            report.status = "degraded".into();
+            "codex_cli_unavailable"
+        };
+        for source in &mut report.sources {
+            source.session_runtime_status = runtime_status.into();
         }
         print_doctor(report, *json)?;
         return Ok(());
@@ -155,7 +174,10 @@ async fn main() -> Result<()> {
     info!(path = %instance_lock.path().display(), "Observer writer lock acquired");
     let server_token = if matches!(cli.command, Command::Serve) {
         let token = rotate_token(&config.server.bearer_token_file)?;
-        instance_lock.mark_pairing_ready()?;
+        println!(
+            "Starting Local Viewer on http://{}; pairing link will appear when it is ready.",
+            config.server.bind
+        );
         Some(token)
     } else {
         None
@@ -246,22 +268,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Serve => {
-            let initial =
-                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
-            info!(
-                files = initial.files_scanned,
-                events = initial.events_inserted,
-                "initial import complete"
-            );
-
             let (_watcher, mut rescan_hints) = watcher::RolloutWatcher::start(&config)?;
-            let second =
-                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
-            info!(
-                files = second.files_scanned,
-                events = second.events_inserted,
-                "post-watcher reconciliation complete"
-            );
             let (shutdown_sender, shutdown_receiver) = watch::channel(false);
             let fingerprint_key =
                 credentials::load_or_create_key(&config.storage.fingerprint_key_file)?;
@@ -271,27 +278,55 @@ async fn main() -> Result<()> {
                 writer.clone(),
                 fingerprint_key,
             )?;
-            let session_registry = session_kernel.registry_handle();
-            let source_stale_sender = session_registry.as_ref().map(|registry| {
-                let (sender, mut receiver) =
-                    tokio::sync::mpsc::unbounded_channel::<domain::session::SourceEpochStale>();
-                let registry = registry.clone();
-                tokio::spawn(async move {
-                    while let Some(stale) = receiver.recv().await {
-                        registry
-                            .stale_source(&stale.source_id, &stale.source_epoch)
-                            .await;
-                    }
-                });
-                sender
+            let signal_sender = shutdown_sender.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    let _ = signal_sender.send(true);
+                }
             });
-            let live_runtime = live::spawn_enabled(
-                &config,
+
+            let (http_ready_sender, http_ready_receiver) = oneshot::channel();
+            let http_handle = tokio::spawn(http::serve(
+                config.clone(),
                 database.clone(),
                 writer.clone(),
-                source_stale_sender,
-                shutdown_receiver.clone(),
-            )?;
+                session_kernel.clone(),
+                server_token.expect("Serve initialized one startup token"),
+                http::ServeLifecycle {
+                    ready: http_ready_sender,
+                    shutdown: shutdown_receiver.clone(),
+                },
+            ));
+            let http_ready = match http_ready_receiver.await {
+                Ok(ready) => ready,
+                Err(_) => {
+                    return http_handle
+                        .await
+                        .context("Observer Web Viewer task failed before readiness")?;
+                }
+            };
+            wait_for_local_viewer(http_ready.bound_address).await?;
+            instance_lock.mark_pairing_ready()?;
+            println!("Local Viewer: {}", http_ready.viewer_url);
+            if let Some(viewer_url) = http_ready.tailscale_viewer_url {
+                println!("Tailscale Viewer: {viewer_url}");
+            }
+
+            let initial =
+                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
+            info!(
+                files = initial.files_scanned,
+                events = initial.events_inserted,
+                "initial import complete"
+            );
+
+            let second =
+                Importer::new_with_writer(&config, database.as_ref(), &writer)?.import_all()?;
+            info!(
+                files = second.files_scanned,
+                events = second.events_inserted,
+                "post-watcher reconciliation complete"
+            );
 
             let scan_config = config.clone();
             let scan_db = database.clone();
@@ -328,29 +363,38 @@ async fn main() -> Result<()> {
                     }
                 }
             });
-            let signal_sender = shutdown_sender.clone();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    let _ = signal_sender.send(true);
-                }
-            });
-            http::serve(
-                config,
-                database,
-                writer,
-                live_runtime.controller,
-                session_kernel.clone(),
-                server_token.expect("Serve initialized one startup token"),
-                shutdown_receiver,
-            )
-            .await?;
+            http_handle
+                .await
+                .context("Observer Web Viewer task failed")??;
             let _ = shutdown_sender.send(true);
             session_kernel.shutdown().await;
-            for handle in live_runtime.handles {
-                let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-            }
+        }
+        Command::OwnedAppServerGuard { .. } => {
+            unreachable!("owned App Server guard exits before configuration loading")
         }
     }
+    Ok(())
+}
+
+async fn wait_for_local_viewer(address: std::net::SocketAddr) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        let mut stream = TcpStream::connect(address).await?;
+        stream
+            .write_all(
+                format!("GET / HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await?;
+        let mut response = [0_u8; 64];
+        let read = stream.read(&mut response).await?;
+        let status = std::str::from_utf8(&response[..read]).context("read Viewer probe status")?;
+        if !status.starts_with("HTTP/1.1 200 ") && !status.starts_with("HTTP/1.0 200 ") {
+            anyhow::bail!("Viewer readiness probe returned a non-200 response");
+        }
+        Result::<()>::Ok(())
+    })
+    .await
+    .context("timed out waiting for Local Viewer readiness")??;
     Ok(())
 }
 
@@ -362,8 +406,8 @@ fn print_doctor(report: crate::domain::model::DoctorReport, json: bool) -> Resul
         println!("database: {}", report.database);
         for source in report.sources {
             println!(
-                "source {}: {} ({}; live={})",
-                source.name, source.status, source.path, source.live_socket_status
+                "source {}: {} ({}; session-runtime={})",
+                source.name, source.status, source.path, source.session_runtime_status
             );
         }
         println!("checks: {}", serde_json::to_string(&report.checks)?);
@@ -400,6 +444,25 @@ fn safe_export_output(config: &Config, output: &std::path::Path) -> Result<PathB
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn viewer_readiness_requires_a_successful_http_response() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 256];
+            let _ = stream.read(&mut request).await?;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await?;
+            Result::<()>::Ok(())
+        });
+
+        wait_for_local_viewer(address).await?;
+        server.await??;
+        Ok(())
+    }
 
     #[test]
     fn export_output_cannot_target_codex_source() -> Result<()> {

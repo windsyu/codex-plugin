@@ -1,5 +1,7 @@
 # ADR 0013: V2 Controller boundary and authentication
 
+> Superseded in part by [ADR 0022](0022-gateway-owned-app-server-session.md): authentication, `/v1` read-only compatibility, typed operations and audit remain; source-global actors, configured sockets and attach-only process ownership do not.
+
 ## Context
 
 V1 has a default-off read-oriented App Server adapter and no Codex mutation routes. V2 must add local conversation control without weakening `/v1`, starting another App Server, or exposing raw JSON-RPC. Earlier exploratory work used a separate control token, but the approved V2 constraints explicitly require the existing bearer, pairing Cookie, and verified Tailscale identity to receive the same control authority.
@@ -30,7 +32,7 @@ V1 has a default-off read-oriented App Server adapter and no Codex mutation rout
 
 ## Status
 
-Accepted
+Superseded in part by ADR 0020 and ADR 0022
 
 ## Date
 

@@ -35,6 +35,7 @@ pub(super) struct CreateFakeSessionRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CreateSessionRequest {
+    store_source_id: String,
     source_id: String,
     source_epoch: String,
     expected_supervisor_version: u64,
@@ -43,6 +44,14 @@ pub(super) struct CreateSessionRequest {
     cwd: String,
     rows: Option<u16>,
     cols: Option<u16>,
+}
+
+pub(super) async fn session_sources(State(state): State<ApiState>) -> Response {
+    let registry = match state.session_kernel.registry() {
+        Ok(registry) => registry,
+        Err(error) => return session_error_response(error),
+    };
+    Json(json!({"apiVersion":"v2","data":registry.session_sources()})).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,39 +194,6 @@ pub(super) async fn create_session(
         Ok(key) => key,
         Err(error) => return error.response(),
     };
-    match state
-        .controller
-        .snapshot(&request.source_id, &request.source_epoch)
-        .await
-    {
-        Ok(snapshot)
-            if snapshot.state == "ready"
-                && snapshot.supervisor_version == request.expected_supervisor_version => {}
-        Ok(snapshot) if snapshot.state == "ready" => {
-            return v2_error_details(
-                StatusCode::CONFLICT,
-                "SUPERVISOR_VERSION_STALE",
-                "the selected Supervisor version is stale",
-                json!({"currentVersion":snapshot.supervisor_version}),
-            );
-        }
-        Ok(_) | Err(crate::controller::RegistryError::SourceNotLive) => {
-            return v2_error(
-                StatusCode::CONFLICT,
-                "SOURCE_NOT_LIVE",
-                "the selected App Server source is not ready",
-                None,
-            );
-        }
-        Err(crate::controller::RegistryError::SourceEpochStale) => {
-            return v2_error(
-                StatusCode::CONFLICT,
-                "SOURCE_EPOCH_STALE",
-                "the selected source epoch is stale",
-                None,
-            );
-        }
-    }
     let registry = match state.session_kernel.registry() {
         Ok(registry) => registry,
         Err(error) => return session_error_response(error),
@@ -227,6 +203,7 @@ pub(super) async fn create_session(
             principal.0,
             idempotency_key,
             CreateSession {
+                store_source_id: request.store_source_id,
                 source_id: request.source_id,
                 source_epoch: request.source_epoch,
                 expected_supervisor_version: request.expected_supervisor_version,
@@ -239,20 +216,26 @@ pub(super) async fn create_session(
         )
         .await
     {
-        Ok(outcome) => (
-            if outcome.replayed || outcome.existing_owner {
-                StatusCode::OK
-            } else {
-                StatusCode::CREATED
-            },
-            Json(json!({
-                "apiVersion":"v2",
-                "data":outcome.snapshot,
-                "idempotentReplay":outcome.replayed,
-                "existingOwner":outcome.existing_owner
-            })),
-        )
-            .into_response(),
+        Ok(outcome) => {
+            let view = match registry.view(&outcome.snapshot.worker_id.0) {
+                Ok(view) => view,
+                Err(error) => return session_error_response(error),
+            };
+            (
+                if outcome.replayed || outcome.existing_owner {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CREATED
+                },
+                Json(json!({
+                    "apiVersion":"v2",
+                    "data":view,
+                    "idempotentReplay":outcome.replayed,
+                    "existingOwner":outcome.existing_owner
+                })),
+            )
+                .into_response()
+        }
         Err(error) => session_error_response(error),
     }
 }
@@ -781,6 +764,7 @@ pub(super) fn session_error_response(error: SessionError) -> Response {
         | "IDEMPOTENCY_CONFLICT"
         | "TURN_STATE_CONFLICT"
         | "WORKER_VERSION_CONFLICT"
+        | "SUPERVISOR_VERSION_STALE"
         | "SOURCE_EPOCH_STALE"
         | "ATTACHMENT_ALREADY_CONNECTED"
         | "ATTACHMENT_EXPIRED" => StatusCode::CONFLICT,
@@ -900,7 +884,7 @@ mod tests {
         database.migrate()?;
         Ok(ApiState {
             writer: WriterHandle::start(database.clone(), 4096, 16, 512)?,
-            controller: ControllerRegistry::default(),
+            controller: Some(ControllerRegistry::default()),
             session_kernel,
             database,
             token: Arc::new(URL_SAFE_NO_PAD.encode([7_u8; 32])),
@@ -916,6 +900,7 @@ mod tests {
 
     fn test_app(state: ApiState) -> Router {
         Router::new()
+            .route("/v2/session-sources", get(session_sources))
             .route("/v2/sessions", post(create_session))
             .route("/v2/sessions/fake", post(create_fake_session))
             .route("/v2/sessions/{worker_id}", get(get_session))
@@ -1236,44 +1221,48 @@ mod tests {
     #[tokio::test]
     async fn real_session_create_rejects_stale_supervisor_version_before_spawning()
     -> anyhow::Result<()> {
-        use crate::controller::{
-            ActorRequest, CapabilityCatalog, SourceActorSnapshot, actor_channel,
-        };
-
         let temp = TempDir::new()?;
         let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
-        let mut state = test_state(&temp, SessionKernel::disabled())?;
-        let registry = ControllerRegistry::default();
-        let (sender, mut receiver) = actor_channel();
-        registry.publish(
-            SourceActorSnapshot {
+        let database = Arc::new(Database::open(&temp.path().join("runtime.sqlite"))?);
+        database.migrate()?;
+        let writer = WriterHandle::start(database.clone(), 4096, 16, 512)?;
+        let codex_home = temp.path().join("codex-home");
+        fs::create_dir(&codex_home)?;
+        let kernel = SessionKernel::runtime_for_test(
+            temp.path().join("runtime"),
+            fake_cli(&temp)?,
+            vec![crate::session::SessionSource {
+                store_source_id: "store-real".into(),
                 source_id: "source-real".into(),
                 source_epoch: "epoch-current".into(),
                 supervisor_version: 2,
-                state: "ready".into(),
-                experimental_api: true,
-                catalog: CapabilityCatalog::default(),
-                unavailable_reason: None,
-            },
-            sender,
-        );
-        state.controller = registry;
-        let actor = tokio::spawn(async move {
-            while let Some(request) = receiver.recv().await {
-                if let ActorRequest::Snapshot { reply } = request {
-                    let _ = reply.send(SourceActorSnapshot {
-                        source_id: "source-real".into(),
-                        source_epoch: "epoch-current".into(),
-                        supervisor_version: 2,
-                        state: "ready".into(),
-                        experimental_api: true,
-                        catalog: CapabilityCatalog::default(),
-                        unavailable_reason: None,
-                    });
-                }
-            }
-        });
+                codex_home,
+                default_cwd: temp.path().to_path_buf(),
+                test_upstream_socket: None,
+            }],
+            writer,
+            database,
+        )?;
+        let state = test_state(&temp, kernel)?;
         let app = test_app(state);
+        let sources = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/session-sources")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(sources.status(), StatusCode::OK);
+        let sources = response_json(sources).await?;
+        assert_eq!(sources["data"][0]["storeSourceId"], "store-real");
+        assert_eq!(sources["data"][0]["sourceId"], "source-real");
+        assert_eq!(sources["data"][0]["sourceEpoch"], "epoch-current");
+        assert_eq!(sources["data"][0]["supervisorVersion"], 2);
+        assert_eq!(sources["data"][0]["status"], "ready");
+        assert!(sources["data"][0].get("codexHome").is_none());
+        assert!(sources["data"][0].get("socket").is_none());
         let response = app
             .clone()
             .oneshot(
@@ -1286,6 +1275,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "storeSourceId":"store-real",
                             "sourceId":"source-real",
                             "sourceEpoch":"epoch-current",
                             "expectedSupervisorVersion":1,
@@ -1302,7 +1292,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = response_json(response).await?;
         assert_eq!(body["error"]["code"], "SUPERVISOR_VERSION_STALE");
-        assert_eq!(body["error"]["details"]["currentVersion"], 2);
 
         let stale_epoch = app
             .oneshot(
@@ -1315,6 +1304,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
+                            "storeSourceId":"store-real",
                             "sourceId":"source-real",
                             "sourceEpoch":"epoch-old",
                             "expectedSupervisorVersion":2,
@@ -1331,7 +1321,6 @@ mod tests {
             response_json(stale_epoch).await?["error"]["code"],
             "SOURCE_EPOCH_STALE"
         );
-        actor.abort();
         Ok(())
     }
 }

@@ -225,6 +225,15 @@ export interface ControllerSource {
   unavailableReason?: string;
 }
 
+export interface SessionSource {
+  storeSourceId: string;
+  sourceId: string;
+  sourceEpoch: string;
+  supervisorVersion: number;
+  defaultCwd: string;
+  status: 'ready' | 'unavailable';
+}
+
 export interface SlashCommand {
   name: string;
   capability: string;
@@ -342,6 +351,8 @@ export interface SessionWorker {
     primaryThreadId?: string;
     sourceId: string;
     sourceEpoch: string;
+    mode: 'new' | 'resume';
+    canonicalCwd: string;
   };
   threadLeases?: Array<{
     leaseId: string;
