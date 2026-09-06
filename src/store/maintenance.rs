@@ -20,28 +20,6 @@ pub(super) fn read_only_mode(path: &Path) -> Value {
     json!({"status":if fs::symlink_metadata(path).is_ok() {"present"} else {"missing"}})
 }
 
-pub(super) fn socket_status(path: &Path) -> String {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return "missing".into();
-    };
-    if metadata.file_type().is_symlink() {
-        return "symlink_rejected".into();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if metadata.file_type().is_socket() {
-            "socket_present_unprobed".into()
-        } else {
-            "not_a_socket".into()
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        "unsupported_platform".into()
-    }
-}
-
 pub(super) fn write_private_new(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()

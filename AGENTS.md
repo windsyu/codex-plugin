@@ -22,7 +22,7 @@
 - V2：在安全、可审计的前提下控制确定的 Codex live source；
 - V3：通过 Telegram、飞书、企业微信、Discord 等 IM 接入 V2 Gateway。
 
-V1 本地 MVP 已完成其只读基础目标，`v0.2.0` V2 Controller也已形成验证基线。Session Kernel Slice 1–9 已完成实现与本地验证，当前交付重点是 **V2 release validation 与真实既有 App Server 验收**。V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md` 与Session Kernel设计，同时保持 V1 只读能力和现有V2 ledger/CAS/audit兼容。Slice 10–12 属于 V3，不得作为 V2 收尾提前实现 IM adapter。
+V1 本地 MVP 已完成其只读基础目标，`v0.2.0` V2 Controller也已形成历史验证基线。Session Kernel Slice 1–9 已完成实现与本地验证，当前交付重点是 **官方 CLI 单路径 Session Runtime 的 V2 release validation**。V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md`、Session Kernel设计与 ADR 0022，同时保持 V1 只读能力和现有V2 ledger/CAS/audit兼容。Slice 10–12 属于 V3，不得作为 V2 收尾提前实现 IM adapter。
 
 V1 的历史设计、ADR 和验证记录已经压缩到 `docs/archive/v1-development-history.md`。该归档只用于解释现有代码和兼容性，不是当前开发指令，也不得作为恢复 V1 开发范围的依据。
 
@@ -41,13 +41,13 @@ V2 必须继续保持 `/v1` 只读兼容和 store-first 观察能力，但控制
 Codex 官方源码的本地参考路径：
 
 ```text
-/Users/windsyu/workspace/codex
+/Users/windsyu/magicproject/codex
 ```
 
 当前设计研究基线：
 
 ```text
-41ece455b7fa7166f4fc38522952afdaa2604e18
+633ab199cfd724aa78013c006b27a2b3d049fc3b
 ```
 
 使用源码事实时：
@@ -67,7 +67,7 @@ Codex 官方源码的本地参考路径：
 
 ```text
 可启动
-  → 可连接一个确定的现有 App Server source
+  → 可为一个确定的 store 启动 Worker-owned App Server
   → 可持久化并审计一条 Gateway command
   → 可创建/继续 Thread 并完成一轮对话
   → 可实时展示 Turn 与最终答复
@@ -366,9 +366,9 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 - V1 是已完成的只读兼容基础，历史说明只存在于非规范性归档；
 - `v0.2.0` source-global LiveSourceActor/Web Composer是已验证迁移基线，不再是活动会话目标架构；
-- V2 只连接已存在的 App Server，不负责启动或守护进程；
-- 活动会话目标内核是真实Codex TUI + PTY；每个活动Thread只能属于一个Session Worker，一个TUI的主/side/child Thread可形成指向同一worker的lease set，worker只有一条私有1:1 App Server owner connection；
-- Browser当前会话主要承载xterm，Slash、picker、Goal/Plan和terminal-owned交互交给官方TUI；V1 Viewer继续承载durable history、搜索和安全渲染；
+- V2 不再连接、发现或接管既有 App Server；每个 Session Worker 启动并守护一个专属 App Server；
+- 活动会话目标内核是真实Codex TUI + PTY；每个活动Thread只能属于一个Session Worker，一个TUI的主/side/child Thread可形成指向同一worker的lease set，worker只有一条通向其专属 App Server 的私有1:1 audited proxy connection；
+- Browser当前会话只以 SessionIntent 启动/恢复并承载xterm，Slash、picker、Goal/Plan和terminal-owned交互交给官方TUI；V1 Viewer继续从 rollout watcher + 周期增量导入承载durable history、搜索和安全渲染，无需重启服务；
 - Gateway继续负责SourceSupervisor、source epoch、Thread/InputLease、raw-first、command/audit ledger、pending request CAS和fail-closed recovery；
 - source epoch表示Supervisor共享generation，worker connection epoch表示单条proxy连接；双向protocol envelope和TUI mutation write boundary必须先持久化，单worker断线不无条件拖垮其他Session；
 - V2 复用 V1 bearer、Cookie 和 Tailscale 登录，不增加 control token；

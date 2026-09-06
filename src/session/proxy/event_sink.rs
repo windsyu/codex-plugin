@@ -1364,15 +1364,30 @@ impl ProxyEventSink for SessionProxyEventSink {
             let _ = self.mark_connection_state("failed", "SESSION_PROXY_DISCONNECTED");
         }
         if !was_ready {
-            let _ = transition_command(
-                &self.writer,
-                &self.create_command_id,
-                "outcome_unknown",
-                Some("SESSION_PROXY_DISCONNECTED"),
-                None,
-            );
+            if reason == "worker_stopping" {
+                let _ = transition_command(
+                    &self.writer,
+                    &self.create_command_id,
+                    "cancelled",
+                    None,
+                    Some(
+                        json!({"workerId":self.worker_id,"state":"stopped_before_ready"})
+                            .to_string(),
+                    ),
+                );
+            } else {
+                let _ = transition_command(
+                    &self.writer,
+                    &self.create_command_id,
+                    "outcome_unknown",
+                    Some("SESSION_PROXY_DISCONNECTED"),
+                    None,
+                );
+            }
         }
-        self.bridge.failed("SESSION_PROXY_DISCONNECTED");
+        if reason != "worker_stopping" {
+            self.bridge.failed("SESSION_PROXY_DISCONNECTED");
+        }
         Ok(())
     }
 }
