@@ -108,7 +108,7 @@ session_kernel = "off"
 cargo run -- --config fixtures/session-kernel-preview.toml serve
 ```
 
-打开启动日志中的配对 URL 后，点击“终端会话”会自动使用服务端默认 cwd；仅在自动启动失败后显示重试表单。attachment ID+token 仅保存在当前 tab 的 `sessionStorage`，一次性 WebSocket descriptor 不进入 URL；health 只报告 CLI 可用性和类型化错误，不暴露 executable 绝对路径。
+打开启动日志中的配对 URL 后，点击“新建对话”先选择已有项目或填写绝对工作目录，确认完整路径后再启动。会话历史按工作目录归入项目；“终端会话”优先重新附着当前 tab 保存的匹配会话，否则显示同一目录选择表单。恢复 History 会话沿用它的目录。Hooks 等启动提示在 `connecting` 阶段也可由输入租约持有者使用键盘操作，信任决定由用户完成。attachment ID+token 仅保存在当前 tab 的 `sessionStorage`，一次性 WebSocket descriptor 不进入 URL；health 只报告 CLI 可用性和类型化错误，不暴露 executable 绝对路径。
 
 ## 使用
 
@@ -237,4 +237,4 @@ POST /v2/sessions/{workerId}/stop
 
 V1 只读基础已完成。V2 `v0.2.0` 的九个纵向切片和发布门禁均已完成；自动化、临时 release E2E、安全负向测试、migration/rollback 与已知限制见 [`docs/v2-validation.md`](docs/v2-validation.md)。
 
-2026-09-04，Session Kernel 已收敛为官方 CLI 模型的单一路径：活动会话由真实Codex TUI + PTY驱动，每个Session Worker拥有一个专属App Server和一条1:1 audited proxy connection；Browser只承载xterm，V1 Viewer通过rollout watcher与周期扫描持续负责durable history。private proxy、持久化 lease/owner、raw-first audit、crash recovery、交互request路由、SessionShell自动new/resume、Hooks readiness、稳定 resize/replay 和 Codex 原生 bold/dim/italic/ANSI/TrueColor 呈现均保留；Legacy Composer、source-global transport及旧mutation route不再是生产路径。V3 IM完整控制目标保持独立版本，不实现 Slice 10–12 adapter。
+2026-09-04，Session Kernel 已收敛为官方 CLI 模型的单一路径：活动会话由真实Codex TUI + PTY驱动，每个Session Worker拥有一个专属App Server和一条1:1 audited proxy connection；Browser只承载xterm，V1 Viewer通过rollout watcher与周期扫描持续负责durable history。private proxy、持久化 lease/owner、raw-first audit、crash recovery、交互request路由、SessionShell确认目录后new／自动resume、Hooks readiness、稳定 resize/replay 和 Codex 原生 bold/dim/italic/ANSI/TrueColor 呈现均保留；Legacy Composer、source-global transport及旧mutation route不再是生产路径。V3 IM完整控制目标保持独立版本，不实现 Slice 10–12 adapter。

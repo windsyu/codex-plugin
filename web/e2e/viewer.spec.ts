@@ -182,6 +182,8 @@ async function mockSessionKernel(
       createBodies.push(body);
       expect(body).toMatchObject({ storeSourceId:'source-1',sourceId:'session-source-1',sourceEpoch:'epoch-1',expectedSupervisorVersion:1 });
       worker.persistedWorker.mode = body.mode as 'new' | 'resume';
+      worker.cwd = body.cwd as string;
+      worker.persistedWorker.canonicalCwd = worker.cwd;
       await route.fulfill({status:201,contentType:'application/json',body:JSON.stringify({apiVersion:'v2',data:worker})});
     } else if (url.pathname === '/v2/sessions/fake-worker/events' && request.method() === 'GET') {
       await route.fulfill({status:200,contentType:'text/event-stream',body:`event: session_state\nid: ${worker.outputSeq}\ndata: ${JSON.stringify(worker)}\n\n`});
@@ -389,6 +391,7 @@ test('opens xterm preview, sends leased input, and reattaches after refresh on n
   const fixture = await mockSessionKernel(page);
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
+  await page.getByRole('button',{name:'启动对话',exact:true}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect.poll(() => fixture.getCreateBodies()[0]).toMatchObject({
@@ -450,6 +453,7 @@ test('keeps a second xterm attachment read-only when another attachment owns inp
   await mockSessionKernel(page, true);
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
+  await page.getByRole('button',{name:'启动对话',exact:true}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('只读',{exact:true})).toBeVisible();
@@ -461,6 +465,7 @@ test('renders Codex ANSI semantics and restores a snapshot once while a live wri
   await mockSessionKernel(page);
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
+  await page.getByRole('button',{name:'启动对话',exact:true}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
 
@@ -505,6 +510,7 @@ test('keeps IME-style Unicode, multiline paste, resize and disconnect recovery i
   const fixture = await mockSessionKernel(page);
   await page.goto('/');
   await page.getByRole('button',{name:'终端会话'}).click();
+  await page.getByRole('button',{name:'启动对话',exact:true}).click();
   const dialog = page.getByRole('dialog',{name:'Codex terminal session'});
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect(dialog.getByText('可输入')).toBeVisible();
@@ -546,6 +552,52 @@ test('keeps IME-style Unicode, multiline paste, resize and disconnect recovery i
   await expect.poll(fixture.getAttachCount).toBeGreaterThan(1);
   await expect(dialog.getByText('xterm 已连接')).toBeVisible();
   await expect.poll(fixture.getResumeControlValidated).toBe(true);
+});
+
+test('new conversation requires a project or directory before starting and always creates a new session', async ({ page }) => {
+  const fixture = await mockSessionKernel(page, false, 'tui');
+  await page.setViewportSize({ width: 390, height: 780 });
+  await page.goto('/');
+  await page.getByRole('button', { name: '新建对话', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Codex terminal session' });
+  const directory = dialog.getByLabel('工作目录（绝对路径）');
+  await expect(directory).toHaveValue('/fixture/project');
+  expect(fixture.getCreateBodies()).toHaveLength(0);
+  await dialog.getByRole('combobox', { name: '项目', exact: true }).selectOption('project');
+  await expect(directory).toHaveValue('/fixture');
+  await expect(dialog.locator('.session-directory-preview')).toHaveText('/fixture');
+  await dialog.getByRole('button', { name: '启动对话', exact: true }).click();
+  await expect(dialog.getByText('输入已就绪')).toBeVisible();
+  expect(fixture.getCreateBodies()).toHaveLength(1);
+  expect(fixture.getCreateBodies()[0]).toMatchObject({ mode: 'new', cwd: '/fixture' });
+
+  await dialog.getByRole('button', { name: '返回 History Viewer' }).click();
+  await page.getByRole('button', { name: '新建对话', exact: true }).click();
+  await expect(directory).toBeVisible();
+  expect(fixture.getCreateBodies()).toHaveLength(1);
+  await dialog.getByRole('button', { name: '返回 History Viewer' }).click();
+  await page.getByRole('button', { name: '终端会话', exact: true }).click();
+  await expect(dialog.getByText('xterm 已连接')).toBeVisible();
+  expect(fixture.getCreateBodies()).toHaveLength(1);
+  await dialog.getByRole('button', { name: '返回 History Viewer' }).click();
+  await page.getByRole('button', { name: '新建对话', exact: true }).click();
+  await expect(directory).toBeVisible();
+  await directory.fill('relative/path');
+  await expect(dialog.getByRole('button', { name: '启动对话', exact: true })).toBeDisabled();
+  const custom = '/fixture/workspaces/' + 'long-project-'.repeat(15);
+  await directory.fill(custom);
+  await expect(dialog.getByRole('combobox', { name: '项目', exact: true })).toHaveValue('');
+  await expect(dialog.locator('.session-directory-preview')).toHaveText(custom);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await dialog.getByRole('button', { name: '启动对话', exact: true }).click();
+  await expect(dialog.getByText('输入已就绪')).toBeVisible();
+  expect(fixture.getCreateBodies()).toHaveLength(2);
+  expect(fixture.getCreateBodies()[1]).toMatchObject({ mode: 'new', cwd: custom });
+
+  await page.reload();
+  await page.getByRole('button', { name: '终端会话', exact: true }).click();
+  await expect(dialog.getByText('xterm 已连接')).toBeVisible();
+  expect(fixture.getCreateBodies()).toHaveLength(2);
 });
 
 test('uses native TUI as the default mutation path in tui mode', async ({ page }) => {

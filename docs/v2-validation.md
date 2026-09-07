@@ -28,6 +28,16 @@ The first macOS smoke exposed the 104-byte `sockaddr_un.sun_path` limit. Runtime
 
 ## Automated gates
 
+### Startup input and project selection regression (2026-09-07)
+
+- Reproduced the real Hooks review screen remaining `connecting` with a connected xterm but disabled input. InputLease was acquired correctly; the SSE callback retained the render's pre-attachment identity and subsequently cleared the local lease. The new lifecycle test fails before the fix and passes with current-attachment ownership checks. It also covers late older snapshots and a different input owner.
+- New conversation now requires project/absolute-directory confirmation before creating a Worker. Chrome coverage includes existing projects, custom paths, relative-path rejection, cancellation preserving the prior session, fresh creation, custom-directory reattachment after reload, and 390 px layout.
+- Validation: 81 Web unit tests and 16 system-Chrome E2E tests passed; TypeScript, Web build, Rust debug build and patch hygiene passed. No Rust behavior or schema changed; the Rust suite was not rerun for this frontend-only fix.
+- The rebuilt debug instance was checked with installed `codex-cli 0.146.1`: Hooks review remained `connecting` with usable input; ArrowDown/ArrowUp changed selection and Enter opened the native Hooks review surface. No hook was trusted, no prompt was submitted, and the validation Worker was stopped afterward.
+- No database migration, configuration change, or HTTP/terminal wire-format change is required. The native TUI continues to own hook trust and approval decisions.
+
+### Single-path runtime baseline (2026-09-04)
+
 | Gate | Command / evidence | Result |
 | --- | --- | --- |
 | Rust format | `cargo fmt --check` | Passed |
