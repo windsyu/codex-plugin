@@ -126,14 +126,17 @@ The source-global Controller and Web Composer mutation endpoints are removed. `G
 
 Browser startup uses an explicit `SessionIntent`:
 
-- global “终端会话” and “新建 Thread” select the default ready Session Source and automatically start `new` at its `defaultCwd`;
+- “新建对话” first offers existing History projects and an editable absolute working directory. The default ready Session Source and its `defaultCwd` are suggestions; no Worker starts until the user submits the form. This entry always creates a new session;
+- global “终端会话” reattaches a matching stored session, including its selected canonical cwd; otherwise it shows the same project/directory form;
 - History “继续终端会话” selects the Thread's `storeSourceId`, `codexThreadId`, and durable cwd and automatically starts `resume`;
 - session storage is reused only when source epoch, intent, canonical cwd, and an acquiring/active ThreadLease all match;
-- without a match, exactly one create request is sent;
+- after directory confirmation (or immediately for History resume), exactly one create request is sent;
 - startup displays App Server, proxy, and TUI progress;
-- failure exposes a safe error code and a source/cwd/new-resume retry form.
+- failure exposes a safe error code and a source/cwd retry form for the requested new/resume mode.
 
 Slash commands, pickers, Goal, Plan, settings, approval, questions, and elicitation remain official TUI interactions. History stays a durable structured viewer and only directs users to the owning terminal for ephemeral interaction.
+
+During `connecting`, an authenticated attached terminal may already hold InputLease to answer native startup prompts such as Hooks review. SSE ownership checks use the current attachment identity even when the stream opened before attachment creation; an older lease version cannot clear a newer local lease. Thread readiness remains separate, and no hook is automatically trusted or answered.
 
 ## Ownership, failure, and recovery
 

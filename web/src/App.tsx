@@ -1295,14 +1295,14 @@ export function App() {
       onClose={() => setDashboardState({ phase: 'idle' })} />}
     {tailscaleViewer && health?.control?.tailscaleMutationAccess && <div class="control-risk" role="alert">Tailscale 风险：当前经验证身份拥有与本机登录相同的 V2 mutation 权限。</div>}
     {notice && !detail && <div class="page-notice-dock"><FeedbackNotice message={notice} onClose={() => setNotice('')} /></div>}
-    {sessionPreviewOpen && <SessionShell api={api} intent={sessionIntent}
+    {sessionPreviewOpen && <SessionShell api={api} intent={sessionIntent} projects={projects}
       onClose={() => setSessionPreviewOpen(false)} />}
     <div class={`workspace${selected ? ' detail-active' : ''}`}><Sidebar health={health} projects={projects} threads={filteredThreads} sources={sources}
       filters={filters} setFilters={(value) => { setFilters(value); if (!value.q) setSearchResults(null); }} searchResults={visibleSearchResults}
       searchState={searchState} selected={selected} onSearch={handleSearch}
       onSearchResult={(result) => selectThread(result.threadKey, { turnId: result.turnId, itemId: result.itemId })} onSelect={(key) => selectThread(key)}
       canCreateThread={health?.control?.enabled} onNewThread={() => {
-        if (tuiSessionMode) { setSessionIntent({mode:'new'}); setSessionPreviewOpen(true); }
+        if (tuiSessionMode) { setSessionIntent({mode:'new',fresh:true}); setSessionPreviewOpen(true); }
         else setNotice('Session Runtime 未启用；History 保持只读');
       }} />
       <section class="detail" aria-busy={detailState.phase === 'loading'}><div class="detail-inner">
