@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'preact/compat';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Api, ApiError, reconnectingStream } from '../api';
-import type { GatewayCommand, InputLease, SessionAttachment, SessionSource, SessionWorker, SessionWorkerSnapshot, TerminalSnapshotFrame } from '../types';
+import type { GatewayCommand, InputLease, ProjectSummary, SessionAttachment, SessionSource, SessionWorker, SessionWorkerSnapshot, TerminalSnapshotFrame } from '../types';
 
 const TerminalPanel = lazy(async () => ({ default: (await import('./TerminalPanel')).TerminalPanel }));
 const WORKER_KEY = 'session-runtime-worker-v1';
@@ -12,10 +12,10 @@ interface StoredAttachmentControl { attachmentId: string; attachmentToken: strin
 interface StoredWorkerControl { workerId: string; sourceId: string; sourceEpoch: string; intentKey: string; }
 
 export type SessionIntent =
-  | { mode: 'new' }
+  | { mode: 'new'; fresh?: boolean }
   | { mode: 'resume'; storeSourceId: string; codexThreadId: string; cwd: string };
 
-interface SessionShellProps { api: Api; intent: SessionIntent; onClose: () => void; }
+interface SessionShellProps { api: Api; intent: SessionIntent; projects?: ProjectSummary[]; onClose: () => void; }
 type StartupPhase = 'discovering' | 'starting_app_server' | 'connecting_proxy' | 'starting_tui' | 'ready' | 'failed';
 
 function errorMessage(error: unknown) {
@@ -97,7 +97,7 @@ function phaseLabel(phase: StartupPhase) {
     ready: 'Codex TUI 已就绪', failed: '自动启动失败' } as Record<StartupPhase, string>)[phase];
 }
 
-export function SessionShell({ api, intent, onClose }: SessionShellProps) {
+export function SessionShell({ api, intent, projects = [], onClose }: SessionShellProps) {
   const [sources, setSources] = useState<SessionSource[]>([]);
   const [selectedSource, setSelectedSource] = useState<SessionSource>();
   const [cwd, setCwd] = useState(intent.mode === 'resume' && intent.cwd.startsWith('/') ? intent.cwd : '');
@@ -109,11 +109,16 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
   const [partial, setPartial] = useState(false);
   const [busy, setBusy] = useState(true);
   const [manualRetry, setManualRetry] = useState(false);
+  const [choosingDirectory, setChoosingDirectory] = useState(false);
   const [phase, setPhase] = useState<StartupPhase>('discovering');
   const [error, setError] = useState('');
   const [actionResult, setActionResult] = useState('');
   const reconnectTimer = useRef<number>();
   const attaching = useRef(false);
+  // The SSE subscription starts before attachment creation completes. Its callbacks must
+  // compare ownership with the current attachment, not the render that opened the stream.
+  const attachmentIdRef = useRef<string>();
+  attachmentIdRef.current = attachment?.attachmentId;
 
   async function prepareAttachment(currentWorker: SessionWorker, resume = true) {
     if (attaching.current) return;
@@ -150,9 +155,9 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
       mode: 'resume', storeSourceId: source.storeSourceId, codexThreadId: requestedThreadId.trim(), cwd: requestedCwd
     };
     sessionStorage.setItem(WORKER_KEY, JSON.stringify({ workerId: response.data.workerId, sourceId: source.sourceId,
-      sourceEpoch: source.sourceEpoch, intentKey: sessionIntentKey(source, launchedIntent, requestedCwd) } satisfies StoredWorkerControl));
+      sourceEpoch: source.sourceEpoch, intentKey: sessionIntentKey(source, launchedIntent, response.data.cwd) } satisfies StoredWorkerControl));
     sessionStorage.removeItem(ATTACHMENT_KEY);
-    setWorker(response.data); setPhase('starting_tui');
+    setCwd(response.data.cwd); setWorker(response.data); setPhase('starting_tui');
     await prepareAttachment(response.data, false);
   }
 
@@ -164,21 +169,28 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
         const response = await api.get<SessionSource[]>('/v2/session-sources', controller.signal);
         if (disposed) return;
         setSources(response.data);
-        const source = sourceForIntent(response.data, intent);
+        let source = sourceForIntent(response.data, intent);
         if (!source) throw new Error(intent.mode === 'resume' ? 'History Thread 对应的 Session Source 不可用' : '没有可用的 Session Source');
+        const stored = readStoredWorkerControl();
+        if (intent.mode === 'new' && !intent.fresh && stored) {
+          source = response.data.find((candidate) => candidate.sourceId === stored.sourceId
+            && candidate.sourceEpoch === stored.sourceEpoch && candidate.status === 'ready') || source;
+        }
         const requestedCwd = intent.mode === 'resume' ? intent.cwd : source.defaultCwd;
         setSelectedSource(source); setCwd(requestedCwd); setMode(intent.mode);
         setThreadId(intent.mode === 'resume' ? intent.codexThreadId : '');
-        const key = sessionIntentKey(source, intent, requestedCwd);
-        const stored = readStoredWorkerControl();
-        if (stored && stored.sourceId === source.sourceId && stored.sourceEpoch === source.sourceEpoch && stored.intentKey === key) {
+        if (stored && !(intent.mode === 'new' && intent.fresh)
+          && stored.sourceId === source.sourceId && stored.sourceEpoch === source.sourceEpoch) {
           try {
             const existing = await api.get<SessionWorker>(`/v2/sessions/${encodeURIComponent(stored.workerId)}`, controller.signal);
-            if (sessionMatchesIntent(existing.data, source, intent, requestedCwd)) {
-              setWorker(existing.data); setPhase('connecting_proxy'); await prepareAttachment(existing.data); return;
+            const restoreCwd = intent.mode === 'new' ? existing.data.cwd : requestedCwd;
+            if (stored.intentKey === sessionIntentKey(source, intent, restoreCwd)
+              && sessionMatchesIntent(existing.data, source, intent, restoreCwd)) {
+              setCwd(restoreCwd); setWorker(existing.data); setPhase('connecting_proxy'); await prepareAttachment(existing.data); return;
             }
           } catch (cause) { if (controller.signal.aborted) return; }
         }
+        if (intent.mode === 'new') { setChoosingDirectory(true); return; }
         clearStoredSession();
         await createSession(source, intent.mode, intent.mode === 'resume' ? intent.codexThreadId : '', requestedCwd, controller.signal);
       } catch (cause) {
@@ -187,7 +199,7 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
     }
     void bootstrap();
     return () => { disposed = true; controller.abort(); window.clearTimeout(reconnectTimer.current); };
-  }, [api, intent.mode, intent.mode === 'resume' ? intent.storeSourceId : '', intent.mode === 'resume' ? intent.codexThreadId : '', intent.mode === 'resume' ? intent.cwd : '']);
+  }, [api, intent.mode, intent.mode === 'new' ? intent.fresh : false, intent.mode === 'resume' ? intent.storeSourceId : '', intent.mode === 'resume' ? intent.codexThreadId : '', intent.mode === 'resume' ? intent.cwd : '']);
 
   useEffect(() => {
     if (!worker?.workerId || ['exited', 'failed', 'stale_epoch'].includes(worker.state)) return;
@@ -201,7 +213,7 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
   async function retry() {
     const source = selectedSource || sources.find((candidate) => candidate.status === 'ready');
     if (!source) { setError('请选择可用的 Session Source'); return; }
-    setBusy(true); setManualRetry(false); setError(''); clearStoredSession();
+    setBusy(true); setManualRetry(false); setChoosingDirectory(false); setError(''); clearStoredSession();
     try { await createSession(source, mode, threadId, cwd); }
     catch (cause) { setPhase('failed'); setError(errorMessage(cause)); setManualRetry(true); }
     finally { setBusy(false); }
@@ -257,8 +269,12 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
   }
 
   function updateLeaseFromSnapshot(next: SessionWorkerSnapshot) {
-    if (next.inputLease.ownerAttachmentId === attachment?.attachmentId && next.inputLease.leaseId) setLease(next.inputLease);
-    else if (next.inputLease.ownerAttachmentId && next.inputLease.ownerAttachmentId !== attachment?.attachmentId) setLease(undefined);
+    const currentAttachmentId = attachmentIdRef.current;
+    setLease((current) => {
+      if (current && current.version > next.inputLease.version) return current;
+      return next.inputLease.ownerAttachmentId === currentAttachmentId && next.inputLease.leaseId
+        ? next.inputLease : undefined;
+    });
   }
   function updateWorkerView(next: SessionWorker) { setWorker(next); updateLeaseFromSnapshot(next); }
   function updateWorkerSnapshot(next: SessionWorkerSnapshot) {
@@ -273,20 +289,25 @@ export function SessionShell({ api, intent, onClose }: SessionShellProps) {
     <header class="session-shell-header"><div class="session-shell-brand"><span class="session-shell-mark" aria-hidden="true">&gt;_</span><div>
       <p class="eyebrow">CODEX · SESSION RUNTIME</p><h2>Codex Terminal</h2></div></div>
       <button class="session-history-action" type="button" onClick={onClose} aria-label="返回 History Viewer"><span aria-hidden="true">←</span> History</button></header>
-    {!worker && !manualRetry && <div class="session-create" role="status" aria-live="polite"><strong>{phaseLabel(phase)}</strong>
-      <p>启动 App Server → 连接 audited proxy → 启动 Codex TUI</p></div>}
-    {!worker && manualRetry && <form class="session-create" onSubmit={(event) => { event.preventDefault(); void retry(); }}>
-      <label>Session Source<select value={selectedSource?.sourceId || ''} onChange={(event) => {
+    {!worker && !manualRetry && !choosingDirectory && <div class="session-create" role="status" aria-live="polite"><strong>{phaseLabel(phase)}</strong>
+      <p>正在准备 Codex 终端…</p></div>}
+    {!worker && (manualRetry || choosingDirectory) && <form class="session-create" onSubmit={(event) => { event.preventDefault(); void retry(); }}>
+      <h2>{mode === 'new' ? '新建对话' : '恢复对话'}</h2>
+      {(sources.length > 1 || manualRetry) && <label>Codex 数据源<select value={selectedSource?.sourceId || ''} onChange={(event) => {
         const source = sources.find((candidate) => candidate.sourceId === event.currentTarget.value); setSelectedSource(source);
-        if (source && mode === 'new') setCwd(source.defaultCwd);
       }}>{!sources.some((source) => source.status === 'ready') && <option value="">没有可用 source</option>}
-        {sources.filter((source) => source.status === 'ready').map((source) => <option key={source.sourceId} value={source.sourceId}>{source.storeSourceId.slice(0, 10)} · {source.sourceEpoch.slice(0, 8)}</option>)}</select></label>
-      <fieldset><legend>会话方式</legend><label><input type="radio" name="session-mode" checked={mode === 'new'} onChange={() => { setMode('new'); setThreadId(''); }} />新建 Thread</label>
-        <label><input type="radio" name="session-mode" checked={mode === 'resume'} onChange={() => setMode('resume')} />恢复 Thread</label></fieldset>
+        {sources.filter((source) => source.status === 'ready').map((source, index) => <option key={source.sourceId} value={source.sourceId}>数据源 {index + 1} · {source.storeSourceId.slice(0, 10)}</option>)}</select></label>}
       {mode === 'resume' && <label>Codex Thread ID<input value={threadId} onInput={(event) => setThreadId(event.currentTarget.value)} placeholder="thread UUID" /></label>}
-      <label>cwd<input value={cwd} onInput={(event) => setCwd(event.currentTarget.value)} placeholder="/absolute/workspace" /></label>
-      <p>Gateway 会为这个 Worker 启动专属 App Server 和固定参数的 Codex TUI；浏览器不能提供 executable、argv、socket、PID 或环境变量。</p>
-      <button type="submit" disabled={busy || !cwd.startsWith('/') || !selectedSource || (mode === 'resume' && !threadId.trim())}>{busy ? '正在启动…' : '重试启动'}</button></form>}
+      {mode === 'new' && <label>项目<select value={projects.find((item) => item.project.path === cwd)?.project.key || ''}
+        onChange={(event) => {
+          const project = projects.find((item) => item.project.key === event.currentTarget.value);
+          setCwd(project?.project.path || '');
+        }}><option value="">自定义目录</option>{projects.map(({ project }) =>
+          <option key={project.key} value={project.key}>{project.name} · {project.path}</option>)}</select></label>}
+      <label>工作目录（绝对路径）<input value={cwd} onInput={(event) => setCwd(event.currentTarget.value)} placeholder="/absolute/workspace" required /></label>
+      <p>Codex 将在这个目录中打开，会话历史按工作目录归入项目。</p>
+      <code class="session-directory-preview">{cwd || '请选择项目或填写工作目录'}</code>
+      <button type="submit" disabled={busy || !cwd.startsWith('/') || !selectedSource || (mode === 'resume' && !threadId.trim())}>{busy ? '正在启动…' : manualRetry ? '重试启动' : '启动对话'}</button></form>}
     {worker && <div class="session-worker"><div class="session-toolbar"><div class="session-status-cluster">
       <span class={`badge badge-${worker.state}`} title={`Worker ${worker.workerId}`}>{worker.state.replaceAll('_', ' ')}</span>
       <span class={`session-input-state ${lease?.leaseId ? 'session-input-active' : ''}`}><i />{lease?.leaseId ? '可输入' : '只读'}</span>
