@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use crate::clock::now_ms;
 use crate::config::Config;
 use crate::domain::classify::{classify_item, summary_text};
-use crate::domain::gateway::GatewayCommandRecord;
 use crate::domain::identity::thread_key;
 use crate::domain::live::{classify_live_item, live_summary};
 use crate::domain::model::{
@@ -28,18 +27,12 @@ use crate::permissions::{
 };
 
 mod blob;
-mod gateway;
 mod maintenance;
 mod pool;
 mod projection;
 mod query;
 mod schema;
-mod session;
 mod write;
-
-pub(crate) use gateway::{
-    ClaimedImageUpload, ImageUploadRecord, NewImageUpload, PendingRequestClaim, StageImageUpload,
-};
 
 pub use blob::BlobRecord;
 use blob::PreparedBlob;
@@ -48,13 +41,9 @@ use pool::{ReadConnection, ReadPool};
 use projection::{projection_reference_key, truncate};
 use query::query_json_connection;
 pub use schema::LATEST_SCHEMA_VERSION;
+#[cfg(test)]
 use schema::*;
 use write::TurnUpdate;
-
-pub(crate) struct GatewayCommandPage {
-    pub as_of_rowid: i64,
-    pub commands: Vec<GatewayCommandRecord>,
-}
 
 struct SessionContextBackfill {
     base_instructions: Option<String>,
@@ -823,93 +812,6 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn record_live_capabilities_on(
-        &self,
-        connection: &Connection,
-        source_id: &str,
-        epoch_id: &str,
-        capabilities: &Value,
-    ) -> Result<()> {
-        let capability_json = capabilities.to_string();
-        let capability_hash = blake3::hash(capability_json.as_bytes())
-            .to_hex()
-            .to_string();
-        let schema_hash = serde_json::from_str::<Value>(COMPATIBILITY_MANIFEST)?
-            .pointer("/appServer/protocolSchemaSha256")
-            .and_then(Value::as_str)
-            .context("compatibility manifest lacks protocol schema hash")?
-            .to_string();
-        connection.execute(
-            "INSERT INTO source_epochs(source_id,epoch_id,opened_at_ms,capability_json,capability_hash,schema_hash)
-             VALUES (?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(source_id,epoch_id) DO UPDATE SET capability_json=excluded.capability_json,
-               capability_hash=excluded.capability_hash,schema_hash=excluded.schema_hash",
-            params![source_id, epoch_id, now_ms(), capability_json, capability_hash, schema_hash],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn open_source_epoch_on(
-        &self,
-        connection: &Connection,
-        source_id: &str,
-        epoch_id: &str,
-    ) -> Result<()> {
-        connection.execute(
-            "INSERT OR IGNORE INTO source_epochs(source_id,epoch_id,opened_at_ms) VALUES (?1,?2,?3)",
-            params![source_id, epoch_id, now_ms()],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn close_live_epoch_on(
-        &self,
-        connection: &mut Connection,
-        source_id: &str,
-        epoch_id: &str,
-        reason: &str,
-    ) -> Result<()> {
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE source_epochs SET closed_at_ms=?1,close_reason=?2 WHERE source_id=?3 AND epoch_id=?4",
-            params![now_ms(), reason, source_id, epoch_id],
-        )?;
-        let turn_keys = {
-            let mut statement = transaction.prepare(
-                "SELECT DISTINCT thread_key,turn_id FROM raw_events
-                 WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'' AND turn_id IS NOT NULL",
-            )?;
-            statement
-                .query_map(params![source_id, epoch_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut thread_keys = HashSet::new();
-        for (thread_key, turn_id) in turn_keys {
-            let mut coverage = load_coverage(&transaction, &thread_key, &turn_id)?;
-            coverage.source_disconnect_count = coverage.source_disconnect_count.saturating_add(1);
-            coverage.live_epoch_contiguous = false;
-            store_coverage(&transaction, &thread_key, &turn_id, &coverage)?;
-            thread_keys.insert(thread_key);
-        }
-        transaction.execute(
-            "UPDATE threads SET runtime_status_stale=1
-             WHERE thread_key IN (SELECT DISTINCT thread_key FROM raw_events WHERE source_id=?1 AND epoch_id=?2 AND thread_key<>'')",
-            params![source_id, epoch_id],
-        )?;
-        transaction.execute(
-            "UPDATE pending_requests SET state='source_disconnected'
-             WHERE source_id=?1 AND epoch_id=?2 AND state IN ('pending','resolving')",
-            params![source_id, epoch_id],
-        )?;
-        for thread_key in thread_keys {
-            recompute_thread_completeness(&transaction, &thread_key)?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub fn max_event_seq(&self) -> Result<i64> {
         Ok(self.read_connection()?.query_row(
             "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='raw_events'),0)",
@@ -1390,7 +1292,7 @@ impl Database {
                     },
                     // The store layer only checks durable rollout access. The command layer
                     // fills this process-runtime check without introducing an upward dependency.
-                    session_runtime_status: "unchecked".into(),
+                    session_runtime_status: "retired".into(),
                 }
             })
             .collect();

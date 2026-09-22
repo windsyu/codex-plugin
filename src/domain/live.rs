@@ -1,34 +1,6 @@
-use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::classify::summary_text;
-
-/// Validates the recoverable JSON-RPC envelope shape shared by the legacy
-/// live transport and the Session Kernel proxy. Unknown methods and fields are
-/// intentionally accepted so callers can preserve and forward them raw-first.
-pub fn validate_app_server_envelope(envelope: &Value) -> Result<()> {
-    let object = envelope.as_object().ok_or_else(|| {
-        anyhow::anyhow!("incompatible protocol: JSON-RPC envelope is not an object")
-    })?;
-    if let Some(method) = object.get("method") {
-        if !method.is_string() {
-            bail!("incompatible protocol: JSON-RPC method is not a string");
-        }
-        if let Some(params) = object.get("params")
-            && !params.is_object()
-            && !params.is_null()
-        {
-            bail!("incompatible protocol: JSON-RPC params is not an object");
-        }
-        return Ok(());
-    }
-    if !object.contains_key("id")
-        || (!object.contains_key("result") && !object.contains_key("error"))
-    {
-        bail!("incompatible protocol: response lacks id and result/error");
-    }
-    Ok(())
-}
 
 pub fn classify_live_item(method: &str, item: Option<&Value>) -> Option<String> {
     if method.contains("requestApproval") {

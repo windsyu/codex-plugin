@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex 工作台设置",
+  "description": "工作台网页与本文件使用同一份设置。启动偏好和保存位置下次启动生效，清理策略保存后生效。",
+  "type": "object",
+  "required": [
+    "schemaVersion"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "openBrowser": {
+          "title": "启动时自动打开浏览器",
+          "type": "boolean",
+          "default": true
+        },
+        "codexBin": {
+          "title": "Codex 程序位置",
+          "description": "使用 codex，或填写已安装 Codex 程序的完整路径。",
+          "type": "string",
+          "pattern": "^(codex|/[^\\u0000]+)$",
+          "default": "codex"
+        },
+        "profile": {
+          "title": "Codex 启动配置",
+          "description": "已在 Codex 中创建的配置名称，null 表示使用默认配置。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "default": null
+        },
+        "providerProfile": {
+          "description": "模型连接方式，目前只有一个支持值，通常无需修改。",
+          "const": "unmanaged-custom",
+          "default": "unmanaged-custom"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataDir": {
+          "title": "历史保存位置",
+          "description": "历史保存在该目录的 runs 文件夹中，null 使用用户主目录下的 .codex-web/history。更换位置不会搬迁已有记录。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/[^\\u0000]+$",
+          "default": null
+        }
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "title": "允许清理历史记录",
+              "description": "默认关闭。开启后可预览并确认删除当前项目的工作台历史，不删除 Codex 原生会话。",
+              "type": "boolean",
+              "default": false
+            },
+            "retention": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "title": "自动清理过期记录",
+                  "description": "需先允许清理历史。开启后自动删除超过保留天数、已正常结束且结束时间可确认的记录，无需逐次确认。",
+                  "type": "boolean",
+                  "default": false
+                },
+                "days": {
+                  "title": "保留天数",
+                  "description": "按每次运行结束的时间计算，只有自动清理开启时才执行。",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3650,
+                  "default": 90
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "retention"
+                ],
+                "properties": {
+                  "retention": {
+                    "required": [
+                      "enabled"
+                    ],
+                    "properties": {
+                      "enabled": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "enabled"
+                ],
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "title": "手机接入端口",
+          "description": "0 自动选择。保存后下次开启设备访问生效，不会自动开放网络。",
+          "type": "integer",
+          "anyOf": [
+            {
+              "const": 0
+            },
+            {
+              "minimum": 1024,
+              "maximum": 65535
+            }
+          ],
+          "default": 0
+        }
+      }
+    }
+  }
+}

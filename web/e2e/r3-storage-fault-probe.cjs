@@ -1,0 +1,34 @@
+const { expect } = require('playwright/test');
+const { chromium, close } = require('./browser-lifecycle.cjs');
+const assert = require('node:assert/strict');
+let browser,page,stage='launch';
+const report=value=>process.stdout.write(`${JSON.stringify(value)}\n`);
+
+const screenshot=async suffix=>{if(page&&process.env.WORKBENCH_PROBE_SCREENSHOT)await page.screenshot({path:`${process.env.WORKBENCH_PROBE_SCREENSHOT}.${suffix}.png`,fullPage:true});};
+setTimeout(()=>{report({stage:'failed',check:stage,reason:'deadline'});close(1);},35000).unref();
+(async()=>{
+  browser=await chromium.launch({executablePath:process.env.WORKBENCH_TEST_CHROME||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
+  page=await browser.newPage({viewport:{width:1600,height:1000}});page.setDefaultTimeout(10000);let errors=0;page.on('pageerror',()=>errors++);
+  await page.goto(process.env.WORKBENCH_PROBE_URL);await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned','true');
+  const input=page.locator('.xterm-helper-textarea'),terminal=await input.elementHandle();
+  await expect(page.locator('.wb-message-list')).toContainText('R3_ALREADY_SAVED');
+  await expect(page.locator('.wb-footer')).toContainText('已保存');
+  const initial=await page.evaluate(async()=>(await fetch('/workbench/v1/live/snapshot')).json());
+  await page.locator('.wb-footer').getByRole('button',{name:/保存状态/ }).click();report({stage:'degrade'});stage='degraded-live';
+  await expect(page.locator('.wb-message-list')).toContainText('R3_MEMORY_CONTINUES');
+  await expect(page.locator('.wb-footer')).toContainText('保存异常');
+  await expect(page.locator('.wb-status-details')).toContainText('终端仍可使用');
+  const failed=await page.evaluate(async()=>(await fetch('/workbench/v1/live/snapshot')).json());assert.equal(failed.persistedThroughViewSeq,initial.persistedThroughViewSeq);
+  await input.pressSequentially('R3_INPUT_DURING_DISK_FAILURE');await expect(page.locator('.xterm-rows')).toContainText('R3_INPUT_DURING_DISK_FAILURE');
+  assert.equal(await terminal.evaluate(node=>node===document.querySelector('.xterm-helper-textarea')),true);await screenshot('degraded');
+  report({stage:'recover'});stage='recovery';
+  await expect(page.locator('.wb-message-list')).toContainText('R3_RECORDING_RESUMES');
+  await expect(page.locator('.wb-footer')).toContainText('历史有缺失');
+  await expect(page.locator('.wb-status-details')).toContainText('缺失的中间过程没有被补齐');
+  const restored=await page.evaluate(async()=>(await fetch('/workbench/v1/live/snapshot')).json());
+  assert.equal(restored.persistedThroughViewSeq,initial.persistedThroughViewSeq);assert.ok(restored.recorderStatus.savedThroughViewSeq>initial.viewSeq);
+  await screenshot('recovered');await page.getByRole('button',{name:'关闭用量概览',exact:true}).click();
+  await page.getByRole('button',{name:'历史记录',exact:true}).click();await page.locator('.wb-history-list button').filter({hasText:'当前运行'}).click();
+  await expect(page.locator('.wb-saved-reading')).toContainText('保存有 1 处缺口');await expect(page.locator('.wb-saved-reading')).toContainText('R3_RECORDING_RESUMES');
+  assert.equal(errors,0);report({stage:'complete',nativeInputDuringFailure:true,liveDuringFailure:true,continuousWatermarkFrozen:true,recoveryGapVisible:true,pageErrors:errors,browser:browser.version()});await close(0);
+})().catch(async()=>{await screenshot('failed').catch(()=>{});report({stage:'failed',check:stage,reason:'assertion (private output suppressed)'});close(1);});

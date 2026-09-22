@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "launch": {
+    "openBrowser": true,
+    "codexBin": "codex",
+    "profile": null,
+    "providerProfile": "unmanaged-custom"
+  },
+  "storage": {
+    "dataDir": null
+  },
+  "history": {
+    "cleanup": {
+      "enabled": false,
+      "retention": {
+        "enabled": false,
+        "days": 90
+      }
+    }
+  }
+}

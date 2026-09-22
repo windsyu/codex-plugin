@@ -1,17 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Api, ApiError, connect, loadDashboard, loadEventPage, loadThread, reconnectingStream } from './api';
 import { renderMarkdown } from './lib/markdown';
 import { coalesceActivities, itemPayload, presentItem, summarizeActivities } from './presentation';
-import { SessionShell } from './session/SessionShell';
-import type { SessionIntent } from './session/SessionShell';
 import type { ActivityEntry } from './presentation';
-import type { ControlCatalog, ControllerSource, GatewayCommand, GatewayStatusCard, Health, Item, PendingRequest, ProjectSummary, RawEvent, SearchResult, Source, Thread, ThreadDetail, Turn } from './types';
+import type { Health, Item, ProjectSummary, RawEvent, SearchResult, Source, Thread, ThreadDetail, Turn } from './types';
 
 type RequestPhase = 'idle' | 'loading' | 'success' | 'error';
 type TransportState = 'connecting' | 'live' | 'disconnected';
 interface Filters { source: string; status: string; completeness: string; archived: string; q: string; }
 interface RequestState { phase: RequestPhase; message?: string; }
-interface NewThreadInput { sourceId: string; sourceEpoch: string; cwd: string; model: string | null; personality: string | null; permissions: string | null; }
 
 const defaultFilters: Filters = { source: '', status: '', completeness: '', archived: '', q: '' };
 const savedToken = sessionStorage.getItem('observer-token') || '';
@@ -169,84 +166,12 @@ export function itemRendererKind(itemType: string) {
 function isAbort(error: unknown) { return error instanceof DOMException && error.name === 'AbortError'; }
 function requestMessage(error: unknown) { return error instanceof Error ? error.message : '请求失败'; }
 
-export function selectThreadControlCatalog(catalogs: ControlCatalog[]) {
-  return catalogs.find((catalog) => catalog.threadLoaded)
-    || catalogs.find((catalog) => catalog.slashCommands.some((command) => command.capability === 'thread.resume'));
-}
-
-function settingId(value: unknown) {
-  if (typeof value === 'string') return value || null;
-  const entry = record(value);
-  const id = entry.id ?? entry.name ?? entry.value;
-  return typeof id === 'string' && id ? id : null;
-}
-
-export function clearThreadInput(thread: Thread, turns: Turn[], catalog: ControlCatalog): NewThreadInput | undefined {
-  const cwd = thread.context.runtime.cwd || thread.cwdDisplay;
-  if (!cwd?.startsWith('/')) return undefined;
-  const latestContext = [...turns].reverse().find((turn) => turn.context)?.context;
-  return {
-    sourceId: catalog.sourceId,
-    sourceEpoch: catalog.sourceEpoch,
-    cwd,
-    model: thread.context.runtime.model || thread.model || latestContext?.model || null,
-    personality: settingId(latestContext?.personality),
-    permissions: settingId(thread.context.runtime.activePermissionProfile || latestContext?.permissionProfile)
-  };
-}
-
 export function deferInitialDashboardForPairing(hash: string) {
   return Boolean(new URLSearchParams(hash.slice(1)).get('pair'));
 }
 
 export function shouldFollowLatestMessage(distanceFromBottom: number) {
   return distanceFromBottom <= 120;
-}
-
-export function canNavigateComposerHistory(value: string, selectionStart: number, selectionEnd: number, direction: 'previous' | 'next') {
-  if (selectionStart !== selectionEnd) return false;
-  return direction === 'previous' ? !value.slice(0, selectionStart).includes('\n') : !value.slice(selectionEnd).includes('\n');
-}
-
-export function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
-  textarea.style.height = 'auto';
-  const height = Math.min(220, Math.max(64, textarea.scrollHeight));
-  textarea.style.height = `${height}px`;
-  textarea.style.overflowY = textarea.scrollHeight > 220 ? 'auto' : 'hidden';
-}
-
-export function currentSessionPresence(thread: Thread, catalog?: ControlCatalog, controlError?: string) {
-  if (thread.archived) return { label:'已归档', tone:'muted', detail:'该会话当前仅供浏览' };
-  if (catalog?.activeTurnId) return { label:'正在处理', tone:'live', detail:'Codex 正在执行当前 Turn' };
-  if (!controlError && catalog?.threadLoaded) return { label:'可继续', tone:'ready', detail:'已连接到当前 App Server source' };
-  if (controlError) return { label:'仅浏览', tone:'warning', detail:controlError };
-  if (thread.stale || thread.status === 'active') return { label:'状态待同步', tone:'warning', detail:'尚未确认实时控制状态' };
-  return { label:'历史会话', tone:'muted', detail:'未加载到可控 App Server source' };
-}
-
-export function commandNotice(command: GatewayCommand) {
-  const state = ({
-    received: '已接收',
-    authorized: '已授权',
-    dispatching: '正在派发',
-    accepted_by_source: '已由 Source 接受',
-    running: '正在运行',
-    completed: '已完成',
-    rejected: '已拒绝',
-    failed: '失败',
-    cancelled: '已取消'
-  } as Record<string, string>)[command.state] || command.state.replaceAll('_', ' ');
-  if (command.state === 'completed' && command.capability === 'thread.goal.get') {
-    const result = record(command.result);
-    return result.goalPresent === false
-      ? '当前会话没有 Goal'
-      : `当前 Goal：${String(result.goalStatus || 'active')}`;
-  }
-  if (command.state === 'completed' && command.capability === 'thread.goal.clear') return 'Goal 已清除';
-  if (command.state === 'completed' && command.capability === 'thread.goal.set') return 'Goal 状态已更新';
-  return command.state === 'outcome_unknown'
-    ? '操作结果未知：请刷新状态，系统不会自动重放'
-    : `控制操作${state}`;
 }
 
 export function FeedbackNotice({ message, onClose }: { message: string; onClose: () => void }) {
@@ -357,29 +282,6 @@ function DialogueMessage({ item }: { item: Item }) {
   </article>;
 }
 
-export interface OptimisticMessage {
-  threadKey: string;
-  clientUserMessageId: string;
-  text: string;
-  imageCount: number;
-  createdAtMs: number;
-  state: 'sending' | 'accepted' | 'outcome_unknown' | 'failed';
-  error?: string;
-}
-
-function projectedClientMessageIds(items: Item[]) {
-  const ids = new Set<string>();
-  for (const item of items) {
-    if (item.itemType !== 'user_message') continue;
-    const raw = record(item.raw); const payload = payloadOf(item); const provenance = record(item.provenance);
-    for (const candidate of [item.itemId, raw.clientId, raw.client_id, raw.clientUserMessageId, payload.clientId, payload.client_id,
-      payload.clientUserMessageId, provenance.clientUserMessageId]) {
-      if (typeof candidate === 'string' && candidate) ids.add(candidate);
-    }
-  }
-  return ids;
-}
-
 function rolloutMessageVariant(item: Item) {
   const raw = record(item.raw);
   if ((item.itemType === 'user_message' && raw.type === 'user_message')
@@ -449,24 +351,6 @@ export function dedupeDialogueItems(items: Item[]) {
   return items.filter((item) => !mirroredResponses.has(item) && !mirroredLiveItems.has(item));
 }
 
-export function reconcileOptimisticMessages(messages: OptimisticMessage[], threadKey: string, items: Item[]) {
-  const projected = projectedClientMessageIds(items);
-  return messages.filter((message) => message.threadKey !== threadKey || !projected.has(message.clientUserMessageId));
-}
-
-export function OptimisticMessageCard({ message }: { message: OptimisticMessage }) {
-  const status = ({ sending:'正在发送', accepted:'已提交，等待投影', outcome_unknown:'结果未知，不会自动重放', failed:'发送失败' } as const)[message.state];
-  const content = message.text || (message.imageCount ? '图片消息' : '空消息');
-  return <article class={`dialogue-message dialogue-user optimistic-message optimistic-${message.state}`}
-    data-client-user-message-id={message.clientUserMessageId} role="status">
-    <div class="dialogue-body"><header><strong>你</strong><span>{formatClock(message.createdAtMs)} · {status}</span></header>
-      <div class="dialogue-content markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
-      {message.imageCount > 0 && <p class="optimistic-images">{message.imageCount} 张本地图片</p>}
-      {message.error && <p class="optimistic-error">{message.error}</p>}
-    </div>
-  </article>;
-}
-
 function ActivityPanel({ entries, token, onBlob, focusedItemId }: {
   entries: ActivityEntry[]; token: string; onBlob: (message: string) => void; focusedItemId?: string;
 }) {
@@ -526,29 +410,6 @@ function DiagnosticsSummary({ detail, health }: { detail: ThreadDetail; health?:
   </details>;
 }
 
-export function GatewayStatusCardView({ card }: { card: GatewayStatusCard }) {
-  return <section class="command-status gateway-status-card" role="status" aria-label={`Gateway ${card.cardType} status card`}>
-    <strong>Gateway /{card.cardType}</strong><span>{card.sourceId.slice(0, 8)} · epoch {card.sourceEpoch.slice(0, 8)}</span>
-    <details><summary>查看状态</summary><pre>{jsonText(card.content)}</pre></details>
-  </section>;
-}
-
-function isGatewayStatusCard(value: GatewayCommand | GatewayStatusCard): value is GatewayStatusCard {
-  return 'kind' in value && value.kind === 'gatewayStatusCard';
-}
-
-function requestPayloadSummary(request: PendingRequest) {
-  const payload = record(request.payload);
-  const fields = ['command', 'cwd', 'grantRoot', 'reason', 'permissions', 'questions', 'serverName', 'message', 'requestedSchema'];
-  return Object.fromEntries(fields.filter((field) => payload[field] != null).map((field) => [field, payload[field]]));
-}
-
-function ActiveTurnIndicator({ command }: { command?: GatewayCommand }) {
-  const steering = command?.capability === 'turn.steer' && ['received','authorized','dispatching','accepted_by_source','running'].includes(command.state);
-  return <div class="active-turn-indicator" role="status" aria-live="polite"><span class="thinking-pulse"><i /><i /><i /></span>
-    <span><strong>{steering ? 'Steering' : 'Thinking'}</strong>{steering ? ' · 正在追加你的指令' : ' · Codex 正在处理'}</span></div>;
-}
-
 export function ConversationFollowButton({ unseenUpdates, onJump }: { unseenUpdates: number; onJump: () => void }) {
   return <button class="jump-to-latest" type="button" onClick={onJump} aria-label="回到最新消息">
     <Icon name="down" size={14} /><span>{unseenUpdates > 0 ? `回到最新 · ${unseenUpdates} 条新进展` : '回到最新'}</span>
@@ -560,7 +421,7 @@ function CurrentSessionOverview({ thread, turnCount, pendingCount }: {
 }) {
   const presence = thread.archived
     ? { label:'已归档', tone:'muted', detail:'该会话当前仅供浏览' }
-    : { label:'History 只读', tone:'muted', detail:'活动输入由终端 Session Runtime 承载' };
+    : { label:'History 只读', tone:'muted', detail:'此处仅查看已保存的历史记录' };
   return <div class="session-overview" aria-label="当前会话状态">
     <span class="session-kicker">{thread.archived ? '归档会话' : '当前会话'}</span>
     <span class={`session-presence session-presence-${presence.tone}`} title={presence.detail}><i />{presence.label}</span>
@@ -568,331 +429,6 @@ function CurrentSessionOverview({ thread, turnCount, pendingCount }: {
     {pendingCount > 0 && <span class="session-attention">{pendingCount} 个请求待处理</span>}
     {thread.captureCompleteness !== 'durable_complete' && <span class="session-attention">{completenessLabel(thread.captureCompleteness)}</span>}
   </div>;
-}
-
-export function PendingRequestCard({ request, busy, onAction }: {
-  request: PendingRequest; busy: boolean; onAction: (request: PendingRequest, action: Record<string, unknown>) => void;
-}) {
-  const [answer, setAnswer] = useState('');
-  const actionable = request.state === 'pending' && !busy;
-  const questions = Array.isArray(request.payload.questions) ? request.payload.questions.map(record) : [];
-  const formSchema = record(request.payload.requestedSchema); const formProperties = record(formSchema.properties);
-  const approval = request.requestType === 'approval';
-  const permissionRequest = approval && request.payload.permissions != null;
-  return <article class={`request-card request-${request.state}`} aria-label={`${request.requestType} request`}>
-    <header><strong>{request.requestType?.replaceAll('_', ' ') || 'request'}</strong>{badge(request.state)}</header>
-    <pre>{jsonText(requestPayloadSummary(request))}</pre>
-    {request.requestType === 'user_input' && questions.length > 0 && <label>回答（每行对应一个问题）
-      <textarea value={answer} onInput={(event) => setAnswer((event.target as HTMLTextAreaElement).value)} disabled={!actionable} /></label>}
-    {request.requestType === 'mcp_elicitation' && Object.keys(formProperties).length > 0 && <label>表单 JSON
-      <textarea value={answer} placeholder="{}" onInput={(event) => setAnswer((event.target as HTMLTextAreaElement).value)} disabled={!actionable} /></label>}
-    <div class="request-actions">
-      {approval && !permissionRequest && <><button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'accept' })}>允许</button>
-        <button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'acceptForSession' })}>本次会话允许</button>
-        <button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'approval', decision: 'decline' })}>拒绝</button></>}
-      {permissionRequest && <><button type="button" disabled={!actionable} onClick={() => onAction(request,
-        { type: 'permissions', grant: true, scope: 'turn', strictAutoReview: null })}>允许本 Turn</button>
-        <button type="button" disabled={!actionable} onClick={() => onAction(request,
-          { type: 'permissions', grant: false, scope: 'turn', strictAutoReview: null })}>拒绝</button></>}
-      {request.requestType === 'user_input' && <button type="button" disabled={!actionable || !answer.trim()} onClick={() => {
-        const lines = answer.split(/\r?\n/); const answers = Object.fromEntries(questions.map((question, index) => [String(question.id), [lines[index] || '']]));
-        onAction(request, { type: 'userInput', answers });
-      }}>提交回答</button>}
-      {request.requestType === 'mcp_elicitation' && <><button type="button" disabled={!actionable || !answer.trim()} onClick={() => {
-        try { onAction(request, { type: 'mcpElicitation', action: 'accept', content: JSON.parse(answer) }); } catch { /* server is never called for malformed local JSON */ }
-      }}>提交表单</button><button type="button" disabled={!actionable} onClick={() => onAction(request, { type: 'mcpElicitation', action: 'decline' })}>拒绝</button></>}
-    </div>
-  </article>;
-}
-
-function slashCommandDescription(command: ControlCatalog['slashCommands'][number]) {
-  return ({
-    '/new':'新建对话', '/clear':'清空界面并开始新对话', '/resume':'加载当前会话', '/fork':'创建分支', '/rename':'重命名会话', '/archive':'归档会话',
-    '/compact':'压缩上下文', '/review':'开始代码审查', '/interrupt':'停止当前 Turn', '/plan':'切换 Plan 模式',
-    '/goal':'查看或设置 Goal', '/model':'选择模型', '/reasoning':'选择推理强度', '/personality':'选择个性',
-    '/permissions':'选择权限', '/mcp':'查看 MCP 状态', '/status':'查看 Gateway 状态', '/usage':'查看用量'
-  } as Record<string, string>)[command.name] || command.capability;
-}
-
-export function Composer({ catalog, thread, disabledReason, busy, onSend, onInterrupt, onSetting, onSlash }: {
-  catalog?: ControlCatalog; thread?: Thread; disabledReason?: string; busy: boolean;
-  onSend: (text: string, images: File[]) => void | boolean | Promise<void | boolean>; onInterrupt: () => void;
-  onSetting?: (capability: string, value: string) => void; onSlash?: (command: string) => void;
-}) {
-  const [text, setText] = useState(''); const [images, setImages] = useState<File[]>([]);
-  const [activeOption, setActiveOption] = useState(0); const [paletteClosed, setPaletteClosed] = useState(false);
-  const [history, setHistory] = useState<string[]>([]); const [historyIndex, setHistoryIndex] = useState<number | null>(null);
-  const [historyDraft, setHistoryDraft] = useState('');
-  const [submitting, setSubmitting] = useState(false); const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const locked = Boolean(disabledReason); const disabled = locked || busy || submitting;
-  const activeTurn = Boolean(catalog?.activeTurnId);
-  const resumable = Boolean(catalog && !catalog.threadLoaded
-    && catalog.slashCommands.some((command) => command.capability === 'thread.resume'));
-  const picker = catalog && !paletteClosed ? slashPicker(text, catalog, thread) : undefined;
-  const hasInput = Boolean(text.trim() || images.length);
-  const slashToken = text.trim().split(/\s/, 1)[0];
-  const editingSlashName = text.startsWith('/') && !text.startsWith('//') && !/\s/.test(text);
-  const palette = !picker && !paletteClosed && editingSlashName
-    ? (catalog?.slashCommands.filter((command) => command.name.startsWith(slashToken)) || []) : [];
-  const optionCount = picker?.options.length || palette.length;
-
-  useLayoutEffect(() => { if (textareaRef.current) resizeComposerTextarea(textareaRef.current); }, [text]);
-
-  function updateText(value: string) {
-    setText(value); setPaletteClosed(false); setActiveOption(0); setHistoryIndex(null);
-  }
-
-  function settleSubmission(accepted: void | boolean, submittedText: string) {
-    if (accepted === false) { textareaRef.current?.focus(); return false; }
-    const historyText = submittedText.trim();
-    if (historyText) setHistory((current) => [...current.filter((entry) => entry !== historyText), historyText].slice(-50));
-    setText(''); setImages([]); setPaletteClosed(false); setActiveOption(0); textareaRef.current?.focus();
-    setHistoryIndex(null); setHistoryDraft('');
-    return true;
-  }
-
-  function submit(nextText = text, nextImages = images): boolean | Promise<boolean> {
-    if (disabled || (!nextText.trim() && nextImages.length === 0)) return false;
-    try {
-      const result = onSend(nextText, nextImages);
-      if (!result || typeof (result as Promise<void | boolean>).then !== 'function') return settleSubmission(result as void | boolean, nextText);
-      setSubmitting(true);
-      return Promise.resolve(result).then((accepted) => settleSubmission(accepted, nextText)).catch(() => { textareaRef.current?.focus(); return false; })
-        .finally(() => setSubmitting(false));
-    } catch {
-      textareaRef.current?.focus();
-      return false;
-    }
-  }
-
-  function chooseCommand(command: ControlCatalog['slashCommands'][number]) {
-    const exact = text.trim() === command.name;
-    if (exact && !command.interactionRequiredWithoutArgument) void submit(command.name, []);
-    else {
-      updateText(command.name);
-      requestAnimationFrame(() => textareaRef.current?.focus());
-    }
-  }
-
-  function choosePicker(index: number) {
-    if (!picker) return;
-    const option = picker.options[index];
-    if (option) void submit(`${picker.command} ${option.value}`, []);
-  }
-
-  function navigateHistory(direction: 'previous' | 'next') {
-    if (history.length === 0) return;
-    let nextIndex: number | null = historyIndex;
-    let nextText = text;
-    if (direction === 'previous') {
-      if (historyIndex == null) { setHistoryDraft(text); nextIndex = history.length - 1; }
-      else nextIndex = Math.max(0, historyIndex - 1);
-      nextText = history[nextIndex];
-    } else if (historyIndex != null && historyIndex < history.length - 1) {
-      nextIndex = historyIndex + 1; nextText = history[nextIndex];
-    } else {
-      nextIndex = null; nextText = historyDraft;
-    }
-    setHistoryIndex(nextIndex); setText(nextText); setPaletteClosed(true); setActiveOption(0);
-    requestAnimationFrame(() => {
-      const textarea = textareaRef.current;
-      if (textarea) textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-    });
-  }
-
-  function appendImages(files: File[]) {
-    const accepted = files.filter((file) => ['image/png','image/jpeg','image/webp','image/gif'].includes(file.type));
-    if (accepted.length) setImages((current) => [...current, ...accepted].slice(0, 4));
-  }
-
-  return <section class={`composer${activeTurn ? ' composer-active' : ''}`} aria-label="Codex 控制 Composer">
-    <div class="composer-status" id="composer-status">
-      <span>{disabledReason || (activeTurn ? '在当前 Turn 中追加指令' : 'Source 已连接，可以继续对话')}</span>
-      {resumable && <button type="button" disabled={busy} onClick={() => void onSend('/resume', [])}>加载到当前 source</button>}
-    </div>
-    <textarea ref={textareaRef} value={text} disabled={disabled} rows={1} aria-describedby="composer-status"
-      placeholder={activeTurn ? '继续引导当前任务…' : '询问 Codex，输入 / 查看命令'}
-      aria-controls={optionCount ? 'composer-command-options' : undefined}
-      aria-activedescendant={optionCount ? `composer-option-${Math.min(activeOption, optionCount - 1)}` : undefined}
-      onInput={(event) => updateText((event.target as HTMLTextAreaElement).value)} onPaste={(event) => {
-        const files = Array.from(event.clipboardData?.files || []);
-        if (files.some((file) => file.type.startsWith('image/'))) { event.preventDefault(); appendImages(files); }
-      }} onKeyDown={(event) => {
-        if (event.isComposing || event.keyCode === 229) return;
-        if (optionCount && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
-          event.preventDefault(); const delta = event.key === 'ArrowDown' ? 1 : -1;
-          setActiveOption((current) => (current + delta + optionCount) % optionCount); return;
-        }
-        if (optionCount && event.key === 'Escape') { event.preventDefault(); setPaletteClosed(true); return; }
-        if (optionCount && (event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
-          event.preventDefault(); if (picker) choosePicker(activeOption); else if (palette[activeOption]) chooseCommand(palette[activeOption]); return;
-        }
-        if (!optionCount && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-          const textarea = event.currentTarget as HTMLTextAreaElement; const direction = event.key === 'ArrowUp' ? 'previous' : 'next';
-          if ((direction === 'previous' || historyIndex != null)
-            && canNavigateComposerHistory(textarea.value, textarea.selectionStart, textarea.selectionEnd, direction)) {
-            event.preventDefault(); navigateHistory(direction); return;
-          }
-        }
-        if (event.key === 'Escape' && activeTurn && !locked && !busy && !submitting) { event.preventDefault(); onInterrupt(); return; }
-        if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && (text.trim() || images.length)) {
-          event.preventDefault(); void submit();
-        }
-      }} />
-    {palette.length > 0 && <div id="composer-command-options" class="slash-palette" role="listbox" aria-label="可用 Slash commands">
-      {palette.map((command, index) => <button id={`composer-option-${index}`} type="button" role="option" aria-selected={index === activeOption}
-        onMouseEnter={() => setActiveOption(index)} onClick={() => chooseCommand(command)}><strong>{command.name}</strong>
-        <small>{slashCommandDescription(command)}</small></button>)}</div>}
-    {picker && <div id="composer-command-options" class="slash-picker" role="listbox" aria-label={picker.label}><strong>{picker.label}</strong>
-      <div>{picker.options.map((option, index) => <button id={`composer-option-${index}`} type="button" role="option"
-        aria-selected={index === activeOption || option.selected} onMouseEnter={() => setActiveOption(index)} onClick={() => choosePicker(index)}>{option.label}</button>)}</div>
-    </div>}
-    {images.length > 0 && <div class="image-preview">{images.map((file, index) => <span><span>{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MiB</span>
-      <button type="button" aria-label={`移除图片 ${file.name}`} disabled={disabled} onClick={() => setImages((current) => current.filter((_, item) => item !== index))}>
-        <Icon name="close" size={13} /></button></span>)}</div>}
-    <div class="composer-footer"><label class="image-picker" aria-label="添加图片"><Icon name="plus" size={18} />
-      <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={disabled}
-        onChange={(event) => appendImages(Array.from((event.target as HTMLInputElement).files || []))} /></label>
-      {catalog?.threadLoaded && thread && onSetting && <ControlSettings thread={thread} catalog={catalog} busy={busy || submitting}
-        onSetting={onSetting} onSlash={onSlash || ((command) => { void onSend(command, []); })} />}
-      <span class="composer-shortcut">{activeTurn ? (hasInput ? 'Enter 追加 · Esc 中断' : 'Esc 中断当前 Turn') : 'Enter 发送 · Shift/Alt+Enter 换行'}</span><div class="composer-actions">
-        {activeTurn && <button class="composer-stop" type="button" aria-label="停止当前 Turn" title="停止当前 Turn" disabled={locked || busy || submitting}
-          onClick={onInterrupt}><Icon name="stop" size={15} /></button>}
-        {(!activeTurn || hasInput) && <button class="composer-send" type="button" aria-label={activeTurn ? '发送追加指令' : '发送消息'} title={activeTurn ? '发送追加指令' : '发送消息'}
-          disabled={disabled || !hasInput} onClick={() => void submit()}>{submitting ? <span class="button-spinner" /> : <Icon name="send" size={17} />}</button>}
-      </div></div>
-  </section>;
-}
-
-function catalogItems(catalog: ControlCatalog, method: string) {
-  const entry = catalog.capabilities?.entries?.[method];
-  return entry?.available && Array.isArray(entry.data?.data)
-    ? entry.data.data.filter((item) => item.hidden !== true && item.allowed !== false)
-    : [];
-}
-
-function catalogItemId(item: Record<string, unknown>) { return typeof item.id === 'string' ? item.id : ''; }
-function catalogItemLabel(item: Record<string, unknown>) {
-  return String(item.displayName || item.name || item.label || item.id || 'unknown');
-}
-
-function slashPicker(text: string, catalog: ControlCatalog, thread?: Thread) {
-  const command = text.trim();
-  const currentModel = thread?.context.runtime.model || thread?.model || '';
-  const models = catalogItems(catalog, 'model/list');
-  const model = models.find((item) => catalogItemId(item) === currentModel);
-  const definitions = {
-    '/model': { label:'选择 Model', items:models, value:catalogItemId, itemLabel:catalogItemLabel, current:currentModel },
-    '/reasoning': { label:'选择 Reasoning', items:Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts.map(record) : [],
-      value:(item: Record<string, unknown>) => String(item.reasoningEffort || ''), itemLabel:(item: Record<string, unknown>) => String(item.label || item.reasoningEffort || ''),
-      current:thread?.context.runtime.reasoningEffort || thread?.reasoningEffort || '' },
-    '/personality': { label:'选择 Personality', items:model?.supportsPersonality === true
-      ? [{id:'none',name:'默认'},{id:'friendly',name:'Friendly'},{id:'pragmatic',name:'Pragmatic'}] : [],
-      value:catalogItemId, itemLabel:catalogItemLabel, current:'' },
-    '/permissions': { label:'选择 Permissions', items:catalogItems(catalog, 'permissionProfile/list'), value:catalogItemId,
-      itemLabel:catalogItemLabel, current:typeof thread?.context.runtime.activePermissionProfile === 'string'
-        ? thread.context.runtime.activePermissionProfile : String(record(thread?.context.runtime.activePermissionProfile).id || '') }
-  } as const;
-  const definition = definitions[command as keyof typeof definitions];
-  if (!definition || !catalog.slashCommands.some((entry) => entry.name === command) || definition.items.length === 0) return undefined;
-  return { command, label:definition.label, options:definition.items.map((item) => ({
-    value:definition.value(item), label:definition.itemLabel(item), selected:definition.value(item) === definition.current
-  })).filter((option) => option.value) };
-}
-
-export function ControlSettings({ thread, catalog, busy, onSetting, onSlash }: {
-  thread: Thread; catalog: ControlCatalog; busy: boolean;
-  onSetting: (capability: string, value: string) => void; onSlash: (command: string) => void;
-}) {
-  const [goal, setGoal] = useState('');
-  const models = catalogItems(catalog, 'model/list'); const permissions = catalogItems(catalog, 'permissionProfile/list');
-  const currentModel = thread.context.runtime.model || thread.model || catalogItemId(models[0] || {});
-  const model = models.find((item) => catalogItemId(item) === currentModel);
-  const efforts = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts.map(record) : [];
-  const permission = record(thread.context.runtime.activePermissionProfile);
-  const currentPermission = typeof thread.context.runtime.activePermissionProfile === 'string'
-    ? thread.context.runtime.activePermissionProfile : String(permission.id || '');
-  const currentModelLabel = catalogItemLabel(models.find((item) => catalogItemId(item) === currentModel) || { id:currentModel || 'Source 默认' });
-  const currentEffort = thread.context.runtime.reasoningEffort || thread.reasoningEffort || '默认';
-  const currentPermissionLabel = catalogItemLabel(permissions.find((item) => catalogItemId(item) === currentPermission)
-    || { id:currentPermission || '默认权限' });
-  const planMode = catalog.collaborationMode?.mode === 'plan'; const goalStatus = catalog.goal?.status;
-  const planAvailable = catalog.slashCommands.some((command) => command.capability === 'thread.plan');
-  return <details class="control-settings"><summary aria-label="打开 Codex 控制设置"><span class="permission-summary"><Icon name="settings" size={15} />
-    {currentPermissionLabel}</span><span class="model-summary">{currentModelLabel} · {currentEffort}</span></summary>
-    <section class="control-settings-panel" aria-label="Codex 控制设置"><div class="setting-row">
-      <label>Model<select aria-label="Model" value={currentModel} disabled={busy || models.length === 0}
-        onChange={(event) => onSetting('thread.settings.model', (event.target as HTMLSelectElement).value)}>
-        {models.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
-      <label>Reasoning<select aria-label="Reasoning" value={thread.context.runtime.reasoningEffort || thread.reasoningEffort || ''}
-        disabled={busy || efforts.length === 0} onChange={(event) => onSetting('thread.settings.reasoning', (event.target as HTMLSelectElement).value)}>
-        {!thread.context.runtime.reasoningEffort && !thread.reasoningEffort && <option value="">默认</option>}
-        {efforts.map((item) => <option value={String(item.reasoningEffort || '')}>{String(item.label || item.reasoningEffort || '')}</option>)}</select></label>
-      <label>Permissions<select aria-label="Permissions" value={currentPermission} disabled={busy || permissions.length === 0}
-        onChange={(event) => onSetting('thread.settings.permissions', (event.target as HTMLSelectElement).value)}>
-        {!currentPermission && <option value="">默认</option>}{permissions.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
-      {model?.supportsPersonality === true && <label>Personality<select aria-label="Personality" disabled={busy}
-        onChange={(event) => onSetting('thread.settings.personality', (event.target as HTMLSelectElement).value)}>
-        <option value="none">默认</option><option value="friendly">Friendly</option><option value="pragmatic">Pragmatic</option></select></label>}
-    </div>
-    <div class="mode-row">{planAvailable && <><span>Plan：{planMode ? '已启用' : '未启用'}</span><button type="button" disabled={busy}
-      onClick={() => onSlash(planMode ? '/plan off' : '/plan')}>{planMode ? '退出 Plan' : '进入 Plan'}</button></>}<span>Goal：{goalStatus || '未设置'}</span>
-      <input aria-label="Goal objective" value={goal} placeholder="设置 Goal" disabled={busy}
-        onInput={(event) => setGoal((event.target as HTMLInputElement).value)} />
-      <button type="button" disabled={busy || !goal.trim()} onClick={() => { onSlash(`/goal ${goal}`); setGoal(''); }}>设置</button>
-      {goalStatus === 'active' && <button type="button" disabled={busy} onClick={() => onSlash('/goal pause')}>暂停</button>}
-      {goalStatus === 'paused' && <button type="button" disabled={busy} onClick={() => onSlash('/goal resume')}>恢复</button>}
-      {goalStatus && <button type="button" disabled={busy} onClick={() => onSlash('/goal clear')}>清除</button>}
-    </div>
-  </section></details>;
-}
-
-export function GoalStatusBar({ catalog, busy, onSlash }: {
-  catalog: ControlCatalog; busy: boolean; onSlash: (command: string) => void;
-}) {
-  const goal = catalog.goal;
-  if (!goal) return null;
-  const status = goal.status || 'active';
-  return <section class={`goal-status goal-${status}`} role="status" aria-label="当前 Goal">
-    <div><span class="goal-mark" /><span><strong>{goal.objective || 'Goal 已设置'}</strong>
-      <small>{status === 'paused' ? '已暂停' : '进行中'}{goal.tokensUsed != null ? ` · ${goal.tokensUsed.toLocaleString()} tokens` : ''}
-        {goal.timeUsedSeconds != null ? ` · ${goal.timeUsedSeconds}s` : ''}</small></span></div>
-    <div>{status === 'active'
-      ? <button type="button" disabled={busy} onClick={() => onSlash('/goal pause')}>暂停</button>
-      : <button type="button" disabled={busy} onClick={() => onSlash('/goal resume')}>恢复</button>}
-      <button type="button" disabled={busy} onClick={() => onSlash('/goal clear')}>清除</button></div>
-  </section>;
-}
-
-export function NewThreadDialog({ sources, catalog, busy, error, onSource, onClose, onCreate }: {
-  sources: ControllerSource[]; catalog?: ControlCatalog; busy: boolean; error?: string;
-  onSource: (sourceId: string) => void; onClose: () => void;
-  onCreate: (input: NewThreadInput) => void;
-}) {
-  const [cwd, setCwd] = useState(''); const [model, setModel] = useState(''); const [personality, setPersonality] = useState('');
-  const [permissions, setPermissions] = useState(''); const source = sources.find((value) => value.sourceId === catalog?.sourceId) || sources[0];
-  const models = catalog ? catalogItems(catalog, 'model/list') : []; const profiles = catalog ? catalogItems(catalog, 'permissionProfile/list') : [];
-  return <div class="dialog-backdrop"><section class="new-thread-dialog" role="dialog" aria-modal="true" aria-label="新建 Codex Thread">
-    <header><div><p class="eyebrow">V2 CONTROL</p><h2>新建对话</h2></div><button type="button" onClick={onClose} disabled={busy}>关闭</button></header>
-    {error && <p class="dialog-error" role="alert">{error}</p>}
-    <label>Live source<select aria-label="Live source" value={source?.sourceId || ''} disabled={busy || sources.length === 0}
-      onChange={(event) => onSource((event.target as HTMLSelectElement).value)}>{sources.map((value) =>
-        <option value={value.sourceId}>{value.sourceId} · epoch {value.sourceEpoch.slice(0, 8)}</option>)}</select></label>
-    <label>本机绝对 cwd<input aria-label="cwd" value={cwd} placeholder="/Users/me/workspace/project" disabled={busy}
-      onInput={(event) => setCwd((event.target as HTMLInputElement).value)} /></label>
-    <div class="new-thread-options"><label>Model<select aria-label="New thread model" value={model} disabled={busy || models.length === 0}
-      onChange={(event) => setModel((event.target as HTMLSelectElement).value)}><option value="">Source 默认</option>
-      {models.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
-      <label>Permissions<select aria-label="New thread permissions" value={permissions} disabled={busy || profiles.length === 0}
-        onChange={(event) => setPermissions((event.target as HTMLSelectElement).value)}><option value="">Source 默认</option>
-        {profiles.map((item) => <option value={catalogItemId(item)}>{catalogItemLabel(item)}</option>)}</select></label>
-      <label>Personality<select aria-label="New thread personality" value={personality} disabled={busy}
-        onChange={(event) => setPersonality((event.target as HTMLSelectElement).value)}><option value="">默认</option>
-        <option value="friendly">Friendly</option><option value="pragmatic">Pragmatic</option></select></label></div>
-    <button class="primary-action" type="button" disabled={busy || !source || !catalog || !cwd.startsWith('/')}
-      onClick={() => source && catalog && onCreate({ sourceId:source.sourceId,sourceEpoch:catalog.sourceEpoch,cwd,
-        model:model || null,personality:personality || null,permissions:permissions || null })}>创建 Thread</button>
-  </section></div>;
 }
 
 function RawInspector({ events, state, hasMore, onOpen, onMore, onRetry, onCloseError, onCopy }: {
@@ -917,16 +453,13 @@ function RawInspector({ events, state, hasMore, onOpen, onMore, onRetry, onClose
 }
 
 function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawState, rawHasMore, onRawOpen, onRawMore,
-  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId, notice, onNoticeClose,
-  tuiSessionMode, onOpenSession }: {
+  onRawRetry, onRawCloseError, onCopy, onBack, onNavigate, onBlob, focusedItemId, notice, onNoticeClose }: {
   detail: ThreadDetail; turns: Turn[]; items: Item[]; token: string; health?: Health; rawEvents: RawEvent[]; rawState: RequestState;
   rawHasMore: boolean; onRawOpen: () => void; onRawMore: () => void; onRawRetry: () => void; onRawCloseError: () => void;
   onCopy: (event: RawEvent) => void;
   onBack: () => void; onNavigate: (key: string) => void; onBlob: (message: string) => void; focusedItemId?: string;
   notice?: string;
   onNoticeClose: () => void;
-  tuiSessionMode: boolean;
-  onOpenSession: () => void;
 }) {
   const { thread, relations } = detail;
   const grouped = useMemo(() => {
@@ -993,7 +526,7 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
       {grouped.map(([key, group], index) => <TurnSection key={key} turn={group.turn} items={group.items} token={token} onBlob={onBlob}
         focusedItemId={focusedItemId} ordinal={index + 1} />)}</div>
     {detail.pendingRequests.some((request) => request.state !== 'resolved') && <div class="request-card-list">
-      <div class="notice notice-warning" role="status">此 Thread 有待处理交互；请打开拥有该 Thread 的终端，由官方 TUI 响应。</div>
+      <div class="notice notice-warning" role="status">历史记录中有未解决的交互请求；这里不代表当前 CLI 仍在等待。</div>
     </div>}
     <RawInspector events={rawEvents} state={rawState} hasMore={rawHasMore} onOpen={onRawOpen} onMore={onRawMore} onRetry={onRawRetry}
       onCloseError={onRawCloseError} onCopy={onCopy} />
@@ -1001,11 +534,7 @@ function ThreadDetailView({ detail, turns, items, token, health, rawEvents, rawS
     <div class="conversation-dock" aria-label="对话操作区">
       {showJumpToLatest && <ConversationFollowButton unseenUpdates={unseenUpdates} onJump={jumpToLatest} />}
       {notice && <FeedbackNotice message={notice} onClose={onNoticeClose} />}
-      {tuiSessionMode ? <div class="session-default-entry" role="status">
-        <div><strong>活动输入由真实 Codex TUI 承载</strong><span>Slash、picker、Goal、Plan 与交互请求只在终端会话中响应；History 保持只读。</span></div>
-        <button type="button" onClick={onOpenSession}>继续终端会话</button>
-      </div> : <div class="session-default-entry" role="status"><div><strong>History 只读</strong>
-        <span>启用 V2 Session Runtime 后可从这里继续该 Thread。</span></div></div>}
+      <p class="history-read-only">历史只读 · 如需继续对话，请在项目目录运行 codex-view。</p>
     </div>
   </div>;
 }
@@ -1036,12 +565,10 @@ function ThreadRow({ thread, selected, onSelect }: { thread: Thread; selected?: 
   </button>;
 }
 
-export function Sidebar({ health, projects, threads, sources, filters, setFilters, searchResults, searchState, selected, onSearch, onSearchResult, onSelect,
-  canCreateThread, onNewThread }: {
+export function Sidebar({ health, projects, threads, sources, filters, setFilters, searchResults, searchState, selected, onSearch, onSearchResult, onSelect }: {
   health?: Health; projects: ProjectSummary[]; threads: Thread[]; sources: Source[]; filters: Filters; setFilters: (filters: Filters) => void;
   searchResults: SearchResult[] | null; searchState: RequestState; selected?: string; onSearch: (query: string) => void;
   onSearchResult: (result: SearchResult) => void; onSelect: (threadKey: string) => void;
-  canCreateThread?: boolean; onNewThread?: () => void;
 }) {
   const [search, setSearch] = useState(filters.q);
   const visibleProjects = useMemo(() => projects.filter((project) => threads.some((thread) => thread.project?.key === project.project.key)), [projects, threads]);
@@ -1054,7 +581,6 @@ export function Sidebar({ health, projects, threads, sources, filters, setFilter
     disconnected: summary.disconnected + (['degraded', 'incompatible', 'disconnected', 'offline'].includes(source.status) ? 1 : 0)
   }), { decode: 0, unknown: 0, disconnected: 0 });
   return <aside class="sidebar" aria-label="Thread 导航"><div class="sidebar-head">
-    {canCreateThread && <button type="button" class="new-chat-button" onClick={onNewThread}><Icon name="plus" size={17} /><span>新建对话</span></button>}
     <form class="search-row" role="search" onSubmit={(event) => { event.preventDefault(); onSearch(search.trim()); }}>
       <label class="sr-only" for="viewer-search">搜索消息和工具摘要</label><input id="viewer-search" type="search" value={search}
         onInput={(event) => setSearch((event.target as HTMLInputElement).value)} placeholder="搜索会话" /><button type="submit" aria-label="搜索"><Icon name="search" /></button>
@@ -1147,8 +673,6 @@ export function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searchState, setSearchState] = useState<RequestState>({ phase: 'idle' });
   const [notice, setNotice] = useState('');
-  const [sessionPreviewOpen, setSessionPreviewOpen] = useState(false);
-  const [sessionIntent, setSessionIntent] = useState<SessionIntent>({ mode:'new' });
   const [focusTarget, setFocusTarget] = useState<{ turnId?: string; itemId?: string }>();
   const refreshTimer = useRef<number>();
   const detailController = useRef<AbortController>();
@@ -1189,7 +713,7 @@ export function App() {
     }
     void refresh();
     const streamController = new AbortController();
-    void reconnectingStream(api, '/v2/stream', () => {
+    void reconnectingStream(api, '/v1/stream', () => {
       window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(() => {
         void refresh();
         const threadKey = selectedRef.current;
@@ -1278,33 +802,24 @@ export function App() {
   const sessionLabel = token ? 'Bearer' : tailscaleViewer ? 'Tailscale' : 'Cookie';
   const transportText = transport === 'live' ? `${sessionLabel} · 实时已连接`
     : transport === 'disconnected' ? `${sessionLabel} · 实时已断开，正在重试` : `${sessionLabel} · 正在连接实时更新`;
-  const tuiSessionMode = health?.sessionKernel?.configuredMode === 'tui'
-    && health.sessionKernel.workerAvailable && health.sessionKernel.cliAvailable;
 
   if (!api) return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1><span class="readonly-label">待认证</span></div></header>
     <AuthPanel onConnect={handleConnect} error={authError} checking={authChecking} /></main>;
 
   return <main><header class="topbar"><div class="brand"><span class="brand-mark"><Icon name="codex" size={18} /></span><h1>Codex Observer</h1>
-    <span class="readonly-label">{health?.control?.enabled ? 'V2 控制' : '只读'}</span></div>
-    <div class="status-stack">{health?.sessionKernel?.workerAvailable && health.sessionKernel.cliAvailable &&
-      <button type="button" class="session-preview-button" onClick={() => { setSessionIntent({mode:'new'}); setSessionPreviewOpen(true); }}>终端会话</button>}
+    <span class="readonly-label">只读历史</span></div>
+    <div class="status-stack">
       <div class={`health health-${health?.status || 'loading'}`} title={`后端 ${health?.status || 'loading'} · event ${health?.asOfEventSeq || 0}`}>
       <span class="status-dot" />本机数据</div><div class={`transport transport-${transport}`}>{transportText}</div></div></header>
     {dashboardState.phase === 'loading' && !health && <div class="page-status" role="status">正在加载 Dashboard…</div>}
     {dashboardState.phase === 'error' && <ErrorNotice message={`Dashboard：${dashboardState.message}`} onRetry={() => setApi(connect(token))}
       onClose={() => setDashboardState({ phase: 'idle' })} />}
-    {tailscaleViewer && health?.control?.tailscaleMutationAccess && <div class="control-risk" role="alert">Tailscale 风险：当前经验证身份拥有与本机登录相同的 V2 mutation 权限。</div>}
     {notice && !detail && <div class="page-notice-dock"><FeedbackNotice message={notice} onClose={() => setNotice('')} /></div>}
-    {sessionPreviewOpen && <SessionShell api={api} intent={sessionIntent} projects={projects}
-      onClose={() => setSessionPreviewOpen(false)} />}
     <div class={`workspace${selected ? ' detail-active' : ''}`}><Sidebar health={health} projects={projects} threads={filteredThreads} sources={sources}
       filters={filters} setFilters={(value) => { setFilters(value); if (!value.q) setSearchResults(null); }} searchResults={visibleSearchResults}
       searchState={searchState} selected={selected} onSearch={handleSearch}
       onSearchResult={(result) => selectThread(result.threadKey, { turnId: result.turnId, itemId: result.itemId })} onSelect={(key) => selectThread(key)}
-      canCreateThread={health?.control?.enabled} onNewThread={() => {
-        if (tuiSessionMode) { setSessionIntent({mode:'new',fresh:true}); setSessionPreviewOpen(true); }
-        else setNotice('Session Runtime 未启用；History 保持只读');
-      }} />
+      />
       <section class="detail" aria-busy={detailState.phase === 'loading'}><div class="detail-inner">
         {detailState.phase === 'loading' && <div class="detail-loading" role="status"><p class="eyebrow">THREAD → TURN → ITEM</p><h2>正在加载所选 Thread…</h2></div>}
         {detailState.phase === 'error' && <ErrorNotice message={`Thread：${detailState.message}`} onRetry={() => selected && selectThread(selected, focusTarget)}
@@ -1319,11 +834,7 @@ export function App() {
           onBack={() => { detailController.current?.abort(); rawController.current?.abort(); selectedRef.current = undefined; setSelected(undefined); setDetail(undefined); setDetailState({ phase: 'idle' }); }}
           onNavigate={(key) => selectThread(key)} onBlob={setNotice} focusedItemId={focusTarget?.itemId}
           notice={notice} onNoticeClose={() => setNotice('')}
-          tuiSessionMode={Boolean(tuiSessionMode)} onOpenSession={() => {
-            const cwd = detail.thread.context.runtime.cwd || detail.thread.cwdDisplay || '';
-            setSessionIntent({mode:'resume',storeSourceId:detail.thread.storeSourceId,codexThreadId:detail.thread.codexThreadId,cwd});
-            setSessionPreviewOpen(true);
-          }} />}
+          /> }
       </div></section>
     </div>
   </main>;

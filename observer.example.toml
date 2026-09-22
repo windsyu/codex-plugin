@@ -8,20 +8,6 @@ allowed_origins = ["http://127.0.0.1:4765"]
 enabled = false
 https_port = 443
 
-# V2 mutations remain unavailable unless this is explicitly enabled. The
-# Controller reuses the existing V1 bearer, pairing Cookie, or verified
-# Tailscale identity; it does not create a second control credential. If both
-# Controller and Tailscale Serve are enabled, every verified Tailnet user
-# accepted by Serve has the same V2 mutation authority as a local session.
-[controller]
-enabled = false
-# off keeps every Session mutation disabled; tui enables the real Codex TUI
-# Session Runtime and starts one dedicated App Server for each Worker.
-session_kernel = "off"
-# Development/test only; when session_kernel="preview" this must point to one fixed
-# executable. Browser requests can never supply an executable or argv.
-# session_fixture_cli = "tests/fixtures/fake_codex_cli.sh"
-
 [storage]
 database = "observer-data/observer.sqlite"
 blob_dir = "observer-data/blobs"

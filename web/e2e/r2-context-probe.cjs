@@ -1,0 +1,85 @@
+// Uses only synthetic observations and a cat PTY; no model account or browser download.
+const { expect } = require('playwright/test');
+const { chromium, close } = require('./browser-lifecycle.cjs');
+const assert = require('node:assert/strict');
+let browser, page, stage = 'launch';
+const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+
+const screenshot = async suffix => { if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${suffix}.png`, fullPage: true }); };
+setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, 40000).unref();
+(async () => {
+  browser = await chromium.launch({ executablePath: process.env.WORKBENCH_TEST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+  page = await browser.newPage({ viewport: { width: 1600, height: 1000 } }); page.setDefaultTimeout(10000);
+  let errors = 0, fetches = 0; page.on('pageerror', () => errors++);
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/workbench/v1/requests/')) fetches++; });
+  await page.goto(process.env.WORKBENCH_PROBE_URL);
+  await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
+  const input = page.locator('.xterm-helper-textarea'), terminal = await input.elementHandle();
+  const run = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  report({ stage: 'ready' }); stage = 'initial-context';
+  await expect(page.locator('.wb-message-list')).toContainText('R2_CONTEXT_PARTIAL');
+  assert.equal(fetches, 0);
+  await expect(page.locator('.wb-message-list [data-role="user"]')).toHaveCount(0);
+  await page.locator('.wb-message-list').getByRole('button', { name: '调用详情', exact: true }).first().click();
+  const context = page.locator('.wb-request-context');
+  await expect(context.locator('.wb-context-entry')).toHaveCount(16);
+  assert.equal(fetches, 1);
+  const system = context.locator('.wb-context-entry').filter({ has: page.locator('summary', { hasText: '系统说明' }) });
+  await system.locator('summary').press('Enter');
+  await expect(system.locator('pre')).toContainText('R2_SYSTEM_CONTEXT');
+  await expect(system.locator('pre')).toContainText('[已脱敏]');
+  await expect(system.locator('svg,script,img')).toHaveCount(0);
+  const systemNode = await system.elementHandle();
+  report({ stage: 'reading' }); stage = 'response-usage';
+  await expect(context.locator('.wb-response-usage')).toContainText('124');
+  await expect(context).toContainText('已收到新的响应状态');
+  assert.equal(fetches, 1);
+  await expect(system.locator('summary')).toBeFocused();
+  await expect(system).toHaveAttribute('open', '');
+  assert.equal(await systemNode.evaluate(element => element.isConnected), true);
+  await context.getByRole('button', { name: '加载后续内容' }).click();
+  await expect(context).toContainText('上下文或运行已更新');
+  await expect(context.locator('.wb-context-entry')).toHaveCount(16);
+  await context.getByRole('button', { name: '刷新上下文' }).click();
+  await expect(context).not.toContainText('上下文或运行已更新');
+  for (let n = 0; n < 5 && await context.getByRole('button', { name: '加载后续内容' }).count(); n++) {
+    await context.getByRole('button', { name: '加载后续内容' }).click();
+    await expect(context.getByRole('button', { name: '刷新上下文' })).toBeEnabled();
+  }
+  await expect(context).toContainText('响应文档：已捕获');
+  const tool = context.locator('.wb-context-entry').filter({ has: page.locator('summary', { hasText: '工具定义' }) });
+  await tool.locator('summary').press('Enter');
+  await expect(tool.locator('pre')).toContainText('read_fixture');
+  await expect(tool.locator('pre')).toContainText('password');
+  await expect(tool.locator('pre')).toContainText('properties');
+  const content = await context.textContent();
+  for (const privateValue of ['fixture-sensitive-value', 'PRIVATE_BASE64', 'PRIVATE_REASONING', 'PRIVATE_DEFAULT']) assert.ok(!content.includes(privateValue));
+  assert.equal(await page.evaluate(() => Boolean(window.r2ContextInjected)), false);
+  stage = 'panels-and-widths';
+  const beforeSwitch = fetches;
+  await page.getByRole('button', { name: '终端', exact: true }).click();
+  await page.getByRole('button', { name: '终端', exact: true }).click();
+  await expect(tool).toHaveAttribute('open', ''); assert.equal(fetches, beforeSwitch);
+  assert.equal(await terminal.evaluate(element => element === document.querySelector('.xterm-helper-textarea')), true);
+  await input.pressSequentially('R2_CONTEXT_INPUT');
+  await expect(page.locator('.xterm-rows')).toContainText('R2_CONTEXT_INPUT');
+  for (const width of [1024, 736, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.locator('.wb-call-body').evaluate(element => { element.scrollTop = 0; });
+  await screenshot('narrow');
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await page.locator('.wb-call-body').evaluate(element => { element.scrollTop = 0; });
+  await screenshot('context');
+  stage = 'reload'; await page.reload();
+  await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
+  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  assert.equal(after.processId, run.processId); assert.equal(after.runEpoch, run.runEpoch);
+  await expect(page.locator('.wb-message-list')).toContainText('R2_CONTEXT_FINAL');
+  await page.locator('.wb-message-list').getByRole('button', { name: '调用详情', exact: true }).first().click();
+  await expect(page.locator('.wb-context-entry')).toHaveCount(16);
+  assert.equal(errors, 0);
+  report({ stage: 'complete', onDemand: true, staleCursorProtected: true, samePtyProcess: true, contextLiteralAndRedacted: true, userMessages: 0, perResponseUsage: true, pageErrors: errors, browser: browser.version() });
+  await close(0);
+})().catch(async () => { await screenshot('failed').catch(() => {}); report({ stage: 'failed', check: stage, reason: 'assertion (private URL/output suppressed)' }); close(1); });

@@ -32,7 +32,10 @@ export function renderMarkdown(markdown: string): string {
   const parsed = marked.parse(markdown ?? '') as string;
   const clean = DOMPurify.sanitize(parsed, {
     USE_PROFILES: { html: true },
-    FORBID_TAGS: ['style', 'form', 'input', 'script', 'iframe', 'object', 'embed']
+    FORBID_TAGS: ['style', 'form', 'input', 'script', 'iframe', 'object', 'embed'],
+    // The terminal needs inline layout styles in CSP, but model-supplied HTML
+    // must not use those styles to cover or impersonate workbench controls.
+    FORBID_ATTR: ['style']
   });
   const template = document.createElement('template');
   template.innerHTML = clean;

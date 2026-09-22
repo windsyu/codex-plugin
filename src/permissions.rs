@@ -78,34 +78,6 @@ pub fn create_private_file(path: &Path, label: &str) -> Result<fs::File> {
         .with_context(|| format!("create {label} {}", path.display()))
 }
 
-#[cfg(unix)]
-pub fn validate_private_unix_socket(path: &Path, label: &str) -> Result<()> {
-    use std::os::unix::fs::FileTypeExt;
-
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect {label} {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
-        anyhow::bail!("{label} is not a direct Unix socket");
-    }
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        anyhow::bail!("{label} is not owned by the current user");
-    }
-    if metadata.mode() & 0o077 != 0 {
-        anyhow::bail!("{label} permissions are broader than 0600");
-    }
-    let parent = path.parent().context("Unix socket has no parent")?;
-    let parent_metadata = fs::metadata(parent)?;
-    if parent_metadata.uid() != unsafe { libc::geteuid() } || parent_metadata.mode() & 0o022 != 0 {
-        anyhow::bail!("{label} directory is not private");
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn validate_private_unix_socket(_path: &Path, _label: &str) -> Result<()> {
-    anyhow::bail!("App Server live mode is currently supported on Unix only")
-}
-
 pub fn prepare_database_files(path: &Path) -> Result<()> {
     let suffix = |value: &str| {
         let mut name = path.as_os_str().to_os_string();
