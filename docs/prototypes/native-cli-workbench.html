@@ -1,0 +1,1842 @@
+<!doctype html>
+<html lang="en" data-visualize-standalone>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src 'unsafe-inline' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Codex 原生 CLI 工作台 · cc-viewer 风格交互原型</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Codex 原生 CLI 工作台 · cc-viewer 风格交互原型" srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot; data-visualize-standalone&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27; &#x27;unsafe-eval&#x27; &#x27;wasm-unsafe-eval&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src &#x27;unsafe-inline&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Codex 原生 CLI 工作台 · cc-viewer 风格交互原型&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(
+    --background,
+    var(--color-background-primary, light-dark(rgb(255 255 255), rgb(24 24 24)))
+  ) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: var(
+    --color-background-primary,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --card: color-mix(in oklab, var(--foreground) 5%, var(--background));
+  --card-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --popover: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255), rgb(45 45 45))
+  );
+  --popover-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --primary: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --primary-foreground: var(
+    --color-text-inverse,
+    light-dark(rgb(255 255 255), rgb(13 13 13))
+  );
+  --secondary: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%))
+  );
+  --secondary-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: var(
+    --color-text-secondary,
+    light-dark(rgb(26 28 31 / 49.4%), rgb(255 255 255 / 49.8%))
+  );
+  --accent: var(
+    --color-background-info,
+    light-dark(rgb(229 242 255), rgb(13 39 63))
+  );
+  --accent-foreground: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --destructive: var(
+    --color-text-warning,
+    light-dark(rgb(226 85 7), rgb(255 133 73))
+  );
+  --border: var(
+    --color-border-secondary,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+  --input: var(
+    --color-border-primary,
+    light-dark(
+      rgb(26 28 31 / 11.8%),
+      color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+    )
+  );
+  --ring: var(
+    --color-ring-primary,
+    light-dark(rgb(51 156 255), rgb(131 195 255 / 76%))
+  );
+  --font-size-base: var(--font-text-md-size, 14px);
+  --blue: light-dark(rgb(51 156 255), rgb(51 156 255));
+  --orange: light-dark(rgb(226 85 7), rgb(251 106 34));
+  --green: light-dark(rgb(0 162 64), rgb(64 201 119));
+  --red: light-dark(rgb(224 46 42), rgb(255 103 100));
+  --purple: light-dark(rgb(146 79 247), rgb(173 123 249));
+  --yellow: light-dark(rgb(255 195 0), rgb(255 210 64));
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans: -apple-system, system-ui, &quot;Segoe UI&quot;, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 430;
+  --font-weight-medium: 500;
+  --icon-size: 16px;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --corner-shape: round;
+  --radius: var(--border-radius-lg, 10px);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  /* Preserve MCP aliases for older inline renderers without creating :root cycles. */
+  --color-background-primary: var(
+    --background,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --color-text-primary: var(
+    --foreground,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --color-border-secondary: var(
+    --border,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+
+  margin: 0;
+  padding: var(--visualize-paint-gutter, 0px);
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans) !important;
+  font-size: var(--font-size-normal);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--line-height-normal);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: pointer;
+  font-weight: var(--font-weight-medium, 500);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+
+h1 {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h3,
+h4,
+h5,
+h6 {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.3;
+}
+
+b,
+strong,
+th {
+  font-weight: var(--font-weight-medium);
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: var(--corner-shape);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--foreground);
+  font: inherit;
+  text-align: start;
+}
+
+.table :is(th, td) {
+  padding-block: 10px;
+  padding-inline: 0 24px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.table-responsive &gt; .table :is(th, td) {
+  overflow-wrap: break-word;
+}
+
+.table :is(th, td):last-child {
+  padding-inline-end: 0;
+}
+
+.table :is(caption, thead th) {
+  font-weight: 600;
+}
+
+.table thead th {
+  padding-block: 8px;
+  border-bottom-color: color-mix(in srgb, var(--foreground) 16%, transparent);
+}
+
+.table tbody tr:last-child :is(th, td) {
+  border-bottom: 0;
+}
+
+.table.table-sm :is(th, td) {
+  padding-block: 6px;
+}
+
+.table.table-sm :is(th, td):not(:last-child) {
+  padding-inline-end: 16px;
+}
+
+.table :is(.text-end, [align=&quot;right&quot;]) {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.table :is(.text-center, [align=&quot;center&quot;]) {
+  text-align: center;
+}
+
+.table .text-nowrap {
+  white-space: nowrap;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: var(--corner-shape);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+#widget &gt; :not(.card, .progress) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-shape);
+  color: var(--popover-foreground);
+  background: var(--popover);
+  box-shadow: none;
+  font-size: var(--font-size-tooltip);
+  line-height: var(--line-height-tooltip);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+hr {
+  width: 100%;
+  height: 1px;
+  margin-block: 6px;
+  border: 0;
+  background: var(--border);
+}
+
+.nav {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.progress {
+  display: flex;
+  height: 8px;
+  margin-block: calc((var(--line-height-normal, 1.5em) - 8px) / 2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+}
+
+.progress-bar:only-child {
+  border-radius: var(--radius-full);
+}
+
+.progress-bar {
+  height: 100%;
+  flex-shrink: 0;
+  border: 0;
+  background: var(--viz-series-1);
+}
+
+.viz-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  color: var(--accent-foreground);
+  background: var(--accent);
+  font-weight: var(--font-weight-medium);
+}
+
+small,
+.text-small,
+.viz-badge {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.nav-link,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+.btn,
+.nav-link {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-shape);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover,
+.nav-link:not(:disabled):not([aria-disabled=&quot;true&quot;]):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn-primary {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: padding-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.nav-pills .nav-link {
+  min-width: 0;
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.nav-justified .nav-link {
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.nav-pills .nav-link.active {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.btn:disabled,
+.nav-link:disabled,
+.nav-link[aria-disabled=&quot;true&quot;] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-shape);
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  padding: 0;
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  min-height: 26px;
+  margin-right: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: 28px;
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: var(--corner-shape);
+}
+
+textarea.form-control {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 32px 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-shape);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%),
+    linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-select:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-check {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  border-color: var(--input);
+  border-radius: var(--radius-sm);
+  corner-shape: var(--corner-shape);
+  background-color: var(--secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 2px solid var(--primary);
+  background:
+    radial-gradient(circle, var(--primary-foreground) 0 2.5px, transparent 3px),
+    var(--primary);
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--primary);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 28px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  outline: none;
+  border: 0;
+  accent-color: var(--primary);
+  background: linear-gradient(
+      color-mix(in srgb, var(--foreground) 7%, transparent),
+      color-mix(in srgb, var(--foreground) 7%, transparent)
+    )
+    center / 100% 2px no-repeat;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range::-moz-range-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+  [aria-pressed=&quot;true&quot;],
+  [aria-selected=&quot;true&quot;],
+  .is-selected
+) {
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible,
+.nav-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .btn,
+  .nav-link,
+  .form-control,
+  .form-select {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep small-screen WebKit from zooming when a text field receives focus. */
+  .form-control,
+  .form-select {
+    font-size: max(16px, var(--font-size-normal));
+  }
+
+  .form-control[type=&quot;file&quot;]::file-selector-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .form-control-color[type=&quot;color&quot;] {
+    width: 44px;
+    height: 44px;
+  }
+
+  .form-control:is(
+    [type=&quot;date&quot;],
+    [type=&quot;datetime-local&quot;],
+    [type=&quot;month&quot;],
+    [type=&quot;time&quot;],
+    [type=&quot;week&quot;]
+  ) {
+    min-width: 0;
+    max-width: 100%;
+    padding-block: 8px;
+  }
+
+  .form-check {
+    min-height: 44px;
+    padding-inline: 15px;
+  }
+
+  .form-check-input {
+    position: relative;
+  }
+
+  .form-check-input::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    content: &quot;&quot;;
+    transform: translate(-50%, -50%);
+  }
+
+  .form-check-label {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+  }
+
+  .form-range {
+    height: 44px;
+    touch-action: pan-y;
+  }
+
+  .form-range::-webkit-slider-runnable-track {
+    height: 44px;
+  }
+
+  .form-range::-moz-range-track {
+    height: 44px;
+  }
+
+  .form-range::-webkit-slider-thumb {
+    margin-top: 12px;
+  }
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+/* Model-authored chart rules can otherwise stretch icons after these styles load. */
+svg.lucide {
+  display: block;
+  width: var(--icon-size) !important;
+  height: var(--icon-size) !important;
+  flex: none;
+  margin: 0 !important;
+  stroke-width: 1.6;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;style&gt;
+#native-workbench-prototype {
+  --wb-bg: #0a0a0a;
+  --wb-side: #111111;
+  --wb-soft: #1e1e1e;
+  --wb-terminal: #0a0a0a;
+  --wb-text: #e5e5e5;
+  --wb-muted: #999999;
+  --wb-line: #303030;
+  --wb-accent: #73c991;
+  --wb-accent-soft: #19271f;
+  --wb-warning: #e5ba78;
+  --wb-warning-bg: #2a2000;
+  --wb-delete: #f87171;
+  --wb-delete-bg: #312020;
+  --wb-blue: #4a9eff;
+  --wb-orange: #e59b68;
+  --wb-bubble: #2a2a2a;
+  --wb-terminal-width: 30%;
+  color: var(--wb-text);
+  font: 13px/1.65 -apple-system, BlinkMacSystemFont, &quot;Segoe UI&quot;, &quot;PingFang SC&quot;, sans-serif;
+  width: 100%;
+  color-scheme: dark;
+}
+#native-workbench-prototype * { box-sizing: border-box; }
+#native-workbench-prototype [hidden] { display: none !important; }
+#native-workbench-prototype button, #native-workbench-prototype input, #native-workbench-prototype select, #native-workbench-prototype textarea { font: inherit; }
+#native-workbench-prototype button { cursor: pointer; }
+#native-workbench-prototype button:disabled { cursor: default; opacity: .6; }
+#native-workbench-prototype h2, #native-workbench-prototype h3, #native-workbench-prototype p { margin: 0; }
+#native-workbench-prototype h2 { font-size: 19px; line-height: 1.45; font-weight: 500; letter-spacing: -.4px; }
+#native-workbench-prototype h3 { font-size: 13px; font-weight: 500; }
+#native-workbench-prototype strong { font-weight: 500; }
+#native-workbench-prototype code, #native-workbench-prototype pre, #native-workbench-prototype .wb-mono { font-family: &quot;SFMono-Regular&quot;, Consolas, &quot;Liberation Mono&quot;, monospace; }
+#native-workbench-prototype code { font-size: 12px; color: inherit; background: none; padding: 0; }
+#native-workbench-prototype svg { width: 16px; height: 16px; flex-shrink: 0; }
+#native-workbench-prototype .wb-window { background: var(--wb-bg); border: 1px solid var(--wb-line); border-radius: 2px; overflow: clip; }
+#native-workbench-prototype .wb-header { display: flex; align-items: center; gap: 8px; padding: 4px 8px; min-height: 40px; flex-wrap: wrap; background: #1e1e1e; border-bottom: 1px solid #292929; }
+#native-workbench-prototype .wb-brand { display: flex; align-items: center; gap: 9px; font-weight: 500; letter-spacing: -.3px; }
+#native-workbench-prototype .wb-mark { display: grid; place-items: center; width: 28px; height: 28px; background: var(--wb-text); color: var(--wb-bg); border-radius: 8px; font-family: monospace; font-size: 16px; }
+#native-workbench-prototype .wb-project { display: flex; align-items: center; gap: 5px; color: #bdbdbd; font-size: 12px; }
+#native-workbench-prototype .wb-header-end { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--wb-muted); border: 1px solid var(--wb-line); padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+#native-workbench-prototype .wb-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 7px; color: var(--wb-muted); background: transparent; border: 0; border-radius: 5px; min-height: 30px; }
+#native-workbench-prototype .wb-icon-button:hover { color: var(--wb-text); background: var(--wb-soft); }
+#native-workbench-prototype .wb-layout { display: grid; grid-template-columns: 37px minmax(0, 1fr) var(--wb-terminal-width); align-items: stretch; }
+#native-workbench-prototype .wb-rail { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 2px; border-right: 1px solid #292929; background: #1a1a1a; }
+#native-workbench-prototype .wb-nav { border: 0; border-radius: 5px; color: var(--wb-muted); background: transparent; width: 32px; min-height: 35px; padding: 7px; display: flex; align-items: center; justify-content: center; gap: 5px; }
+#native-workbench-prototype .wb-nav:hover { background: var(--wb-soft); color: var(--wb-text); }
+#native-workbench-prototype .wb-nav[aria-pressed=&quot;true&quot;] { background: #1c304b; color: var(--wb-blue); }
+#native-workbench-prototype .wb-nav-label { display: none; }
+#native-workbench-prototype .wb-content-area { display: grid; grid-template-columns: 167px minmax(0, 1fr); min-width: 0; }
+#native-workbench-prototype .wb-sidebar { background: var(--wb-side); border-right: 4px solid #252525; min-width: 0; padding: 12px 7px; }
+#native-workbench-prototype .wb-side-heading { color: var(--wb-muted); font-size: 11px; letter-spacing: .7px; margin: 0 5px 14px; }
+#native-workbench-prototype .wb-side-section { margin: 20px 5px 8px; font-size: 11px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-side-button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; border-radius: 0; background: transparent; color: #bbb; text-align: left; padding: 6px 7px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-side-button:hover { background: var(--wb-soft); }
+#native-workbench-prototype .wb-side-button[aria-pressed=&quot;true&quot;] { background: #222; color: #ddd; }
+#native-workbench-prototype .wb-side-button small { font-size: 11px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-side-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+#native-workbench-prototype .wb-tree-parent { display: flex; gap: 6px; align-items: center; color: var(--wb-muted); margin: 14px 4px 5px; font-size: 12px; }
+#native-workbench-prototype .wb-main { min-width: 0; }
+#native-workbench-prototype .wb-main-header { min-height: 51px; padding: 11px 18px; display: flex; align-items: center; gap: 9px; justify-content: space-between; flex-wrap: wrap; border-bottom: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-main-title { display: flex; align-items: center; gap: 7px; font-weight: 500; }
+#native-workbench-prototype .wb-main-body { padding: 16px 16px 20px; min-height: 660px; }
+#native-workbench-prototype .wb-eyebrow { font-size: 11px; color: var(--wb-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--wb-accent); display: inline-block; flex-shrink: 0; }
+#native-workbench-prototype .wb-subtitle { color: var(--wb-muted); font-size: 11px; margin-top: 7px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-message { margin-top: 24px; }
+#native-workbench-prototype .wb-message-role { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; margin-bottom: 7px; }
+#native-workbench-prototype .wb-message-role small { margin-left: auto; color: var(--wb-muted); font-size: 11px; font-weight: 400; }
+#native-workbench-prototype .wb-avatar { height: 20px; width: 20px; display: inline-grid; place-items: center; border: 1px solid var(--wb-line); border-radius: 5px; font-size: 11px; }
+#native-workbench-prototype .wb-user-message { padding: 12px 14px; background: var(--wb-soft); border-radius: 8px; }
+#native-workbench-prototype .wb-assistant-text { padding-left: 1px; }
+#native-workbench-prototype .wb-tool { margin-top: 12px; border: 1px solid var(--wb-line); border-radius: 7px; overflow: clip; }
+#native-workbench-prototype .wb-tool summary { padding: 10px 12px; cursor: pointer; display: flex; align-items: flex-start; gap: 8px; list-style: none; }
+#native-workbench-prototype .wb-tool summary::-webkit-details-marker { display: none; }
+#native-workbench-prototype .wb-tool summary::after { content: &quot;+&quot;; margin-left: auto; color: var(--wb-muted); }
+#native-workbench-prototype .wb-tool[open] summary::after { content: &quot;−&quot;; }
+#native-workbench-prototype .wb-tool-label { flex: 1; min-width: 0; }
+#native-workbench-prototype .wb-tool-label small { display: block; color: var(--wb-muted); font-size: 11px; margin-top: 1px; }
+#native-workbench-prototype .wb-tool-content { border-top: 1px solid var(--wb-line); padding: 10px 12px; font-size: 12px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-code-line { display: block; padding: 2px 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.75 &quot;SFMono-Regular&quot;, Consolas, monospace; }
+#native-workbench-prototype .wb-added { background: var(--wb-accent-soft); color: var(--wb-accent); }
+#native-workbench-prototype .wb-removed { background: var(--wb-delete-bg); color: var(--wb-delete); }
+#native-workbench-prototype .wb-code { margin: 10px 0 0; padding: 10px 0; border: 1px solid var(--wb-line); border-radius: 6px; background: var(--wb-side); overflow-wrap: anywhere; white-space: pre-wrap; }
+#native-workbench-prototype .wb-source { color: var(--wb-muted); font-size: 11px; display: block; margin-top: 9px; }
+#native-workbench-prototype .wb-link { padding: 0; border: 0; background: transparent; color: var(--wb-accent); display: inline-flex; align-items: center; gap: 4px; text-align: left; font-size: 12px; }
+#native-workbench-prototype .wb-link:hover { text-decoration: underline; }
+#native-workbench-prototype .wb-stream { margin-top: 20px; }
+#native-workbench-prototype .wb-stream-end { display: inline-block; width: 6px; height: 14px; background: var(--wb-accent); vertical-align: -2px; margin-left: 4px; }
+#native-workbench-prototype .wb-read-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 23px; padding-top: 13px; border-top: 1px solid var(--wb-line); color: var(--wb-muted); font-size: 11px; }
+#native-workbench-prototype .wb-terminal { background: var(--wb-terminal); border-left: 5px solid #242424; min-width: 0; display: flex; flex-direction: column; }
+#native-workbench-prototype .wb-terminal-header { display: flex; gap: 7px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px 12px; min-height: 34px; color: var(--wb-muted); border-bottom: 1px solid #222; }
+#native-workbench-prototype .wb-terminal-name { display: flex; align-items: center; gap: 7px; font-weight: 500; font-size: 12px; }
+#native-workbench-prototype .wb-terminal-screen { padding: 12px; flex: 1; min-width: 0; font: 12px/1.8 &quot;SFMono-Regular&quot;, Consolas, &quot;PingFang SC&quot;, monospace; }
+#native-workbench-prototype .wb-terminal-screen p { overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-term-brand { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 9px; }
+#native-workbench-prototype .wb-term-muted { color: var(--wb-muted); }
+#native-workbench-prototype .wb-term-task { margin-top: 29px; padding-top: 14px; border-top: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-term-block { margin-top: 21px; }
+#native-workbench-prototype .wb-term-ok { color: var(--wb-accent); }
+#native-workbench-prototype .wb-term-indent { padding-left: 14px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-terminal-bottom { border-top: 1px solid var(--wb-line); padding: 12px 13px; }
+#native-workbench-prototype .wb-term-entry { display: flex; align-items: flex-start; gap: 8px; padding: 10px 0; }
+#native-workbench-prototype .wb-term-entry textarea { width: 100%; min-width: 0; min-height: 42px; resize: vertical; background: transparent; color: var(--wb-text); border: 0; padding: 0; font-family: &quot;SFMono-Regular&quot;, Consolas, &quot;PingFang SC&quot;, monospace; font-size: 12px; }
+#native-workbench-prototype .wb-term-entry textarea::placeholder { color: var(--wb-muted); opacity: 1; }
+#native-workbench-prototype .wb-term-hint { font-size: 11px; color: var(--wb-muted); display: flex; align-items: center; justify-content: space-between; gap: 5px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-statusbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; column-gap: 15px; row-gap: 6px; padding: 5px 10px; background: #151515; border-top: 1px solid #252525; font-size: 11px; }
+#native-workbench-prototype .wb-status-items { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-status-button { display: inline-flex; align-items: center; gap: 5px; background: transparent; border: 0; color: var(--wb-muted); padding: 0; font-size: 11px; }
+#native-workbench-prototype .wb-status-button:hover { color: var(--wb-text); text-decoration: underline; }
+#native-workbench-prototype .wb-warning { color: var(--wb-warning); }
+#native-workbench-prototype .wb-notice { margin: 0; padding: 10px 17px; background: var(--wb-warning-bg); color: var(--wb-warning); border-bottom: 1px solid var(--wb-line); font-size: 12px; }
+#native-workbench-prototype .wb-status-detail { padding: 14px 18px; border-top: 1px solid var(--wb-line); background: var(--wb-side); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; font-size: 12px; }
+#native-workbench-prototype .wb-status-detail p { color: var(--wb-muted); margin-top: 4px; font-size: 11px; }
+#native-workbench-prototype .wb-kv { display: grid; grid-template-columns: minmax(72px, .7fr) minmax(0, 1fr); gap: 7px 12px; margin-top: 20px; font-size: 12px; }
+#native-workbench-prototype .wb-kv dt { color: var(--wb-muted); }
+#native-workbench-prototype .wb-kv dd { margin: 0; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-section-label { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex-wrap: wrap; margin: 24px 0 10px; }
+#native-workbench-prototype .wb-context-piece { padding: 11px 0; border-top: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-context-piece summary { cursor: pointer; font-size: 12px; }
+#native-workbench-prototype .wb-context-piece p { margin-top: 9px; font-size: 12px; color: var(--wb-muted); overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-segment { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--wb-side); border: 1px solid var(--wb-line); border-radius: 7px; margin: 18px 0; }
+#native-workbench-prototype .wb-segment button { flex: 1; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--wb-muted); font-size: 11px; }
+#native-workbench-prototype .wb-segment button[aria-pressed=&quot;true&quot;] { color: var(--wb-text); background: var(--wb-bg); box-shadow: 0 1px 3px light-dark(#23352b12, #00000020); }
+#native-workbench-prototype .wb-form-label { display: block; font-size: 12px; color: var(--wb-muted); margin-top: 16px; }
+#native-workbench-prototype .wb-search-field { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-search-field input { min-width: 0; flex: 1 1 150px; border: 1px solid var(--wb-line); border-radius: 5px; padding: 7px 9px; background: var(--wb-bg); color: var(--wb-text); }
+#native-workbench-prototype .wb-action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--wb-line); border-radius: 5px; background: var(--wb-bg); color: var(--wb-text); padding: 6px 10px; font-size: 12px; }
+#native-workbench-prototype .wb-search-result { padding: 15px 0; border-bottom: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-search-result p { font-family: monospace; font-size: 11px; color: var(--wb-muted); margin-top: 6px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-takeover { background: var(--wb-accent); color: var(--wb-bg); border: 0; padding: 5px 9px; border-radius: 5px; }
+#native-workbench-prototype .wb-takeover-panel { padding: 12px 13px; background: var(--wb-bg); border-bottom: 1px solid var(--wb-line); font-size: 12px; }
+#native-workbench-prototype .wb-takeover-panel p { margin-bottom: 9px; }
+#native-workbench-prototype .wb-inline-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-header-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 29px; padding: 3px 10px; border-radius: 5px; background: #111; border: 1px solid #3b3b3b; color: #bdbdbd; font-size: 12px; }
+#native-workbench-prototype .wb-header-toggle[aria-pressed=&quot;true&quot;] { background: #10243d; border-color: #285a9f; color: var(--wb-blue); }
+#native-workbench-prototype .wb-prototype-label { color: #929292; font-size: 11px; }
+#native-workbench-prototype .wb-tree-file { display: flex; align-items: center; gap: 6px; width: 100%; }
+#native-workbench-prototype .wb-tree-file svg { width: 13px; height: 13px; color: #e2c08d; }
+#native-workbench-prototype .wb-file-state { color: #e2c08d; margin-left: auto; }
+#native-workbench-prototype .wb-chat-row { display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 8px; margin: 17px 0; }
+#native-workbench-prototype .wb-chat-avatar { color: var(--wb-orange); padding-top: 3px; }
+#native-workbench-prototype .wb-chat-avatar svg { width: 26px; height: 26px; }
+#native-workbench-prototype .wb-chat-col { min-width: 0; }
+#native-workbench-prototype .wb-chat-meta { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin-bottom: 4px; font-size: 11px; color: #989898; }
+#native-workbench-prototype .wb-chat-meta time { color: #8b929f; font-size: 11px; }
+#native-workbench-prototype .wb-chat-outer { border: 1px solid #303030; border-radius: 3px 8px 8px 8px; background: #111; padding: 5px; }
+#native-workbench-prototype .wb-chat-inner { background: var(--wb-bubble); border: 1px solid #555; border-radius: 2px 5px 5px 5px; padding: 9px 10px; line-height: 1.75; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-chat-inner p + p { margin-top: 10px; }
+#native-workbench-prototype .wb-chat-inner code { color: #b6b8ff; background: #14141f; padding: 2px 4px; border-radius: 3px; }
+#native-workbench-prototype .wb-chat-inner ul { margin: 9px 0 0; padding-left: 19px; }
+#native-workbench-prototype .wb-chat-user { margin: 0 0 19px 54px; }
+#native-workbench-prototype .wb-chat-user .wb-chat-meta { justify-content: flex-end; }
+#native-workbench-prototype .wb-chat-user .wb-chat-outer { padding: 9px 11px; background: #123d72; border-color: #376aa7; border-radius: 8px 3px 8px 8px; }
+#native-workbench-prototype .wb-compact-tool { border: 1px solid #363636; background: #111; border-radius: 6px; padding: 6px; }
+#native-workbench-prototype .wb-tool-heading { display: flex; align-items: center; gap: 6px; border: 1px solid #525252; border-radius: 3px; background: #292929; padding: 5px 8px; font-size: 12px; }
+#native-workbench-prototype .wb-tool-heading svg { color: #73c991; width: 14px; height: 14px; }
+#native-workbench-prototype .wb-compact-tool details { padding: 8px 5px; font-size: 12px; }
+#native-workbench-prototype .wb-compact-tool summary { cursor: pointer; color: #aaa; }
+#native-workbench-prototype .wb-tool-facts { display: flex; flex-wrap: wrap; gap: 12px; border-top: 1px solid #303030; padding: 7px 5px 1px; color: #bbb; font-size: 11px; }
+#native-workbench-prototype .wb-message-table { width: 100%; border-collapse: collapse; margin-top: 9px; font-size: 12px; }
+#native-workbench-prototype .wb-message-table th, #native-workbench-prototype .wb-message-table td { border: 1px solid #62646b; padding: 7px 8px; text-align: left; font-weight: 400; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-message-table th { background: #1f1f1f; }
+#native-workbench-prototype .wb-message-table td { background: #0a0a0a; }
+#native-workbench-prototype .wb-latest-divider { display: flex; align-items: center; gap: 12px; color: #888; font-size: 11px; margin: 25px 0 19px; }
+#native-workbench-prototype .wb-latest-divider::before, #native-workbench-prototype .wb-latest-divider::after { content: &#x27;&#x27;; flex: 1; border-top: 1px dashed #303030; }
+#native-workbench-prototype .wb-chat-request { display: inline-flex; padding: 0; background: transparent; border: 0; color: #8b929f; }
+#native-workbench-prototype .wb-chat-request svg { width: 12px; height: 12px; }
+#native-workbench-prototype .wb-chat-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; padding: 7px 0 0 34px; font-size: 11px; color: #888; }
+#native-workbench-prototype .wb-inline-diff { margin-top: 10px; border: 1px solid #444; border-radius: 4px; background: #161616; }
+#native-workbench-prototype .wb-inline-diff summary { cursor: pointer; padding: 6px 8px; font-size: 11px; color: #bbb; }
+#native-workbench-prototype[data-page=&quot;conversation&quot;] .wb-main-header { display: none; }
+#native-workbench-prototype[data-terminal=&quot;false&quot;] .wb-layout { grid-template-columns: 37px minmax(0, 1fr); }
+#native-workbench-prototype[data-terminal=&quot;false&quot;] .wb-terminal { display: none; }
+#native-workbench-prototype[data-sidebar=&quot;false&quot;] .wb-content-area { grid-template-columns: minmax(0, 1fr); }
+#native-workbench-prototype[data-sidebar=&quot;false&quot;] .wb-sidebar { display: none; }
+#native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-layout { grid-template-columns: 45px minmax(0, 1fr); }
+#native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-terminal { grid-column: 2; border-top: 1px solid var(--wb-line); border-left: 0; }
+#native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-terminal-screen { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+#native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-term-task { margin-top: 0; border-top: 0; padding-top: 0; }
+#native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-main-body { min-height: 0; }
+@media (max-width: 870px) {
+  #native-workbench-prototype .wb-layout { grid-template-columns: 43px minmax(0, 1fr); }
+  #native-workbench-prototype .wb-terminal { grid-column: 2; border-left: 0; border-top: 1px solid var(--wb-line); }
+  #native-workbench-prototype .wb-terminal-screen { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  #native-workbench-prototype .wb-term-task { margin-top: 0; padding-top: 0; border-top: 0; }
+  #native-workbench-prototype .wb-main-body { min-height: 0; }
+}
+@media (max-width: 550px) {
+  #native-workbench-prototype .wb-header { padding: 6px 8px; gap: 6px; }
+  #native-workbench-prototype .wb-header-end { gap: 8px; }
+  #native-workbench-prototype .wb-project { padding-left: 0; }
+  #native-workbench-prototype .wb-layout, #native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-layout { display: block; }
+  #native-workbench-prototype .wb-rail { flex-direction: row; flex-wrap: wrap; justify-content: space-between; border-right: 0; border-bottom: 1px solid var(--wb-line); padding: 6px; gap: 3px; }
+  #native-workbench-prototype .wb-nav { width: auto; min-width: 65px; flex: 1; padding: 6px 7px; }
+  #native-workbench-prototype .wb-nav-label { display: inline; font-size: 11px; }
+  #native-workbench-prototype .wb-content-area { display: block; }
+  #native-workbench-prototype .wb-sidebar { border-right: 0; border-bottom: 1px solid var(--wb-line); padding: 10px 12px; }
+  #native-workbench-prototype .wb-side-heading { margin-bottom: 5px; }
+  #native-workbench-prototype .wb-side-section, #native-workbench-prototype .wb-tree-parent { margin-top: 9px; }
+  #native-workbench-prototype .wb-side-button { padding: 6px 8px; flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #native-workbench-prototype .wb-side-secondary { display: none; }
+  #native-workbench-prototype .wb-main-header { padding: 10px 14px; }
+  #native-workbench-prototype .wb-main-body { padding: 21px 16px; }
+  #native-workbench-prototype .wb-chat-row { grid-template-columns: 21px minmax(0, 1fr); gap: 6px; }
+  #native-workbench-prototype .wb-chat-avatar svg { width: 21px; height: 21px; }
+  #native-workbench-prototype .wb-chat-user { margin-left: 25px; }
+  #native-workbench-prototype .wb-message-table th, #native-workbench-prototype .wb-message-table td { padding: 5px; }
+  #native-workbench-prototype .wb-terminal-screen, #native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-terminal-screen { display: block; }
+  #native-workbench-prototype .wb-term-task, #native-workbench-prototype[data-layout=&quot;bottom&quot;] .wb-term-task { margin-top: 20px; border-top: 1px solid var(--wb-line); padding-top: 14px; }
+  #native-workbench-prototype .wb-status-detail { grid-template-columns: 1fr; gap: 12px; }
+}
+@media (pointer: coarse) {
+  #native-workbench-prototype button, #native-workbench-prototype summary { min-height: 44px; }
+  #native-workbench-prototype input, #native-workbench-prototype textarea { font-size: 16px; }
+}
+&lt;/style&gt;
+
+&lt;div id=&quot;native-workbench-prototype&quot; data-layout=&quot;right&quot; data-sidebar=&quot;true&quot; data-page=&quot;conversation&quot; data-terminal=&quot;true&quot; aria-label=&quot;参照 cc-viewer 界面的 Codex 工作台原型&quot;&gt;
+  &lt;div class=&quot;wb-window&quot;&gt;
+    &lt;header class=&quot;wb-header&quot;&gt;
+      &lt;button class=&quot;wb-icon-button&quot; id=&quot;wb-toggle-sidebar&quot; type=&quot;button&quot; aria-label=&quot;切换项目侧栏&quot; aria-pressed=&quot;true&quot;&gt;&lt;i data-lucide=&quot;menu&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/button&gt;
+      &lt;div class=&quot;wb-project&quot;&gt;&lt;span&gt;当前项目:demo-web&lt;/span&gt;&lt;/div&gt;
+      &lt;div class=&quot;wb-header-end&quot;&gt;&lt;span class=&quot;wb-prototype-label&quot;&gt;Codex 原型 · 示例数据&lt;/span&gt;&lt;button class=&quot;wb-header-toggle&quot; id=&quot;wb-terminal-toggle&quot; type=&quot;button&quot; aria-pressed=&quot;true&quot;&gt;&lt;i data-lucide=&quot;terminal&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;终端&lt;/button&gt;&lt;button class=&quot;wb-header-toggle&quot; id=&quot;wb-network-toggle&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;&lt;i data-lucide=&quot;panel-top&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;网络&lt;/button&gt;&lt;/div&gt;
+    &lt;/header&gt;
+    &lt;div class=&quot;wb-notice&quot; id=&quot;wb-notice&quot; role=&quot;status&quot; hidden&gt;&lt;/div&gt;
+    &lt;div class=&quot;wb-layout&quot;&gt;
+      &lt;nav class=&quot;wb-rail&quot; aria-label=&quot;工作台导航&quot;&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-page=&quot;conversation&quot; aria-label=&quot;返回对话&quot; aria-pressed=&quot;false&quot; data-tooltip=&quot;返回对话&quot;&gt;&lt;i data-lucide=&quot;messages-square&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;对话&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-side=&quot;files&quot; aria-label=&quot;项目文件&quot; aria-pressed=&quot;false&quot; data-tooltip=&quot;项目文件&quot;&gt;&lt;i data-lucide=&quot;folder&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;文件&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-side=&quot;git&quot; aria-label=&quot;Git 变更&quot; aria-pressed=&quot;true&quot; data-tooltip=&quot;Git 变更&quot;&gt;&lt;i data-lucide=&quot;git-branch&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;Git&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-side=&quot;search&quot; aria-label=&quot;全文搜索&quot; aria-pressed=&quot;false&quot; data-tooltip=&quot;全文搜索&quot;&gt;&lt;i data-lucide=&quot;search&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;搜索&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-page=&quot;requests&quot; aria-label=&quot;模型请求&quot; aria-pressed=&quot;false&quot; data-tooltip=&quot;模型请求&quot;&gt;&lt;i data-lucide=&quot;activity&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;请求&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-nav&quot; type=&quot;button&quot; data-page=&quot;history&quot; aria-label=&quot;运行历史&quot; aria-pressed=&quot;false&quot; data-tooltip=&quot;运行历史&quot;&gt;&lt;i data-lucide=&quot;history&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span class=&quot;wb-nav-label&quot;&gt;历史&lt;/span&gt;&lt;/button&gt;
+      &lt;/nav&gt;
+      &lt;div class=&quot;wb-content-area&quot;&gt;
+        &lt;aside class=&quot;wb-sidebar&quot; id=&quot;wb-sidebar&quot; aria-label=&quot;项目内容&quot;&gt;&lt;/aside&gt;
+        &lt;main class=&quot;wb-main&quot;&gt;
+          &lt;div class=&quot;wb-main-header&quot;&gt;&lt;div class=&quot;wb-main-title&quot; id=&quot;wb-page-title&quot;&gt;实时阅读&lt;/div&gt;&lt;button type=&quot;button&quot; class=&quot;wb-icon-button&quot; data-page=&quot;conversation&quot;&gt;&lt;i data-lucide=&quot;arrow-left&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;返回对话&lt;/button&gt;&lt;/div&gt;
+          &lt;div class=&quot;wb-main-body&quot; id=&quot;wb-content&quot;&gt;&lt;/div&gt;
+        &lt;/main&gt;
+      &lt;/div&gt;
+      &lt;section class=&quot;wb-terminal&quot; id=&quot;wb-terminal&quot; aria-label=&quot;原生 Codex CLI，示意画面&quot;&gt;
+        &lt;div class=&quot;wb-terminal-header&quot;&gt;&lt;span style=&quot;font-size:11px&quot;&gt;原生 Codex CLI&lt;/span&gt;&lt;span id=&quot;wb-input-owner&quot; style=&quot;font-size:11px&quot;&gt;本页可输入&lt;/span&gt;&lt;/div&gt;
+        &lt;div class=&quot;wb-takeover-panel&quot; id=&quot;wb-takeover-panel&quot; hidden&gt;
+          &lt;p id=&quot;wb-takeover-copy&quot;&gt;终端由另一页面控制，本页可继续阅读。&lt;/p&gt;
+          &lt;div class=&quot;wb-inline-actions&quot;&gt;&lt;button type=&quot;button&quot; class=&quot;wb-takeover&quot; id=&quot;wb-takeover&quot;&gt;接管输入&lt;/button&gt;&lt;button type=&quot;button&quot; class=&quot;wb-action&quot; id=&quot;wb-cancel-takeover&quot; hidden&gt;取消&lt;/button&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;wb-terminal-screen&quot;&gt;
+          &lt;div&gt;
+            &lt;div class=&quot;wb-term-brand&quot;&gt;&lt;span&gt;&amp;gt;_&lt;/span&gt; OpenAI Codex&lt;/div&gt;
+            &lt;p class=&quot;wb-term-muted&quot;&gt;/workspace/demo-web&lt;/p&gt;
+            &lt;p class=&quot;wb-term-muted&quot;&gt;gpt-5.6-sol · 示例会话&lt;/p&gt;
+            &lt;p class=&quot;wb-term-muted&quot; style=&quot;margin-top:15px&quot;&gt;/model · /permissions&lt;/p&gt;
+          &lt;/div&gt;
+          &lt;div class=&quot;wb-term-task&quot;&gt;
+            &lt;p&gt;› 给搜索补上取消按钮，点取消后中止当前请求，并保留关键词。&lt;/p&gt;
+            &lt;div class=&quot;wb-term-block&quot;&gt;&lt;p&gt;• 我先看一下搜索实现。&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;Read SearchBar.tsx&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;Read useSearch.ts&lt;/p&gt;&lt;/div&gt;
+            &lt;div class=&quot;wb-term-block&quot;&gt;&lt;p&gt;• 搜索取消的修改方案：&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;useSearch.ts&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;└─ 中止当前请求&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;SearchBar.tsx&lt;/p&gt;&lt;p class=&quot;wb-term-indent&quot;&gt;└─ 显示取消按钮&lt;/p&gt;&lt;/div&gt;
+            &lt;div class=&quot;wb-term-block&quot;&gt;&lt;p&gt;• 使用 AbortController 中止请求，保留输入关键词。&lt;/p&gt;&lt;/div&gt;
+            &lt;div class=&quot;wb-term-block&quot;&gt;&lt;p&gt;• 补上取消时的状态复位…&lt;/p&gt;&lt;p class=&quot;wb-term-muted&quot;&gt;esc to interrupt&lt;/p&gt;&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;wb-terminal-bottom&quot;&gt;
+          &lt;label class=&quot;wb-term-entry&quot;&gt;&lt;span aria-hidden=&quot;true&quot;&gt;›&lt;/span&gt;&lt;textarea id=&quot;wb-terminal-input&quot; rows=&quot;2&quot; placeholder=&quot;在原生 CLI 中输入…&quot; aria-label=&quot;终端输入示意，仅本地草稿，不执行&quot;&gt;&lt;/textarea&gt;&lt;/label&gt;
+          &lt;div class=&quot;wb-term-hint&quot;&gt;&lt;span id=&quot;wb-terminal-help&quot;&gt;原型输入仅作展示，不会执行&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/section&gt;
+    &lt;/div&gt;
+    &lt;footer class=&quot;wb-statusbar&quot;&gt;
+      &lt;div class=&quot;wb-status-items&quot;&gt;
+        &lt;button class=&quot;wb-status-button&quot; type=&quot;button&quot; data-status=&quot;capture&quot;&gt;&lt;span class=&quot;wb-dot&quot;&gt;&lt;/span&gt;&lt;span id=&quot;wb-capture-label&quot;&gt;实时捕获正常&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-status-button&quot; type=&quot;button&quot; data-status=&quot;save&quot;&gt;&lt;i data-lucide=&quot;hard-drive&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span id=&quot;wb-save-label&quot;&gt;保存中 · 最新 2 条&lt;/span&gt;&lt;/button&gt;
+        &lt;button class=&quot;wb-status-button&quot; type=&quot;button&quot; data-status=&quot;history&quot;&gt;&lt;i data-lucide=&quot;history&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span id=&quot;wb-coverage-label&quot;&gt;历史覆盖：本次运行&lt;/span&gt;&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;span style=&quot;color:var(--wb-muted)&quot;&gt;仅本机 · 1 个 CLI&lt;/span&gt;
+    &lt;/footer&gt;
+    &lt;section class=&quot;wb-status-detail&quot; id=&quot;wb-status-detail&quot; aria-label=&quot;捕获和保存详情&quot; hidden&gt;
+      &lt;div&gt;&lt;strong&gt;实时捕获&lt;/strong&gt;&lt;p id=&quot;wb-capture-detail&quot;&gt;当前观察流连续，页面已显示最新内容。&lt;/p&gt;&lt;/div&gt;
+      &lt;div&gt;&lt;strong&gt;保存到磁盘&lt;/strong&gt;&lt;p id=&quot;wb-save-detail&quot;&gt;已保存到 #126；#127–128 仍在等待写入。&lt;/p&gt;&lt;/div&gt;
+      &lt;div&gt;&lt;strong&gt;历史覆盖&lt;/strong&gt;&lt;p id=&quot;wb-coverage-detail&quot;&gt;只覆盖本次运行中已捕获的内容；原生历史按已确认的身份补齐。&lt;/p&gt;&lt;/div&gt;
+    &lt;/section&gt;
+  &lt;/div&gt;
+  &lt;div id=&quot;wb-announcement&quot; aria-live=&quot;polite&quot; style=&quot;position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)&quot;&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;script&gt;
+(() =&gt; {
+  const root = document.getElementById(&#x27;native-workbench-prototype&#x27;);
+  const content = root.querySelector(&#x27;#wb-content&#x27;);
+  const sidebar = root.querySelector(&#x27;#wb-sidebar&#x27;);
+  const pageTitle = root.querySelector(&#x27;#wb-page-title&#x27;);
+  const terminalInput = root.querySelector(&#x27;#wb-terminal-input&#x27;);
+  const state = { page: &#x27;conversation&#x27;, side: &#x27;git&#x27;, layout: &#x27;right&#x27;, terminal: true, terminalWidth: 30, sidebar: true, scenario: &#x27;normal&#x27;, request: &#x27;03&#x27;, file: &#x27;useSearch.ts&#x27;, history: &#x27;current&#x27;, context: &#x27;read&#x27;, follow: true };
+  const announce = message =&gt; { root.querySelector(&#x27;#wb-announcement&#x27;).textContent = message; };
+  const refreshIcons = () =&gt; { if (globalThis.lucide) globalThis.lucide.createIcons({ attrs: { width: 16, height: 16 } }); };
+  const sideButton = (label, meta, attribute, value, active) =&gt; `&lt;button class=&quot;wb-side-button&quot; type=&quot;button&quot; ${attribute}=&quot;${value}&quot; aria-pressed=&quot;${active}&quot;&gt;&lt;span&gt;${label}&lt;/span&gt;&lt;small&gt;${meta}&lt;/small&gt;&lt;/button&gt;`;
+  const titles = { conversation: &#x27;实时阅读&#x27;, requests: &#x27;模型请求&#x27;, files: &#x27;项目文件&#x27;, search: &#x27;全文搜索&#x27;, git: &#x27;Git 变更&#x27;, history: &#x27;运行历史&#x27; };
+  const fileSource = {
+    &#x27;useSearch.ts&#x27;: [&#x27;import { useRef, useState } from &quot;preact/hooks&quot;;&#x27;, &#x27;&#x27;, &#x27;export function useSearch() {&#x27;, &#x27;  const controller = useRef(null);&#x27;, &#x27;  const [loading, setLoading] = useState(false);&#x27;, &#x27;&#x27;, &#x27;  async function search(query) {&#x27;, &#x27;    controller.current = new AbortController();&#x27;, &#x27;    setLoading(true);&#x27;, &#x27;    try {&#x27;, &#x27;      return await fetchResults(query, {&#x27;, &#x27;        signal: controller.current.signal&#x27;, &#x27;      });&#x27;, &#x27;    } finally {&#x27;, &#x27;      setLoading(false);&#x27;, &#x27;    }&#x27;, &#x27;  }&#x27;, &#x27;&#x27;, &#x27;  const cancel = () =&gt; controller.current?.abort();&#x27;, &#x27;  return { search, cancel, loading };&#x27;, &#x27;}&#x27;],
+    &#x27;SearchBar.tsx&#x27;: [&#x27;import { useSearch } from &quot;./useSearch&quot;;&#x27;, &#x27;&#x27;, &#x27;export function SearchBar() {&#x27;, &#x27;  const { search, cancel, loading } = useSearch();&#x27;, &#x27;&#x27;, &#x27;  return (&#x27;, &#x27;    &lt;form onSubmit={handleSearch}&gt;&#x27;, &#x27;      &lt;input aria-label=&quot;搜索关键词&quot; /&gt;&#x27;, &#x27;      {loading &amp;&amp; (&#x27;, &#x27;        &lt;button onClick={cancel}&gt;取消&lt;/button&gt;&#x27;, &#x27;      )}&#x27;, &#x27;    &lt;/form&gt;&#x27;, &#x27;  );&#x27;, &#x27;}&#x27;]
+  };
+  const escape = value =&gt; String(value).replaceAll(&#x27;&amp;&#x27;, &#x27;&amp;amp;&#x27;).replaceAll(&#x27;&lt;&#x27;, &#x27;&amp;lt;&#x27;).replaceAll(&#x27;&gt;&#x27;, &#x27;&amp;gt;&#x27;).replaceAll(&#x27;&quot;&#x27;, &#x27;&amp;quot;&#x27;);
+  function renderSidebar() {
+    const view = state.side;
+    if (view === &#x27;conversation&#x27;) {
+      sidebar.innerHTML = `&lt;div class=&quot;wb-side-heading&quot;&gt;对话&lt;/div&gt;${sideButton(&#x27;搜索取消交互&#x27;, &#x27;当前运行 · 实时&#x27;, &#x27;data-page&#x27;, &#x27;conversation&#x27;, true)}&lt;div class=&quot;wb-side-section&quot;&gt;已关联来源&lt;/div&gt;&lt;div style=&quot;padding:0 8px;font-size:11px;color:var(--wb-muted)&quot;&gt;模型请求 #01–03&lt;br&gt;当前会话已确认&lt;/div&gt;&lt;div class=&quot;wb-side-secondary&quot;&gt;&lt;div class=&quot;wb-side-section&quot;&gt;最近运行&lt;/div&gt;${sideButton(&#x27;整理搜索组件&#x27;, &#x27;昨天 · 只读记录&#x27;, &#x27;data-history&#x27;, &#x27;previous&#x27;, false)}&lt;/div&gt;`;
+    } else if (view === &#x27;requests&#x27;) {
+      sidebar.innerHTML = `&lt;div class=&quot;wb-side-heading&quot;&gt;本次模型请求&lt;/div&gt;${[&#x27;03&#x27;, &#x27;02&#x27;, &#x27;01&#x27;].map((id, i) =&gt; sideButton(`#${id} · 模型响应`, i === 0 ? &#x27;接收中 · WS&#x27; : &#x27;响应已结束 · WS&#x27;, &#x27;data-request&#x27;, id, state.request === id)).join(&#x27;&#x27;)}&lt;div class=&quot;wb-side-secondary&quot;&gt;&lt;div class=&quot;wb-side-section&quot;&gt;连接&lt;/div&gt;&lt;div style=&quot;padding:0 8px;font-size:11px;color:var(--wb-muted)&quot;&gt;一个 WS 连接&lt;br&gt;三个独立响应&lt;/div&gt;&lt;/div&gt;`;
+    } else if (view === &#x27;files&#x27; || view === &#x27;git&#x27;) {
+      sidebar.innerHTML = `&lt;div class=&quot;wb-side-heading&quot; style=&quot;display:flex;gap:10px;align-items:center&quot;&gt;${view === &#x27;git&#x27; ? &#x27;GIT 变更 &lt;span style=&quot;color:#73c991&quot;&gt;+9&lt;/span&gt;&lt;span style=&quot;color:#ef6b6b&quot;&gt;−1&lt;/span&gt;&#x27; : &#x27;文件浏览&#x27;}&lt;/div&gt;&lt;div class=&quot;wb-tree-parent&quot;&gt;&lt;i data-lucide=&quot;chevron-down&quot; aria-hidden=&quot;true&quot; style=&quot;width:11px&quot;&gt;&lt;/i&gt;&lt;i data-lucide=&quot;folder-open&quot; aria-hidden=&quot;true&quot; style=&quot;color:#e2c08d&quot;&gt;&lt;/i&gt;demo-web&lt;/div&gt;&lt;div class=&quot;wb-tree-parent&quot; style=&quot;margin:6px 4px 5px 15px&quot;&gt;&lt;i data-lucide=&quot;chevron-down&quot; aria-hidden=&quot;true&quot; style=&quot;width:11px&quot;&gt;&lt;/i&gt;&lt;i data-lucide=&quot;folder&quot; aria-hidden=&quot;true&quot; style=&quot;color:#e2c08d&quot;&gt;&lt;/i&gt;src&lt;/div&gt;${[&#x27;useSearch.ts&#x27;, &#x27;SearchBar.tsx&#x27;].map(file =&gt; `&lt;button class=&quot;wb-side-button&quot; type=&quot;button&quot; data-file=&quot;${file}&quot; aria-pressed=&quot;${state.page !== &#x27;conversation&#x27; &amp;&amp; file === state.file}&quot;&gt;&lt;span class=&quot;wb-tree-file&quot;&gt;&lt;i data-lucide=&quot;file-code&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;span style=&quot;font-size:11px&quot;&gt;${file}&lt;/span&gt;${view === &#x27;git&#x27; ? &#x27;&lt;span class=&quot;wb-file-state&quot;&gt;M&lt;/span&gt;&#x27; : &#x27;&#x27;}&lt;/span&gt;&lt;/button&gt;`).join(&#x27;&#x27;)}&lt;div class=&quot;wb-side-secondary&quot;&gt;&lt;div class=&quot;wb-side-section&quot; style=&quot;border-top:1px dashed #303030;padding-top:13px&quot;&gt;${view === &#x27;git&#x27; ? &#x27;⌄ 本地提交&#x27; : &#x27;工作区范围&#x27;}&lt;/div&gt;&lt;div style=&quot;padding:0 8px;font-size:11px;color:var(--wb-muted)&quot;&gt;${view === &#x27;git&#x27; ? &#x27;&lt;code style=&quot;font-size:11px;color:#bbb&quot;&gt;a31c8e2&lt;/code&gt; 整理搜索组件&lt;br&gt;&lt;span style=&quot;color:#888&quot;&gt;feat/search-cancel&lt;/span&gt;&#x27; : &#x27;当前启动目录 · 只读&#x27;}&lt;/div&gt;&lt;/div&gt;`;
+    } else if (view === &#x27;search&#x27;) {
+      sidebar.innerHTML = `&lt;div class=&quot;wb-side-heading&quot;&gt;搜索范围&lt;/div&gt;&lt;div style=&quot;padding:0 6px&quot;&gt;demo-web&lt;/div&gt;&lt;div class=&quot;wb-side-section&quot;&gt;目录&lt;/div&gt;&lt;div style=&quot;padding:0 6px;color:var(--wb-muted);font-size:12px&quot;&gt;src /&lt;br&gt;遵循项目忽略规则&lt;/div&gt;`;
+    } else {
+      sidebar.innerHTML = `&lt;div class=&quot;wb-side-heading&quot;&gt;运行历史&lt;/div&gt;${sideButton(&#x27;搜索取消交互&#x27;, &#x27;今天 · 当前运行&#x27;, &#x27;data-history&#x27;, &#x27;current&#x27;, state.history === &#x27;current&#x27;)}${sideButton(&#x27;整理搜索组件&#x27;, &#x27;昨天 · 已保存&#x27;, &#x27;data-history&#x27;, &#x27;previous&#x27;, state.history === &#x27;previous&#x27;)}`;
+    }
+  }
+  function conversationMarkup() {
+    const row = (body, time, plain = false) =&gt; `&lt;article class=&quot;wb-chat-row&quot;&gt;&lt;span class=&quot;wb-chat-avatar&quot; aria-hidden=&quot;true&quot;&gt;&lt;i data-lucide=&quot;aperture&quot;&gt;&lt;/i&gt;&lt;/span&gt;&lt;div class=&quot;wb-chat-col&quot;&gt;&lt;div class=&quot;wb-chat-meta&quot;&gt;&lt;span&gt;gpt-5.6-sol&lt;/span&gt;&lt;span style=&quot;display:flex;gap:7px;align-items:center&quot;&gt;&lt;button class=&quot;wb-chat-request&quot; type=&quot;button&quot; data-page=&quot;requests&quot; aria-label=&quot;查看这条消息的模型请求&quot;&gt;&lt;i data-lucide=&quot;arrow-right-left&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/button&gt;&lt;time&gt;${time}&lt;/time&gt;&lt;/span&gt;&lt;/div&gt;${plain ? body : `&lt;div class=&quot;wb-chat-outer&quot;&gt;&lt;div class=&quot;wb-chat-inner&quot;&gt;${body}&lt;/div&gt;&lt;/div&gt;`}&lt;/div&gt;&lt;/article&gt;`;
+    return `&lt;article class=&quot;wb-chat-user&quot;&gt;&lt;div class=&quot;wb-chat-meta&quot;&gt;&lt;span&gt;你&lt;/span&gt;&lt;time&gt;14:32:06&lt;/time&gt;&lt;/div&gt;&lt;p class=&quot;wb-chat-outer&quot;&gt;给搜索补上取消按钮，点取消后中止当前请求，并保留关键词。&lt;/p&gt;&lt;/article&gt;
+      ${row(&#x27;&lt;p&gt;我先检查当前搜索实现，再补上取消请求和界面状态的处理。&lt;/p&gt;&#x27;, &#x27;14:32:08&#x27;)}
+      ${row(`&lt;div class=&quot;wb-compact-tool&quot;&gt;&lt;div class=&quot;wb-tool-heading&quot;&gt;&lt;i data-lucide=&quot;check&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;读取搜索实现 · 已获取结果&lt;/div&gt;&lt;details&gt;&lt;summary&gt;结果详情&lt;/summary&gt;&lt;div style=&quot;padding:8px 0&quot;&gt;&lt;button class=&quot;wb-link&quot; type=&quot;button&quot; data-open-file=&quot;useSearch.ts&quot;&gt;src/useSearch.ts&lt;/button&gt;&lt;br&gt;&lt;button class=&quot;wb-link&quot; type=&quot;button&quot; data-open-file=&quot;SearchBar.tsx&quot;&gt;src/SearchBar.tsx&lt;/button&gt;&lt;span class=&quot;wb-source&quot;&gt;结果来源：后续请求 #02&lt;/span&gt;&lt;/div&gt;&lt;/details&gt;&lt;div class=&quot;wb-tool-facts&quot;&gt;&lt;span&gt;2 个文件&lt;/span&gt;&lt;span&gt;结果已观察&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;`, &#x27;14:32:10&#x27;, true)}
+      ${row(`&lt;p&gt;搜索取消的修改方案：&lt;/p&gt;&lt;table class=&quot;wb-message-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;文件&lt;/th&gt;&lt;th&gt;修改内容&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;&lt;code&gt;useSearch.ts&lt;/code&gt;&lt;/td&gt;&lt;td&gt;中止当前请求&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;code&gt;SearchBar.tsx&lt;/code&gt;&lt;/td&gt;&lt;td&gt;显示取消按钮&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;ul&gt;&lt;li&gt;使用 &lt;code&gt;AbortController&lt;/code&gt; 取消请求。&lt;/li&gt;&lt;li&gt;取消后保留关键词，并退出加载状态。&lt;/li&gt;&lt;/ul&gt;&lt;details class=&quot;wb-inline-diff&quot;&gt;&lt;summary&gt;拟议修改 · useSearch.ts · +3&lt;/summary&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+ const cancel = () =&amp;gt; {&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+   controller.current?.abort();&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+ };&lt;/span&gt;&lt;span class=&quot;wb-source&quot; style=&quot;padding:5px 8px&quot;&gt;调用已生成 · 尚未观察到执行结果&lt;/span&gt;&lt;/details&gt;`, &#x27;14:32:13&#x27;)}
+      &lt;div class=&quot;wb-latest-divider&quot;&gt;最新回复&lt;/div&gt;
+      ${row(&#x27;&lt;p&gt;接下来补上取消时的状态复位，避免旧请求覆盖新的搜索结果。&lt;span class=&quot;wb-stream-end&quot; aria-hidden=&quot;true&quot;&gt;&lt;/span&gt;&lt;/p&gt;&#x27;, &#x27;14:32:18&#x27;)}
+      &lt;div class=&quot;wb-chat-footer&quot;&gt;&lt;span&gt;&lt;span class=&quot;wb-dot&quot; style=&quot;margin-right:5px&quot;&gt;&lt;/span&gt;模型响应接收中&lt;/span&gt;&lt;button class=&quot;wb-link&quot; type=&quot;button&quot; id=&quot;wb-follow&quot; aria-pressed=&quot;${state.follow}&quot; style=&quot;color:#aaa;font-size:11px&quot;&gt;&lt;i data-lucide=&quot;arrow-down&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;${state.follow ? &#x27;跟随最新&#x27; : &#x27;已暂停跟随&#x27;}&lt;/button&gt;&lt;/div&gt;`;
+  }
+  function requestMarkup() {
+    const live = state.request === &#x27;03&#x27;;
+    const tokens = state.request === &#x27;02&#x27; ? &#x27;6,240 输入 / 810 输出&#x27; : &#x27;3,410 输入 / 226 输出&#x27;;
+    return `&lt;div class=&quot;wb-eyebrow&quot;&gt;原始模型请求 · 已脱敏&lt;/div&gt;&lt;h2&gt;请求 #${state.request}&lt;/h2&gt;&lt;p class=&quot;wb-subtitle&quot;&gt;${live ? &#x27;模型响应仍在接收&#x27; : &#x27;本次模型响应已结束&#x27;} · ${live ? &#x27;用量待响应返回&#x27; : &#x27;不代表整个 Codex 任务结束&#x27;}&lt;/p&gt;
+      &lt;dl class=&quot;wb-kv&quot;&gt;&lt;dt&gt;传输&lt;/dt&gt;&lt;dd&gt;WebSocket · response.create&lt;/dd&gt;&lt;dt&gt;模型&lt;/dt&gt;&lt;dd&gt;示例模型 · 以请求字段为准&lt;/dd&gt;&lt;dt&gt;响应&lt;/dt&gt;&lt;dd class=&quot;wb-mono&quot;&gt;resp_demo_${state.request}&lt;/dd&gt;&lt;dt&gt;请求耗时&lt;/dt&gt;&lt;dd&gt;${live ? &#x27;接收中&#x27; : state.request === &#x27;02&#x27; ? &#x27;2.8 s&#x27; : &#x27;1.6 s&#x27;}&lt;/dd&gt;&lt;dt&gt;本次用量&lt;/dt&gt;&lt;dd&gt;${live ? &#x27;待返回&#x27; : tokens}&lt;/dd&gt;&lt;/dl&gt;
+      &lt;div class=&quot;wb-segment&quot; aria-label=&quot;上下文展示方式&quot;&gt;&lt;button type=&quot;button&quot; data-context=&quot;read&quot; aria-pressed=&quot;${state.context === &#x27;read&#x27;}&quot;&gt;上下文&lt;/button&gt;&lt;button type=&quot;button&quot; data-context=&quot;raw&quot; aria-pressed=&quot;${state.context === &#x27;raw&#x27;}&quot;&gt;脱敏 JSON&lt;/button&gt;&lt;/div&gt;
+      ${state.context === &#x27;raw&#x27; ? `&lt;pre class=&quot;wb-code&quot; style=&quot;padding:12px;font-size:11px&quot;&gt;${escape(JSON.stringify({type:&#x27;response.create&#x27;, model:&#x27;demo-model&#x27;, previous_response_id: state.request === &#x27;01&#x27; ? null : `resp_demo_0${Number(state.request)-1}`, input:[{type:&#x27;function_call_output&#x27;,call_id:&#x27;call_demo_read&#x27;,output:&#x27;[已截断的安全预览]&#x27;}], stream:true}, null, 2))}&lt;/pre&gt;&lt;span class=&quot;wb-source&quot;&gt;观察副本预览。认证字段与加密内容按策略省略。&lt;/span&gt;` : `&lt;div class=&quot;wb-section-label&quot;&gt;&lt;h3&gt;本次可见输入&lt;/h3&gt;&lt;span class=&quot;wb-badge&quot;&gt;增量上下文&lt;/span&gt;&lt;/div&gt;&lt;details class=&quot;wb-context-piece&quot;&gt;&lt;summary&gt;系统指令 &lt;span style=&quot;color:var(--wb-muted)&quot;&gt;· 安全预览&lt;/span&gt;&lt;/summary&gt;&lt;p&gt;在当前项目中完成用户任务。遵循工作区指令，并保持改动范围明确。&lt;/p&gt;&lt;/details&gt;&lt;details class=&quot;wb-context-piece&quot;&gt;&lt;summary&gt;工具定义 &lt;span style=&quot;color:var(--wb-muted)&quot;&gt;· 2 个示例&lt;/span&gt;&lt;/summary&gt;&lt;p&gt;exec_command · 执行命令&lt;br&gt;apply_patch · 提出文件修改&lt;/p&gt;&lt;/details&gt;&lt;details class=&quot;wb-context-piece&quot; open&gt;&lt;summary&gt;工具结果 &lt;span style=&quot;color:var(--wb-muted)&quot;&gt;· call_demo_read&lt;/span&gt;&lt;/summary&gt;&lt;p&gt;已读取 src/useSearch.ts 与 src/SearchBar.tsx。调用通过明确的 call ID 关联。&lt;/p&gt;&lt;/details&gt;&lt;span class=&quot;wb-source&quot;&gt;先前上下文通过 previous_response_id 引用；未捕获的部分不会补成完整对话。&lt;/span&gt;`}`;
+  }
+  function fileMarkup() {
+    return `&lt;div class=&quot;wb-eyebrow&quot;&gt;工作区文件 · 只读&lt;/div&gt;&lt;h2 style=&quot;overflow-wrap:anywhere&quot;&gt;${state.file}&lt;/h2&gt;&lt;p class=&quot;wb-subtitle&quot;&gt;src/${state.file} · 快照 14:32:18&lt;/p&gt;&lt;pre class=&quot;wb-code&quot;&gt;${fileSource[state.file].map((line, index) =&gt; `&lt;span class=&quot;wb-code-line&quot;&gt;&lt;span style=&quot;color:var(--wb-muted);display:inline-block;width:25px;user-select:none&quot;&gt;${index+1}&lt;/span&gt;${escape(line)}&lt;/span&gt;`).join(&#x27;&#x27;)}&lt;/pre&gt;&lt;div class=&quot;wb-read-footer&quot;&gt;&lt;span&gt;示例文件内容&lt;/span&gt;&lt;button class=&quot;wb-link&quot; data-page=&quot;git&quot; type=&quot;button&quot;&gt;查看工作区 Diff&lt;/button&gt;&lt;/div&gt;`;
+  }
+  function gitMarkup() {
+    const search = state.file === &#x27;useSearch.ts&#x27;;
+    return `&lt;div class=&quot;wb-eyebrow&quot;&gt;&lt;i data-lucide=&quot;git-branch&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;feat/search-cancel · 工作区&lt;/div&gt;&lt;h2 style=&quot;overflow-wrap:anywhere&quot;&gt;${state.file}&lt;/h2&gt;&lt;p class=&quot;wb-subtitle&quot;&gt;未暂存差异 · 读取于 14:32:18&lt;/p&gt;&lt;div class=&quot;wb-section-label&quot;&gt;&lt;h3&gt;src/${state.file}&lt;/h3&gt;&lt;span style=&quot;color:var(--wb-accent);font-size:12px&quot;&gt;${search ? &#x27;+6 −1&#x27; : &#x27;+3 −0&#x27;}&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;wb-code&quot; style=&quot;padding:10px 0&quot;&gt;${search ? `&lt;span class=&quot;wb-code-line&quot;&gt;  export function useSearch() {&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+   const controller = useRef(null);&lt;/span&gt;&lt;span class=&quot;wb-code-line&quot;&gt;    async function search(query) {&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+     controller.current =&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+       new AbortController();&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-removed&quot;&gt;-     return fetchResults(query);&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+     return fetchResults(query, {&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+       signal: controller.current.signal&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+     });&lt;/span&gt;&lt;span class=&quot;wb-code-line&quot;&gt;    }&lt;/span&gt;` : `&lt;span class=&quot;wb-code-line&quot;&gt;  &amp;lt;input aria-label=&quot;搜索关键词&quot; /&amp;gt;&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+ {loading &amp;amp;&amp;amp; (&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+   &amp;lt;button onClick={cancel}&amp;gt;取消&amp;lt;/button&amp;gt;&lt;/span&gt;&lt;span class=&quot;wb-code-line wb-added&quot;&gt;+ )}&lt;/span&gt;`}&lt;/div&gt;&lt;span class=&quot;wb-source&quot;&gt;来源：当前工作区。包含所有未暂存修改，不能据此确认上方模型调用已执行。&lt;/span&gt;&lt;div class=&quot;wb-read-footer&quot;&gt;&lt;span&gt;只读 · 工作区快照&lt;/span&gt;&lt;button class=&quot;wb-link&quot; type=&quot;button&quot; data-open-file=&quot;${state.file}&quot;&gt;打开文件&lt;/button&gt;&lt;/div&gt;`;
+  }
+  function searchMarkup() {
+    return `&lt;div class=&quot;wb-eyebrow&quot;&gt;项目全文搜索&lt;/div&gt;&lt;h2&gt;在当前目录中查找&lt;/h2&gt;&lt;label class=&quot;wb-form-label&quot; for=&quot;wb-search-query&quot;&gt;关键词&lt;/label&gt;&lt;form class=&quot;wb-search-field&quot; id=&quot;wb-search-form&quot;&gt;&lt;input id=&quot;wb-search-query&quot; value=&quot;AbortController&quot; spellcheck=&quot;false&quot;&gt;&lt;button class=&quot;wb-action&quot; type=&quot;submit&quot;&gt;&lt;i data-lucide=&quot;search&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;搜索&lt;/button&gt;&lt;/form&gt;&lt;div id=&quot;wb-search-results&quot; aria-live=&quot;polite&quot;&gt;&lt;/div&gt;`;
+  }
+  function historyMarkup() {
+    const previous = state.history === &#x27;previous&#x27;;
+    return `&lt;div class=&quot;wb-eyebrow&quot;&gt;${previous ? &#x27;历史运行 · 只读&#x27; : &#x27;当前运行 · 持续记录&#x27;}&lt;/div&gt;&lt;h2&gt;${previous ? &#x27;整理搜索组件&#x27; : &#x27;搜索取消交互&#x27;}&lt;/h2&gt;&lt;p class=&quot;wb-subtitle&quot;&gt;${previous ? &#x27;昨天 16:08–16:12 · 运行已结束&#x27; : &#x27;今天 14:32 启动 · CLI 仍在运行&#x27;}&lt;/p&gt;&lt;dl class=&quot;wb-kv&quot;&gt;&lt;dt&gt;保存&lt;/dt&gt;&lt;dd&gt;${previous ? &#x27;已保存到运行结束记录&#x27; : &#x27;已保存到 #126&#x27;}&lt;/dd&gt;&lt;dt&gt;覆盖范围&lt;/dt&gt;&lt;dd&gt;${previous ? &#x27;该次运行中已捕获的内容&#x27; : &#x27;本次运行 · 尾部仍在保存&#x27;}&lt;/dd&gt;&lt;dt&gt;终端&lt;/dt&gt;&lt;dd&gt;${previous ? &#x27;旧运行终端未恢复；右侧是当前 CLI&#x27; : &#x27;当前终端保持连接&#x27;}&lt;/dd&gt;&lt;/dl&gt;&lt;article class=&quot;wb-message&quot;&gt;&lt;div class=&quot;wb-message-role&quot;&gt;&lt;span class=&quot;wb-avatar&quot;&gt;你&lt;/span&gt;你&lt;/div&gt;&lt;p class=&quot;wb-user-message&quot;&gt;${previous ? &#x27;把搜索逻辑从页面拆出来，保持行为不变。&#x27; : &#x27;给搜索补上取消按钮，保留关键词。&#x27;}&lt;/p&gt;&lt;/article&gt;&lt;article class=&quot;wb-message&quot;&gt;&lt;div class=&quot;wb-message-role&quot;&gt;&lt;span class=&quot;wb-avatar&quot;&gt;&amp;gt;_&lt;/span&gt;Codex&lt;/div&gt;&lt;p&gt;${previous ? &#x27;已将搜索逻辑集中到 useSearch，SearchBar 负责渲染输入和结果。&#x27; : &#x27;当前实时内容仍在更新，可返回实时阅读。&#x27;}&lt;/p&gt;&lt;/article&gt;&lt;div class=&quot;wb-read-footer&quot;&gt;&lt;span&gt;浏览历史不切换右侧 CLI&lt;/span&gt;&lt;button class=&quot;wb-link&quot; type=&quot;button&quot; data-page=&quot;conversation&quot;&gt;返回实时阅读&lt;/button&gt;&lt;/div&gt;`;
+  }
+  function renderSearch() {
+    const field = root.querySelector(&#x27;#wb-search-query&#x27;);
+    const results = root.querySelector(&#x27;#wb-search-results&#x27;);
+    if (!field || !results) return;
+    const term = field.value.trim();
+    const hits = term ? Object.entries(fileSource).flatMap(([file, lines]) =&gt; lines.map((line, index) =&gt; ({file, line, index}))).filter(hit =&gt; hit.line.toLowerCase().includes(term.toLowerCase())) : [];
+    results.innerHTML = `&lt;p class=&quot;wb-subtitle&quot; style=&quot;margin-top:17px&quot;&gt;${term ? `${hits.length} 处匹配 · 示例文件` : &#x27;输入关键词后搜索示例文件&#x27;}&lt;/p&gt;${hits.map(hit =&gt; `&lt;div class=&quot;wb-search-result&quot;&gt;&lt;button type=&quot;button&quot; class=&quot;wb-link&quot; data-open-file=&quot;${hit.file}&quot;&gt;src/${hit.file}:${hit.index+1}&lt;/button&gt;&lt;p&gt;${escape(hit.line)}&lt;/p&gt;&lt;/div&gt;`).join(&#x27;&#x27;)}`;
+  }
+  function renderPage() {
+    root.dataset.page = state.page;
+    pageTitle.textContent = titles[state.page];
+    root.querySelectorAll(&#x27;.wb-nav&#x27;).forEach(button =&gt; button.setAttribute(&#x27;aria-pressed&#x27;, String(button.dataset.side ? button.dataset.side === state.side : button.dataset.page === state.side)));
+    root.querySelector(&#x27;#wb-network-toggle&#x27;).setAttribute(&#x27;aria-pressed&#x27;, String(state.page === &#x27;requests&#x27;));
+    renderSidebar();
+    const renderers = { conversation: conversationMarkup, requests: requestMarkup, files: fileMarkup, search: searchMarkup, git: gitMarkup, history: historyMarkup };
+    content.innerHTML = renderers[state.page]();
+    if (state.page === &#x27;search&#x27;) renderSearch();
+    refreshIcons();
+  }
+  function applyPresentation() {
+    root.dataset.layout = state.layout;
+    root.dataset.terminal = String(state.terminal);
+    root.style.setProperty(&#x27;--wb-terminal-width&#x27;, state.terminalWidth + &#x27;%&#x27;);
+    root.querySelector(&#x27;#wb-terminal-toggle&#x27;).setAttribute(&#x27;aria-pressed&#x27;, String(state.terminal));
+    root.dataset.sidebar = String(state.sidebar);
+    root.querySelector(&#x27;#wb-toggle-sidebar&#x27;).setAttribute(&#x27;aria-pressed&#x27;, String(state.sidebar));
+    const storage = state.scenario === &#x27;storage&#x27;;
+    const gap = state.scenario === &#x27;gap&#x27;;
+    const readonly = state.scenario === &#x27;readonly&#x27;;
+    const notice = root.querySelector(&#x27;#wb-notice&#x27;);
+    notice.hidden = !storage &amp;&amp; !gap;
+    notice.textContent = storage ? &#x27;保存异常 · 磁盘暂时不可写，终端与实时阅读继续。最新内容尚未保存。&#x27; : gap ? &#x27;捕获有缺口 · 部分观察内容未保留，原生 CLI 继续。当前阅读内容可能不完整。&#x27; : &#x27;&#x27;;
+    root.querySelector(&#x27;#wb-capture-label&#x27;).textContent = gap ? &#x27;捕获存在缺口&#x27; : &#x27;实时捕获正常&#x27;;
+    root.querySelector(&#x27;#wb-save-label&#x27;).textContent = storage ? &#x27;保存异常 · 水位停留 #126&#x27; : &#x27;保存中 · 最新 2 条&#x27;;
+    root.querySelector(&#x27;#wb-coverage-label&#x27;).textContent = gap ? &#x27;历史覆盖：有缺口&#x27; : &#x27;历史覆盖：本次运行&#x27;;
+    root.querySelector(&#x27;#wb-capture-detail&#x27;).textContent = gap ? &#x27;观察副本 #113–119 丢失；网络转发和 CLI 不因此丢字节。&#x27; : &#x27;当前观察流连续，页面已显示最新内容。&#x27;;
+    root.querySelector(&#x27;#wb-save-detail&#x27;).textContent = storage ? &#x27;磁盘写入失败。持久水位停留 #126，未保存尾部可能在服务退出后丢失。&#x27; : &#x27;已保存到 #126；#127–128 仍在等待写入。&#x27;;
+    root.querySelector(&#x27;#wb-coverage-detail&#x27;).textContent = gap ? &#x27;记录中保留缺口。后续内容继续展示，不能视作连续、完整历史。&#x27; : &#x27;只覆盖本次运行中已捕获的内容；原生历史按已确认的身份补齐。&#x27;;
+    root.querySelector(&#x27;#wb-input-owner&#x27;).textContent = readonly ? &#x27;只读连接&#x27; : &#x27;本页可输入&#x27;;
+    root.querySelector(&#x27;#wb-takeover-panel&#x27;).hidden = !readonly;
+    if (!readonly) {
+      takeoverPending = false;
+      root.querySelector(&#x27;#wb-takeover-copy&#x27;).textContent = &#x27;终端由另一页面控制，本页可继续阅读。&#x27;;
+      root.querySelector(&#x27;#wb-takeover&#x27;).textContent = &#x27;接管输入&#x27;;
+      root.querySelector(&#x27;#wb-cancel-takeover&#x27;).hidden = true;
+    }
+    terminalInput.disabled = readonly;
+    terminalInput.placeholder = readonly ? &#x27;接管后才能向原生终端输入&#x27; : &#x27;在原生终端继续输入…&#x27;;
+  }
+  let takeoverPending = false;
+  root.addEventListener(&#x27;click&#x27;, event =&gt; {
+    const button = event.target.closest(&#x27;button&#x27;);
+    if (!button || !root.contains(button)) return;
+    if (button.dataset.page) { state.page = button.dataset.page; if (state.page !== &#x27;conversation&#x27;) state.side = state.page; renderPage(); announce(`已切换到${titles[state.page]}，原生终端保持连接。`); }
+    else if (button.dataset.side) { state.side = button.dataset.side; state.sidebar = true; if (state.side === &#x27;search&#x27;) state.page = &#x27;search&#x27;; renderPage(); applyPresentation(); }
+    else if (button.dataset.request) { state.page = &#x27;requests&#x27;; state.side = &#x27;requests&#x27;; state.request = button.dataset.request; renderPage(); }
+    else if (button.dataset.file) { state.file = button.dataset.file; state.page = state.side === &#x27;git&#x27; ? &#x27;git&#x27; : &#x27;files&#x27;; renderPage(); }
+    else if (button.dataset.openFile) { state.file = button.dataset.openFile; state.page = &#x27;files&#x27;; state.side = &#x27;files&#x27;; renderPage(); }
+    else if (button.dataset.history) { state.page = &#x27;history&#x27;; state.side = &#x27;history&#x27;; state.history = button.dataset.history; renderPage(); }
+    else if (button.dataset.context) { state.context = button.dataset.context; renderPage(); }
+    else if (button.dataset.status) {
+      const detail = root.querySelector(&#x27;#wb-status-detail&#x27;);
+      detail.hidden = !detail.hidden;
+      root.querySelectorAll(&#x27;[data-status]&#x27;).forEach(item =&gt; item.setAttribute(&#x27;aria-expanded&#x27;, String(!detail.hidden)));
+    } else if (button.id === &#x27;wb-toggle-sidebar&#x27;) { state.sidebar = !state.sidebar; applyPresentation(); }
+    else if (button.id === &#x27;wb-terminal-toggle&#x27;) { state.terminal = !state.terminal; applyPresentation(); }
+    else if (button.id === &#x27;wb-network-toggle&#x27;) { state.page = state.page === &#x27;requests&#x27; ? &#x27;conversation&#x27; : &#x27;requests&#x27;; state.side = state.page === &#x27;requests&#x27; ? &#x27;requests&#x27; : &#x27;git&#x27;; renderPage(); }
+    else if (button.id === &#x27;wb-focus-terminal&#x27;) { if (!terminalInput.disabled) terminalInput.focus(); else announce(&#x27;当前为只读页面，可在终端中接管输入。&#x27;); }
+    else if (button.id === &#x27;wb-follow&#x27;) { state.follow = !state.follow; renderPage(); announce(state.follow ? &#x27;跟随最新内容。&#x27; : &#x27;已暂停跟随。&#x27;); }
+    else if (button.id === &#x27;wb-takeover&#x27;) {
+      if (!takeoverPending) {
+        takeoverPending = true;
+        root.querySelector(&#x27;#wb-takeover-copy&#x27;).textContent = &#x27;接管后，另一页面立即变为只读。确认将输入权移至本页？&#x27;;
+        button.textContent = &#x27;确认接管&#x27;;
+        root.querySelector(&#x27;#wb-cancel-takeover&#x27;).hidden = false;
+      } else {
+        state.scenario = &#x27;normal&#x27;; takeoverPending = false; applyPresentation(); terminalInput.focus(); announce(&#x27;已模拟接管：本页可输入。&#x27;);
+      }
+    } else if (button.id === &#x27;wb-cancel-takeover&#x27;) {
+      takeoverPending = false;
+      root.querySelector(&#x27;#wb-takeover-copy&#x27;).textContent = &#x27;终端由另一页面控制，本页可继续阅读。&#x27;;
+      root.querySelector(&#x27;#wb-takeover&#x27;).textContent = &#x27;接管输入&#x27;;
+      button.hidden = true;
+    }
+  });
+  root.addEventListener(&#x27;submit&#x27;, event =&gt; { if (event.target.id === &#x27;wb-search-form&#x27;) { event.preventDefault(); renderSearch(); } });
+  terminalInput.addEventListener(&#x27;input&#x27;, () =&gt; { root.querySelector(&#x27;#wb-terminal-help&#x27;).textContent = terminalInput.value ? &#x27;本地演示草稿 · 不发送给 CLI&#x27; : &#x27;原型输入仅作展示，不会执行&#x27;; });
+  renderPage();
+  applyPresentation();
+  if (globalThis.Tweak) {
+    const tweak = new globalThis.Tweak({ container: root, onChange: () =&gt; { applyPresentation(); } });
+    tweak.addSelect(state, &#x27;layout&#x27;, { label: &#x27;终端位置&#x27;, options: [{label:&#x27;右侧并排（方案默认）&#x27;,value:&#x27;right&#x27;}, {label:&#x27;底部展开&#x27;,value:&#x27;bottom&#x27;}] });
+    tweak.addSlider(state, &#x27;terminalWidth&#x27;, { label: &#x27;右侧终端占比&#x27;, min: 25, max: 40, step: 1, unit: &#x27;%&#x27; });
+    tweak.addToggle(state, &#x27;sidebar&#x27;, { label: &#x27;显示项目侧栏&#x27; });
+    tweak.addSelect(state, &#x27;scenario&#x27;, { label: &#x27;界面状态&#x27;, options: [{label:&#x27;正常实时阅读&#x27;,value:&#x27;normal&#x27;}, {label:&#x27;磁盘保存异常&#x27;,value:&#x27;storage&#x27;}, {label:&#x27;捕获存在缺口&#x27;,value:&#x27;gap&#x27;}, {label:&#x27;另一页面正在输入&#x27;,value:&#x27;readonly&#x27;}] });
+  }
+})();
+&lt;/script&gt;
+
+&lt;script src=&quot;https://unpkg.com/@floating-ui/core@1.7.3/dist/floating-ui.core.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script src=&quot;https://unpkg.com/@floating-ui/dom@1.7.4/dist/floating-ui.dom.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+  let lastPointerWasTouch = false;
+  let pinnedByTouch = false;
+
+  const getTrigger = (target) =&gt;
+    target?.nodeType === Node.ELEMENT_NODE
+      ? target.closest(&quot;[data-tooltip]&quot;)
+      : null;
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    pinnedByTouch = false;
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handlePointer = (event) =&gt; {
+    lastPointerWasTouch =
+      event.type === &quot;pointerdown&quot; &amp;&amp; event.pointerType === &quot;touch&quot;;
+  };
+  const handleTouchClick = (event) =&gt; {
+    const isTouch = event.pointerType === &quot;touch&quot; || lastPointerWasTouch;
+    lastPointerWasTouch = false;
+    if (!isTouch || event.detail === 0) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (
+      trigger == null ||
+      !trigger.isConnected ||
+      getContent(trigger).length === 0 ||
+      (pinnedByTouch &amp;&amp; activeTrigger === trigger)
+    ) {
+      if (pinnedByTouch) {
+        closeTooltip();
+      }
+      return;
+    }
+    openTooltip(trigger);
+    pinnedByTouch = activeTrigger === trigger;
+    window.setTimeout(() =&gt; {
+      if (activeTrigger === trigger &amp;&amp; !trigger.isConnected) {
+        closeTooltip(false);
+      }
+    }, 0);
+  };
+  const handleLeave = (event) =&gt; {
+    if (pinnedByTouch) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    lastPointerWasTouch = false;
+    const trigger = getTrigger(event.target);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    lastPointerWasTouch = false;
+    document.removeEventListener(&quot;pointerover&quot;, handlePointerOpen);
+    document.removeEventListener(&quot;pointerdown&quot;, handlePointer);
+    document.removeEventListener(&quot;pointercancel&quot;, handlePointer);
+    document.removeEventListener(&quot;click&quot;, handleTouchClick);
+    document.removeEventListener(&quot;pointerout&quot;, handleLeave);
+    document.removeEventListener(&quot;focusin&quot;, handleFocusIn);
+    document.removeEventListener(&quot;focusout&quot;, handleLeave);
+    document.removeEventListener(&quot;keydown&quot;, handleKeyDown);
+    document.removeEventListener(&quot;contextmenu&quot;, handleContextMenu);
+    tooltip = null;
+  };
+
+  document.addEventListener(&quot;pointerover&quot;, handlePointerOpen);
+  document.addEventListener(&quot;pointerdown&quot;, handlePointer);
+  document.addEventListener(&quot;pointercancel&quot;, handlePointer);
+  document.addEventListener(&quot;click&quot;, handleTouchClick);
+  document.addEventListener(&quot;pointerout&quot;, handleLeave);
+  document.addEventListener(&quot;focusin&quot;, handleFocusIn);
+  document.addEventListener(&quot;focusout&quot;, handleLeave);
+  document.addEventListener(&quot;keydown&quot;, handleKeyDown);
+  document.addEventListener(&quot;contextmenu&quot;, handleContextMenu);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-tabs&quot;&gt;
+(() =&gt; {
+  const selector = &#x27;.nav[role=&quot;tablist&quot;] [role=&quot;tab&quot;]&#x27;;
+  const disabled = &#x27;:disabled,[aria-disabled=&quot;true&quot;]&#x27;;
+  const selectTab = (selected) =&gt; {
+    const panelId = selected.getAttribute(&quot;aria-controls&quot;);
+    for (const tab of selected.closest(&#x27;[role=&quot;tablist&quot;]&#x27;).querySelectorAll(&#x27;[role=&quot;tab&quot;]&#x27;)) {
+      const active = tab === selected;
+      tab.classList.toggle(&quot;active&quot;, active);
+      tab.setAttribute(&quot;aria-selected&quot;, String(active));
+      const id = tab.getAttribute(&quot;aria-controls&quot;);
+      const panel = id &amp;&amp; document.getElementById(id);
+      if (panel != null) {
+        panel.hidden = id !== panelId;
+        if (!panel.hidden &amp;&amp; selected.id) {
+          panel.setAttribute(&quot;aria-labelledby&quot;, selected.id);
+        }
+      }
+    }
+  };
+  const interact = (event) =&gt; {
+    const tab = event.target?.closest?.(selector);
+    if (event.defaultPrevented || tab == null || tab.matches(disabled)) {
+      return;
+    }
+    if (event.type === &quot;click&quot;) {
+      selectTab(tab);
+      return;
+    }
+    const tabs = Array.from(
+      tab.closest(&#x27;[role=&quot;tablist&quot;]&#x27;).querySelectorAll(&#x27;[role=&quot;tab&quot;]&#x27;),
+    ).filter((candidate) =&gt; !candidate.matches(disabled));
+    const current = tabs.indexOf(tab);
+    let next;
+    if (event.key === &quot;ArrowRight&quot; || event.key === &quot;ArrowDown&quot;) {
+      next = (current + 1) % tabs.length;
+    } else if (event.key === &quot;ArrowLeft&quot; || event.key === &quot;ArrowUp&quot;) {
+      next = (current + tabs.length - 1) % tabs.length;
+    } else if (event.key === &quot;Home&quot;) {
+      next = 0;
+    } else if (event.key === &quot;End&quot;) {
+      next = tabs.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    tabs[next].focus();
+    selectTab(tabs[next]);
+  };
+
+  for (const list of document.querySelectorAll(&#x27;.nav[role=&quot;tablist&quot;]&#x27;)) {
+    const selected =
+      list.querySelector(&#x27;[role=&quot;tab&quot;][aria-selected=&quot;true&quot;]&#x27;) ??
+      list.querySelector(&#x27;[role=&quot;tab&quot;].active&#x27;) ??
+      list.querySelector(&#x27;[role=&quot;tab&quot;]&#x27;);
+    if (selected != null) {
+      selectTab(selected);
+    }
+  }
+  document.addEventListener(&quot;click&quot;, interact);
+  document.addEventListener(&quot;keydown&quot;, interact);
+  window.addEventListener(&quot;pagehide&quot;, () =&gt; {
+    document.removeEventListener(&quot;click&quot;, interact);
+    document.removeEventListener(&quot;keydown&quot;, interact);
+  }, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-lucide&quot; async src=&quot;https://unpkg.com/lucide@1.17.0/dist/umd/lucide.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codex · 实时阅读</title><link rel="stylesheet" href="/workbench.css"><script defer src="/workbench.js"></script></head>
+<body>
+  <header><strong>Codex</strong><span>实时阅读</span><span class="scope">R0 接入实验 · 模型正文</span><span id="connection" role="status">连接中</span></header>
+  <main>
+    <div class="intro"><span>原生 CLI 运行，网页同步阅读。</span><span>输入、审批和设置请使用原生终端。</span></div>
+    <div id="notice" role="status" hidden></div>
+    <section id="messages" aria-label="模型响应"><p id="empty">等待模型正文…</p></section>
+    <button id="follow" type="button" hidden>跟随最新</button>
+    <details id="diagnostics"><summary>捕获详情</summary><ul id="issues"></ul></details>
+  </main>
+  <footer><span id="capture">等待观察数据</span><span>保存：未启用，仅本次运行内存</span><span>历史覆盖：部分 · 仅正文</span></footer>
+</body>
+</html>

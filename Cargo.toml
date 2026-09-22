@@ -3,11 +3,16 @@ name = "codex-local-observer"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-description = "Local Codex observer and auditable V2 control gateway"
+description = "Native Codex CLI workbench with read-only Observer history compatibility"
+default-run = "codex-view"
 
 [[bin]]
 name = "codex-observerd"
 path = "src/main.rs"
+
+[[bin]]
+name = "codex-view"
+path = "src/bin/codex-view.rs"
 
 [dependencies]
 anyhow = "1"
@@ -18,17 +23,23 @@ blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 notify = "8"
 portable-pty = "0.9"
 rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-rust-embed = "8"
+# Keep the built UI and API together in local trial binaries as well as releases.
+rust-embed = { version = "8", features = ["debug-embed"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
+serde_path_to_error = "0.1"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.29"
 toml = "0.9"
+tempfile = "3"
 tower-http = { version = "0.6", features = ["catch-panic", "request-id", "set-header", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -37,6 +48,9 @@ vt100 = "0.16"
 walkdir = "2"
 zstd = "0.13"
 
+# 0.16.2 with the reviewed wide-cell resize fix; see vendor/vt100/PATCH.md.
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
+
 [dev-dependencies]
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -6,7 +6,8 @@ export default defineConfig({
   base: '/',
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: { input: { observer: 'index.html', workbench: 'workbench.html' } }
   },
   test: {
     environment: 'jsdom',

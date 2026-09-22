@@ -47,8 +47,8 @@ describe('Api', () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode('event: observer\nid: signed-'));
-        controller.enqueue(encoder.encode('cursor\ndata: {"eventSeq":7}\n\n'));
+        controller.enqueue(encoder.encode('event: observer\nid: '));
+        controller.enqueue(encoder.encode('7\ndata: {"eventSeq":7}\n\n'));
         controller.close();
       }
     });
@@ -56,35 +56,52 @@ describe('Api', () => {
       status: 200, headers: { 'Content-Type': 'text/event-stream' }
     }));
     const events: unknown[] = []; const onOpen = vi.fn();
-    await new Api('private-token').stream('/v2/stream', (event) => events.push(event), new AbortController().signal, onOpen);
+    await new Api('private-token').stream('/v1/stream', (event) => events.push(event), new AbortController().signal, onOpen);
     expect(onOpen).toHaveBeenCalledOnce();
-    expect(events).toEqual([{ type: 'observer', id: 'signed-cursor', data: { eventSeq: 7 } }]);
-    expect(fetchMock.mock.calls[0][0]).toBe('/v2/stream');
+    expect(events).toEqual([{ type: 'observer', id: '7', data: { eventSeq: 7 } }]);
+    expect(fetchMock.mock.calls[0][0]).toBe('/v1/stream');
     expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer private-token' });
   });
 
-  it('reconnects the stream from the last signed composite cursor', async () => {
+  it('reconnects the stream from the last event sequence cursor', async () => {
     const api = new Api('token'); const controller = new AbortController(); const states: string[] = [];
     const streamMock = vi.spyOn(api, 'stream')
       .mockImplementationOnce(async (_path, onEvent, _signal, onOpen) => {
-        onOpen?.(); onEvent({ type: 'observer', id: 'signed/composite+cursor', data: {} });
+        onOpen?.(); onEvent({ type: 'observer', id: '7', data: {} });
         throw new Error('network disconnected');
       })
       .mockImplementationOnce(async (path) => {
-        expect(new URL(path, window.location.origin).searchParams.get('cursor')).toBe('signed/composite+cursor');
+        expect(new URL(path, window.location.origin).searchParams.get('afterEventSeq')).toBe('7');
         controller.abort();
       });
-    await reconnectingStream(api, '/v2/stream', vi.fn(), (state) => states.push(state), controller.signal, 0);
+    await reconnectingStream(api, '/v1/stream', vi.fn(), (state) => states.push(state), controller.signal, 0);
     expect(streamMock).toHaveBeenCalledTimes(2);
     expect(states).toEqual(['connecting', 'live', 'disconnected', 'connecting']);
   });
 
-  it('drops an expired stream cursor before reconnecting', async () => {
+  it('resyncs an expired stream from the current V1 watermark', async () => {
     const api = new Api('token'); const controller = new AbortController();
     const streamMock = vi.spyOn(api, 'stream')
       .mockRejectedValueOnce(new ApiError(410, 'expired', 'CURSOR_EXPIRED'))
-      .mockImplementationOnce(async (path) => { expect(path).toBe('/v2/stream'); controller.abort(); });
-    await reconnectingStream(api, '/v2/stream', vi.fn(), vi.fn(), controller.signal, 0);
+      .mockImplementationOnce(async (path) => { expect(path).toBe('/v1/stream?afterEventSeq=42'); controller.abort(); });
+    vi.spyOn(api, 'get').mockResolvedValueOnce({ apiVersion: 'v1', asOfEventSeq: 42, data: {} });
+    const onEvent = vi.fn();
+    await reconnectingStream(api, '/v1/stream', onEvent, vi.fn(), controller.signal, 0);
+    expect(onEvent).toHaveBeenCalledWith({ type: 'resync', id: '42', data: {} });
     expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a failed snapshot read without replaying an expired sequence', async () => {
+    const api = new Api('token'); const controller = new AbortController();
+    const stream = vi.spyOn(api, 'stream')
+      .mockRejectedValueOnce(new ApiError(410, 'expired'))
+      .mockImplementationOnce(async path => {
+        expect(path).toBe('/v1/stream?afterEventSeq=43'); controller.abort();
+      });
+    const snapshot = vi.spyOn(api, 'get').mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ apiVersion:'v1',asOfEventSeq:43,data:{} });
+    await reconnectingStream(api, '/v1/stream', vi.fn(), vi.fn(), controller.signal, 0);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(stream).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,0 +1,449 @@
+<style>
+#native-workbench-prototype {
+  --wb-bg: #0a0a0a;
+  --wb-side: #111111;
+  --wb-soft: #1e1e1e;
+  --wb-terminal: #0a0a0a;
+  --wb-text: #e5e5e5;
+  --wb-muted: #999999;
+  --wb-line: #303030;
+  --wb-accent: #73c991;
+  --wb-accent-soft: #19271f;
+  --wb-warning: #e5ba78;
+  --wb-warning-bg: #2a2000;
+  --wb-delete: #f87171;
+  --wb-delete-bg: #312020;
+  --wb-blue: #4a9eff;
+  --wb-orange: #e59b68;
+  --wb-bubble: #2a2a2a;
+  --wb-terminal-width: 30%;
+  color: var(--wb-text);
+  font: 13px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  width: 100%;
+  color-scheme: dark;
+}
+#native-workbench-prototype * { box-sizing: border-box; }
+#native-workbench-prototype [hidden] { display: none !important; }
+#native-workbench-prototype button, #native-workbench-prototype input, #native-workbench-prototype select, #native-workbench-prototype textarea { font: inherit; }
+#native-workbench-prototype button { cursor: pointer; }
+#native-workbench-prototype button:disabled { cursor: default; opacity: .6; }
+#native-workbench-prototype h2, #native-workbench-prototype h3, #native-workbench-prototype p { margin: 0; }
+#native-workbench-prototype h2 { font-size: 19px; line-height: 1.45; font-weight: 500; letter-spacing: -.4px; }
+#native-workbench-prototype h3 { font-size: 13px; font-weight: 500; }
+#native-workbench-prototype strong { font-weight: 500; }
+#native-workbench-prototype code, #native-workbench-prototype pre, #native-workbench-prototype .wb-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+#native-workbench-prototype code { font-size: 12px; color: inherit; background: none; padding: 0; }
+#native-workbench-prototype svg { width: 16px; height: 16px; flex-shrink: 0; }
+#native-workbench-prototype .wb-window { background: var(--wb-bg); border: 1px solid var(--wb-line); border-radius: 2px; overflow: clip; }
+#native-workbench-prototype .wb-header { display: flex; align-items: center; gap: 8px; padding: 4px 8px; min-height: 40px; flex-wrap: wrap; background: #1e1e1e; border-bottom: 1px solid #292929; }
+#native-workbench-prototype .wb-brand { display: flex; align-items: center; gap: 9px; font-weight: 500; letter-spacing: -.3px; }
+#native-workbench-prototype .wb-mark { display: grid; place-items: center; width: 28px; height: 28px; background: var(--wb-text); color: var(--wb-bg); border-radius: 8px; font-family: monospace; font-size: 16px; }
+#native-workbench-prototype .wb-project { display: flex; align-items: center; gap: 5px; color: #bdbdbd; font-size: 12px; }
+#native-workbench-prototype .wb-header-end { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--wb-muted); border: 1px solid var(--wb-line); padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+#native-workbench-prototype .wb-icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 7px; color: var(--wb-muted); background: transparent; border: 0; border-radius: 5px; min-height: 30px; }
+#native-workbench-prototype .wb-icon-button:hover { color: var(--wb-text); background: var(--wb-soft); }
+#native-workbench-prototype .wb-layout { display: grid; grid-template-columns: 37px minmax(0, 1fr) var(--wb-terminal-width); align-items: stretch; }
+#native-workbench-prototype .wb-rail { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 2px; border-right: 1px solid #292929; background: #1a1a1a; }
+#native-workbench-prototype .wb-nav { border: 0; border-radius: 5px; color: var(--wb-muted); background: transparent; width: 32px; min-height: 35px; padding: 7px; display: flex; align-items: center; justify-content: center; gap: 5px; }
+#native-workbench-prototype .wb-nav:hover { background: var(--wb-soft); color: var(--wb-text); }
+#native-workbench-prototype .wb-nav[aria-pressed="true"] { background: #1c304b; color: var(--wb-blue); }
+#native-workbench-prototype .wb-nav-label { display: none; }
+#native-workbench-prototype .wb-content-area { display: grid; grid-template-columns: 167px minmax(0, 1fr); min-width: 0; }
+#native-workbench-prototype .wb-sidebar { background: var(--wb-side); border-right: 4px solid #252525; min-width: 0; padding: 12px 7px; }
+#native-workbench-prototype .wb-side-heading { color: var(--wb-muted); font-size: 11px; letter-spacing: .7px; margin: 0 5px 14px; }
+#native-workbench-prototype .wb-side-section { margin: 20px 5px 8px; font-size: 11px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-side-button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; border-radius: 0; background: transparent; color: #bbb; text-align: left; padding: 6px 7px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-side-button:hover { background: var(--wb-soft); }
+#native-workbench-prototype .wb-side-button[aria-pressed="true"] { background: #222; color: #ddd; }
+#native-workbench-prototype .wb-side-button small { font-size: 11px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-side-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+#native-workbench-prototype .wb-tree-parent { display: flex; gap: 6px; align-items: center; color: var(--wb-muted); margin: 14px 4px 5px; font-size: 12px; }
+#native-workbench-prototype .wb-main { min-width: 0; }
+#native-workbench-prototype .wb-main-header { min-height: 51px; padding: 11px 18px; display: flex; align-items: center; gap: 9px; justify-content: space-between; flex-wrap: wrap; border-bottom: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-main-title { display: flex; align-items: center; gap: 7px; font-weight: 500; }
+#native-workbench-prototype .wb-main-body { padding: 16px 16px 20px; min-height: 660px; }
+#native-workbench-prototype .wb-eyebrow { font-size: 11px; color: var(--wb-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--wb-accent); display: inline-block; flex-shrink: 0; }
+#native-workbench-prototype .wb-subtitle { color: var(--wb-muted); font-size: 11px; margin-top: 7px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-message { margin-top: 24px; }
+#native-workbench-prototype .wb-message-role { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; margin-bottom: 7px; }
+#native-workbench-prototype .wb-message-role small { margin-left: auto; color: var(--wb-muted); font-size: 11px; font-weight: 400; }
+#native-workbench-prototype .wb-avatar { height: 20px; width: 20px; display: inline-grid; place-items: center; border: 1px solid var(--wb-line); border-radius: 5px; font-size: 11px; }
+#native-workbench-prototype .wb-user-message { padding: 12px 14px; background: var(--wb-soft); border-radius: 8px; }
+#native-workbench-prototype .wb-assistant-text { padding-left: 1px; }
+#native-workbench-prototype .wb-tool { margin-top: 12px; border: 1px solid var(--wb-line); border-radius: 7px; overflow: clip; }
+#native-workbench-prototype .wb-tool summary { padding: 10px 12px; cursor: pointer; display: flex; align-items: flex-start; gap: 8px; list-style: none; }
+#native-workbench-prototype .wb-tool summary::-webkit-details-marker { display: none; }
+#native-workbench-prototype .wb-tool summary::after { content: "+"; margin-left: auto; color: var(--wb-muted); }
+#native-workbench-prototype .wb-tool[open] summary::after { content: "−"; }
+#native-workbench-prototype .wb-tool-label { flex: 1; min-width: 0; }
+#native-workbench-prototype .wb-tool-label small { display: block; color: var(--wb-muted); font-size: 11px; margin-top: 1px; }
+#native-workbench-prototype .wb-tool-content { border-top: 1px solid var(--wb-line); padding: 10px 12px; font-size: 12px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-code-line { display: block; padding: 2px 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.75 "SFMono-Regular", Consolas, monospace; }
+#native-workbench-prototype .wb-added { background: var(--wb-accent-soft); color: var(--wb-accent); }
+#native-workbench-prototype .wb-removed { background: var(--wb-delete-bg); color: var(--wb-delete); }
+#native-workbench-prototype .wb-code { margin: 10px 0 0; padding: 10px 0; border: 1px solid var(--wb-line); border-radius: 6px; background: var(--wb-side); overflow-wrap: anywhere; white-space: pre-wrap; }
+#native-workbench-prototype .wb-source { color: var(--wb-muted); font-size: 11px; display: block; margin-top: 9px; }
+#native-workbench-prototype .wb-link { padding: 0; border: 0; background: transparent; color: var(--wb-accent); display: inline-flex; align-items: center; gap: 4px; text-align: left; font-size: 12px; }
+#native-workbench-prototype .wb-link:hover { text-decoration: underline; }
+#native-workbench-prototype .wb-stream { margin-top: 20px; }
+#native-workbench-prototype .wb-stream-end { display: inline-block; width: 6px; height: 14px; background: var(--wb-accent); vertical-align: -2px; margin-left: 4px; }
+#native-workbench-prototype .wb-read-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 23px; padding-top: 13px; border-top: 1px solid var(--wb-line); color: var(--wb-muted); font-size: 11px; }
+#native-workbench-prototype .wb-terminal { background: var(--wb-terminal); border-left: 5px solid #242424; min-width: 0; display: flex; flex-direction: column; }
+#native-workbench-prototype .wb-terminal-header { display: flex; gap: 7px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px 12px; min-height: 34px; color: var(--wb-muted); border-bottom: 1px solid #222; }
+#native-workbench-prototype .wb-terminal-name { display: flex; align-items: center; gap: 7px; font-weight: 500; font-size: 12px; }
+#native-workbench-prototype .wb-terminal-screen { padding: 12px; flex: 1; min-width: 0; font: 12px/1.8 "SFMono-Regular", Consolas, "PingFang SC", monospace; }
+#native-workbench-prototype .wb-terminal-screen p { overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-term-brand { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 9px; }
+#native-workbench-prototype .wb-term-muted { color: var(--wb-muted); }
+#native-workbench-prototype .wb-term-task { margin-top: 29px; padding-top: 14px; border-top: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-term-block { margin-top: 21px; }
+#native-workbench-prototype .wb-term-ok { color: var(--wb-accent); }
+#native-workbench-prototype .wb-term-indent { padding-left: 14px; color: var(--wb-muted); }
+#native-workbench-prototype .wb-terminal-bottom { border-top: 1px solid var(--wb-line); padding: 12px 13px; }
+#native-workbench-prototype .wb-term-entry { display: flex; align-items: flex-start; gap: 8px; padding: 10px 0; }
+#native-workbench-prototype .wb-term-entry textarea { width: 100%; min-width: 0; min-height: 42px; resize: vertical; background: transparent; color: var(--wb-text); border: 0; padding: 0; font-family: "SFMono-Regular", Consolas, "PingFang SC", monospace; font-size: 12px; }
+#native-workbench-prototype .wb-term-entry textarea::placeholder { color: var(--wb-muted); opacity: 1; }
+#native-workbench-prototype .wb-term-hint { font-size: 11px; color: var(--wb-muted); display: flex; align-items: center; justify-content: space-between; gap: 5px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-statusbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; column-gap: 15px; row-gap: 6px; padding: 5px 10px; background: #151515; border-top: 1px solid #252525; font-size: 11px; }
+#native-workbench-prototype .wb-status-items { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-status-button { display: inline-flex; align-items: center; gap: 5px; background: transparent; border: 0; color: var(--wb-muted); padding: 0; font-size: 11px; }
+#native-workbench-prototype .wb-status-button:hover { color: var(--wb-text); text-decoration: underline; }
+#native-workbench-prototype .wb-warning { color: var(--wb-warning); }
+#native-workbench-prototype .wb-notice { margin: 0; padding: 10px 17px; background: var(--wb-warning-bg); color: var(--wb-warning); border-bottom: 1px solid var(--wb-line); font-size: 12px; }
+#native-workbench-prototype .wb-status-detail { padding: 14px 18px; border-top: 1px solid var(--wb-line); background: var(--wb-side); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; font-size: 12px; }
+#native-workbench-prototype .wb-status-detail p { color: var(--wb-muted); margin-top: 4px; font-size: 11px; }
+#native-workbench-prototype .wb-kv { display: grid; grid-template-columns: minmax(72px, .7fr) minmax(0, 1fr); gap: 7px 12px; margin-top: 20px; font-size: 12px; }
+#native-workbench-prototype .wb-kv dt { color: var(--wb-muted); }
+#native-workbench-prototype .wb-kv dd { margin: 0; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-section-label { display: flex; align-items: center; gap: 8px; justify-content: space-between; flex-wrap: wrap; margin: 24px 0 10px; }
+#native-workbench-prototype .wb-context-piece { padding: 11px 0; border-top: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-context-piece summary { cursor: pointer; font-size: 12px; }
+#native-workbench-prototype .wb-context-piece p { margin-top: 9px; font-size: 12px; color: var(--wb-muted); overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-segment { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--wb-side); border: 1px solid var(--wb-line); border-radius: 7px; margin: 18px 0; }
+#native-workbench-prototype .wb-segment button { flex: 1; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--wb-muted); font-size: 11px; }
+#native-workbench-prototype .wb-segment button[aria-pressed="true"] { color: var(--wb-text); background: var(--wb-bg); box-shadow: 0 1px 3px light-dark(#23352b12, #00000020); }
+#native-workbench-prototype .wb-form-label { display: block; font-size: 12px; color: var(--wb-muted); margin-top: 16px; }
+#native-workbench-prototype .wb-search-field { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-search-field input { min-width: 0; flex: 1 1 150px; border: 1px solid var(--wb-line); border-radius: 5px; padding: 7px 9px; background: var(--wb-bg); color: var(--wb-text); }
+#native-workbench-prototype .wb-action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--wb-line); border-radius: 5px; background: var(--wb-bg); color: var(--wb-text); padding: 6px 10px; font-size: 12px; }
+#native-workbench-prototype .wb-search-result { padding: 15px 0; border-bottom: 1px solid var(--wb-line); }
+#native-workbench-prototype .wb-search-result p { font-family: monospace; font-size: 11px; color: var(--wb-muted); margin-top: 6px; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-takeover { background: var(--wb-accent); color: var(--wb-bg); border: 0; padding: 5px 9px; border-radius: 5px; }
+#native-workbench-prototype .wb-takeover-panel { padding: 12px 13px; background: var(--wb-bg); border-bottom: 1px solid var(--wb-line); font-size: 12px; }
+#native-workbench-prototype .wb-takeover-panel p { margin-bottom: 9px; }
+#native-workbench-prototype .wb-inline-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+#native-workbench-prototype .wb-header-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 29px; padding: 3px 10px; border-radius: 5px; background: #111; border: 1px solid #3b3b3b; color: #bdbdbd; font-size: 12px; }
+#native-workbench-prototype .wb-header-toggle[aria-pressed="true"] { background: #10243d; border-color: #285a9f; color: var(--wb-blue); }
+#native-workbench-prototype .wb-prototype-label { color: #929292; font-size: 11px; }
+#native-workbench-prototype .wb-tree-file { display: flex; align-items: center; gap: 6px; width: 100%; }
+#native-workbench-prototype .wb-tree-file svg { width: 13px; height: 13px; color: #e2c08d; }
+#native-workbench-prototype .wb-file-state { color: #e2c08d; margin-left: auto; }
+#native-workbench-prototype .wb-chat-row { display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 8px; margin: 17px 0; }
+#native-workbench-prototype .wb-chat-avatar { color: var(--wb-orange); padding-top: 3px; }
+#native-workbench-prototype .wb-chat-avatar svg { width: 26px; height: 26px; }
+#native-workbench-prototype .wb-chat-col { min-width: 0; }
+#native-workbench-prototype .wb-chat-meta { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin-bottom: 4px; font-size: 11px; color: #989898; }
+#native-workbench-prototype .wb-chat-meta time { color: #8b929f; font-size: 11px; }
+#native-workbench-prototype .wb-chat-outer { border: 1px solid #303030; border-radius: 3px 8px 8px 8px; background: #111; padding: 5px; }
+#native-workbench-prototype .wb-chat-inner { background: var(--wb-bubble); border: 1px solid #555; border-radius: 2px 5px 5px 5px; padding: 9px 10px; line-height: 1.75; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-chat-inner p + p { margin-top: 10px; }
+#native-workbench-prototype .wb-chat-inner code { color: #b6b8ff; background: #14141f; padding: 2px 4px; border-radius: 3px; }
+#native-workbench-prototype .wb-chat-inner ul { margin: 9px 0 0; padding-left: 19px; }
+#native-workbench-prototype .wb-chat-user { margin: 0 0 19px 54px; }
+#native-workbench-prototype .wb-chat-user .wb-chat-meta { justify-content: flex-end; }
+#native-workbench-prototype .wb-chat-user .wb-chat-outer { padding: 9px 11px; background: #123d72; border-color: #376aa7; border-radius: 8px 3px 8px 8px; }
+#native-workbench-prototype .wb-compact-tool { border: 1px solid #363636; background: #111; border-radius: 6px; padding: 6px; }
+#native-workbench-prototype .wb-tool-heading { display: flex; align-items: center; gap: 6px; border: 1px solid #525252; border-radius: 3px; background: #292929; padding: 5px 8px; font-size: 12px; }
+#native-workbench-prototype .wb-tool-heading svg { color: #73c991; width: 14px; height: 14px; }
+#native-workbench-prototype .wb-compact-tool details { padding: 8px 5px; font-size: 12px; }
+#native-workbench-prototype .wb-compact-tool summary { cursor: pointer; color: #aaa; }
+#native-workbench-prototype .wb-tool-facts { display: flex; flex-wrap: wrap; gap: 12px; border-top: 1px solid #303030; padding: 7px 5px 1px; color: #bbb; font-size: 11px; }
+#native-workbench-prototype .wb-message-table { width: 100%; border-collapse: collapse; margin-top: 9px; font-size: 12px; }
+#native-workbench-prototype .wb-message-table th, #native-workbench-prototype .wb-message-table td { border: 1px solid #62646b; padding: 7px 8px; text-align: left; font-weight: 400; overflow-wrap: anywhere; }
+#native-workbench-prototype .wb-message-table th { background: #1f1f1f; }
+#native-workbench-prototype .wb-message-table td { background: #0a0a0a; }
+#native-workbench-prototype .wb-latest-divider { display: flex; align-items: center; gap: 12px; color: #888; font-size: 11px; margin: 25px 0 19px; }
+#native-workbench-prototype .wb-latest-divider::before, #native-workbench-prototype .wb-latest-divider::after { content: ''; flex: 1; border-top: 1px dashed #303030; }
+#native-workbench-prototype .wb-chat-request { display: inline-flex; padding: 0; background: transparent; border: 0; color: #8b929f; }
+#native-workbench-prototype .wb-chat-request svg { width: 12px; height: 12px; }
+#native-workbench-prototype .wb-chat-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; padding: 7px 0 0 34px; font-size: 11px; color: #888; }
+#native-workbench-prototype .wb-inline-diff { margin-top: 10px; border: 1px solid #444; border-radius: 4px; background: #161616; }
+#native-workbench-prototype .wb-inline-diff summary { cursor: pointer; padding: 6px 8px; font-size: 11px; color: #bbb; }
+#native-workbench-prototype[data-page="conversation"] .wb-main-header { display: none; }
+#native-workbench-prototype[data-terminal="false"] .wb-layout { grid-template-columns: 37px minmax(0, 1fr); }
+#native-workbench-prototype[data-terminal="false"] .wb-terminal { display: none; }
+#native-workbench-prototype[data-sidebar="false"] .wb-content-area { grid-template-columns: minmax(0, 1fr); }
+#native-workbench-prototype[data-sidebar="false"] .wb-sidebar { display: none; }
+#native-workbench-prototype[data-layout="bottom"] .wb-layout { grid-template-columns: 45px minmax(0, 1fr); }
+#native-workbench-prototype[data-layout="bottom"] .wb-terminal { grid-column: 2; border-top: 1px solid var(--wb-line); border-left: 0; }
+#native-workbench-prototype[data-layout="bottom"] .wb-terminal-screen { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+#native-workbench-prototype[data-layout="bottom"] .wb-term-task { margin-top: 0; border-top: 0; padding-top: 0; }
+#native-workbench-prototype[data-layout="bottom"] .wb-main-body { min-height: 0; }
+@media (max-width: 870px) {
+  #native-workbench-prototype .wb-layout { grid-template-columns: 43px minmax(0, 1fr); }
+  #native-workbench-prototype .wb-terminal { grid-column: 2; border-left: 0; border-top: 1px solid var(--wb-line); }
+  #native-workbench-prototype .wb-terminal-screen { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  #native-workbench-prototype .wb-term-task { margin-top: 0; padding-top: 0; border-top: 0; }
+  #native-workbench-prototype .wb-main-body { min-height: 0; }
+}
+@media (max-width: 550px) {
+  #native-workbench-prototype .wb-header { padding: 6px 8px; gap: 6px; }
+  #native-workbench-prototype .wb-header-end { gap: 8px; }
+  #native-workbench-prototype .wb-project { padding-left: 0; }
+  #native-workbench-prototype .wb-layout, #native-workbench-prototype[data-layout="bottom"] .wb-layout { display: block; }
+  #native-workbench-prototype .wb-rail { flex-direction: row; flex-wrap: wrap; justify-content: space-between; border-right: 0; border-bottom: 1px solid var(--wb-line); padding: 6px; gap: 3px; }
+  #native-workbench-prototype .wb-nav { width: auto; min-width: 65px; flex: 1; padding: 6px 7px; }
+  #native-workbench-prototype .wb-nav-label { display: inline; font-size: 11px; }
+  #native-workbench-prototype .wb-content-area { display: block; }
+  #native-workbench-prototype .wb-sidebar { border-right: 0; border-bottom: 1px solid var(--wb-line); padding: 10px 12px; }
+  #native-workbench-prototype .wb-side-heading { margin-bottom: 5px; }
+  #native-workbench-prototype .wb-side-section, #native-workbench-prototype .wb-tree-parent { margin-top: 9px; }
+  #native-workbench-prototype .wb-side-button { padding: 6px 8px; flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #native-workbench-prototype .wb-side-secondary { display: none; }
+  #native-workbench-prototype .wb-main-header { padding: 10px 14px; }
+  #native-workbench-prototype .wb-main-body { padding: 21px 16px; }
+  #native-workbench-prototype .wb-chat-row { grid-template-columns: 21px minmax(0, 1fr); gap: 6px; }
+  #native-workbench-prototype .wb-chat-avatar svg { width: 21px; height: 21px; }
+  #native-workbench-prototype .wb-chat-user { margin-left: 25px; }
+  #native-workbench-prototype .wb-message-table th, #native-workbench-prototype .wb-message-table td { padding: 5px; }
+  #native-workbench-prototype .wb-terminal-screen, #native-workbench-prototype[data-layout="bottom"] .wb-terminal-screen { display: block; }
+  #native-workbench-prototype .wb-term-task, #native-workbench-prototype[data-layout="bottom"] .wb-term-task { margin-top: 20px; border-top: 1px solid var(--wb-line); padding-top: 14px; }
+  #native-workbench-prototype .wb-status-detail { grid-template-columns: 1fr; gap: 12px; }
+}
+@media (pointer: coarse) {
+  #native-workbench-prototype button, #native-workbench-prototype summary { min-height: 44px; }
+  #native-workbench-prototype input, #native-workbench-prototype textarea { font-size: 16px; }
+}
+</style>
+
+<div id="native-workbench-prototype" data-layout="right" data-sidebar="true" data-page="conversation" data-terminal="true" aria-label="参照 cc-viewer 界面的 Codex 工作台原型">
+  <div class="wb-window">
+    <header class="wb-header">
+      <button class="wb-icon-button" id="wb-toggle-sidebar" type="button" aria-label="切换项目侧栏" aria-pressed="true"><i data-lucide="menu" aria-hidden="true"></i></button>
+      <div class="wb-project"><span>当前项目:demo-web</span></div>
+      <div class="wb-header-end"><span class="wb-prototype-label">Codex 原型 · 示例数据</span><button class="wb-header-toggle" id="wb-terminal-toggle" type="button" aria-pressed="true"><i data-lucide="terminal" aria-hidden="true"></i>终端</button><button class="wb-header-toggle" id="wb-network-toggle" type="button" aria-pressed="false"><i data-lucide="panel-top" aria-hidden="true"></i>网络</button></div>
+    </header>
+    <div class="wb-notice" id="wb-notice" role="status" hidden></div>
+    <div class="wb-layout">
+      <nav class="wb-rail" aria-label="工作台导航">
+        <button class="wb-nav" type="button" data-page="conversation" aria-label="返回对话" aria-pressed="false" data-tooltip="返回对话"><i data-lucide="messages-square" aria-hidden="true"></i><span class="wb-nav-label">对话</span></button>
+        <button class="wb-nav" type="button" data-side="files" aria-label="项目文件" aria-pressed="false" data-tooltip="项目文件"><i data-lucide="folder" aria-hidden="true"></i><span class="wb-nav-label">文件</span></button>
+        <button class="wb-nav" type="button" data-side="git" aria-label="Git 变更" aria-pressed="true" data-tooltip="Git 变更"><i data-lucide="git-branch" aria-hidden="true"></i><span class="wb-nav-label">Git</span></button>
+        <button class="wb-nav" type="button" data-side="search" aria-label="全文搜索" aria-pressed="false" data-tooltip="全文搜索"><i data-lucide="search" aria-hidden="true"></i><span class="wb-nav-label">搜索</span></button>
+        <button class="wb-nav" type="button" data-page="requests" aria-label="模型请求" aria-pressed="false" data-tooltip="模型请求"><i data-lucide="activity" aria-hidden="true"></i><span class="wb-nav-label">请求</span></button>
+        <button class="wb-nav" type="button" data-page="history" aria-label="运行历史" aria-pressed="false" data-tooltip="运行历史"><i data-lucide="history" aria-hidden="true"></i><span class="wb-nav-label">历史</span></button>
+      </nav>
+      <div class="wb-content-area">
+        <aside class="wb-sidebar" id="wb-sidebar" aria-label="项目内容"></aside>
+        <main class="wb-main">
+          <div class="wb-main-header"><div class="wb-main-title" id="wb-page-title">实时阅读</div><button type="button" class="wb-icon-button" data-page="conversation"><i data-lucide="arrow-left" aria-hidden="true"></i>返回对话</button></div>
+          <div class="wb-main-body" id="wb-content"></div>
+        </main>
+      </div>
+      <section class="wb-terminal" id="wb-terminal" aria-label="原生 Codex CLI，示意画面">
+        <div class="wb-terminal-header"><span style="font-size:11px">原生 Codex CLI</span><span id="wb-input-owner" style="font-size:11px">本页可输入</span></div>
+        <div class="wb-takeover-panel" id="wb-takeover-panel" hidden>
+          <p id="wb-takeover-copy">终端由另一页面控制，本页可继续阅读。</p>
+          <div class="wb-inline-actions"><button type="button" class="wb-takeover" id="wb-takeover">接管输入</button><button type="button" class="wb-action" id="wb-cancel-takeover" hidden>取消</button></div>
+        </div>
+        <div class="wb-terminal-screen">
+          <div>
+            <div class="wb-term-brand"><span>&gt;_</span> OpenAI Codex</div>
+            <p class="wb-term-muted">/workspace/demo-web</p>
+            <p class="wb-term-muted">gpt-5.6-sol · 示例会话</p>
+            <p class="wb-term-muted" style="margin-top:15px">/model · /permissions</p>
+          </div>
+          <div class="wb-term-task">
+            <p>› 给搜索补上取消按钮，点取消后中止当前请求，并保留关键词。</p>
+            <div class="wb-term-block"><p>• 我先看一下搜索实现。</p><p class="wb-term-indent">Read SearchBar.tsx</p><p class="wb-term-indent">Read useSearch.ts</p></div>
+            <div class="wb-term-block"><p>• 搜索取消的修改方案：</p><p class="wb-term-indent">useSearch.ts</p><p class="wb-term-indent">└─ 中止当前请求</p><p class="wb-term-indent">SearchBar.tsx</p><p class="wb-term-indent">└─ 显示取消按钮</p></div>
+            <div class="wb-term-block"><p>• 使用 AbortController 中止请求，保留输入关键词。</p></div>
+            <div class="wb-term-block"><p>• 补上取消时的状态复位…</p><p class="wb-term-muted">esc to interrupt</p></div>
+          </div>
+        </div>
+        <div class="wb-terminal-bottom">
+          <label class="wb-term-entry"><span aria-hidden="true">›</span><textarea id="wb-terminal-input" rows="2" placeholder="在原生 CLI 中输入…" aria-label="终端输入示意，仅本地草稿，不执行"></textarea></label>
+          <div class="wb-term-hint"><span id="wb-terminal-help">原型输入仅作展示，不会执行</span></div>
+        </div>
+      </section>
+    </div>
+    <footer class="wb-statusbar">
+      <div class="wb-status-items">
+        <button class="wb-status-button" type="button" data-status="capture"><span class="wb-dot"></span><span id="wb-capture-label">实时捕获正常</span></button>
+        <button class="wb-status-button" type="button" data-status="save"><i data-lucide="hard-drive" aria-hidden="true"></i><span id="wb-save-label">保存中 · 最新 2 条</span></button>
+        <button class="wb-status-button" type="button" data-status="history"><i data-lucide="history" aria-hidden="true"></i><span id="wb-coverage-label">历史覆盖：本次运行</span></button>
+      </div>
+      <span style="color:var(--wb-muted)">仅本机 · 1 个 CLI</span>
+    </footer>
+    <section class="wb-status-detail" id="wb-status-detail" aria-label="捕获和保存详情" hidden>
+      <div><strong>实时捕获</strong><p id="wb-capture-detail">当前观察流连续，页面已显示最新内容。</p></div>
+      <div><strong>保存到磁盘</strong><p id="wb-save-detail">已保存到 #126；#127–128 仍在等待写入。</p></div>
+      <div><strong>历史覆盖</strong><p id="wb-coverage-detail">只覆盖本次运行中已捕获的内容；原生历史按已确认的身份补齐。</p></div>
+    </section>
+  </div>
+  <div id="wb-announcement" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)"></div>
+</div>
+
+<script>
+(() => {
+  const root = document.getElementById('native-workbench-prototype');
+  const content = root.querySelector('#wb-content');
+  const sidebar = root.querySelector('#wb-sidebar');
+  const pageTitle = root.querySelector('#wb-page-title');
+  const terminalInput = root.querySelector('#wb-terminal-input');
+  const state = { page: 'conversation', side: 'git', layout: 'right', terminal: true, terminalWidth: 30, sidebar: true, scenario: 'normal', request: '03', file: 'useSearch.ts', history: 'current', context: 'read', follow: true };
+  const announce = message => { root.querySelector('#wb-announcement').textContent = message; };
+  const refreshIcons = () => { if (globalThis.lucide) globalThis.lucide.createIcons({ attrs: { width: 16, height: 16 } }); };
+  const sideButton = (label, meta, attribute, value, active) => `<button class="wb-side-button" type="button" ${attribute}="${value}" aria-pressed="${active}"><span>${label}</span><small>${meta}</small></button>`;
+  const titles = { conversation: '实时阅读', requests: '模型请求', files: '项目文件', search: '全文搜索', git: 'Git 变更', history: '运行历史' };
+  const fileSource = {
+    'useSearch.ts': ['import { useRef, useState } from "preact/hooks";', '', 'export function useSearch() {', '  const controller = useRef(null);', '  const [loading, setLoading] = useState(false);', '', '  async function search(query) {', '    controller.current = new AbortController();', '    setLoading(true);', '    try {', '      return await fetchResults(query, {', '        signal: controller.current.signal', '      });', '    } finally {', '      setLoading(false);', '    }', '  }', '', '  const cancel = () => controller.current?.abort();', '  return { search, cancel, loading };', '}'],
+    'SearchBar.tsx': ['import { useSearch } from "./useSearch";', '', 'export function SearchBar() {', '  const { search, cancel, loading } = useSearch();', '', '  return (', '    <form onSubmit={handleSearch}>', '      <input aria-label="搜索关键词" />', '      {loading && (', '        <button onClick={cancel}>取消</button>', '      )}', '    </form>', '  );', '}']
+  };
+  const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+  function renderSidebar() {
+    const view = state.side;
+    if (view === 'conversation') {
+      sidebar.innerHTML = `<div class="wb-side-heading">对话</div>${sideButton('搜索取消交互', '当前运行 · 实时', 'data-page', 'conversation', true)}<div class="wb-side-section">已关联来源</div><div style="padding:0 8px;font-size:11px;color:var(--wb-muted)">模型请求 #01–03<br>当前会话已确认</div><div class="wb-side-secondary"><div class="wb-side-section">最近运行</div>${sideButton('整理搜索组件', '昨天 · 只读记录', 'data-history', 'previous', false)}</div>`;
+    } else if (view === 'requests') {
+      sidebar.innerHTML = `<div class="wb-side-heading">本次模型请求</div>${['03', '02', '01'].map((id, i) => sideButton(`#${id} · 模型响应`, i === 0 ? '接收中 · WS' : '响应已结束 · WS', 'data-request', id, state.request === id)).join('')}<div class="wb-side-secondary"><div class="wb-side-section">连接</div><div style="padding:0 8px;font-size:11px;color:var(--wb-muted)">一个 WS 连接<br>三个独立响应</div></div>`;
+    } else if (view === 'files' || view === 'git') {
+      sidebar.innerHTML = `<div class="wb-side-heading" style="display:flex;gap:10px;align-items:center">${view === 'git' ? 'GIT 变更 <span style="color:#73c991">+9</span><span style="color:#ef6b6b">−1</span>' : '文件浏览'}</div><div class="wb-tree-parent"><i data-lucide="chevron-down" aria-hidden="true" style="width:11px"></i><i data-lucide="folder-open" aria-hidden="true" style="color:#e2c08d"></i>demo-web</div><div class="wb-tree-parent" style="margin:6px 4px 5px 15px"><i data-lucide="chevron-down" aria-hidden="true" style="width:11px"></i><i data-lucide="folder" aria-hidden="true" style="color:#e2c08d"></i>src</div>${['useSearch.ts', 'SearchBar.tsx'].map(file => `<button class="wb-side-button" type="button" data-file="${file}" aria-pressed="${state.page !== 'conversation' && file === state.file}"><span class="wb-tree-file"><i data-lucide="file-code" aria-hidden="true"></i><span style="font-size:11px">${file}</span>${view === 'git' ? '<span class="wb-file-state">M</span>' : ''}</span></button>`).join('')}<div class="wb-side-secondary"><div class="wb-side-section" style="border-top:1px dashed #303030;padding-top:13px">${view === 'git' ? '⌄ 本地提交' : '工作区范围'}</div><div style="padding:0 8px;font-size:11px;color:var(--wb-muted)">${view === 'git' ? '<code style="font-size:11px;color:#bbb">a31c8e2</code> 整理搜索组件<br><span style="color:#888">feat/search-cancel</span>' : '当前启动目录 · 只读'}</div></div>`;
+    } else if (view === 'search') {
+      sidebar.innerHTML = `<div class="wb-side-heading">搜索范围</div><div style="padding:0 6px">demo-web</div><div class="wb-side-section">目录</div><div style="padding:0 6px;color:var(--wb-muted);font-size:12px">src /<br>遵循项目忽略规则</div>`;
+    } else {
+      sidebar.innerHTML = `<div class="wb-side-heading">运行历史</div>${sideButton('搜索取消交互', '今天 · 当前运行', 'data-history', 'current', state.history === 'current')}${sideButton('整理搜索组件', '昨天 · 已保存', 'data-history', 'previous', state.history === 'previous')}`;
+    }
+  }
+  function conversationMarkup() {
+    const row = (body, time, plain = false) => `<article class="wb-chat-row"><span class="wb-chat-avatar" aria-hidden="true"><i data-lucide="aperture"></i></span><div class="wb-chat-col"><div class="wb-chat-meta"><span>gpt-5.6-sol</span><span style="display:flex;gap:7px;align-items:center"><button class="wb-chat-request" type="button" data-page="requests" aria-label="查看这条消息的模型请求"><i data-lucide="arrow-right-left" aria-hidden="true"></i></button><time>${time}</time></span></div>${plain ? body : `<div class="wb-chat-outer"><div class="wb-chat-inner">${body}</div></div>`}</div></article>`;
+    return `<article class="wb-chat-user"><div class="wb-chat-meta"><span>你</span><time>14:32:06</time></div><p class="wb-chat-outer">给搜索补上取消按钮，点取消后中止当前请求，并保留关键词。</p></article>
+      ${row('<p>我先检查当前搜索实现，再补上取消请求和界面状态的处理。</p>', '14:32:08')}
+      ${row(`<div class="wb-compact-tool"><div class="wb-tool-heading"><i data-lucide="check" aria-hidden="true"></i>读取搜索实现 · 已获取结果</div><details><summary>结果详情</summary><div style="padding:8px 0"><button class="wb-link" type="button" data-open-file="useSearch.ts">src/useSearch.ts</button><br><button class="wb-link" type="button" data-open-file="SearchBar.tsx">src/SearchBar.tsx</button><span class="wb-source">结果来源：后续请求 #02</span></div></details><div class="wb-tool-facts"><span>2 个文件</span><span>结果已观察</span></div></div>`, '14:32:10', true)}
+      ${row(`<p>搜索取消的修改方案：</p><table class="wb-message-table"><thead><tr><th>文件</th><th>修改内容</th></tr></thead><tbody><tr><td><code>useSearch.ts</code></td><td>中止当前请求</td></tr><tr><td><code>SearchBar.tsx</code></td><td>显示取消按钮</td></tr></tbody></table><ul><li>使用 <code>AbortController</code> 取消请求。</li><li>取消后保留关键词，并退出加载状态。</li></ul><details class="wb-inline-diff"><summary>拟议修改 · useSearch.ts · +3</summary><span class="wb-code-line wb-added">+ const cancel = () =&gt; {</span><span class="wb-code-line wb-added">+   controller.current?.abort();</span><span class="wb-code-line wb-added">+ };</span><span class="wb-source" style="padding:5px 8px">调用已生成 · 尚未观察到执行结果</span></details>`, '14:32:13')}
+      <div class="wb-latest-divider">最新回复</div>
+      ${row('<p>接下来补上取消时的状态复位，避免旧请求覆盖新的搜索结果。<span class="wb-stream-end" aria-hidden="true"></span></p>', '14:32:18')}
+      <div class="wb-chat-footer"><span><span class="wb-dot" style="margin-right:5px"></span>模型响应接收中</span><button class="wb-link" type="button" id="wb-follow" aria-pressed="${state.follow}" style="color:#aaa;font-size:11px"><i data-lucide="arrow-down" aria-hidden="true"></i>${state.follow ? '跟随最新' : '已暂停跟随'}</button></div>`;
+  }
+  function requestMarkup() {
+    const live = state.request === '03';
+    const tokens = state.request === '02' ? '6,240 输入 / 810 输出' : '3,410 输入 / 226 输出';
+    return `<div class="wb-eyebrow">原始模型请求 · 已脱敏</div><h2>请求 #${state.request}</h2><p class="wb-subtitle">${live ? '模型响应仍在接收' : '本次模型响应已结束'} · ${live ? '用量待响应返回' : '不代表整个 Codex 任务结束'}</p>
+      <dl class="wb-kv"><dt>传输</dt><dd>WebSocket · response.create</dd><dt>模型</dt><dd>示例模型 · 以请求字段为准</dd><dt>响应</dt><dd class="wb-mono">resp_demo_${state.request}</dd><dt>请求耗时</dt><dd>${live ? '接收中' : state.request === '02' ? '2.8 s' : '1.6 s'}</dd><dt>本次用量</dt><dd>${live ? '待返回' : tokens}</dd></dl>
+      <div class="wb-segment" aria-label="上下文展示方式"><button type="button" data-context="read" aria-pressed="${state.context === 'read'}">上下文</button><button type="button" data-context="raw" aria-pressed="${state.context === 'raw'}">脱敏 JSON</button></div>
+      ${state.context === 'raw' ? `<pre class="wb-code" style="padding:12px;font-size:11px">${escape(JSON.stringify({type:'response.create', model:'demo-model', previous_response_id: state.request === '01' ? null : `resp_demo_0${Number(state.request)-1}`, input:[{type:'function_call_output',call_id:'call_demo_read',output:'[已截断的安全预览]'}], stream:true}, null, 2))}</pre><span class="wb-source">观察副本预览。认证字段与加密内容按策略省略。</span>` : `<div class="wb-section-label"><h3>本次可见输入</h3><span class="wb-badge">增量上下文</span></div><details class="wb-context-piece"><summary>系统指令 <span style="color:var(--wb-muted)">· 安全预览</span></summary><p>在当前项目中完成用户任务。遵循工作区指令，并保持改动范围明确。</p></details><details class="wb-context-piece"><summary>工具定义 <span style="color:var(--wb-muted)">· 2 个示例</span></summary><p>exec_command · 执行命令<br>apply_patch · 提出文件修改</p></details><details class="wb-context-piece" open><summary>工具结果 <span style="color:var(--wb-muted)">· call_demo_read</span></summary><p>已读取 src/useSearch.ts 与 src/SearchBar.tsx。调用通过明确的 call ID 关联。</p></details><span class="wb-source">先前上下文通过 previous_response_id 引用；未捕获的部分不会补成完整对话。</span>`}`;
+  }
+  function fileMarkup() {
+    return `<div class="wb-eyebrow">工作区文件 · 只读</div><h2 style="overflow-wrap:anywhere">${state.file}</h2><p class="wb-subtitle">src/${state.file} · 快照 14:32:18</p><pre class="wb-code">${fileSource[state.file].map((line, index) => `<span class="wb-code-line"><span style="color:var(--wb-muted);display:inline-block;width:25px;user-select:none">${index+1}</span>${escape(line)}</span>`).join('')}</pre><div class="wb-read-footer"><span>示例文件内容</span><button class="wb-link" data-page="git" type="button">查看工作区 Diff</button></div>`;
+  }
+  function gitMarkup() {
+    const search = state.file === 'useSearch.ts';
+    return `<div class="wb-eyebrow"><i data-lucide="git-branch" aria-hidden="true"></i>feat/search-cancel · 工作区</div><h2 style="overflow-wrap:anywhere">${state.file}</h2><p class="wb-subtitle">未暂存差异 · 读取于 14:32:18</p><div class="wb-section-label"><h3>src/${state.file}</h3><span style="color:var(--wb-accent);font-size:12px">${search ? '+6 −1' : '+3 −0'}</span></div><div class="wb-code" style="padding:10px 0">${search ? `<span class="wb-code-line">  export function useSearch() {</span><span class="wb-code-line wb-added">+   const controller = useRef(null);</span><span class="wb-code-line">    async function search(query) {</span><span class="wb-code-line wb-added">+     controller.current =</span><span class="wb-code-line wb-added">+       new AbortController();</span><span class="wb-code-line wb-removed">-     return fetchResults(query);</span><span class="wb-code-line wb-added">+     return fetchResults(query, {</span><span class="wb-code-line wb-added">+       signal: controller.current.signal</span><span class="wb-code-line wb-added">+     });</span><span class="wb-code-line">    }</span>` : `<span class="wb-code-line">  &lt;input aria-label="搜索关键词" /&gt;</span><span class="wb-code-line wb-added">+ {loading &amp;&amp; (</span><span class="wb-code-line wb-added">+   &lt;button onClick={cancel}&gt;取消&lt;/button&gt;</span><span class="wb-code-line wb-added">+ )}</span>`}</div><span class="wb-source">来源：当前工作区。包含所有未暂存修改，不能据此确认上方模型调用已执行。</span><div class="wb-read-footer"><span>只读 · 工作区快照</span><button class="wb-link" type="button" data-open-file="${state.file}">打开文件</button></div>`;
+  }
+  function searchMarkup() {
+    return `<div class="wb-eyebrow">项目全文搜索</div><h2>在当前目录中查找</h2><label class="wb-form-label" for="wb-search-query">关键词</label><form class="wb-search-field" id="wb-search-form"><input id="wb-search-query" value="AbortController" spellcheck="false"><button class="wb-action" type="submit"><i data-lucide="search" aria-hidden="true"></i>搜索</button></form><div id="wb-search-results" aria-live="polite"></div>`;
+  }
+  function historyMarkup() {
+    const previous = state.history === 'previous';
+    return `<div class="wb-eyebrow">${previous ? '历史运行 · 只读' : '当前运行 · 持续记录'}</div><h2>${previous ? '整理搜索组件' : '搜索取消交互'}</h2><p class="wb-subtitle">${previous ? '昨天 16:08–16:12 · 运行已结束' : '今天 14:32 启动 · CLI 仍在运行'}</p><dl class="wb-kv"><dt>保存</dt><dd>${previous ? '已保存到运行结束记录' : '已保存到 #126'}</dd><dt>覆盖范围</dt><dd>${previous ? '该次运行中已捕获的内容' : '本次运行 · 尾部仍在保存'}</dd><dt>终端</dt><dd>${previous ? '旧运行终端未恢复；右侧是当前 CLI' : '当前终端保持连接'}</dd></dl><article class="wb-message"><div class="wb-message-role"><span class="wb-avatar">你</span>你</div><p class="wb-user-message">${previous ? '把搜索逻辑从页面拆出来，保持行为不变。' : '给搜索补上取消按钮，保留关键词。'}</p></article><article class="wb-message"><div class="wb-message-role"><span class="wb-avatar">&gt;_</span>Codex</div><p>${previous ? '已将搜索逻辑集中到 useSearch，SearchBar 负责渲染输入和结果。' : '当前实时内容仍在更新，可返回实时阅读。'}</p></article><div class="wb-read-footer"><span>浏览历史不切换右侧 CLI</span><button class="wb-link" type="button" data-page="conversation">返回实时阅读</button></div>`;
+  }
+  function renderSearch() {
+    const field = root.querySelector('#wb-search-query');
+    const results = root.querySelector('#wb-search-results');
+    if (!field || !results) return;
+    const term = field.value.trim();
+    const hits = term ? Object.entries(fileSource).flatMap(([file, lines]) => lines.map((line, index) => ({file, line, index}))).filter(hit => hit.line.toLowerCase().includes(term.toLowerCase())) : [];
+    results.innerHTML = `<p class="wb-subtitle" style="margin-top:17px">${term ? `${hits.length} 处匹配 · 示例文件` : '输入关键词后搜索示例文件'}</p>${hits.map(hit => `<div class="wb-search-result"><button type="button" class="wb-link" data-open-file="${hit.file}">src/${hit.file}:${hit.index+1}</button><p>${escape(hit.line)}</p></div>`).join('')}`;
+  }
+  function renderPage() {
+    root.dataset.page = state.page;
+    pageTitle.textContent = titles[state.page];
+    root.querySelectorAll('.wb-nav').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.side ? button.dataset.side === state.side : button.dataset.page === state.side)));
+    root.querySelector('#wb-network-toggle').setAttribute('aria-pressed', String(state.page === 'requests'));
+    renderSidebar();
+    const renderers = { conversation: conversationMarkup, requests: requestMarkup, files: fileMarkup, search: searchMarkup, git: gitMarkup, history: historyMarkup };
+    content.innerHTML = renderers[state.page]();
+    if (state.page === 'search') renderSearch();
+    refreshIcons();
+  }
+  function applyPresentation() {
+    root.dataset.layout = state.layout;
+    root.dataset.terminal = String(state.terminal);
+    root.style.setProperty('--wb-terminal-width', state.terminalWidth + '%');
+    root.querySelector('#wb-terminal-toggle').setAttribute('aria-pressed', String(state.terminal));
+    root.dataset.sidebar = String(state.sidebar);
+    root.querySelector('#wb-toggle-sidebar').setAttribute('aria-pressed', String(state.sidebar));
+    const storage = state.scenario === 'storage';
+    const gap = state.scenario === 'gap';
+    const readonly = state.scenario === 'readonly';
+    const notice = root.querySelector('#wb-notice');
+    notice.hidden = !storage && !gap;
+    notice.textContent = storage ? '保存异常 · 磁盘暂时不可写，终端与实时阅读继续。最新内容尚未保存。' : gap ? '捕获有缺口 · 部分观察内容未保留，原生 CLI 继续。当前阅读内容可能不完整。' : '';
+    root.querySelector('#wb-capture-label').textContent = gap ? '捕获存在缺口' : '实时捕获正常';
+    root.querySelector('#wb-save-label').textContent = storage ? '保存异常 · 水位停留 #126' : '保存中 · 最新 2 条';
+    root.querySelector('#wb-coverage-label').textContent = gap ? '历史覆盖：有缺口' : '历史覆盖：本次运行';
+    root.querySelector('#wb-capture-detail').textContent = gap ? '观察副本 #113–119 丢失；网络转发和 CLI 不因此丢字节。' : '当前观察流连续，页面已显示最新内容。';
+    root.querySelector('#wb-save-detail').textContent = storage ? '磁盘写入失败。持久水位停留 #126，未保存尾部可能在服务退出后丢失。' : '已保存到 #126；#127–128 仍在等待写入。';
+    root.querySelector('#wb-coverage-detail').textContent = gap ? '记录中保留缺口。后续内容继续展示，不能视作连续、完整历史。' : '只覆盖本次运行中已捕获的内容；原生历史按已确认的身份补齐。';
+    root.querySelector('#wb-input-owner').textContent = readonly ? '只读连接' : '本页可输入';
+    root.querySelector('#wb-takeover-panel').hidden = !readonly;
+    if (!readonly) {
+      takeoverPending = false;
+      root.querySelector('#wb-takeover-copy').textContent = '终端由另一页面控制，本页可继续阅读。';
+      root.querySelector('#wb-takeover').textContent = '接管输入';
+      root.querySelector('#wb-cancel-takeover').hidden = true;
+    }
+    terminalInput.disabled = readonly;
+    terminalInput.placeholder = readonly ? '接管后才能向原生终端输入' : '在原生终端继续输入…';
+  }
+  let takeoverPending = false;
+  root.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button || !root.contains(button)) return;
+    if (button.dataset.page) { state.page = button.dataset.page; if (state.page !== 'conversation') state.side = state.page; renderPage(); announce(`已切换到${titles[state.page]}，原生终端保持连接。`); }
+    else if (button.dataset.side) { state.side = button.dataset.side; state.sidebar = true; if (state.side === 'search') state.page = 'search'; renderPage(); applyPresentation(); }
+    else if (button.dataset.request) { state.page = 'requests'; state.side = 'requests'; state.request = button.dataset.request; renderPage(); }
+    else if (button.dataset.file) { state.file = button.dataset.file; state.page = state.side === 'git' ? 'git' : 'files'; renderPage(); }
+    else if (button.dataset.openFile) { state.file = button.dataset.openFile; state.page = 'files'; state.side = 'files'; renderPage(); }
+    else if (button.dataset.history) { state.page = 'history'; state.side = 'history'; state.history = button.dataset.history; renderPage(); }
+    else if (button.dataset.context) { state.context = button.dataset.context; renderPage(); }
+    else if (button.dataset.status) {
+      const detail = root.querySelector('#wb-status-detail');
+      detail.hidden = !detail.hidden;
+      root.querySelectorAll('[data-status]').forEach(item => item.setAttribute('aria-expanded', String(!detail.hidden)));
+    } else if (button.id === 'wb-toggle-sidebar') { state.sidebar = !state.sidebar; applyPresentation(); }
+    else if (button.id === 'wb-terminal-toggle') { state.terminal = !state.terminal; applyPresentation(); }
+    else if (button.id === 'wb-network-toggle') { state.page = state.page === 'requests' ? 'conversation' : 'requests'; state.side = state.page === 'requests' ? 'requests' : 'git'; renderPage(); }
+    else if (button.id === 'wb-focus-terminal') { if (!terminalInput.disabled) terminalInput.focus(); else announce('当前为只读页面，可在终端中接管输入。'); }
+    else if (button.id === 'wb-follow') { state.follow = !state.follow; renderPage(); announce(state.follow ? '跟随最新内容。' : '已暂停跟随。'); }
+    else if (button.id === 'wb-takeover') {
+      if (!takeoverPending) {
+        takeoverPending = true;
+        root.querySelector('#wb-takeover-copy').textContent = '接管后，另一页面立即变为只读。确认将输入权移至本页？';
+        button.textContent = '确认接管';
+        root.querySelector('#wb-cancel-takeover').hidden = false;
+      } else {
+        state.scenario = 'normal'; takeoverPending = false; applyPresentation(); terminalInput.focus(); announce('已模拟接管：本页可输入。');
+      }
+    } else if (button.id === 'wb-cancel-takeover') {
+      takeoverPending = false;
+      root.querySelector('#wb-takeover-copy').textContent = '终端由另一页面控制，本页可继续阅读。';
+      root.querySelector('#wb-takeover').textContent = '接管输入';
+      button.hidden = true;
+    }
+  });
+  root.addEventListener('submit', event => { if (event.target.id === 'wb-search-form') { event.preventDefault(); renderSearch(); } });
+  terminalInput.addEventListener('input', () => { root.querySelector('#wb-terminal-help').textContent = terminalInput.value ? '本地演示草稿 · 不发送给 CLI' : '原型输入仅作展示，不会执行'; });
+  renderPage();
+  applyPresentation();
+  if (globalThis.Tweak) {
+    const tweak = new globalThis.Tweak({ container: root, onChange: () => { applyPresentation(); } });
+    tweak.addSelect(state, 'layout', { label: '终端位置', options: [{label:'右侧并排（方案默认）',value:'right'}, {label:'底部展开',value:'bottom'}] });
+    tweak.addSlider(state, 'terminalWidth', { label: '右侧终端占比', min: 25, max: 40, step: 1, unit: '%' });
+    tweak.addToggle(state, 'sidebar', { label: '显示项目侧栏' });
+    tweak.addSelect(state, 'scenario', { label: '界面状态', options: [{label:'正常实时阅读',value:'normal'}, {label:'磁盘保存异常',value:'storage'}, {label:'捕获存在缺口',value:'gap'}, {label:'另一页面正在输入',value:'readonly'}] });
+  }
+})();
+</script>

@@ -1,5 +1,6 @@
 //! SQLite schema assets and version ordering.
 
+#[cfg(test)]
 pub(super) const COMPATIBILITY_MANIFEST: &str =
     include_str!("../../compatibility/codex-41ece455.json");
 

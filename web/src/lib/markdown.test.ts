@@ -29,4 +29,11 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<script');
     expect(html).toContain('red');
   });
+
+  it('removes layout styles that could cover native input or approval controls', () => {
+    const html = renderMarkdown('<div style="position:fixed;inset:0;z-index:999999">untrusted content</div>');
+    expect(html).not.toContain('style=');
+    expect(html).not.toContain('position:fixed');
+    expect(html).toContain('untrusted content');
+  });
 });

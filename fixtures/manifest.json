@@ -8,13 +8,6 @@
     "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-00-00-00000000-0000-7000-8000-000000000001.jsonl",
     "codex-home/sessions/2026/08/14/rollout-2026-08-14T12-10-00-00000000-0000-7000-8000-000000000002.jsonl"
   ],
-  "liveFixtures": [
-    "live-observer.fixture.toml",
-    "live-attach-observer.fixture.toml",
-    "live-probe.mjs",
-    "app-server-v2-controller-init.jsonl",
-    "app-server-v2-conversation.jsonl"
-  ],
   "coverage": [
     "session_meta",
     "legacy session shape",
@@ -27,11 +20,6 @@
     "unknown top-level variant",
     "parent, fork, sub-agent and history-base relations",
     "per-turn model, effort, approval, sandbox and permission profile",
-    "secret redaction",
-    "App Server observe_new and attach_loaded probe",
-    "V2 Controller initialize and capability catalog detection",
-    "V2 typed new, resume, turn start, steer, interrupt and fork dispatch",
-    "V2 Plan, Goal, rename, archive, compact and review dispatch",
-    "V2 approval, permission, user question and MCP elicitation CAS responses"
+    "secret redaction"
   ]
 }

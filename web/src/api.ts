@@ -47,34 +47,6 @@ export class Api {
     return { ...envelope, data };
   }
 
-  async post<T>(path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<ApiEnvelope<T>> {
-    const response = await fetch(path, {
-      method: 'POST',
-      headers: { ...this.headers(), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      body: JSON.stringify(body),
-      signal
-    });
-    const payload = await response.json().catch(() => undefined);
-    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
-    return payload as ApiEnvelope<T>;
-  }
-
-  async delete<T>(path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<ApiEnvelope<T>> {
-    const response = await fetch(path, {
-      method: 'DELETE',
-      headers: { ...this.headers(), 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      body: JSON.stringify(body),
-      signal
-    });
-    const payload = await response.json().catch(() => undefined);
-    if (!response.ok) throw new ApiError(response.status, payload?.error?.message || `HTTP ${response.status}`, payload?.error?.code);
-    return payload as ApiEnvelope<T>;
-  }
-
   async stream(path: string, onEvent: (event: StreamEvent) => void, signal: AbortSignal, onOpen?: () => void) {
     const response = await fetch(path, {
       headers: { ...this.headers(), Accept: 'text/event-stream' }, credentials: 'same-origin', cache: 'no-store', signal
@@ -116,7 +88,7 @@ export interface StreamEvent { type: string; id?: string; data: unknown; }
 function streamPath(path: string, cursor?: string) {
   if (!cursor) return path;
   const url = new URL(path, window.location.origin);
-  url.searchParams.set('cursor', cursor);
+  url.searchParams.set('afterEventSeq', cursor);
   return `${url.pathname}${url.search}`;
 }
 
@@ -138,9 +110,16 @@ export async function reconnectingStream(
   retryMilliseconds = 1_000
 ) {
   let cursor: string | undefined;
+  let needsSnapshot = false;
   while (!signal.aborted) {
     onState('connecting');
     try {
+      if (needsSnapshot) {
+        const snapshot = await api.get<Health>('/v1/health', signal);
+        cursor = String(snapshot.asOfEventSeq);
+        onEvent({ type: 'resync', id: cursor, data: {} });
+        needsSnapshot = false;
+      }
       await api.stream(streamPath(path, cursor), (event) => {
         if (event.id) cursor = event.id;
         onEvent(event);
@@ -148,7 +127,11 @@ export async function reconnectingStream(
     } catch (error) {
       if (signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) throw error;
-      if (error instanceof ApiError && error.status === 410) cursor = undefined;
+      if (error instanceof ApiError && error.status === 410) {
+        // A pruned sequence cannot be replayed. Resync the snapshot, then follow
+        // from its watermark rather than reconnecting forever with sequence 0.
+        needsSnapshot = true;
+      }
     }
     if (signal.aborted) return;
     onState('disconnected');

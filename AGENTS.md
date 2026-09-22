@@ -16,27 +16,28 @@
 
 ## 2. 项目目标与版本边界
 
-项目目标是实现本机运行的 Codex Local Observer & Gateway：
+当前 V2 目标是本机原生 Codex 工作台。2026-09-18 用户明确允许完全重构，要求体验与实现机理向 cc-viewer 靠拢：当前目录启动普通官方 CLI、PTY 直接交互、模型 HTTP/SSE/WS 代理、网页内容直推、后台异步记录。见工作台方案、详细设计与 ADR 0039；实施顺序、验收与状态只在 `docs/v2-implementation-plan.md` 维护。
 
-- V1：读取、整理、搜索和展示本机 Codex 会话；
-- V2：在安全、可审计的前提下控制确定的 Codex live source；
-- V3：通过 Telegram、飞书、企业微信、Discord 等 IM 接入 V2 Gateway。
+V1 Observer、v0.2.0 Controller 与 Session Kernel Slice 1–9 是已有历史实现/验证基线，不是新架构必须复用的前提。允许替换 Worker-owned App Server、remote TUI、持久 Thread/InputLease/TurnOwner、command ledger/CAS 和 raw-first 转发。新路径不承诺旧 `/v2` 控制契约；旧数据库/audit 原样保留，`/v1` 继续只读，可由独立兼容层提供历史读取。
 
-V1 本地 MVP 已完成其只读基础目标，`v0.2.0` V2 Controller也已形成历史验证基线。Session Kernel Slice 1–9 已完成实现与本地验证，当前交付重点是 **官方 CLI 单路径 Session Runtime 的 V2 release validation**。V2 工作必须遵守 `docs/codex-local-gateway-v2-development-constraints.md`、Session Kernel设计与 ADR 0022，同时保持 V1 只读能力和现有V2 ledger/CAS/audit兼容。Slice 10–12 属于 V3，不得作为 V2 收尾提前实现 IM adapter。
-
-V1 的历史设计、ADR 和验证记录已经压缩到 `docs/archive/v1-development-history.md`。该归档只用于解释现有代码和兼容性，不是当前开发指令，也不得作为恢复 V1 开发范围的依据。
-
-V2 必须继续保持 `/v1` 只读兼容和 store-first 观察能力，但控制、对话、权限、source、cwd、附件和 Slash commands 的当前决定只以 V2 核心约束及其链接的Session Kernel设计为准。用户已明确授权V3 IM完整控制目标的设计；V3平台adapter仍不得提前混入V2实现。
+V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再评审，不得提前混入当前工作台。官方 CLI 保持原版，不维护补丁，不自动升级。全文中的安全、测试、Git 和数据保护要求继续适用；历史 Session Kernel 规则不得覆盖本次重构决定。
 
 ## 3. 事实与设计依据
 
 项目文档：
 
-- `docs/codex-local-gateway-v2-development-constraints.md`：V2 当前开发核心约束；
-- `docs/codex-tui-session-kernel-refactor.md`：真实Codex TUI活动会话内核、当前代码迁移与V3 IM总体设计；
-- `docs/codex-tui-session-kernel-slices.md`：Session Kernel与V3 IM逐分片实施、验收和回退；
-- `docs/decisions/0020-codex-tui-session-kernel.md`：活动会话所有权和交互内核ADR；
-- `docs/archive/v1-development-history.md`：非规范性的 V1 历史归档，仅用于兼容性和追溯。
+- `docs/codex-local-gateway-v2-development-constraints.md`：新工作台当前核心约束；
+- `docs/codex-native-cli-workbench.md`：产品目标、架构取舍和已纳入的交互原型；
+- `docs/v2-implementation-plan.md`：唯一实施计划，RQ01–RQ12、R0–R5（含 R3.1）、验收、代码退役与状态；
+- `docs/codex-native-cli-workbench-detailed-design.md`：接入、转发、输入、记录、API、恢复与性能验收；
+- `docs/codex-native-cli-workbench-history-settings.md`：历史占用/删除/保留期限、统一 JSON 与网页展开设置契约，见 ADR 0048；
+- `docs/codex-native-cli-workbench-device-access.md`：LAN IP/Tailscale MagicDNS、共用配对/撤销和同页二维码的实现契约，见 ADR 0051；默认 loopback，显式开启设备监听，真机结果以实施计划为准；
+- `docs/decisions/0039-cc-viewer-style-runtime.md`：新运行路径与可靠性取舍；
+- `docs/cc-viewer-function-and-implementation.md`：独立参考产品说明，不混入本项目要求；
+- `docs/cc-viewer-hands-on-2026-09-18.md`：T01–T13 实际试用记录及限制；
+- `docs/prototypes/README.md`：合成数据交互原型和维护方式，不是新运行时验收；
+- `docs/archive/v2-before-cc-viewer.md`：已删除旧设计/计划/ADR 的索引和固定 Git 基线；
+- `docs/archive/v1-development-history.md`：V1 非规范性历史归档。
 
 Codex 官方源码的本地参考路径：
 
@@ -55,7 +56,7 @@ Codex 官方源码的本地参考路径：
 1. 先记录当前实际 commit，不假设参考仓库永远停留在上述版本；
 2. 优先查公共协议、schema、测试和实现，三者一致时才视为可靠结论；
 3. 明确区分“官方已确认”“源码当前实现”“项目选择”和“待验证假设”；
-4. 不修改 `/Users/windsyu/workspace/codex`，除非用户单独明确要求；
+4. 官方参考仓库只读，除非用户单独明确要求修改；
 5. 产品运行时不得依赖该绝对路径；schema 和 fixture 应复制或生成到本项目中；
 6. 不根据 macOS App 私有行为、社区帖子或猜测建立关键正确性前提。
 
@@ -66,16 +67,15 @@ Codex 官方源码的本地参考路径：
 优先顺序：
 
 ```text
-可启动
-  → 可为一个确定的 store 启动 Worker-owned App Server
-  → 可持久化并审计一条 Gateway command
-  → 可创建/继续 Thread 并完成一轮对话
-  → 可实时展示 Turn 与最终答复
-  → 可使用受支持的 Slash commands 和交互请求
-  → 再做图片、兼容、性能和安全加固
+在当前目录启动普通官方 CLI 与本机网页
+  → 模型代理保持原生请求/认证/传输
+  → 原生输入后网页在响应结束前显示中间内容
+  → 证明慢存储与慢页面不阻塞 CLI，并测量时延
+  → 工具/上下文阅读、异步历史和恢复
+  → 文件/搜索/Git、图片/设备与迁移退役
 ```
 
-每个阶段都应保持项目可运行、可演示、可回退。不要先完成所有底层抽象再第一次展示用户价值。
+每阶段保持可运行、可演示、可回退。先做有限 R0 spike，不先完成控制账本或所有底层抽象。
 
 ### 4.2 用最小方案验证假设
 
@@ -85,27 +85,19 @@ Codex 官方源码的本地参考路径：
 - 只有会显著改变范围、数据模型、安全边界或交付结果的歧义才请求用户决策；
 - 需求没有明确要求时，不擅自扩大到远程访问、多用户、云部署或 IM。
 
-### 4.3 原始数据优先、投影可重建
+### 4.3 转发、实时观察与持久化分离
 
-- 外部数据先形成 append-only raw event，再更新投影；
-- unknown method、variant 或字段必须保留，不能因 decode 失败丢弃；
-- 标准化不得覆盖原始 provenance；
-- checkpoint、raw event 和 projection 必须保持事务一致；
-- JSONL 是 Codex durable history 的主要事实源，Observer SQLite 是自身事件日志和查询投影；
-- 不直接绑定 Codex 内部 SQLite 私有表结构。
+- 网络和 PTY 转发不等待持久化、投影、网页请求或 ACK；
+- 有界观察副本解码并脱敏后进入内存展示，再异步记录；
+- unknown method/variant 保留安全诊断，无法完整捕获时标记缺口，不丢转发字节；
+- journal、snapshot 和索引保留 provenance/格式版本，索引可重建；
+- 只在实际 fsync 后推进持久水位，不能以入队或网页显示当作保存成功；
+- Codex rollout 继续作为原生 durable history 的来源，不直接绑定其内部 SQLite 私有表；
+- 旧 Observer 的 raw/projection/checkpoint 事务约束只适用于旧兼容层，不能回流到新运行热路径。
 
 ### 4.4 明确表达不完整性
 
-无法恢复的实时 delta、approval、question 或 ephemeral 数据不能伪装为完整。API 和 UI 应区分：
-
-```text
-live_complete
-live_partial
-durable_complete
-durable_partial
-metadata_only
-ephemeral_lost
-```
+新 UI/API 分开表达实时捕获、保存和历史覆盖。保存失败、观察缺口、未归属身份、被策略省略和服务退出后丢失的尾部不能伪装为完整。模型 response completed 不代表 Codex Turn completed；模型生成工具参数不代表已执行成功。旧 completeness 枚举可在旧 API 保留，新模型不强制沿用。
 
 ### 4.5 安全默认值
 
@@ -115,7 +107,7 @@ ephemeral_lost
 - Raw JSON、Markdown、ANSI、HTML 和 SVG 默认作为不可信内容；
 - 不把 cwd、diff、完整命令输出或 reasoning 自动发送到外部平台；
 - destructive、高权限和外部写操作必须符合当前用户授权范围；
-- `/v1` 不注册控制 Codex 的 mutation API；V2 mutation 只能位于 `/v2` 并遵守核心约束。
+- 旧 `/v1` 保持只读；新工作台使用 `/workbench/v1`，不得悄悄改变旧控制 API 的语义。
 
 ## 5. 会话开始流程
 
@@ -173,7 +165,7 @@ ADR 至少包含：Context、Decision、Alternatives、Consequences、Status、D
 
 ### 7.1 推荐切片
 
-V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` 第 12 节和 `docs/codex-tui-session-kernel-slices.md` 的纵向切片推进。只有前一个切片达到验收条件后，才把下一个切片作为主线。允许并行准备 fixture 或文档，但不要维持多个长期未集成的大分支。
+只按 `docs/v2-implementation-plan.md` 的状态表与逐片通过条件推进。先证明普通 CLI + 模型代理 + 网页中间态，再扩展；前片通过才能以下片为主线，不维持多个长期未集成分支。旧 Controller、Session Kernel Slice 1–12、W0–W6、N1–N5 不再作为当前任务清单，不能从历史文字恢复未经当前方案接纳的范围。
 
 ### 7.2 编码要求
 
@@ -182,15 +174,15 @@ V2 新开发必须按 `docs/codex-local-gateway-v2-development-constraints.md` �
 - 错误必须携带 source、epoch、offset/sequence 等诊断上下文，但不得泄露 payload 正文；
 - I/O、解析、标准化、投影和查询保持可独立测试；
 - 文件通知只作为 rescan hint；
-- 任何 checkpoint 推进都必须建立在数据已提交或已明确记录错误之上；
+- 持久化 checkpoint 必须建立在数据已提交或明确缺口记录上；实时 viewSeq 是内存阅读序列，不得冒充持久化水位；
 - 不使用 wall clock 作为唯一 ID 或去重键；
-- 不使用真实用户的 `~/.codex` 作为自动化测试写入目标；
-- 集成测试使用临时 `CODEX_HOME`。
+- 不使用真实用户的 `~/.codex` 或 `~/.codex-web` 作为自动化测试写入目标；
+- 集成测试使用临时 `CODEX_HOME`，并显式注入独立临时用户主目录；真实 binary 的测试子进程须隔离其 HOME/USERPROFILE，不能只替换 CODEX_HOME 后写入真实工作台目录。
 
 ### 7.3 避免的做法
 
 - 不在 `/v1` 中注册消息发送、approval、interrupt 或其他控制路由；
-- 不做模型 API MITM；
+- 不做全机 TLS 劫持或开放网络代理；允许 ADR 0039 规定的本次 CLI 显式模型代理，不得为了抓包改变原生认证/权限或强制降级传输；
 - 不让 Web 请求路径直接扫描 Codex store；
 - 不在 adapter 内散落业务投影规则；
 - 不因一个坏 JSON 行停止整个 source；
@@ -356,26 +348,27 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 ## 12. 当前项目决策摘要
 
-用户已经明确确认：
+### 2026-09-18 完全重构（当前方向）
 
-- 产品按 V1、V2、V3 演进；
-- V1 本地 MVP 已完成基础交付，当前开发目标是 V2 Local Gateway；
-- 项目使用 Git + GitHub 进行版本控制。
+用户明确允许完全重构，以 cc-viewer 的体验和核心机理为目标，取代同日 ADR 0038 的增量方案。按 ADR 0039：
 
-当前 V2 已确认的关键边界：
+- 当前目录启动本机网页、PTY 与普通官方 Codex CLI；不由本项目启动外部 App Server，不用 remote TUI；
+- 模型请求走显式本机 HTTP/SSE/WS 代理，实时正文/请求上下文从同层观察副本取得；
+- 直接 push 内容，后台异步 journal/索引；raw-first 数据库提交不再阻挡网络或终端；
+- 原生 TUI 是唯一对话/审批/原生模型与权限设置入口，网页终端单写权简化为内存仲裁和明确接管；工作台自身配置按下述 R3.1 决定提供 JSON/网页表单；
+- Worker/ThreadLease/InputLease/TurnOwner、CAS 与逐命令控制审计不再是新内核要求；
+- 保存失败降级而不主动中止 CLI，接受未落盘尾部/观察副本可能丢失并明确显示；
+- 旧数据/audit 保留且可只读访问，新 namespace/数据目录独立，达标后退役旧控制代码；
+- 不把模型工具参数当执行结果，不把一次模型响应结束当整个任务结束；缺失由终端和可关联 rollout 补充；
+- 继续使用原版官方 CLI，不自动升级，不增加独立 Composer/网页队列，不提前实现 IM；
+- 2026-09-20 用户确认 CLI 升级不应因版本号不同而被阻止：已回归版本是证据元数据，不是启动白名单；未知版本提示后继续，不要求降级或 bypass 参数。可执行文件/版本探测及真实配置、路由检查继续保留，见 ADR 0045；
+- 2026-09-20 用户要求左下角面向实际使用：优先显示本次运行的 Token/输入/输出/缓存/推理统计，技术身份、保存水位和解析记录默认折叠；保存异常与历史缺失仍简短可见。累计用量须独立去重、标明未知与范围，不把缓存/推理重复计入总量，见 ADR 0046；
+- 2026-09-20 用户确认移除独立“模型请求/网络”页面：实时及历史对话的模型/工具卡提供“调用详情”，用量概览提供简洁“调用记录”；辅助/未归属内容在详情保留，不复制聊天正文。历史详情绑定其运行/窗口，底栏仍属于当前运行，见 ADR 0047；
+- 2026-09-20 用户要求历史占用、按运行/批量删除、可选保留期限和统一 JSON/网页设置。默认手动/自动删除均关闭，同一文件服务本地编辑和网页表单；清理仅针对绑定数据根的当前项目，活动运行及原生/旧数据受保护，旧记录无可靠结束时间时不自动删除。契约见 ADR 0048，实现与试用状态只看 R3.1；
+- 2026-09-20 用户进一步确认工作台独立目录：macOS/Linux 使用 `~/.codex-web`，Windows 约定 `%USERPROFILE%\.codex-web`；内部统一 `config/config.json` 与 `history/`。默认值不再依赖 `CODEX_HOME`，显式配置/数据路径覆盖继续有效。旧目录保留原位、不自动迁移或回退读取，原生配置与会话不改动；Windows 目录约定不代表完整 Windows 运行已验收。见 ADR 0049；
+- 2026-09-20 用户明确配置交互只需在当前工作台点击按钮展开可视化修改面板、用完收起；不新建独立设置页面、导航项或前端路由，不切换中央阅读或卸载终端。展开表单继续编辑同一 JSON，收起保留当前页面内未保存草稿，见历史与配置方案 §6.1；
+- 2026-09-19 用户确认终端显示保持简洁：保留原生 ANSI 样式，网页 CLI 子进程清除继承的 `NO_COLOR`、使用 truecolor，并用官方 `tui.animations=false` 关闭装饰动画；不新增动画过滤层或修改全局配置；
+- 2026-09-19 用户确认右侧终端打开即用：不显示启用/释放输入权按钮，空闲时自动可输入；仅多页面冲突时显示“在此输入”，点击一次切换，无二次确认。内部单写、重连保留和未确认输入不重发继续适用，输出始终可读；
+- 旧设计与重复计划已清理，历史原文通过固定 Git commit 追溯；交互原型保留并纳入 R1–R4，进度统一看实施计划。
 
-- V1 是已完成的只读兼容基础，历史说明只存在于非规范性归档；
-- `v0.2.0` source-global LiveSourceActor/Web Composer是已验证迁移基线，不再是活动会话目标架构；
-- V2 不再连接、发现或接管既有 App Server；每个 Session Worker 启动并守护一个专属 App Server；
-- 活动会话目标内核是真实Codex TUI + PTY；每个活动Thread只能属于一个Session Worker，一个TUI的主/side/child Thread可形成指向同一worker的lease set，worker只有一条通向其专属 App Server 的私有1:1 audited proxy connection；
-- Browser当前会话只以 SessionIntent 启动/恢复并承载xterm，Slash、picker、Goal/Plan和terminal-owned交互交给官方TUI；V1 Viewer继续从 rollout watcher + 周期增量导入承载durable history、搜索和安全渲染，无需重启服务；
-- Gateway继续负责SourceSupervisor、source epoch、Thread/InputLease、raw-first、command/audit ledger、pending request CAS和fail-closed recovery；
-- source epoch表示Supervisor共享generation，worker connection epoch表示单条proxy连接；双向protocol envelope和TUI mutation write boundary必须先持久化，单worker断线不无条件拖垮其他Session；
-- V2 复用 V1 bearer、Cookie 和 Tailscale 登录，不增加 control token；
-- 所有已验证的 Tailnet 用户拥有与本机登录相同的 V2 mutation 能力；
-- `/v1` 保持只读，V2 mutation 只注册在 `/v2`；
-- V2 首版范围、任意 cwd、图片和 Slash commands 以核心约束为准；
-- V3 IM Bridge保持独立未来版本，但目标已确认为完整控制面；绑定后的IM principal与本机登录具有相同Gateway控制能力，并保留原生approval/question/elicitation、CAS和审计；
-- V3可借鉴cc-viewer的worker、队列、binding、dedup和输出缓冲，不采用skip-permissions、自动approval、regex hard deny、禁止交互或transcript/ANSI推断。
-
-默认技术基线可以通过 Issue、设计评审和 ADR 调整。任何变化都应在同一个 PR 中更新本节和对应设计文档。
+R0 先验证当前必要 provider/profile 的原生流程，以及合成 SSE/WS 转发、真实中间态和慢记录器隔离；其余 profile 验收后逐项加入支持清单。旧路径性能可作参照，不为对比继续改造旧内核。配置入口、参考产品试用、原型或旧测试均不能替代新路径验收。文档清理不执行代码退役、用户服务切换或数据库 migration。

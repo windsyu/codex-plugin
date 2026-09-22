@@ -1,0 +1,8 @@
+{"live": true, "profile": {"auth": "configured-custom-bearer", "model": "gpt-6-astra", "provider": "custom", "reasoningEffort": "max", "scope": "isolated-synthetic-task", "websocketsConfigured": null, "wireApi": "responses"}, "sourceUnchanged": true, "stage": "profile-inspected"}
+{"characters": 172, "elapsedMs": 21717, "stage": "browser-midstream"}
+{"elapsedMs": 31127, "stage": "model-response-completed"}
+{"browser": "153.0.8010.50", "headless": false, "pageErrors": 0, "stage": "browser-verified"}
+{"stage": "native-tool-verified"}
+{"elapsedMs": 39888, "stage": "native-escape-sent"}
+{"nativeAbort": true, "stage": "native-cancel-verified", "unfinishedStreamClosed": true}
+{"browserMidstream": true, "capture": "partial", "captureStats": {"byte_limit": 8388608, "dropped_bytes": 0, "dropped_chunks": 0, "interrupted_streams": 4, "retained_bytes": 0, "transports": {"http_requests": 5, "http_responses": 5, "sse_responses": 5, "websocket_requests": 0, "websocket_responses": 0}}, "diagnosticCodes": ["omitted_by_policy", "interrupted", "interrupted", "omitted_by_policy", "omitted_by_policy", "interrupted", "omitted_by_policy", "interrupted", "omitted_by_policy", "interrupted"], "elapsedMs": 97968, "finalCharacters": 594, "interactions": {"elapsedMs": 66631, "nativeAbort": true, "recoveryBrowserMidstream": true, "recoveryNativeVisible": true, "recoveryTurnCompleted": true, "sameCliRecovery": true, "toolSucceeded": true, "unfinishedStreamClosed": true}, "nativeFinalVisible": true, "nativeTurnCompleted": true, "passed": true, "sourceAndProviderUnchanged": true, "stage": "result", "submitted": true}

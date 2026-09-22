@@ -26,7 +26,6 @@ describe('responsive Viewer contract', () => {
     expect(css).toMatch(/\.workspace\s*\{[^}]*grid-template-columns:\s*320px/);
     expect(css).toMatch(/\.detail-inner\s*\{[^}]*max-width:\s*900px/);
     expect(css).toMatch(/\.conversation-dock\s*\{[^}]*position:\s*sticky/);
-    expect(css).toMatch(/\.composer\s*\{[^}]*border-radius:\s*22px/);
     expect(css).toMatch(/\.jump-to-latest\s*\{[^}]*border-radius:\s*99px/);
     expect(css).toMatch(/\.session-overview\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(css).toMatch(/\.dialogue-assistant\s*\{[^}]*grid-template-columns:\s*28px/);
@@ -34,24 +33,4 @@ describe('responsive Viewer contract', () => {
     expect(css).toMatch(/\.project-heading \.project-title\s*\{[^}]*flex:\s*1/);
   });
 
-  it('keeps the native terminal chrome stable and measures a padding-free xterm host', () => {
-    expect(css).toMatch(/\.session-toolbar\s*\{[^}]*white-space|\.session-status-cluster\s*\{[^}]*white-space:\s*nowrap/);
-    expect(css).toMatch(/\.session-context-strip\s*\{[^}]*white-space:\s*nowrap/);
-    expect(css).toMatch(/\.terminal-panel-wrap\s*\{[^}]*display:\s*flex/);
-    expect(css).toMatch(/\.terminal-stage\s*\{[^}]*padding:/);
-    expect(css).toMatch(/\.terminal-panel\s*\{[^}]*height:\s*100%/);
-    expect(css).not.toMatch(/\.terminal-panel\s*\{[^}]*padding:/);
-    expect(css).toMatch(/\.xterm-viewport\s*\{[^}]*scrollbar-gutter:\s*stable/);
-  });
-
-  it('keeps a single compact runtime status row outside the xterm canvas', () => {
-    expect(css).toMatch(/\.terminal-titlebar\s*\{[^}]*flex:\s*none/);
-    expect(css).toMatch(/\.terminal-runtime-status\s*\{[^}]*white-space:\s*nowrap/);
-    expect(css).toMatch(/\.terminal-runtime-status\s*\{[^}]*overflow-x:\s*auto/);
-    expect(css).toMatch(/\.terminal-panel-wrap:focus-within\s*\{[^}]*border-color:/);
-    expect(css).toMatch(/\.terminal-input-status\s*\{[^}]*flex:\s*none/);
-    expect(css).toMatch(/\.terminal-input-status-attention\s*\{[^}]*border-color:/);
-    expect(css).not.toContain('.terminal-legend');
-    expect(css).not.toContain('.terminal-input-guide');
-  });
 });

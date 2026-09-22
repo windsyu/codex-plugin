@@ -1,0 +1,17 @@
+{"live":true,"profile":{"auth":"configured-custom-bearer","configurationSources":{"managedConfigPreference":false,"managedFile":false,"managedRequirementsPreference":false,"possibleCloudManagement":false,"systemConfig":false,"systemRequirements":false,"unverifiedAuthStore":false},"model":"gpt-6-astra","provider":"custom","reasoningEffort":"high","scope":"isolated-synthetic-task","websocketsConfigured":null,"wireApi":"responses"},"sourceUnchanged":true,"stage":"profile-inspected"}
+{"slashPickerCancelled":true,"stage":"native-ready"}
+{"stage":"real-midstream","submitToVisibleMs":11167}
+{"check":"real-tool-and-stream","elapsedMs":15001,"stage":"progress"}
+{"check":"real-tool-and-stream","elapsedMs":30003,"stage":"progress"}
+{"nativeExitCode":0,"separateToolCard":true,"stage":"real-tool-verified","submitToResponseEndMs":38193,"userMultilineExact":true}
+{"draftPreserved":true,"noReplay":true,"sameCli":true,"stage":"refresh-verified"}
+{"check":"real-stream-cancel","elapsedMs":45005,"stage":"progress"}
+{"interruptedWhileReceiving":true,"stage":"cancel-verified"}
+{"nativePlaceholder":true,"noAutomaticEnter":true,"stage":"image-attached"}
+{"check":"native-image-attachment","elapsedMs":60006,"stage":"progress"}
+{"capture":"partial","diagnosticCodes":["omitted_by_policy","interrupted"],"redAndBlueRecognized":true,"requestCount":5,"sameCliRecovery":true,"stage":"real-image-verified"}
+{"nativeAnswer":true,"refreshDidNotAnswer":true,"stage":"real-approval-verified"}
+{"check":"real-native-question","elapsedMs":75008,"stage":"progress"}
+{"refreshDidNotAnswer":true,"selectedBlue":true,"stage":"real-question-verified"}
+{"browser":"153.0.8010.50","elapsedMs":84305,"pageErrors":0,"stage":"complete","terminalFaults":0}
+{"cliReaped":true,"entryRemoved":true,"isolatedUserHome":true,"listenerClosed":true,"nativeAborts":1,"nativeCompletions":4,"nativeImageInputs":1,"sourceAndProviderUnchanged":true,"stage":"product-cleanup"}

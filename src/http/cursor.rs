@@ -35,13 +35,6 @@ pub(super) struct RequestKey {
     pub(super) request_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct V2StreamCursor {
-    pub(super) event_seq: i64,
-    pub(super) command_transition_seq: i64,
-}
-
 pub(super) enum CursorFailure {
     Invalid(String),
     Internal(anyhow::Error),
@@ -108,18 +101,6 @@ pub(super) fn encode_page_cursor(cursor: &PageCursor, token: &str) -> Result<Str
 
 pub(super) fn encode_request_key(request: &RequestKey, token: &str) -> Result<String> {
     encode(request, token)
-}
-
-pub(super) fn decode_request_key(value: &str, token: &str) -> Result<RequestKey> {
-    decode(value, token)
-}
-
-pub(super) fn encode_v2_stream_cursor(cursor: &V2StreamCursor, token: &str) -> Result<String> {
-    encode(cursor, token)
-}
-
-pub(super) fn decode_v2_stream_cursor(value: &str, token: &str) -> Result<V2StreamCursor> {
-    decode(value, token)
 }
 
 fn decode_page_cursor(value: &str, token: &str) -> Result<PageCursor> {

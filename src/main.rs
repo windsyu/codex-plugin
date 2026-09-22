@@ -4,15 +4,12 @@
 mod architecture;
 mod clock;
 mod config;
-#[allow(dead_code, unused_imports)] // Legacy Controller remains only as migration-test evidence.
-mod controller;
 mod credentials;
 mod domain;
 mod http;
 mod ingest;
 mod instance_lock;
 mod permissions;
-mod session;
 mod store;
 mod tailscale;
 mod watcher;
@@ -84,15 +81,6 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    #[command(hide = true)]
-    OwnedAppServerGuard {
-        #[arg(long)]
-        codex_executable: PathBuf,
-        #[arg(long)]
-        cwd: PathBuf,
-        #[arg(long)]
-        socket: PathBuf,
-    },
 }
 
 #[tokio::main]
@@ -106,28 +94,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    if let Command::OwnedAppServerGuard {
-        codex_executable,
-        cwd,
-        socket,
-    } = &cli.command
-    {
-        return session::run_owned_app_server_guard(codex_executable, cwd, socket);
-    }
     let config = Config::load(&cli.config)?;
     config.validate()?;
     if let Command::Doctor { json } = &cli.command {
-        let mut report = Database::doctor_read_only(&config)?;
-        let runtime_status = if session::codex_cli_available().is_some() {
-            "ready"
-        } else {
-            report.status = "degraded".into();
-            "codex_cli_unavailable"
-        };
-        for source in &mut report.sources {
-            source.session_runtime_status = runtime_status.into();
-        }
-        print_doctor(report, *json)?;
+        print_doctor(Database::doctor_read_only(&config)?, *json)?;
         return Ok(());
     }
     if matches!(cli.command, Command::Open) {
@@ -188,44 +158,6 @@ async fn main() -> Result<()> {
         config.capture.inline_blob_bytes,
     )?);
     database.migrate()?;
-    let gateway_recovery = database.recover_gateway_after_restart()?;
-    for path in &gateway_recovery.image_paths {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).with_context(|| format!("remove stale image {path}")),
-        }
-    }
-    if gateway_recovery.closed_epochs > 0
-        || gateway_recovery.failed_before_dispatch > 0
-        || gateway_recovery.outcome_unknown > 0
-    {
-        info!(
-            closed_epochs = gateway_recovery.closed_epochs,
-            failed_before_dispatch = gateway_recovery.failed_before_dispatch,
-            outcome_unknown = gateway_recovery.outcome_unknown,
-            removed_images = gateway_recovery.image_paths.len(),
-            "Gateway restart recovery completed without replay"
-        );
-    }
-    let session_recovery = database.recover_sessions_after_restart()?;
-    if session_recovery.orphaned_workers > 0
-        || session_recovery.orphaned_thread_leases > 0
-        || session_recovery.orphaned_attachments > 0
-        || session_recovery.orphaned_input_leases > 0
-    {
-        info!(
-            orphaned_workers = session_recovery.orphaned_workers,
-            orphaned_thread_leases = session_recovery.orphaned_thread_leases,
-            orphaned_attachments = session_recovery.orphaned_attachments,
-            orphaned_input_leases = session_recovery.orphaned_input_leases,
-            "Session Kernel restart recovery completed without process adoption or replay"
-        );
-    }
-    let expired_images = database.sweep_expired_image_uploads(crate::clock::now_ms())?;
-    if expired_images > 0 {
-        info!(files = expired_images, "removed expired staged images");
-    }
     let writer = WriterHandle::start(
         database.clone(),
         config.capture.ingest_queue_events,
@@ -270,14 +202,6 @@ async fn main() -> Result<()> {
         Command::Serve => {
             let (_watcher, mut rescan_hints) = watcher::RolloutWatcher::start(&config)?;
             let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-            let fingerprint_key =
-                credentials::load_or_create_key(&config.storage.fingerprint_key_file)?;
-            let session_kernel = session::SessionKernel::from_config(
-                &config,
-                database.clone(),
-                writer.clone(),
-                fingerprint_key,
-            )?;
             let signal_sender = shutdown_sender.clone();
             tokio::spawn(async move {
                 if tokio::signal::ctrl_c().await.is_ok() {
@@ -290,7 +214,6 @@ async fn main() -> Result<()> {
                 config.clone(),
                 database.clone(),
                 writer.clone(),
-                session_kernel.clone(),
                 server_token.expect("Serve initialized one startup token"),
                 http::ServeLifecycle {
                     ready: http_ready_sender,
@@ -367,10 +290,6 @@ async fn main() -> Result<()> {
                 .await
                 .context("Observer Web Viewer task failed")??;
             let _ = shutdown_sender.send(true);
-            session_kernel.shutdown().await;
-        }
-        Command::OwnedAppServerGuard { .. } => {
-            unreachable!("owned App Server guard exits before configuration loading")
         }
     }
     Ok(())
@@ -444,6 +363,29 @@ fn safe_export_output(config: &Config, output: &std::path::Path) -> Result<PathB
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn retired_app_server_guard_is_not_a_cli_command() {
+        assert!(
+            Cli::try_parse_from([
+                "codex-observerd",
+                "owned-app-server-guard",
+                "--codex-executable",
+                "/never-executed",
+                "--cwd",
+                "/tmp",
+                "--socket",
+                "/tmp/never-connected.sock"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["codex-observerd", "serve"])
+                .unwrap()
+                .command,
+            Command::Serve
+        ));
+    }
 
     #[tokio::test]
     async fn viewer_readiness_requires_a_successful_http_response() -> Result<()> {
