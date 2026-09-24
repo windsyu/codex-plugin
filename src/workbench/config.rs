@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use super::paths::WorkbenchPaths;
 use super::recording::fs::Directory;
-use notify::Watcher;
 use serde::Serialize;
 use tokio::sync::oneshot;
 mod model;
@@ -85,11 +84,12 @@ pub struct Prepared {
     overrides: Overrides,
     pub effective: Config,
     pub data_dir: PathBuf,
+    application: bool,
 }
 
 // Resolve existing parents, but do not require the future storage directory to
 // exist. Paths never become shell strings. Leaf symlinks are rejected by I/O.
-fn location(path: &Path, cwd: &Path) -> io::Result<PathBuf> {
+pub(crate) fn location(path: &Path, cwd: &Path) -> io::Result<PathBuf> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -117,6 +117,10 @@ fn location(path: &Path, cwd: &Path) -> io::Result<PathBuf> {
     }
     Ok(result)
 }
+/// Resolve a launch identity without requiring a native directory to exist.
+pub fn location_for_application(path: &Path, cwd: &Path) -> io::Result<PathBuf> {
+    location(path, cwd)
+}
 fn overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
@@ -126,9 +130,34 @@ impl Prepared {
         cwd: &Path,
         paths: &WorkbenchPaths,
         config_dir: Option<&Path>,
-        mut overrides: Overrides,
+        overrides: Overrides,
     ) -> Result<Self, ConfigError> {
-        let home = home.canonicalize().map_err(ConfigError::io)?;
+        Self::load_inner(home, cwd, paths, config_dir, overrides, false)
+    }
+    /// Application settings do not require an installed CLI or native home.
+    pub fn load_application(
+        home: &Path,
+        cwd: &Path,
+        paths: &WorkbenchPaths,
+        config_dir: Option<&Path>,
+        overrides: Overrides,
+    ) -> Result<Self, ConfigError> {
+        Self::load_inner(home, cwd, paths, config_dir, overrides, true)
+    }
+    fn load_inner(
+        home: &Path,
+        cwd: &Path,
+        paths: &WorkbenchPaths,
+        config_dir: Option<&Path>,
+        mut overrides: Overrides,
+        application: bool,
+    ) -> Result<Self, ConfigError> {
+        let home = if application {
+            location(home, cwd)
+        } else {
+            home.canonicalize()
+        }
+        .map_err(ConfigError::io)?;
         let cwd = cwd.canonicalize().map_err(ConfigError::io)?;
         if let Some(p) = &overrides.codex_bin
             && p != Path::new("codex")
@@ -183,7 +212,11 @@ impl Prepared {
             }
             Err(e) => return Err(ConfigError::io(e)),
         };
-        let saved = Config::parse(&bytes)?;
+        let saved = match Config::parse(&bytes) {
+            Ok(config) => config,
+            Err(_) if application => Config::default(), // snapshot exposes the original error; never overwrite it
+            Err(error) => return Err(error),
+        };
         let effective = overrides.apply(&saved);
         if effective.storage.data_dir.is_none()
             && std::fs::symlink_metadata(&paths.root).is_ok_and(|m| m.file_type().is_symlink())
@@ -202,7 +235,7 @@ impl Prepared {
             &cwd,
         )
         .map_err(ConfigError::io)?;
-        let prepared = Self {
+        let mut prepared = Self {
             directory,
             home,
             paths: paths.clone(),
@@ -210,8 +243,15 @@ impl Prepared {
             overrides,
             effective,
             data_dir,
+            application,
         };
-        prepared.validate(&saved)?;
+        if let Err(error) = prepared.validate(&saved) {
+            if application && error.field == "history.library" {
+                prepared.effective.history.library.enabled = false;
+            } else {
+                return Err(error);
+            }
+        }
         prepared.effective.validate()?;
         prepared.validate(&prepared.effective)?;
         // Schema is app-owned; reject an unsafe replacement before writing it.
@@ -229,6 +269,9 @@ impl Prepared {
         }
         drop(lock);
         Ok(prepared)
+    }
+    pub fn config_dir(&self) -> &Path {
+        &self.directory.path
     }
     fn validate(&self, config: &Config) -> Result<(), ConfigError> {
         config.validate()?;
@@ -252,7 +295,12 @@ impl Prepared {
                 "unsafe_data_directory",
             ));
         }
-        if config.launch.codex_bin != "codex" {
+        config
+            .history
+            .library
+            .resolved(&self.home, &self.data_dir)
+            .map_err(|code| ConfigError::field("history.library", code))?;
+        if !self.application && config.launch.codex_bin != "codex" {
             use std::os::unix::fs::PermissionsExt;
             let meta = std::fs::metadata(&config.launch.codex_bin)
                 .map_err(|_| ConfigError::field("launch.codexBin", "executable_unavailable"))?;
@@ -283,6 +331,7 @@ impl Prepared {
                 (Some(c), Some(r), vec![])
             }
             Err(e) => {
+                effective.history.library.enabled = false;
                 effective.history.cleanup.enabled = false;
                 effective.history.cleanup.retention.enabled = false;
                 (None, None, vec![e])
@@ -308,7 +357,7 @@ impl Prepared {
             }
         }
         Settings {
-            schema_version: 1,
+            schema_version: 2,
             revision,
             saved,
             effective,
@@ -330,6 +379,9 @@ impl Prepared {
         config: &Config,
         deadline: Instant,
     ) -> Result<Settings, ConfigError> {
+        let mut upgraded = config.clone();
+        upgraded.schema_version = 2;
+        let config = &upgraded;
         self.validate(config)?;
         self.directory.verify_location().map_err(ConfigError::io)?;
         let lock = lock(&self.directory)?;
@@ -412,7 +464,7 @@ enum Request {
         deadline: Instant,
         reply: oneshot::Sender<Result<Settings, ConfigError>>,
     },
-    Reload,
+    Wake,
 }
 #[derive(Clone)]
 pub struct ConfigHandle {
@@ -456,11 +508,6 @@ pub struct ConfigService {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-fn queue_reload(sender: &mpsc::SyncSender<Request>, pending: &AtomicBool) {
-    if !pending.swap(true, Ordering::AcqRel) && sender.try_send(Request::Reload).is_err() {
-        pending.store(false, Ordering::Release);
-    }
-}
 impl ConfigService {
     pub fn start(prepared: Prepared) -> io::Result<Self> {
         let (sender, rx) = mpsc::sync_channel(8);
@@ -471,26 +518,13 @@ impl ConfigService {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
-        let changes = handle.sender.clone();
-        let reload_pending = Arc::new(AtomicBool::new(false));
-        let pending_hint = reload_pending.clone();
         let thread = std::thread::Builder::new()
             .name("workbench-settings".into())
             .spawn(move || {
-                let mut watcher =
-                    notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                        if event.as_ref().is_ok_and(|event| event.kind.is_access()) {
-                            return;
-                        }
-                        queue_reload(&changes, &pending_hint);
-                    })
-                    .ok();
-                if let Some(w) = &mut watcher {
-                    let _ = w.watch(
-                        &prepared.directory.path,
-                        notify::RecursiveMode::NonRecursive,
-                    );
-                }
+                // Reads/saves consult disk directly, and the cleanup scheduler
+                // independently polls policy before every deletion. A watcher
+                // had no consumer for its snapshots and delayed first requests
+                // while the OS initialized it. Keep this worker ready immediately.
                 while !stopping.load(Ordering::Acquire) {
                     match rx.recv_timeout(Duration::from_secs(1)) {
                         Ok(Request::Read(reply)) => {
@@ -506,10 +540,7 @@ impl ConfigService {
                                 let _ = reply.send(prepared.save(&revision, &config, deadline));
                             }
                         }
-                        Ok(Request::Reload) | Err(mpsc::RecvTimeoutError::Timeout) => {
-                            reload_pending.store(false, Ordering::Release);
-                            let _ = prepared.snapshot();
-                        }
+                        Ok(Request::Wake) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
@@ -527,7 +558,7 @@ impl ConfigService {
 impl Drop for ConfigService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = self.handle.sender.try_send(Request::Reload);
+        let _ = self.handle.sender.try_send(Request::Wake);
         if let Some(thread) = self.thread.take()
             && thread.is_finished()
         {

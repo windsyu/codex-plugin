@@ -4,6 +4,8 @@
 > 状态：设计已更新；实现进度见 [V2 实施计划](v2-implementation-plan.md)。当前 main 仍是旧 Session Runtime，不能把目标写成已实现。
 > 决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)；[整体方案](codex-native-cli-workbench.md)；[详细设计](codex-native-cli-workbench-detailed-design.md)。
 
+2026-09-22 用户新增 R6：默认全部历史首页，明确选择项目/现有目录后启动 CLI；另项目新标签、默认新对话、指定会话另行恢复。该授权扩展为 Application 管理多个独立项目 Run，覆盖本文“每次启动一个项目”的后续边界；每 Run 的 PTY/目录/代理/保存隔离与零自动输入仍适用。设计和实现契约见[历史首页方案](codex-native-cli-workbench-history-home.md)，逐片状态与证据只在实施计划维护。
+
 ## 1. 文档目的与约束级别
 
 本文约束新工作台设计、实现、测试和迁移。当前会话明确要求优先于 AGENTS.md，后者优先于本文与详细设计；旧代码不是必须复用的约束。

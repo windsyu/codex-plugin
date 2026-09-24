@@ -74,6 +74,28 @@ fn native_workbench_does_not_import_legacy_runtime_or_ui() {
         "workbench",
         &["controller", "session", "store", "writer", "ingest"],
     );
+    assert_avoids(
+        "history",
+        &["controller", "session", "store", "writer", "ingest", "http"],
+    );
+    for path in rust_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/history")) {
+        let source = fs::read_to_string(path).unwrap();
+        if source.lines().any(|line| line == "#![cfg(test)]") {
+            continue;
+        }
+        for forbidden in [
+            "../store/",
+            "../ingest/",
+            "../http/",
+            "../session/",
+            "../controller/",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "history must not include a legacy runtime"
+            );
+        }
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for path in rust_files(&root.join("src/workbench")) {
         let source = fs::read_to_string(&path).unwrap();

@@ -29,6 +29,19 @@ function fixture(control = { controllerConnection: null as string | null, genera
 }
 
 describe('native terminal browser connection', () => {
+  it('reports an exit only from the server, preserves it on disconnect and never reclaims ended input', () => {
+    const { socket, view, terminal } = fixture();
+    socket.close();
+    expect(view().exit).toBeNull();
+    const exit = { code: 0, signal: null };
+    socket.receive({ type: 'state', exit, control: { controllerConnection: null, generation: 2, reconnectReserved: false, ended: true, rows: 24, cols: 80 } });
+    expect(view().exit).toEqual(exit);
+    expect(terminal.options).toMatchObject({ disableStdin: true });
+    const before = socket.sent.length;
+    client!.input('after exit'); client!.takeover(); socket.close();
+    expect(socket.sent).toHaveLength(before);
+    expect(view().exit).toEqual(exit);
+  });
   it('automatically enables a free terminal without trusting copied credentials or sending input early', () => {
     sessionStorage.setItem('workbench-reconnect:epoch', 'copied-token');
     const { socket, view } = fixture();

@@ -14,7 +14,7 @@
 
 | 实现 | 行为 |
 | --- | --- |
-| [共用接入](../src/workbench/web/access.rs)与[地址发现](../src/workbench/web/access/discovery.rs) | 一个设备监听，复用 WebState/Run；每 10 秒刷新 IP/MagicDNS，只读发现，不调用 Serve |
+| [共用接入](../src/workbench/web/access.rs)与[地址发现](../src/workbench/web/access/discovery.rs) | Application 共用设备监听与地址缓存，按 Run 选择 WebState；每 10 秒刷新 IP/MagicDNS，只读发现，不调用 Serve |
 | [Web 边界](../src/workbench/web.rs) | listener generation 与 Host 集合同时验证，每次请求的 Origin 须对应当前 Host；远端不能伪装本机管理入口 |
 | [许可](../src/workbench/permission.rs)、[终端仲裁](../src/workbench/control.rs)与[WS](../src/workbench/web/terminal_api.rs) | 单个浏览器许可可撤销；流、排队输入及断线重连保留均检查此许可 |
 | [接入面板](../web/src/workbench/AccessPanel.tsx) | 同页展开、本地 QR、固定配对码、地址选择与撤销；业务 API/WS 继续跟随页面地址 |
@@ -44,7 +44,7 @@ Tailscale http://设备名.tailnet.ts.net:端口 [复制] [二维码]
                                       [关闭设备访问]
 ```
 
-地址为布局示意。复制/二维码使用带完整 #pair=… 的 URL，地址文字可省略密钥。Tailscale 未就绪时显示已有地址和简短原因，不阻塞局域网；连接后补充地址，不重启 Run。
+地址为布局示意。Application 的复制/二维码使用完整 `http://地址:端口/?run=<runId>#pair=<配对码>`，独立单 Run ReadingServer 保留 `/#pair=…`。地址文字可省略查询和密钥；实际二维码与复制内容必须保留后端返回的路径、查询和 fragment。切换 IP/MagicDNS 或发现新地址只替换 origin，不重新拼成根路径而丢失 Run 选择器。Tailscale 未就绪时显示已有地址和简短原因，不阻塞局域网；连接后补充地址，不重启 Run。
 
 - 两个 URL 同时有效。选择二维码不触发启用/关闭；任一地址配对成功后，其他地址仍可使用同一码继续配对。
 - 配对码随本次程序运行保持固定，支持重复扫码；页面刷新、重新展开和其他浏览器加入均不换码。程序退出后失效，下次启动生成新码。
@@ -66,7 +66,7 @@ flowchart LR
 
 ### 4.1 监听与地址发现
 
-默认只有现有本机监听。点击开启后，ReadingServer 复用同一 Router、WebState、LiveHub 和终端句柄，增加**一个共用 IPv4 设备监听**，绑定 0.0.0.0:port；局域网 IP 与 Tailscale IP/MagicDNS 都访问这个端口。保留原本机 listener 只为保持已打开的本机 URL，不为 LAN/Tailscale 各建服务或状态。
+默认只有本机 Application 监听。点击某个 Run 开启后增加**一个共用 IPv4 设备监听**，绑定 0.0.0.0:port；局域网 IP 与 Tailscale IP/MagicDNS 都访问这个端口。多项目共用监听与地址缓存，业务按显式 runId 分派给各自的 Router/WebState/LiveHub/终端。保留本机 listener 以维持电脑 URL，不为 LAN/Tailscale 各建服务。第二个 Run 直接复用已发现地址，慢发现不占请求派发锁。独立 ReadingServer 的单 Run 装配保留原契约。
 
 端口默认 OS 分配，显式端口占用则报告冲突。开启会接受本机 IPv4 网卡连接，不能把 wildcard 描述成仅限某张 Wi-Fi；不会自动修改防火墙，受保护 API 始终需配对。只有本机管理会话可开启、读取配对链接和撤销，模型代理不跟随开放。
 
@@ -86,13 +86,13 @@ IP 和域名是不同浏览器 origin，Cookie 和本地草稿自然分开；改
 
 每个 Run 创建一份 32 字节 CSPRNG 配对码及非秘密 pairingId，生命周期随 Launcher/Run；无 5 分钟期限、无单次消费，也不提供自动或手动轮换入口。配对码绑定 Run，**不绑定某种 URL 或设备监听 generation**。为保证本机页面刷新后仍可显示同一码，服务端只在内存保留原码，本机专用 GET /access/pairing 返回当前地址的链接；普通状态和设备业务接口不返回码，响应 no-store。程序退出即丢弃，下一次启动独立生成；不写配置、日志、journal 或 localStorage。
 
-手机复用 fragment → POST /pair → HttpOnly Cookie 流程。GET/链接预览不建立授权，POST 每次仍验证当前接入已开启及配对码正确，并保留限流。已携带当前有效设备 Cookie 的浏览器重复扫码直接成功，复用原会话、不轮换 Cookie、不占新名额、不改变终端 reconnect grant；即使 8 项已满，已授权浏览器仍可重复扫码。若响应与 Cookie 一起丢失，重试可能创建另一项授权，不能用指纹猜测为同一个浏览器。
+Application 下手机链接为 `/?run=<id>#pair=<token>`，复用 fragment → POST `/workbench/v1/runs/<id>/pair` → HttpOnly Cookie 流程；本页表中相对 Run 接口均使用此前缀。GET/链接预览不建立授权，POST 每次仍验证当前接入已开启及配对码正确，并保留限流。已携带当前有效设备 Cookie 的浏览器重复扫码直接成功，复用原会话、不轮换 Cookie、不占新名额、不改变终端 reconnect grant；即使 8 项已满，已授权浏览器仍可重复扫码。若响应与 Cookie 一起丢失，重试可能创建另一项授权，不能用指纹猜测为同一个浏览器。
 
-新浏览器签发随机 HttpOnly、Host-only、SameSite=Strict Cookie；授权关联 Run/generation/sessionId，共用最多 8 项的内存表，服务端仅保存 Cookie 摘要。Cookie 名含 Run/generation。IP 与域名可能产生同一手机的两份浏览器授权，因此显示“已配对浏览器”，不猜物理设备身份。已配对浏览器拥有相同现有功能；本机管理资格不通过共享链接发放。
+新浏览器签发随机 HttpOnly、Host-only、SameSite=Strict Cookie；授权关联 Run/generation/sessionId，每 Run 最多 8 项的内存表，服务端仅保存 Cookie 摘要。Cookie 名含 Run/generation。IP 与域名可能产生同一手机的两份浏览器授权，因此显示“已配对浏览器”，不猜物理设备身份。已配对浏览器只操作所配对的 Run；全局历史、项目启动、其他 Run、共享 settings 读写均拒绝，本机管理资格不通过链接发放。手机隐藏全局首页与设置，服务端同时拒绝这些接口。
 
-关闭设备访问先撤销整个 generation，再取消远端 SSE/WS、写权、reconnectSecret 和排队输入，最后关闭共用设备监听；本机会话与 CLI 保留。单浏览器撤销仅针对 sessionId，与访问 URL 无关；持有码的浏览器仍可重新扫码取得新授权。关闭接入期间不接受配对/访问；同一进程再次开启复用原配对码，但不恢复被撤销的 Cookie 或终端重连资格。IP/端口改变时 URL/二维码需跟随新地址，配对码部分保持固定。WS 需在帧调度和 PTY 排队执行时检查可撤销许可，不能只验握手。
+关闭设备访问先撤销整个 generation，再取消远端 SSE/WS、写权、reconnectSecret 和排队输入，再注销当前 Run；只有最后一个启用项注销才关闭共用设备监听，其他 Run 不受影响。本机会话与 CLI 保留。单浏览器撤销仅针对 sessionId，与访问 URL 无关；持有码的浏览器仍可重新扫码取得新授权。关闭接入期间不接受配对/访问；同一进程再次开启复用原配对码，但不恢复被撤销的 Cookie 或终端重连资格。IP/端口改变时 URL/二维码需跟随新地址，配对码部分保持固定。WS 需在帧调度和 PTY 排队执行时检查可撤销许可，不能只验握手。
 
-已写入 PTY 的字节或已执行命令无法收回。关闭电脑网页不关闭接入/CLI；CLI 退出或“停止当前运行”仍保留现有内存阅读。Launcher 退出统一结束服务；重启不恢复设备授权或自动开放。普通断网保留现有重连窗口，不重发未确认输入。
+已写入 PTY 的字节或已执行命令无法收回。关闭电脑网页不关闭接入/CLI；CLI 退出或“停止当前运行”撤销本 Run 的全部设备资格，已停止 Run 不能重新开启接入；电脑端保留有界内存阅读。Launcher 退出统一结束服务；重启不恢复设备授权或自动开放。普通断网保留现有重连窗口，不重发未确认输入。
 
 ## 6. 最小配置与接口增量
 

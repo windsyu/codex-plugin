@@ -14,7 +14,7 @@ pub(super) struct Params {
 pub(super) async fn read(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
-    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    uri: axum::http::Uri,
     params: std::result::Result<Query<Params>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     if !authorised(&headers, &state) {

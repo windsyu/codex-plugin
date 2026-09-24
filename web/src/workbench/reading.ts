@@ -2,6 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { modelItems, toolItems, userMessages, parseViewItem, sameItemType, VIEW_SCHEMA_VERSION, type ViewItem, type ViewBase, type ModelItem } from './viewItems';
 import type { NativeCommand, NativeFileChange, ToolCall, ToolContext } from './toolTypes';
 import { parseUsageSummary, type UsageSummary } from './usage';
+import { runApi } from './runApi';
 
 export interface TextKey { requestId: string; responseId: string | null; wireItemId: string; contentIndex: number }
 export interface TextItem { key: TextKey; text: string; revision: number; truncated: boolean; orderIndex?: number; itemKey?: string; author?: ModelItem['author'] }
@@ -168,13 +169,13 @@ export function useReading(epoch: string): ReadingView {
     };
     const connect = async () => {
       try {
-        const response = await fetch('/workbench/v1/live/snapshot', { credentials: 'same-origin', cache: 'no-store' });
+        const response = await fetch(runApi('/live/snapshot'), { credentials: 'same-origin', cache: 'no-store' });
         if (!response.ok) throw new Error('reading unavailable');
         const snapshot = await response.json();
         if (disposed) return;
         if (snapshot.runEpoch !== epoch) throw new Error('reading run changed');
         state = readSnapshot(snapshot, epoch); publish();
-        source = new EventSource(`/workbench/v1/live/events?epoch=${encodeURIComponent(epoch)}&after=${snapshot.viewSeq}`);
+        source = new EventSource(runApi(`/live/events?epoch=${encodeURIComponent(epoch)}&after=${snapshot.viewSeq}`));
         source.onopen = () => { state = { ...state, connected: true }; publish(); };
         source.addEventListener('view', event => {
           try {

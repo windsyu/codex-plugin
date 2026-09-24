@@ -45,8 +45,15 @@ impl ConfigSources {
 }
 
 pub fn inspect(home: &Path, config: &toml::Value) -> Result<ConfigSources> {
+    inspect_for_launch(home, config).map(|(sources, _)| sources)
+}
+
+pub(crate) fn inspect_for_launch(
+    home: &Path,
+    config: &toml::Value,
+) -> Result<(ConfigSources, AuthSnapshot)> {
     let (managed_config_preference, managed_requirements_preference) = managed_preferences()?;
-    inspect_sources(
+    inspect_sources_for_launch(
         home,
         config,
         Path::new("/etc/codex"),
@@ -61,12 +68,21 @@ fn present(path: &Path) -> Result<bool> {
         Err(_) => bail!("configuration-source metadata could not be checked"),
     }
 }
+#[cfg(test)]
 fn inspect_sources(
     home: &Path,
     config: &toml::Value,
     system: &Path,
     preferences: (bool, bool),
 ) -> Result<ConfigSources> {
+    inspect_sources_for_launch(home, config, system, preferences).map(|(sources, _)| sources)
+}
+fn inspect_sources_for_launch(
+    home: &Path,
+    config: &toml::Value,
+    system: &Path,
+    preferences: (bool, bool),
+) -> Result<(ConfigSources, AuthSnapshot)> {
     let mut sources = ConfigSources {
         system_config: present(&system.join("config.toml"))?,
         managed_file: present(&system.join("managed_config.toml"))?,
@@ -80,19 +96,44 @@ fn inspect_sources(
             .is_some_and(|value| value.as_str() != Some("file")),
         ..ConfigSources::default()
     };
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(home.join("auth.json"))
-    {
-        Ok(file) => Some(file),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => bail!("native authentication mode could not be checked"),
-    };
-    if let Some(file) = file {
+    let snapshot = AuthSnapshot::read(home)?;
+    if let Some(bytes) = &snapshot.bytes {
+        let value = auth_value(bytes)?;
+        sources.possible_cloud_management = !value["tokens"].is_null()
+            || value
+                .get("auth_mode")
+                .is_some_and(|mode| !mode.is_null() && mode.as_str() != Some("apikey"));
+    }
+    Ok((sources, snapshot))
+}
+
+// Credential bytes never enter serialized source diagnostics or Debug output.
+pub(crate) struct AuthSnapshot {
+    bytes: Option<Vec<u8>>,
+    api_key: Option<String>,
+}
+impl AuthSnapshot {
+    fn read(home: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(home.join("auth.json"))
+        {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => bail!("native authentication mode could not be checked"),
+        };
+        let Some(file) = file else {
+            return Ok(Self {
+                bytes: None,
+                api_key: None,
+            });
+        };
         ensure!(
-            file.metadata()?.is_file(),
+            file.metadata()
+                .map_err(|_| anyhow::anyhow!("native authentication mode could not be checked"))?
+                .is_file(),
             "native authentication metadata must be a regular file"
         );
         let mut bytes = Vec::new();
@@ -103,19 +144,38 @@ fn inspect_sources(
             bytes.len() <= 1024 * 1024,
             "native authentication metadata exceeds inspection bound"
         );
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
-            anyhow::anyhow!("native authentication metadata is invalid; details suppressed")
-        })?;
-        ensure!(
-            value.is_object(),
-            "native authentication metadata has an unsupported shape"
-        );
-        sources.possible_cloud_management = !value["tokens"].is_null()
-            || value
-                .get("auth_mode")
-                .is_some_and(|mode| !mode.is_null() && mode.as_str() != Some("apikey"));
+        let value = auth_value(&bytes)?;
+        let api_key = value
+            .get("OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(str::to_owned);
+        Ok(Self {
+            bytes: Some(bytes),
+            api_key,
+        })
     }
-    Ok(sources)
+    pub(crate) fn redaction_secrets(&self) -> Vec<String> {
+        self.api_key.iter().cloned().collect()
+    }
+    pub(crate) fn unchanged(&self, home: &Path) -> Result<()> {
+        let current = Self::read(home)?;
+        ensure!(
+            current.bytes == self.bytes,
+            "native authentication metadata changed during startup; retry from the current settings"
+        );
+        Ok(())
+    }
+}
+fn auth_value(bytes: &[u8]) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow::anyhow!("native authentication metadata is invalid; details suppressed")
+    })?;
+    ensure!(
+        value.is_object(),
+        "native authentication metadata has an unsupported shape"
+    );
+    Ok(value)
 }
 
 #[cfg(target_os = "macos")]
@@ -261,6 +321,77 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(!error.contains("synthetic malformed"));
+    }
+
+    #[test]
+    fn authentication_snapshot_secrets_stay_out_of_source_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = toml::Value::Table(toml::Table::new());
+        let path = directory.path().join("auth.json");
+        std::fs::write(&path, r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-private-api-key","unrelated":"synthetic-other-value"}"#).unwrap();
+        let (sources, snapshot) =
+            inspect_sources_for_launch(directory.path(), &config, directory.path(), (false, false))
+                .unwrap();
+        sources.require_verified().unwrap();
+        assert_eq!(
+            snapshot.redaction_secrets(),
+            vec!["synthetic-private-api-key"]
+        );
+        let diagnostic = serde_json::to_string(&sources).unwrap();
+        assert!(!diagnostic.contains("synthetic"));
+        assert!(!diagnostic.contains("OPENAI_API_KEY"));
+        snapshot.unchanged(directory.path()).unwrap();
+        for body in [
+            r#"{}"#,
+            r#"{"OPENAI_API_KEY":""}"#,
+            r#"{"OPENAI_API_KEY":null}"#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(
+                AuthSnapshot::read(directory.path())
+                    .unwrap()
+                    .redaction_secrets()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn authentication_snapshot_rejects_creation_removal_and_credential_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let absent = AuthSnapshot::read(directory.path()).unwrap();
+        absent.unchanged(directory.path()).unwrap();
+        let original = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-original"}"#;
+        std::fs::write(&path, original).unwrap();
+        assert!(absent.unchanged(directory.path()).is_err());
+        let snapshot = AuthSnapshot::read(directory.path()).unwrap();
+        snapshot.unchanged(directory.path()).unwrap();
+        for changed in [
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-replacement"}"#,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"synthetic-cloud-token"}}"#,
+            r#"{"auth_mode":"apikey", "OPENAI_API_KEY":"synthetic-original"}"#,
+            "{synthetic-invalid-secret",
+        ] {
+            std::fs::write(&path, changed).unwrap();
+            let error = snapshot
+                .unchanged(directory.path())
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("synthetic"));
+        }
+        std::fs::remove_file(path).unwrap();
+        assert!(snapshot.unchanged(directory.path()).is_err());
+    }
+
+    #[test]
+    fn authentication_snapshot_rejects_invalid_encoding_shapes_and_oversized_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        for bytes in [vec![0xff], b"[]".to_vec(), vec![b' '; 1024 * 1024 + 1]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(AuthSnapshot::read(directory.path()).is_err());
+        }
     }
 
     #[test]

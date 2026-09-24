@@ -1,15 +1,17 @@
-import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import { CODEX_TERMINAL_THEME } from '../terminal/terminalTheme';
 import { TerminalClient, initialTerminalView } from './terminalClient';
+import type { TerminalExit } from './RunEndedNotice';
 
-export function TerminalPanel({ epoch }: { epoch: string }) {
+export function TerminalPanel({ epoch, onExit }: { epoch: string; onExit?: (exit: TerminalExit) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const client = useRef<TerminalClient>();
   const [view, setView] = useState(initialTerminalView);
+  useEffect(() => { if (view.exit) onExit?.(view.exit); }, [view.exit, onExit]);
   useLayoutEffect(() => {
     if (!host.current) return;
     const terminal = new Terminal({
@@ -30,11 +32,11 @@ export function TerminalPanel({ epoch }: { epoch: string }) {
     void document.fonts?.ready.then(() => connection.resize());
     return () => { cancelAnimationFrame(frame); observer.disconnect(); data.dispose(); connection.dispose(); terminal.dispose(); };
   }, [epoch]);
-  const ended = view.control?.ended;
+  const ended = !!view.exit || view.control?.ended;
   const otherPage = view.ready && !view.owned && (view.control?.controllerConnection || view.control?.reconnectReserved);
   return <section className="wb-terminal" aria-label="原生 Codex 终端" data-owned={view.owned} data-ready={view.ready}>
     <div className="wb-panel-heading"><span>›_ 原生终端</span><span className="wb-terminal-status">{ended ? '已结束' : view.owned ? '已连接' : otherPage ? '只读' : '连接中'}</span></div>
-    {!ended && otherPage && <p className="wb-notice">另一页面正在使用此终端。切换后，另一页面将暂停输入。 <button onClick={() => client.current?.takeover()}>在此输入</button></p>}
+    {!ended && otherPage && <p className="wb-notice">同一工作台的另一页面正在使用此终端。切换只影响此终端，其他项目可同时输入。 <button onClick={() => client.current?.takeover()}>在此输入</button></p>}
     {view.issue && <p className="wb-notice" role="status">{view.issue}</p>}
     {view.inputUncertain && <p className="wb-notice" role="status">部分输入的送达情况未确认；请检查终端，输入不会自动重发。 <button onClick={() => client.current?.acknowledgeInputUncertainty()}>已检查终端</button></p>}
     {view.screenUnavailable && <p className="wb-notice" role="status">屏幕恢复不可用，原生 CLI 与实时输出仍继续；刷新后只能显示后续输出。</p>}

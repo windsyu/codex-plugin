@@ -33,7 +33,7 @@ fn result(state: &WebState, value: Result<Settings, ConfigError>) -> Response {
     }
 }
 pub(super) async fn read(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
-    if !authorised(&headers, &state) {
+    if !owner_authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
     let Some(config) = &state.options.settings else {
@@ -53,7 +53,7 @@ pub(super) async fn save(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !authorised(&headers, &state) {
+    if !owner_authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
     if !same_origin(&headers, &state) {

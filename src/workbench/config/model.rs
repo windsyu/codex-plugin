@@ -19,7 +19,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             launch: Launch::default(),
             storage: Storage::default(),
             history: History::default(),
@@ -59,6 +59,7 @@ pub struct Storage {
 #[serde(default, deny_unknown_fields)]
 pub struct History {
     pub cleanup: Cleanup,
+    pub library: crate::history::library::LibraryConfig,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -131,7 +132,7 @@ impl Config {
     }
     pub fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |field| ConfigError::field(field, "invalid_field");
-        if self.schema_version != 1 {
+        if !matches!(self.schema_version, 1 | 2) {
             return Err(ConfigError::field(
                 "schemaVersion",
                 "unsupported_config_version",
@@ -168,6 +169,10 @@ impl Config {
         {
             return Err(invalid("storage.dataDir"));
         }
+        self.history
+            .library
+            .validate()
+            .map_err(|code| ConfigError::field("history.library", code))?;
         let cleanup = &self.history.cleanup;
         if !(1..=3650).contains(&cleanup.retention.days) {
             return Err(invalid("history.cleanup.retention.days"));

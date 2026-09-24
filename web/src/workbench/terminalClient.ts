@@ -1,6 +1,7 @@
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import { TerminalWriteCoordinator } from '../terminal/terminalWriteCoordinator';
+import { runApi } from './runApi';
 
 export interface Control {
   controllerConnection: string | null; generation: number; reconnectReserved: boolean;
@@ -139,7 +140,7 @@ export class TerminalClient {
   }
   private open() {
     if (this.disposed) return;
-    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/workbench/v1/terminal?epoch=${encodeURIComponent(this.epoch)}`);
+    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${runApi(`/terminal?epoch=${encodeURIComponent(this.epoch)}`)}`);
     this.socket = socket;
     this.request = 0; this.inputSeq = 0; this.generation = undefined; this.lastResize = '';
     this.controlRequest = undefined; this.autoClaimGeneration = undefined;

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
+import { runApi } from './runApi';
 
 interface Address { id: string; label: string; origin: string }
 export interface AccessStatus {
@@ -13,6 +14,7 @@ const messages: Record<string, string> = {
   access_changed: '接入状态已变化，请重试。', stale_run: '工作台已重新启动，请刷新页面。',
   local_management_required: '请在电脑本机页面管理接入。', no_device_address: '暂未发现可用地址，请检查网络后重试。',
   listen_failed: '端口无法监听，请检查是否被占用，或在设置中改为自动选择。',
+  run_ended: '此工作台已结束。请先从首页启动新的对话，再开启手机接入。',
   config_unavailable: '配置暂不可用，请在设置中检查并重新加载。', device_limit: '已达到 8 个浏览器，请先断开不再使用的连接。',
   revocation_pending: '访问资格已撤销，正在等待终端完成清理。请刷新状态。',
 };
@@ -43,12 +45,12 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
     const abort = new AbortController(); controller.current = abort;
     const id = ++request.current;
     try {
-      const value = await payload(await fetch('/workbench/v1/access', { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
+      const value = await payload(await fetch(runApi('/access'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
       if (!alive.current || id !== request.current) return;
       if (typeof value.pairingId !== 'string') throw new Error(messages.version_mismatch);
       infoRef.current = value; setInfo(value);
       if (value.state === 'ready' && value.addresses.length && pairingRef.current?.pairingId !== value.pairingId) {
-        const code = await payload(await fetch('/workbench/v1/access/pairing', { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
+        const code = await payload(await fetch(runApi('/access/pairing'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
         if (alive.current && id === request.current) { pairingRef.current = code; setPairing(code); }
       }
       if (alive.current && id === request.current) setLoadError('');
@@ -62,7 +64,7 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
     controller.current?.abort(); request.current++;
     try {
       const path = name === 'revoke' ? `devices/${encodeURIComponent(id!)}?runEpoch=${encodeURIComponent(epoch)}` : name;
-      await payload(await fetch(`/workbench/v1/access/${path}`, {
+      await payload(await fetch(runApi(`/access/${path}`), {
         method: name === 'revoke' ? 'DELETE' : 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'If-Match': `"${current.revision}"` },
         ...(name === 'revoke' ? {} : { body: JSON.stringify({ runEpoch: epoch }) }),
@@ -82,10 +84,10 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
   }, [open, epoch]);
   const address = info?.addresses.find(a => a.id === selected) || info?.addresses[0];
   const valid = !!pairing && info?.state === 'ready' && info.pairingId === pairing.pairingId;
-  // The run's reusable code also covers newly discovered addresses. Selecting
-  // an address only changes the URL, never its code or the connected browsers.
-  const suffix = pairing?.links[0]?.url.split('#')[1];
-  const link = (a: Address) => valid && suffix ? `${a.origin}/#${suffix}` : '';
+  // Keep the complete backend route, including the Run selector. Only the
+  // origin changes for newly discovered addresses; the code stays reusable.
+  const target = pairing?.links[0]?.url ? new URL(pairing.links[0].url) : null;
+  const link = (a: Address) => valid && target ? `${a.origin}${target.pathname}${target.search}${target.hash}` : '';
   const url = address ? link(address) : '';
   useEffect(() => {
     if (!open || !url || !canvas.current) return;

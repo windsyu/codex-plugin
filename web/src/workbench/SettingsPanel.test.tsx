@@ -117,3 +117,19 @@ it('shows the configuration file only when needed to repair invalid settings', a
   expect(root.textContent).toContain(`需要修复的配置文件：${server.configPath}`);
   expect(root.querySelector('form')).toBeNull();
 });
+
+it('edits application settings without a Run and does not invent a run log location', async () => {
+  const fetch = vi.fn().mockImplementation(async (_url, init) => {
+    const value = data(); if (init.method) value.saved = JSON.parse(init.body).config;
+    return { ok: true, json: async () => ({ instanceId: 'application', settings: value }) };
+  }); vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<SettingsPanel epoch="application" instanceId="application" open onClose={() => {}} onDirtyChange={() => {}} />, root));
+  await act(async () => {});
+  await vi.waitFor(() => expect(input('Codex 启动配置'), root.textContent || '').not.toBeNull());
+  expect(root.textContent).not.toContain('本次运行日志的位置');
+  await type('Codex 启动配置', 'future'); await submit();
+  const call = fetch.mock.calls.find(([, init]) => init.method === 'PUT')!;
+  expect(call[0]).toBe('/workbench/v1/application/settings');
+  expect(JSON.parse(call[1].body).instanceId).toBe('application');
+  expect(JSON.parse(call[1].body).currentRunEpoch).toBeUndefined();
+});

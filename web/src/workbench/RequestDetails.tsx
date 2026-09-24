@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ResponseView } from './reading';
 import { responseLabel } from './ModelMessage';
+import { runApi } from './runApi';
 
 type Source = { kind: 'request'; clientRequestIndex: number | null } | { kind: 'response'; responseId: string | null };
 interface Entry { source: Source; captureSeq: number; section: string; position: number | null; jsonPointer: string; childrenSeparated: boolean; preview: string; truncated: boolean; omitted: boolean }
@@ -61,7 +62,7 @@ function ContextBody({ epoch, requestId, responses, historical, before }: { epoc
     const requestedVersion = latestVersion.current;
     setBusy(true); setError('');
     try {
-      const endpoint = historical ? `/workbench/v1/history/${encodeURIComponent(epoch)}/requests/${encodeURIComponent(requestId)}` : `/workbench/v1/requests/${encodeURIComponent(requestId)}?epoch=${encodeURIComponent(epoch)}`;
+      const endpoint = historical ? runApi(`/history/${encodeURIComponent(epoch)}/requests/${encodeURIComponent(requestId)}`) : runApi(`/requests/${encodeURIComponent(requestId)}?epoch=${encodeURIComponent(epoch)}`);
       const parameters = [cursor ? `cursor=${encodeURIComponent(cursor)}` : '', historical && before != null ? `before=${before}` : ''].filter(Boolean).join('&');
       const result = await fetch(`${endpoint}${parameters ? `${historical ? '?' : '&'}${parameters}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
       if (!result.ok) throw new Error(({ 400: '详情游标无效，请刷新上下文。', 401: '连接验证已失效，请重新打开工作台。', 404: '尚未观察到此请求。', 409: '上下文或运行已更新，请刷新上下文。', 410: '此请求详情已移出内存缓存。', 503: '阅读服务繁忙，请稍后重试。' } as Record<number, string>)[result.status] || '请求详情读取失败，请重试。');

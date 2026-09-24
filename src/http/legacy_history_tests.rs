@@ -150,6 +150,100 @@ async fn schema20_copy_v1_queries_export_and_rejected_mutations_preserve_history
         second["data"][0]["threadKey"]
     );
     assert_eq!(first["asOfEventSeq"], second["asOfEventSeq"]);
+    // R6-A reads the same synthetic schema-20 history independently. No old
+    // Database/Importer/Writer dependency is used by the new adapter itself.
+    // Compare source facts; the library has separate pagination/provenance DTOs.
+    #[cfg(unix)]
+    {
+        use codex_local_observer::history::legacy_reader::{
+            Collection, LegacyReader, Query as LegacyQuery, ReadBudget,
+        };
+        let reader = LegacyReader::open(
+            "synthetic-v1",
+            &copy.join("observer.sqlite"),
+            Some(&copy.join("blobs")),
+            &ReadBudget::default(),
+        )?;
+        for (collection, route, key, fields) in [
+            (
+                Collection::Threads,
+                "/v1/threads?limit=100".into(),
+                "threadKey",
+                vec![
+                    "threadKey",
+                    "codexThreadId",
+                    "storeSourceId",
+                    "name",
+                    "model",
+                    "archived",
+                    "status",
+                    "stale",
+                    "captureCompleteness",
+                    "completenessReasons",
+                    "recencyAtMs",
+                    "lastMessagePreview",
+                    "lastEventSeq",
+                ],
+            ),
+            (
+                Collection::Turns,
+                format!("/v1/threads/{thread_key}/turns?limit=100"),
+                "turnId",
+                vec![
+                    "turnId",
+                    "status",
+                    "captureCompleteness",
+                    "completenessReasons",
+                    "coverage",
+                    "startedAtMs",
+                    "completedAtMs",
+                    "raw",
+                    "lastEventSeq",
+                ],
+            ),
+            (
+                Collection::Items,
+                format!("/v1/threads/{thread_key}/items?limit=100"),
+                "itemId",
+                vec![
+                    "turnScope",
+                    "itemId",
+                    "turnId",
+                    "itemType",
+                    "status",
+                    "summaryText",
+                    "raw",
+                    "provenance",
+                    "lastEventSeq",
+                ],
+            ),
+        ] {
+            let previous = query(&app, &route).await?;
+            let current = reader.page(
+                &LegacyQuery {
+                    collection,
+                    scope: (collection != Collection::Threads).then(|| thread_key.clone()),
+                },
+                None,
+                100,
+                &ReadBudget::default(),
+            )?;
+            let previous = previous["data"].as_array().context("V1 page")?;
+            assert_eq!(current.records.len(), previous.len());
+            for record in current.records {
+                let expected = previous
+                    .iter()
+                    .find(|row| row[key] == record.fields[key])
+                    .context("matching V1 identity")?;
+                for field in &fields {
+                    assert_eq!(
+                        record.fields[*field], expected[*field],
+                        "{collection:?} {field}"
+                    );
+                }
+            }
+        }
+    }
     for route in [
         format!("/v1/threads/{thread_key}"),
         format!("/v1/threads/{thread_key}/turns"),

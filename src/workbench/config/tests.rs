@@ -38,7 +38,7 @@ fn defaults_match_documented_json_and_partial_fields_keep_deletion_disabled() {
 fn invalid_and_duplicate_fields_are_rejected_without_echoing_values() {
     for json in [
         r#"{}"#,
-        r#"{"schemaVersion":2}"#,
+        r#"{"schemaVersion":3}"#,
         r#"{"schemaVersion":1,"schemaVersion":1}"#,
         r#"{"schemaVersion":1,"launch":{"profile":"SECRET","profile":"other"}}"#,
         r#"{"schemaVersion":1,"SECRET":true}"#,
@@ -419,27 +419,33 @@ async fn worker_reads_external_edits_and_fails_closed_without_changing_launch_va
     assert!(loaded.effective.launch.open_browser);
 }
 
-#[test]
-fn repeated_file_notifications_leave_capacity_for_configuration_requests() {
-    let (sender, receiver) = mpsc::sync_channel(8);
-    let pending = AtomicBool::new(false);
-    for _ in 0..1000 {
-        queue_reload(&sender, &pending);
+#[tokio::test]
+async fn repeatedly_opened_settings_services_read_external_edits_without_startup_timeouts() {
+    for _ in 0..12 {
+        let (_temp, prepared) = fixture();
+        let path = prepared.directory.path.join("config.json");
+        let service = ConfigService::start(prepared).unwrap();
+        let handle = service.handle();
+        let mut config = Config::default();
+        config.history.cleanup.enabled = true;
+        std::fs::write(&path, encoded(&config).unwrap()).unwrap();
+        let loaded = handle
+            .read()
+            .await
+            .expect("settings must not wait for a filesystem watcher");
+        assert_eq!(loaded.saved, Some(config));
+        std::fs::write(&path, b"{").unwrap();
+        assert!(
+            !handle
+                .read()
+                .await
+                .unwrap()
+                .effective
+                .history
+                .cleanup
+                .enabled
+        );
     }
-    let (reply, _response) = oneshot::channel();
-    assert!(
-        sender.try_send(Request::Read(reply)).is_ok(),
-        "file notifications must not crowd out user reads or saves"
-    );
-    assert!(matches!(receiver.try_recv(), Ok(Request::Reload)));
-    assert!(matches!(receiver.try_recv(), Ok(Request::Read(_))));
-    assert!(receiver.try_recv().is_err());
-    pending.store(false, Ordering::Release);
-    queue_reload(&sender, &pending);
-    assert!(
-        matches!(receiver.try_recv(), Ok(Request::Reload)),
-        "later filesystem changes must still refresh"
-    );
 }
 
 #[test]
@@ -461,4 +467,34 @@ fn optional_access_port_is_preserved_without_opening_network_or_rewriting_old_co
     ] {
         assert!(Config::parse(raw.as_bytes()).is_err());
     }
+}
+
+#[test]
+fn schema_one_load_does_not_rewrite_and_save_upgrades_with_sources() {
+    let (_temp, prepared) = fixture();
+    let original = br#"{"schemaVersion":1,"launch":{"openBrowser":false}}"#;
+    prepared.directory.atomic("config.json", original).unwrap();
+    let snapshot = prepared.snapshot();
+    assert_eq!(snapshot.saved.as_ref().unwrap().schema_version, 1);
+    assert!(snapshot.saved.as_ref().unwrap().history.library.enabled);
+    assert_eq!(
+        prepared.directory.read("config.json", LIMIT).unwrap(),
+        original
+    );
+    let saved = prepared
+        .save(
+            snapshot.revision.as_deref().unwrap(),
+            snapshot.saved.as_ref().unwrap(),
+            Instant::now() + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert_eq!(saved.saved.as_ref().unwrap().schema_version, 2);
+    assert_eq!(
+        prepared
+            .directory
+            .read("config.previous.json", LIMIT)
+            .unwrap(),
+        original
+    );
+    assert!(!saved.saved.unwrap().history.cleanup.enabled);
 }

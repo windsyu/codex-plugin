@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { runApi } from './runApi';
 
 export type WorkspaceTab = 'files' | 'search' | 'git';
 export interface FileSelection { path: string; line?: number; scope?: 'working' | 'staged' }
@@ -21,7 +22,7 @@ const errors: Record<string, string> = {
 export function workspaceError(code: string): string { return errors[code] || '读取未完成，请刷新重试。'; }
 export function endpoint(kind: string, params: Record<string, string | undefined> = {}) {
   const query = new URLSearchParams(); for (const [key, value] of Object.entries(params)) if (value !== undefined) query.set(key, value);
-  return `/workbench/v1/workspace/${kind}${query.size ? `?${query}` : ''}`;
+  return runApi(`/workspace/${kind}${query.size ? `?${query}` : ''}`);
 }
 // Poll only the visible selection, never the entire tree or every Git file.
 // Aborting a fetch also cancels its bounded backend query.

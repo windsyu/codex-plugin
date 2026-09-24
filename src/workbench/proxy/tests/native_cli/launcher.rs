@@ -120,6 +120,8 @@ pub(super) fn launcher_command(
     let mut command = tokio::process::Command::new(executable);
     command
         .current_dir(workspace)
+        .arg("--project")
+        .arg(workspace)
         // Only this fixture child sees a temporary user home. CODEX_HOME stays
         // separate so default workbench paths cannot touch real user files.
         .env("HOME", home.parent().expect("temporary fixture home"))
@@ -142,8 +144,47 @@ pub(super) fn launcher_command(
 pub(super) async fn wait_entry(child: &mut LauncherChild, path: &Path) -> BrowserEntry {
     timeout(Duration::from_secs(15), async {
         loop {
-            if let Ok(entry) = read_entry(path) {
-                break entry;
+            if let Ok(mut entry) = read_entry(path) {
+                if entry.instance_id.is_none() {
+                    break entry;
+                }
+                let client = Client::builder().no_proxy().build().unwrap();
+                let token = reqwest::Url::parse(&entry.url)
+                    .unwrap()
+                    .fragment()
+                    .unwrap()
+                    .strip_prefix("pair=")
+                    .unwrap()
+                    .to_owned();
+                if let Ok(response) = client
+                    .post(format!("{}/workbench/v1/pair", entry.address))
+                    .header("Origin", &entry.address)
+                    .header("Content-Type", "application/json")
+                    .body(serde_json::to_vec(&json!({"token":token})).unwrap())
+                    .send()
+                    .await
+                    && let Some(cookie) = response.headers().get("set-cookie")
+                {
+                    let response = client
+                        .get(format!("{}/workbench/v1/application", entry.address))
+                        .header("Cookie", cookie.clone())
+                        .send()
+                        .await
+                        .unwrap();
+                    if response.status().is_success() {
+                        let body: Value =
+                            serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                        if let Some(run) = body["runs"].as_array().and_then(|runs| runs.first()) {
+                            // Legacy probe DTO; disk keeps entry v2 with no cliPid.
+                            entry.run_epoch = serde_json::from_value(run["runId"].clone()).unwrap();
+                            entry.cli_pid = run["cliPid"].as_u64().unwrap() as u32;
+                            entry.url = entry
+                                .url
+                                .replace("/#", &format!("/?run={}#", entry.run_epoch));
+                            break entry;
+                        }
+                    }
+                }
             }
             assert!(
                 child.0.try_wait().unwrap().is_none(),
@@ -418,7 +459,10 @@ experimental_bearer_token="synthetic-lifecycle-token"
                 .to_owned();
             for _ in 0..2 {
                 let response = client
-                    .post(format!("{}/workbench/v1/run/stop", entry.address))
+                    .post(format!(
+                        "{}/workbench/v1/runs/{}/stop",
+                        entry.address, entry.run_epoch
+                    ))
                     .header(header::ORIGIN, &entry.address)
                     .header(header::COOKIE, &cookie)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -437,8 +481,9 @@ experimental_bearer_token="synthetic-lifecycle-token"
             .unwrap();
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
             let mut request = format!(
-                "{}/workbench/v1/terminal?epoch={}",
+                "{}/workbench/v1/runs/{}/terminal?epoch={}",
                 entry.address.replacen("http://", "ws://", 1),
+                entry.run_epoch,
                 entry.run_epoch
             )
             .into_client_request()

@@ -4,6 +4,8 @@
 > 上位方案：[工作台方案](codex-native-cli-workbench.md)；决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)。
 > 本文包含目标契约与已验证的实现说明；只有明确链接验收证据的部分才表示已接入，完整 V2 仍未交付。
 
+2026-09-22 新增的 [R6 历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。其中 A–D 已实现独立只读 reader、无 CLI 首页、目录/搜索/来源登记及三类历史阅读；E 已实现网页目录启动、显式原生恢复、操作查询与 Run 范围客户端路由，当前已完成本片验证。生产入口按 Application 身份配对，F 扩展为最多 4 个活动 Run；每 Run 明确寻址，手机共用设备 listener 与地址目录而不共享授权。本文件下述 Run 数据契约继续适用，默认启动与认证以 [R6-B 验证](validation/native-cli-r6-b-application-2026-09-22.md)为准，E 的报告[验证记录](validation/native-cli-r6-e-launch-2026-09-22.md)；schema 25 已可显式登记为只读来源，真实正文抽查及规模验收仍待 G。
+
 前端视觉与交互基准见[方案 §1.1–1.4](codex-native-cli-workbench.md#ui-prototype)及[交互原型](prototypes/native-cli-workbench.html)。原型使用合成数据；聊天角色、内容类型、原生终端生命周期、数据来源与异常状态仍以下述契约为准。
 
 ## 1. 运行单元与模块
@@ -31,16 +33,17 @@
 
 ```text
 cd <project>
-codex-view
-codex-view --no-open
-codex-view --data-dir <private-history-directory>
-codex-view --provider-profile unmanaged-custom
-codex-view --profile <native-profile> --no-open
-codex-view --codex-bin <installed-cli> --resume <explicit-thread-uuid>
+codex-view                         # 首页，零 CLI
+codex-view --project .             # 明确进入当前项目
+codex-view --project . --no-open
+codex-view --project . --data-dir <private-history-directory>
+codex-view --project . --provider-profile unmanaged-custom
+codex-view --project . --profile <native-profile> --no-open
+codex-view --project . --codex-bin <installed-cli> --resume <explicit-thread-uuid>
 codex-view open <private-entry-file>
 ```
 
-命令已在独立 [binary](../src/bin/codex-view.rs) 和 [Launcher](../src/workbench/launch.rs)实现，[正式入口验收](validation/native-cli-r1-launcher-2026-09-19.md)覆盖合成模型、本机 Chrome 和安装版 CLI。Launcher 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，先保留 loopback Web 端口并绑定模型代理，再启动普通官方 CLI 的 PTY。R3 在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
+命令已在独立 [binary](../src/bin/codex-view.rs) 和 [Launcher](../src/workbench/launch.rs)实现，[正式入口验收](validation/native-cli-r1-launcher-2026-09-19.md)覆盖合成模型、本机 Chrome 和安装版 CLI。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。R3 在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
 
 R3.1 已接入独立工作台 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](codex-native-cli-workbench-history-settings.md#2-配置目录与文件契约)；增量验证与后续清理任务见实施计划。
 
@@ -69,7 +72,7 @@ interface CaptureProfile {
 
 这里只记录已确认的模型路由，不复制 credential、不重写官方配置合并器。R0 必须找到并验证 profile 与 CLI 最终生效 provider/config 的核对方法，覆盖命令参数/profile/管理配置的优先级；无法证明时拒绝该 profile，要求显式配置原 upstream，不猜默认地址。[安装版实验](validation/native-cli-r0-progress-2026-09-18.md#26-安装版的配置层验证)已覆盖命名 profile、本次路由覆盖和项目层：项目允许的推理设置生效，但 `model_provider`/`model_providers` 等路由认证字段被原生过滤。当前必要 unmanaged custom profile 增加了启动前来源检查：检测到系统/管理层、非 File 认证存储或可能的云管理时拒绝；只输出存在性，不覆盖策略。R1 Launcher 必须复用该边界并保持原 home，不能用通用 TOML 合并推导 provider，也不能将合成配置实验扩为全 profile 支持。
 
-已实现的适配器为 macOS 的 `unmanaged-custom`，CLI `0.154.0` 是初始基线，`0.155.1` 的[升级回归](validation/native-cli-version-compatibility-2026-09-20.md)覆盖正式入口与合成模型交互；这些版本不是启动白名单。适配器只从原 `config.toml` 与可选 `<name>.config.toml` 选择受测的标量路由字段，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、`requires_openai_auth=false`、显式 base URL 与非空静态 `experimental_bearer_token`；不覆盖模型、推理、权限或重试。`env_key`、`env_http_headers`、命令认证、AWS、managed/cloud/非 File 存储及 `supports_websockets=true` 均须另行验证，当前明确拒绝，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；启动前复查已读配置未改变，这不声称锁住所有配置源或消除并发编辑竞态。
+已实现的适配器为 macOS 的 `unmanaged-custom`，CLI `0.154.0` 是初始基线，`0.155.1` 的[升级回归](validation/native-cli-version-compatibility-2026-09-20.md)覆盖正式入口与合成模型交互；这些版本不是启动白名单。适配器只从原 `config.toml` 与可选 `<name>.config.toml` 选择受测的标量路由字段，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL 与非空静态 `experimental_bearer_token`；`requires_openai_auth=true` 也允许原生 API Key，不能据此推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏；不覆盖模型、推理、权限或重试。`env_key`、`env_http_headers`、命令认证、AWS、managed/cloud/ChatGPT tokens/非 File 存储及 `supports_websockets=true` 均须另行验证，当前明确拒绝，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置和 `auth.json` 未改变，这不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。认证边界修正见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)及[新目录启动回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。
 
 项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；项目层的认证存储覆盖尚未验证则拒绝。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。正式 binary 的普通启动、命名 profile、两轮聊天及退出已实测；[显式 resume 验收](validation/native-cli-r1-native-interactions-2026-09-19.md#4-正式-binary-显式-resume)另验证新 Run 复用明确原生 Thread、终端恢复旧历史、新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；R3 的“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
 
@@ -81,7 +84,7 @@ interface CaptureProfile {
 
 浏览器认证与模型代理分离。Web 使用运行期配对 Cookie、严格 Host/Origin 和 CSRF 防护；模型代理使用本次运行的不可猜路由能力，固定 upstream，拒绝浏览器 Origin/CORS、CONNECT 和任意转发目标。路由能力不进入日志或页面，可经 base URL 前缀注入，出站前剥离并保留原上游路径；它是本机临时能力，不替代模型 Authorization。若该版本支持安全的独立环境 header，可在同一契约下替代路由能力。不能静默降低为开放代理。首版信任同 OS 用户，不声称能抵御该用户读取本次进程参数/内存。
 
-上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：一个共用设备监听复用同一 Router/WebState/Run，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。固定配对码与授权共用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。自动化和 Chrome 结果见[接入验证](validation/native-cli-device-access-2026-09-21.md)，真机仍按 R5/P14 单独验收。
+上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。自动化和 Chrome 结果见[接入验证](validation/native-cli-device-access-2026-09-21.md)，真机仍按 R5/P14 单独验收。
 
 R0 先验证当前必要 profile：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
 
@@ -591,11 +594,13 @@ Browser 只在完整应用事件后推进 cursor；重复事件按 epoch/seq 忽
 
 ## 6. PTY 与单写连接
 
+输入资格以单个 Run/CLI 为边界。项目 A 与项目 B 的 CLI 可以同时接收输入，打开、接管、刷新或重连 A 不得暂停 B；不设 Application、浏览器或用户级的全局输入锁。只有两个页面连接同一个 CLI 时，才需要在这些页面间协调键盘字节和终端尺寸。
+
 单写权保存在内存：`controllerConnectionId + generation + reconnectSecret`。首个配对页面完成终端快照恢复后，对空闲终端自动 claim；收到 grant 才转发按键。日常界面不显示“启用输入”或“释放输入权”，输出始终可读。断线保留约 30 秒重连窗口，原页面凭私有 reconnectSecret 重新绑定并轮换 generation；窗口过期空出写权，等待页面可随状态更新自动 claim，每个 generation 只请求一次，不轮询争抢。
 
-只有另一页面占用或处于重连保留期时，才显示“另一页面正在使用此终端。切换后，另一页面将暂停输入。”及“在此输入”。用户点击一次发起 takeover，不再叠加确认弹窗；收到 grant 后聚焦终端，原页面立即只读。不得自动 takeover。以上时间是体验参数，不是持久 InputLease/TurnOwner。
+只有同一 Run 的另一页面占用或处于重连保留期时，才显示“同一工作台的另一页面正在使用此终端。切换只影响此终端，其他项目可同时输入。”及“在此输入”。用户点击一次发起 takeover，不再叠加确认弹窗；收到 grant 后聚焦终端，同一 Run 的原页面立即只读，其他 Run 的输入保持可用。不得自动 takeover。以上时间是体验参数，不是持久 InputLease/TurnOwner。
 
-输入帧含 generation 和单连接递增序号，当前连接接收后直接 PTY write。每次换连接/接管丢弃旧 generation 的排队字节；不自动重发断线前输入，不能承诺按键跨断线 exactly-once。服务端单一仲裁器串行处理 claim/input/resize，避免两个页面同时通过检查。接管可发生在原生审批期间；首版本机单用户不保留跨主体冻结回合的旧安全保证。
+输入帧含 generation 和单连接递增序号，当前连接接收后直接 PTY write。每次换连接/接管丢弃该 Run 旧 generation 的排队字节；不自动重发断线前输入，不能承诺按键跨断线 exactly-once。服务端每个 PTY 各自串行处理 claim/input/resize，避免同一 CLI 的两个页面同时通过检查；不同 CLI 不共享仲裁器或 generation。接管可发生在原生审批期间；首版本机单用户不保留跨主体冻结回合的旧安全保证。
 
 只有 controller 的尺寸驱动 PTY。resize 仅在行列实际变化时提交并合并重复值，viewer 按服务端尺寸呈现；断线保持最后尺寸。输入不等 VT 投影或数据库。屏幕恢复使用有界终端状态快照加后续输出序列；实现可复用可独立运行的 VT 代码，不能只把任意 ANSI 尾部当完整屏幕。无法恢复时标示屏幕缺口，不注入按键“修复”。原始完整 PTY 历史默认不持久化。
 
@@ -793,5 +798,8 @@ rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安�
 | P12 历史管理 | 占用/partial/分页、精确候选、默认关闭删除、活动锁/跨项目/链接/路径替换负向、批量/幂等/读删并发、各删除崩溃点及暂存恢复；按可靠结束时间保留，旧/异常记录不自动删除；慢 I/O 与原生/旧数据不变 | R3.1，详见[验证契约](codex-native-cli-workbench-history-settings.md#7-验证限制与后续落点) |
 | P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；点击展开/收起及草稿保留、文件往返、焦点/终端/阅读位置保留，无独立设置页或前端路由 | R3.1，同上 |
 | P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve | R5，见[设备接入设计](codex-native-cli-workbench-device-access.md)与[实施顺序](v2-implementation-plan.md#device-access-slices) |
+| P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 | R6-A/C/D/G |
+| P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容 | R6-B/D/E/G；E 实现已完成本片验证，见本片验证报告 |
+| P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI | R6-E/F/G；多 Run 与跨 Run 隔离仍由 F 验收 |
 
 所有 fixture 合成或脱敏，不写真实用户 home。没有性能测量、安装版接入成功和 P07 故障证据，不能把本设计标为已实现；cc-viewer 的 T01–T13 不能替代本项目验收。

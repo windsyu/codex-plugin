@@ -147,7 +147,10 @@ fn private_storage_rejects_symlinks_shared_permissions_and_invalid_blobs() {
     symlink(dir.path().join("outside"), root.path.join("trap")).unwrap();
     assert!(root.open("trap", false).is_err());
     assert!(root.dir("../escape", true).is_err());
-    assert!(root.read_blob("../../outside").is_err());
+    assert!(root.read_blob_limited("../../outside", 1024).is_err());
+    let blob = root.blob(b"bounded blob").unwrap();
+    assert!(root.read_blob_limited(&blob, 3).is_err());
+    assert_eq!(root.read_blob_limited(&blob, 12).unwrap(), b"bounded blob");
     std::fs::set_permissions(&root.path, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Directory::root(&root.path).is_err());
     assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"keep");

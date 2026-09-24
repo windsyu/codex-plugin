@@ -216,6 +216,18 @@ impl Directory {
         }
         owned(&self.file, true)
     }
+    /// Opens an existing private source without creating any directory or file.
+    pub(crate) fn read_only(path: &Path) -> io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        owned(&file, true)?;
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
     pub fn root(path: &Path) -> io::Result<Self> {
         match std::fs::DirBuilder::new().mode(0o700).create(path) {
             Ok(()) => {}
@@ -354,11 +366,11 @@ impl Directory {
         }
         Ok(id)
     }
-    pub fn read_blob(&self, id: &str) -> io::Result<Vec<u8>> {
+    pub(super) fn read_blob_limited(&self, id: &str, limit: usize) -> io::Result<Vec<u8>> {
         if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let bytes = self.read(id, FILE_LIMIT)?;
+        let bytes = self.read(id, limit.min(FILE_LIMIT))?;
         if blake3::hash(&bytes).to_hex().as_str() != id {
             return Err(io::ErrorKind::InvalidData.into());
         }
