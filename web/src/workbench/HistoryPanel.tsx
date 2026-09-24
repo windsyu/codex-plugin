@@ -6,6 +6,7 @@ import { UserMessage } from './UserMessage';
 import { ToolCard } from './ToolCard';
 import type { OpenCalls } from './CallInspector';
 import { HistoryStorage, CleanupPreviewPanel, CleanupJobs, sizeLabel, storageReason, type StorageRun } from './HistoryStorage';
+import { runApi } from './runApi';
 
 interface HistoryRun { runEpoch: string; projectName: string; startedAt: string; state: 'active' | 'ended' | 'unclean'; savedThroughViewSeq: number; persistedThroughViewSeq: number; gapCount: number; historyCoverage: string; storage?: StorageRun | null }
 interface Page { currentRunEpoch: string; runs: HistoryRun[]; nextCursor: string | null; diagnostics: { runEpoch: string; code: string }[]; indexState: string }
@@ -33,7 +34,7 @@ export function HistoryPanel({ epoch, active, blocked = false, managementAvailab
     controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
     setBusy(true); setError('');
     try {
-      const response = await fetch(`/workbench/v1/history${id ? `/${encodeURIComponent(id)}` : ''}${before != null ? `?before=${before}` : cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
+      const response = await fetch(runApi(`/history${id ? `/${encodeURIComponent(id)}` : ''}${before != null ? `?before=${before}` : cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
       if (!response.ok) {
         if (id && saved?.value.run.runEpoch === id && [404, 410].includes(response.status)) { setSaved(null); selectionChanged.current?.(); setRuns(old => old.filter(run => run.runEpoch !== id)); setError('此历史已删除或不存在，请刷新列表。'); return; }
         throw new Error(failure(response.status));
@@ -58,7 +59,7 @@ export function HistoryPanel({ epoch, active, blocked = false, managementAvailab
     if (!active || !managementAvailable || !saved) return;
     const id = saved.value.run.runEpoch, abort = new AbortController(); let timer = 0;
     const check = async () => {
-      try { const response = await fetch(`/workbench/v1/history/${encodeURIComponent(id)}/status`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
+      try { const response = await fetch(runApi(`/history/${encodeURIComponent(id)}/status`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
         if (abort.signal.aborted) return;
         if ([404, 410].includes(response.status)) { controller.current?.abort(); setBusy(false); setSaved(null); selectionChanged.current?.(); setRuns(old => old.filter(run => run.runEpoch !== id)); setError('此历史已删除或不存在，请刷新列表。'); return; }
       } catch { /* Keep readable content on a transient network error. */ }

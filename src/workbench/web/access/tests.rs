@@ -675,3 +675,50 @@ async fn browser_device_access_qr_http_stream_input_and_revocation() {
     assert_eq!(inputs.matches("手机中文输入").count(), 1);
     assert_eq!(inputs.matches("电脑继续输入").count(), 1);
 }
+
+#[tokio::test]
+async fn stopped_run_cannot_reenable_devices_but_owner_can_read_it() {
+    let f = Fixture::new().await;
+    let ready = f.ready().await;
+    let ip = ready["addresses"][0]["origin"].as_str().unwrap();
+    let pairing = f.pairing().await;
+    let device = cookie(&f.pair(ip, ip, token(&pairing)).await);
+    let terminal = f._host.handle();
+    terminal.stop().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !terminal.exited() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The Application exit transition revokes access once and retains the
+    // Run's desktop reader. A later enable must not resurrect authorization.
+    f.server.state.access.close();
+    assert!(
+        f.server
+            .state
+            .access
+            .permission(
+                &{
+                    let mut headers = HeaderMap::new();
+                    headers.insert(header::COOKIE, device.parse().unwrap());
+                    headers
+                },
+                f.server.state.hub.epoch()
+            )
+            .is_none()
+    );
+    let response = f.action("enable").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(json_response(response).await["error"]["code"], "run_ended");
+    assert_ne!(f.status().await["state"], "ready");
+    let reading = f
+        .client
+        .get(format!("{}/workbench/v1/run", f.server.state.origin))
+        .header(header::COOKIE, &f.owner)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reading.status(), StatusCode::OK);
+}

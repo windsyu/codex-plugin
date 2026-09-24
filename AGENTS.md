@@ -28,8 +28,9 @@ V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再�
 
 - `docs/codex-local-gateway-v2-development-constraints.md`：新工作台当前核心约束；
 - `docs/codex-native-cli-workbench.md`：产品目标、架构取舍和已纳入的交互原型；
-- `docs/v2-implementation-plan.md`：唯一实施计划，RQ01–RQ12、R0–R5（含 R3.1）、验收、代码退役与状态；
+- `docs/v2-implementation-plan.md`：唯一实施计划，RQ01–RQ15、R0–R6（含 R3.1）、验收、代码退役与状态；
 - `docs/codex-native-cli-workbench-detailed-design.md`：接入、转发、输入、记录、API、恢复与性能验收；
+- `docs/codex-native-cli-workbench-history-home.md`：R6 全部历史首页、原生/工作台/旧库只读目录、Application/Run 拆分、明确项目启动与恢复的设计，见 ADR 0053；当前状态只在实施计划维护；
 - `docs/codex-native-cli-workbench-history-settings.md`：历史占用/删除/保留期限、统一 JSON 与网页展开设置契约，见 ADR 0048；
 - `docs/codex-native-cli-workbench-device-access.md`：LAN IP/Tailscale MagicDNS、共用配对/撤销和同页二维码的实现契约，见 ADR 0051；默认 loopback，显式开启设备监听，真机结果以实施计划为准；
 - `docs/decisions/0039-cc-viewer-style-runtime.md`：新运行路径与可靠性取舍；
@@ -369,6 +370,7 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 - 2026-09-20 用户明确配置交互只需在当前工作台点击按钮展开可视化修改面板、用完收起；不新建独立设置页面、导航项或前端路由，不切换中央阅读或卸载终端。展开表单继续编辑同一 JSON，收起保留当前页面内未保存草稿，见历史与配置方案 §6.1；
 - 2026-09-19 用户确认终端显示保持简洁：保留原生 ANSI 样式，网页 CLI 子进程清除继承的 `NO_COLOR`、使用 truecolor，并用官方 `tui.animations=false` 关闭装饰动画；不新增动画过滤层或修改全局配置；
 - 2026-09-19 用户确认右侧终端打开即用：不显示启用/释放输入权按钮，空闲时自动可输入；仅多页面冲突时显示“在此输入”，点击一次切换，无二次确认。内部单写、重连保留和未确认输入不重发继续适用，输出始终可读；
+- 2026-09-22 用户要求 R6 整合历史入口，倾向默认先看全部历史，并确认另项目新工作台标签、保留原项目运行，默认新对话、历史单独“继续此会话”。方案将 Application 与 Run 拆分；每 Run 仍为一个普通 CLI，浏览历史不创建进程/自动输入，不恢复旧内核。旧库 schema 25 只读兼容与独立 Run 隔离须单独验收，设计完成不等于实现；见 ADR 0053；
 - 旧设计与重复计划已清理，历史原文通过固定 Git commit 追溯；交互原型保留并纳入 R1–R4，进度统一看实施计划。
 
 R0 先验证当前必要 provider/profile 的原生流程，以及合成 SSE/WS 转发、真实中间态和慢记录器隔离；其余 profile 验收后逐项加入支持清单。旧路径性能可作参照，不为对比继续改造旧内核。配置入口、参考产品试用、原型或旧测试均不能替代新路径验收。文档清理不执行代码退役、用户服务切换或数据库 migration。

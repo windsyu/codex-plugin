@@ -18,6 +18,27 @@ struct Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credential_change_during_final_checks_prevents_cli_spawn() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.home.join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-before"}"#,
+    )
+    .unwrap();
+    let result = WorkbenchRuntime::start_checked(fixture.options(), || {
+        std::fs::write(
+            fixture.home.join("auth.json"),
+            r#"{"tokens":{"access_token":"synthetic-after"}}"#,
+        )?;
+        Ok(())
+    })
+    .await;
+    let error = result.err().expect("credentials changed before spawn");
+    assert_eq!(LaunchFailure::from_error(&error), "native_config_changed");
+    assert!(!fixture.home.join("fixture.pid").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_launch_uses_saved_defaults_and_explicit_overrides_without_restarting_on_save() {
     use crate::workbench::config::{Config, Overrides, Prepared};
     let fixture = Fixture::new();
@@ -223,7 +244,7 @@ async fn launch_keeps_home_cwd_native_args_and_cleans_only_owned_resources() {
         fixture.cwd.canonicalize().unwrap().to_str().unwrap()
     );
     let entry = read_entry(&fixture.entry).unwrap();
-    let proxy_address = reqwest::Url::parse(&run.proxy.child_base_url()).unwrap();
+    let proxy_address = reqwest::Url::parse(&run.runtime.proxy.child_base_url()).unwrap();
     assert_eq!(entry.cli_pid, pid);
     assert_eq!(
         std::fs::read(fixture.home.join("config.toml")).unwrap(),

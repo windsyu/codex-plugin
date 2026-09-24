@@ -18,9 +18,11 @@ use super::{
     terminal::TerminalHost,
     web::ReadingServer,
 };
-mod entry;
+pub(crate) mod entry;
+pub(crate) mod failure;
 mod profile;
 pub use entry::{BrowserEntry, read_entry};
+use failure::LaunchFailure;
 
 // Evidence for diagnostics, never a startup allowlist. Different releases can
 // use the same native flags and model protocol; the actual route checks remain.
@@ -110,15 +112,152 @@ async fn version(path: &Path, home: &Path) -> Result<String> {
     .context("CLI version check timed out")?
 }
 
-pub struct WorkbenchRun {
-    // Field order deliberately stops the native process before removing proxy,
-    // listeners, observers or pairing credentials. CLI is never respawned.
+/// One CLI and its independent data path. No application listener or credentials.
+pub struct WorkbenchRuntime {
     terminal: TerminalHost,
-    pub web: ReadingServer,
     proxy: ProxyServer,
     _observer: Observer,
     _users: RolloutReader,
     _recorder: Recorder,
+    pub(crate) hub: std::sync::Arc<LiveHub>,
+    pub(crate) workspace: super::workspace::Handle,
+    pub epoch: uuid::Uuid,
+    pub cli_version: String,
+    pub cwd: PathBuf,
+}
+impl WorkbenchRuntime {
+    pub async fn start(options: LaunchOptions) -> Result<Self> {
+        Self::start_checked(options, || Ok(())).await
+    }
+    pub(crate) async fn start_checked(
+        options: LaunchOptions,
+        verify: impl FnOnce() -> Result<()>,
+    ) -> Result<Self> {
+        let cwd = options
+            .cwd
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("project directory is unavailable"))?;
+        ensure!(
+            cwd.is_dir() && cwd.ancestors().count() <= 64,
+            "project root must be a supported directory"
+        );
+        let home = options
+            .home
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("native Codex home must already exist"))?;
+        ensure!(home.is_dir(), "native Codex home must be a directory");
+        if let Some(id) = options.resume {
+            ensure!(!id.is_nil(), "resume requires an explicit native thread ID");
+        }
+        let binary =
+            executable(&options.executable).map_err(|e| LaunchFailure::Executable.wrap(e))?;
+        let cli_version = version(&binary, &home)
+            .await
+            .map_err(|e| LaunchFailure::Version.wrap(e))?;
+        if !CHECKED_CLI_VERSIONS.contains(&cli_version.as_str()) {
+            eprintln!("codex-view: CLI {cli_version} 尚未完成本工作台的版本回归，继续启动。");
+        }
+        let profile = profile::Profile::load(&home, &cwd, options.native_profile.as_deref())
+            .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        let hub = LiveHub::new(LiveLimits::default());
+        let epoch = hub.epoch();
+        let data_dir = options
+            .data_dir
+            .unwrap_or_else(|| options.workbench_paths.history_dir());
+        let default_history = data_dir == options.workbench_paths.history_dir();
+        let project_name = profile
+            .policy
+            .scrub(
+                cwd.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("当前项目"),
+            )
+            .as_str()
+            .to_owned();
+        let mut recording = RecorderOptions::new(data_dir, &cwd, project_name);
+        recording.project = Some(super::recording::library::Project {
+            format_version: 1,
+            workspace_id: recording.workspace_id.clone(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            native_home: home.to_string_lossy().into_owned(),
+        });
+        if default_history {
+            recording.private_parent = Some(options.workbench_paths.root);
+        }
+        let recorder =
+            Recorder::start(&hub, recording).map_err(|e| LaunchFailure::Recording.wrap(e))?;
+        let (capture, receiver) = capture::channel(8 * 1024 * 1024, 256);
+        let proxy = ProxyServer::bind(profile.upstream.clone(), capture)
+            .await
+            .map_err(|e| LaunchFailure::Proxy.wrap(e))?;
+        let observer = Observer::start(
+            receiver,
+            hub.clone(),
+            profile.policy.clone(),
+            DecoderLimits::default(),
+        )?;
+        let users = RolloutReader::start(&home, hub.clone(), profile.policy.clone())
+            .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        let mut command = CommandBuilder::new(binary);
+        command.cwd(&cwd);
+        command.env("CODEX_HOME", &home);
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        // This child renders into a color xterm, not the launcher's log sink.
+        command.env_remove("NO_COLOR");
+        if let Some(name) = &options.native_profile {
+            command.args(["--profile", name]);
+        }
+        command.arg("-c");
+        command.arg(format!(
+            "model_providers.{}.base_url={}",
+            profile.provider,
+            toml::Value::String(proxy.child_base_url())
+        ));
+        command.args(["-c", "tui.animations=false"]);
+        if let Some(id) = options.resume {
+            command.args(["resume".to_owned(), id.to_string()]);
+        }
+        verify()?;
+        profile
+            .unchanged()
+            .map_err(|e| LaunchFailure::ConfigChanged.wrap(e))?;
+        let terminal = TerminalHost::spawn(epoch, command, 45, 120)
+            .map_err(|e| LaunchFailure::Terminal.wrap(e))?;
+        let workspace =
+            super::workspace::Handle::start(&cwd).map_err(|e| LaunchFailure::Workspace.wrap(e))?;
+        Ok(Self {
+            terminal,
+            proxy,
+            _observer: observer,
+            _users: users,
+            _recorder: recorder,
+            hub,
+            workspace,
+            epoch,
+            cli_version,
+            cwd,
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn abort_proxy_for_test(&self) {
+        self.proxy.abort_for_test();
+    }
+    pub fn process_id(&self) -> u32 {
+        self.terminal.process_id()
+    }
+    pub(crate) fn terminal(&self) -> super::terminal::TerminalHandle {
+        self.terminal.handle()
+    }
+    pub fn healthy(&self) -> bool {
+        !self.proxy.is_finished() && !self.terminal.is_finished()
+    }
+}
+
+/// Standalone harness retained for native-flow probes. Production uses Application.
+pub struct WorkbenchRun {
+    runtime: WorkbenchRuntime,
+    pub web: ReadingServer,
     entry: entry::EntryFile,
     pub epoch: uuid::Uuid,
     pub cli_version: String,
@@ -141,123 +280,46 @@ impl WorkbenchRun {
         let settings = config
             .map(super::config::ConfigService::start)
             .transpose()?;
-        let cwd = options
-            .cwd
-            .canonicalize()
-            .map_err(|_| anyhow::anyhow!("project directory is unavailable"))?;
-        ensure!(
-            cwd.is_dir() && cwd.ancestors().count() <= 64,
-            "project root must be a supported directory"
-        );
-        let home = options
-            .home
-            .canonicalize()
-            .map_err(|_| anyhow::anyhow!("native Codex home must already exist"))?;
-        ensure!(home.is_dir(), "native Codex home must be a directory");
-        if let Some(id) = options.resume {
-            ensure!(!id.is_nil(), "resume requires an explicit native thread ID");
-        }
-        let binary = executable(&options.executable)?;
-        let cli_version = version(&binary, &home).await?;
-        if !CHECKED_CLI_VERSIONS.contains(&cli_version.as_str()) {
-            eprintln!("codex-view: CLI {cli_version} 尚未完成本工作台的版本回归，继续启动。");
-        }
-        let profile = profile::Profile::load(&home, &cwd, options.native_profile.as_deref())?;
-        let hub = LiveHub::new(LiveLimits::default());
-        let epoch = hub.epoch();
-        let data_dir = options
-            .data_dir
-            .unwrap_or_else(|| options.workbench_paths.history_dir());
-        let default_history = data_dir == options.workbench_paths.history_dir();
-        let project_name = profile
-            .policy
-            .scrub(
-                cwd.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("当前项目"),
-            )
-            .as_str()
-            .to_owned();
-        let mut recording = RecorderOptions::new(data_dir, &cwd, project_name);
-        if default_history {
-            recording.private_parent = Some(options.workbench_paths.root);
-        }
-        let recorder = Recorder::start(&hub, recording)?;
-        let web_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .context("reserve workbench loopback listener")?;
-        let (capture, receiver) = capture::channel(8 * 1024 * 1024, 256);
-        let proxy = ProxyServer::bind(profile.upstream.clone(), capture).await?;
-        let observer = Observer::start(
-            receiver,
-            hub.clone(),
-            profile.policy.clone(),
-            DecoderLimits::default(),
-        )?;
-        let users = RolloutReader::start(&home, hub.clone(), profile.policy.clone())?;
-        let mut command = CommandBuilder::new(binary);
-        command.cwd(&cwd);
-        command.env("CODEX_HOME", &home);
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        // This child renders into a color xterm, not the launcher's log sink.
-        command.env_remove("NO_COLOR");
-        if let Some(name) = &options.native_profile {
-            command.args(["--profile", name]);
-        }
-        command.arg("-c");
-        command.arg(format!(
-            "model_providers.{}.base_url={}",
-            profile.provider,
-            toml::Value::String(proxy.child_base_url())
-        ));
-        command.args(["-c", "tui.animations=false"]);
-        if let Some(id) = options.resume {
-            command.args(["resume".to_owned(), id.to_string()]);
-        }
-        profile.unchanged()?;
-        let terminal = TerminalHost::spawn(epoch, command, 45, 120).map_err(|_| {
-            anyhow::anyhow!("native CLI startup failed; command details suppressed")
-        })?;
+        let path = options.entry_file.clone();
+        let runtime = WorkbenchRuntime::start(options).await?;
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let web = ReadingServer::bind_configured(
-            hub,
-            terminal.handle(),
-            web_listener,
+            runtime.hub.clone(),
+            runtime.terminal(),
+            listener,
             settings.as_ref().map(|s| s.handle()),
-            Some(super::workspace::Handle::start(&cwd).context("open workspace reader")?),
+            Some(runtime.workspace.clone()),
         )
         .await?;
         let entry = entry::EntryFile::create(
-            options.entry_file.as_deref(),
+            path.as_deref(),
             &BrowserEntry {
                 format: "codex-view-entry-v1".into(),
-                run_epoch: epoch,
+                run_epoch: runtime.epoch,
                 address: format!("http://{}", web.address()),
                 url: web.bootstrap_url(),
-                cli_pid: terminal.process_id(),
+                cli_pid: runtime.process_id(),
+                ..Default::default()
             },
         )
         .context("create private browser entry")?;
         Ok(Self {
-            terminal,
+            epoch: runtime.epoch,
+            cli_version: runtime.cli_version.clone(),
+            runtime,
             web,
-            proxy,
-            _observer: observer,
-            _users: users,
-            _recorder: recorder,
             entry,
-            epoch,
-            cli_version,
             _settings: settings,
         })
     }
     pub fn process_id(&self) -> u32 {
-        self.terminal.process_id()
+        self.runtime.process_id()
     }
     pub fn entry_file(&self) -> &Path {
         &self.entry.path
     }
     pub fn healthy(&self) -> bool {
-        !self.proxy.is_finished() && !self.web.is_finished() && !self.terminal.is_finished()
+        self.runtime.healthy() && !self.web.is_finished()
     }
 }
 

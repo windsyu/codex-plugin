@@ -265,14 +265,38 @@ pub(super) struct Recovered {
 }
 
 pub(super) fn recover(dir: &Directory, meta: &Meta, before: Option<u64>) -> io::Result<Recovered> {
+    recover_bounded(dir, meta, before, None)
+}
+pub(super) fn recover_bounded(
+    dir: &Directory,
+    meta: &Meta,
+    before: Option<u64>,
+    deadline: Option<std::time::Instant>,
+) -> io::Result<Recovered> {
     let blobs = dir.dir("blobs", false)?;
+    let mut read_bytes = 0u64;
     let mut checkpoint = None;
     let mut issues = Vec::new();
     let mut verified_prefix = 0;
     let mut intact = true;
     for segment in &meta.segments {
+        if deadline.is_some_and(|d| std::time::Instant::now() > d) {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let budget = if deadline.is_some() {
+            (64 * 1024 * 1024u64).saturating_sub(read_bytes) as usize
+        } else {
+            FILE_LIMIT
+        };
+        if deadline.is_some()
+            && blobs
+                .entry_info(&segment.base)
+                .is_ok_and(|i| i.bytes > budget as u64)
+        {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
         let initial: Checkpoint = match blobs
-            .read_blob(&segment.base)
+            .read_blob_limited(&segment.base, budget)
             .and_then(|b| serde_json::from_slice::<Checkpoint>(&b).map_err(|_| invalid()))
         {
             Ok(value) if value.validate(meta.run_epoch) => value,
@@ -288,6 +312,9 @@ pub(super) fn recover(dir: &Directory, meta: &Meta, before: Option<u64>) -> io::
         };
         if before.is_some_and(|limit| initial.sequence() > limit) {
             break;
+        }
+        if deadline.is_some() {
+            read_bytes += encode(&initial)?.len() as u64;
         }
         let mut state = initial;
         let file = match dir.open(&format!("observations.{}.jsonl", segment.id), false) {
@@ -320,6 +347,11 @@ pub(super) fn recover(dir: &Directory, meta: &Meta, before: Option<u64>) -> io::
         let mut valid_prefix = true;
         let mut cutoff = false;
         loop {
+            if deadline
+                .is_some_and(|d| std::time::Instant::now() > d || read_bytes > 64 * 1024 * 1024)
+            {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
             let mut bytes = Vec::new();
             let count = reader
                 .by_ref()
@@ -328,6 +360,7 @@ pub(super) fn recover(dir: &Directory, meta: &Meta, before: Option<u64>) -> io::
             if count == 0 {
                 break;
             }
+            read_bytes += count as u64;
             let location = offset;
             offset += count as u64;
             let parsed = (|| -> io::Result<()> {
@@ -348,7 +381,14 @@ pub(super) fn recover(dir: &Directory, meta: &Meta, before: Option<u64>) -> io::
                     return Err(invalid());
                 }
                 let data = if let Some(id) = record.data.get("blob").and_then(Value::as_str) {
-                    serde_json::from_slice(&blobs.read_blob(id)?).map_err(|_| invalid())?
+                    let remaining = if deadline.is_some() {
+                        (64 * 1024 * 1024u64).saturating_sub(read_bytes) as usize
+                    } else {
+                        FILE_LIMIT
+                    };
+                    let blob = blobs.read_blob_limited(id, remaining)?;
+                    read_bytes += blob.len() as u64;
+                    serde_json::from_slice(&blob).map_err(|_| invalid())?
                 } else {
                     record.data
                 };

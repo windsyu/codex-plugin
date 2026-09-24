@@ -6,19 +6,21 @@ import jsQR from 'jsqr';
 import { AccessPanel, type AccessStatus } from './AccessPanel';
 vi.mock('qrcode', async original => ({ default: { ...(await original<{default:typeof QRCode}>()).default, toCanvas: vi.fn().mockResolvedValue(undefined) } }));
 const root = document.createElement('div');
-let info: AccessStatus, fetcher: ReturnType<typeof vi.fn>;
+let info: AccessStatus, fetcher: ReturnType<typeof vi.fn>, pairPath: string;
 const token = 'a'.repeat(64);
+const scopedPath = '/?run=11111111-1111-4111-8111-111111111111';
 const response = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(body) });
 const button = (name: string) => [...root.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === name || b.textContent === name)!;
 const click = async (element: HTMLElement) => { await act(async () => element.click()); await act(async () => {}); };
 async function show(open = true) { await act(async () => render(<><textarea aria-label="native" /><AccessPanel epoch="run" open={open} onClose={() => {}} /></>, root)); await act(async () => {}); }
 beforeEach(() => {
+  pairPath = '/'; history.replaceState(null, '', '/');
   document.body.append(root);
   info = { runEpoch: 'run', revision: 1, state: 'ready', addresses: [{ id: 'ip', label: '局域网', origin: 'http://192.168.1.2:5000' }, { id: 'dns', label: 'Tailscale', origin: 'http://machine.tail-test.ts.net:5000' }], devices: [], notice: null, error: null, pairingId: 'fixed-code' };
   fetcher = vi.fn(async (_url: string, opts?: RequestInit) => {
     if (_url.endsWith('/pairing')) {
       expect(opts?.method).toBeUndefined();
-      return response({ runEpoch: 'run', revision: info.revision, pairingId: info.pairingId, links: info.addresses.map(a => ({ addressId: a.id, url: `${a.origin}/#pair=${token}` })) });
+      return response({ runEpoch: 'run', revision: info.revision, pairingId: info.pairingId, links: info.addresses.map(a => ({ addressId: a.id, url: `${a.origin}${pairPath}#pair=${token}` })) });
     }
     if (opts?.method === 'POST') {
       expect(new Headers(opts.headers).get('If-Match')).toBe(`"${info.revision}"`);
@@ -30,8 +32,9 @@ beforeEach(() => {
   });
   vi.stubGlobal('fetch', fetcher);
 });
-afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
-it('selects a QR and copies its full URL without changing the code or mounted terminal', async () => {
+afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
+it.each(['/', scopedPath])('selects a QR and copies its full URL without changing the code or mounted terminal (%s)', async path => {
+  pairPath = path; history.replaceState(null, '', path);
   await show(); await vi.waitFor(() => expect(root.querySelector('canvas')).not.toBeNull()); const native = root.querySelector('textarea')!; native.value = '中文草稿';
   const calls = fetcher.mock.calls.length;
   const qrButtons = [...root.querySelectorAll('button')].filter(b => b.textContent === '二维码');
@@ -39,9 +42,13 @@ it('selects a QR and copies its full URL without changing the code or mounted te
   await click(qrButtons[1]);
   expect(qrButtons[1].getAttribute('aria-pressed')).toBe('true');
   expect(fetcher).toHaveBeenCalledTimes(calls);
-  expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://machine.tail-test.ts.net:5000/#pair=${token}`, expect.objectContaining({ margin: 4 }));
+  expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://machine.tail-test.ts.net:5000${path}#pair=${token}`, expect.objectContaining({ margin: 4 }));
   await click(button('复制Tailscale配对链接'));
-  expect((root.querySelector('[aria-label="手动复制配对链接"]') as HTMLTextAreaElement).value).toBe(`http://machine.tail-test.ts.net:5000/#pair=${token}`);
+  expect((root.querySelector('[aria-label="手动复制配对链接"]') as HTMLTextAreaElement).value).toBe(`http://machine.tail-test.ts.net:5000${path}#pair=${token}`);
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', { clipboard: { writeText } });
+  await click(button('复制局域网配对链接'));
+  expect(writeText).toHaveBeenCalledWith(`http://192.168.1.2:5000${path}#pair=${token}`);
   await show(false); await show(true);
   expect(root.querySelector('textarea')).toBe(native); expect(native.value).toBe('中文草稿');
   expect(fetcher.mock.calls.every(([,options]) => !options?.method)).toBe(true);
@@ -61,7 +68,8 @@ it('retains the QR after pairing and elapsed time, and retrieves the same code a
   expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/pairing'))).toHaveLength(2);
   expect(fetcher.mock.calls.every(([,opt]) => !opt?.method)).toBe(true);
 });
-it('only enables on request and uses the fixed code for new addresses and reopened access', async () => {
+it.each(['/', scopedPath])('only enables on request and uses the fixed code for new addresses and reopened access (%s)', async path => {
+  pairPath = path; history.replaceState(null, '', path);
   info.state = 'off'; await show(); expect(fetcher.mock.calls.every(([,opt]) => !opt?.method)).toBe(true);
   expect(fetcher.mock.calls.some(([url]) => url.endsWith('/pairing'))).toBe(false);
   await click(button('开启设备访问'));
@@ -72,11 +80,11 @@ it('only enables on request and uses the fixed code for new addresses and reopen
   const buttons = [...root.querySelectorAll('button')].filter(b => b.textContent === '二维码');
   await vi.waitFor(() => expect(buttons[2].disabled).toBe(false)); await click(buttons[2]);
   expect(fetcher).toHaveBeenCalledTimes(before);
-  expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://192.168.2.2:5000/#pair=${token}`, expect.anything());
+  expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://192.168.2.2:5000${path}#pair=${token}`, expect.anything());
   await click(button('关闭设备访问')); await vi.waitFor(() => expect(root.querySelector('canvas')).toBeNull());
   info.addresses[2].origin = 'http://192.168.2.2:6000';
   await click(button('开启设备访问'));
-  await vi.waitFor(() => expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://192.168.2.2:6000/#pair=${token}`, expect.anything()));
+  await vi.waitFor(() => expect(QRCode.toCanvas).toHaveBeenLastCalledWith(expect.any(HTMLCanvasElement), `http://192.168.2.2:6000${path}#pair=${token}`, expect.anything()));
 });
 it('reports revision conflicts without replaying a mutation', async () => {
   await show(); await vi.waitFor(() => expect(root.querySelector('canvas')).not.toBeNull()); fetcher.mockImplementation(async (_url, opt) => opt?.method ? response({ error: { code: 'access_changed' } }, 412) : response(info));
@@ -114,7 +122,7 @@ it('lets a slow pairing request finish across multiple status polls', async () =
   expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/pairing'))).toHaveLength(1);
 });
 it('generates a QR that decodes to the full long MagicDNS pairing URL', () => {
-  const url = `http://workstation.long-tailnet-name.ts.net:54321/#pair=${token}`;
+  const url = `http://workstation.long-tailnet-name.ts.net:54321${scopedPath}#pair=${token}`;
   const modules = QRCode.create(url, { errorCorrectionLevel: 'M' }).modules;
   const scale = 5, margin = 4, width = (modules.size + margin * 2) * scale;
   const rgba = new Uint8ClampedArray(width * width * 4).fill(255);

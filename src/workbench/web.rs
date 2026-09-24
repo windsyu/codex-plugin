@@ -85,6 +85,8 @@ struct WebState {
     #[cfg(unix)]
     access: access::Access,
     #[cfg(unix)]
+    shared_access: Option<Arc<access::SharedAccess>>,
+    #[cfg(unix)]
     terminal_slots: Arc<Semaphore>,
 }
 
@@ -188,6 +190,8 @@ impl ReadingServer {
             options,
             #[cfg(unix)]
             access: access::Access::new(),
+            #[cfg(unix)]
+            shared_access: None,
             #[cfg(unix)]
             terminal_slots: Arc::new(Semaphore::new(32)),
         });
@@ -335,6 +339,7 @@ fn router(state: Arc<WebState>) -> Router {
                 .put(settings_api::save)
                 .layer(DefaultBodyLimit::max(super::config::LIMIT)),
         )
+        .route("/workbench/v1/stop", post(terminal_api::stop_run))
         .route("/workbench/v1/run/stop", post(terminal_api::stop_run));
     app.layer(DefaultBodyLimit::max(1024))
         .layer(middleware::from_fn_with_state(state.clone(), boundary))
@@ -517,7 +522,7 @@ async fn run(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response
     #[cfg(not(unix))]
     let terminal = false;
     #[cfg(unix)]
-    let settings_available = state.options.settings.is_some();
+    let settings_available = state.options.settings.is_some() && owner_authorised(&headers, &state);
     #[cfg(not(unix))]
     let settings_available = false;
     #[cfg(unix)]
@@ -645,3 +650,76 @@ async fn events(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(unix)]
+pub(crate) mod application;
+
+/// A Run's routes and optional device listener, without an application listener.
+#[cfg(unix)]
+pub(crate) struct RunSurface {
+    state: Arc<WebState>,
+    stop: watch::Sender<bool>,
+    _management: Option<super::recording::management::Service>,
+}
+#[cfg(unix)]
+impl RunSurface {
+    pub(crate) fn disable_devices(&self) {
+        self.state.access.close();
+    }
+    pub(crate) fn router(&self) -> Router {
+        router(self.state.clone())
+    }
+    fn new(
+        run: &super::launch::WorkbenchRuntime,
+        owner: &application::Owner,
+        settings: super::config::ConfigHandle,
+        shared: Arc<access::SharedAccess>,
+    ) -> Result<Self> {
+        let management = run
+            .hub
+            .history()
+            .map(|history| {
+                super::recording::management::Service::start(
+                    history.root,
+                    history.workspace,
+                    run.epoch,
+                    settings.clone(),
+                )
+            })
+            .transpose()?;
+        let (stop, stop_rx) = watch::channel(false);
+        let state = Arc::new(WebState {
+            hub: run.hub.clone(),
+            authority: owner.authority.clone(),
+            origin: owner.origin.clone(),
+            pairing: owner.pairing.clone(),
+            cookie_name: owner.cookie_name.clone(),
+            session: owner.session.clone(),
+            snapshot_slots: Arc::new(Semaphore::new(2)),
+            stop: stop_rx,
+            options: RuntimeOptions {
+                workspace: Some(run.workspace.clone()),
+                terminal: Some(run.terminal()),
+                settings: Some(settings),
+                management: management.as_ref().map(|m| m.handle()),
+            },
+            access: access::Access::new(),
+            shared_access: Some(shared),
+            terminal_slots: Arc::new(Semaphore::new(32)),
+        });
+        Ok(Self {
+            state,
+            stop,
+            _management: management,
+        })
+    }
+}
+#[cfg(unix)]
+impl Drop for RunSurface {
+    fn drop(&mut self) {
+        // Router clones and in-flight SSE/WS/device requests retain WebState.
+        // Retiring this Run must end them even while Application stays alive.
+        self.state.access.close();
+        self.stop.send_replace(true);
+    }
+}

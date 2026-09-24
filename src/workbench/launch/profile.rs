@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::super::{config_sources, proxy::Upstream, redaction::RedactionPolicy};
+use super::failure::LaunchFailure;
 use anyhow::{Result, bail, ensure};
 
 const CONFIG_BYTES: u64 = 2 * 1024 * 1024;
@@ -15,6 +16,8 @@ pub(super) struct Profile {
     pub upstream: Upstream,
     pub policy: Arc<RedactionPolicy>,
     sources: Vec<(PathBuf, Vec<u8>)>,
+    auth: config_sources::AuthSnapshot,
+    home: PathBuf,
 }
 
 pub(super) fn identifier(value: &str) -> Result<()> {
@@ -79,10 +82,7 @@ impl Profile {
             })?
             .to_owned();
         identifier(&provider)?;
-        ensure!(
-            provider == "custom",
-            "provider is not in the validated capture profile"
-        );
+        ensure!(provider == "custom", LaunchFailure::Provider);
         let provider_table = |value: &toml::Value| -> Result<toml::Table> {
             match value
                 .get("model_providers")
@@ -103,14 +103,16 @@ impl Profile {
             "capture profile requires native Responses wire_api"
         );
         ensure!(
-            field("requires_openai_auth").and_then(toml::Value::as_bool) == Some(false),
-            "OpenAI login capture is not validated for this profile"
+            field("requires_openai_auth")
+                .and_then(toml::Value::as_bool)
+                .is_some(),
+            "native requires_openai_auth must be an explicit boolean"
         );
+        // This flag permits native API-key authentication as well as ChatGPT.
+        // The explicit provider bearer below retains native precedence in both
+        // cases; source inspection still excludes cloud login and managed auth.
         for key in ["env_key", "env_http_headers", "auth", "aws"] {
-            ensure!(
-                field(key).is_none(),
-                "additional provider authentication source requires validation"
-            );
+            ensure!(field(key).is_none(), LaunchFailure::Auth);
         }
         ensure!(
             field("supports_websockets").is_none_or(|v| v.as_bool() == Some(false)),
@@ -157,7 +159,13 @@ impl Profile {
         if let Some(store) = top("cli_auth_credentials_store") {
             auth_config.insert("cli_auth_credentials_store".into(), store.clone());
         }
-        config_sources::inspect(home, &toml::Value::Table(auth_config))?.require_verified()?;
+        let (sources_checked, auth) =
+            config_sources::inspect_for_launch(home, &toml::Value::Table(auth_config))
+                .map_err(|e| LaunchFailure::Auth.wrap(e))?;
+        sources_checked
+            .require_verified()
+            .map_err(|e| LaunchFailure::Auth.wrap(e))?;
+        secrets.extend(auth.redaction_secrets());
         // Project routing is filtered by the installed CLI. Auth-store changes
         // are not in that denylist, so reject them until separately verified.
         for parent in cwd.ancestors().take(64) {
@@ -167,15 +175,16 @@ impl Profile {
             }
             match std::fs::symlink_metadata(&path) {
                 Ok(_) => {
-                    let (config, bytes) = read(&path)?;
+                    let (config, bytes) =
+                        read(&path).map_err(|e| LaunchFailure::ProjectConfig.wrap(e))?;
                     ensure!(
                         config.get("cli_auth_credentials_store").is_none(),
-                        "project authentication-store overrides require a verified adapter"
+                        LaunchFailure::ProjectConfig
                     );
                     sources.push((path, bytes));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => bail!("project configuration could not be checked"),
+                Err(_) => bail!(LaunchFailure::ProjectConfig),
             }
         }
         Ok(Self {
@@ -183,9 +192,12 @@ impl Profile {
             upstream,
             policy: RedactionPolicy::new(secrets)?,
             sources,
+            auth,
+            home: home.to_path_buf(),
         })
     }
     pub fn unchanged(&self) -> Result<()> {
+        self.auth.unchanged(&self.home)?;
         for (path, before) in &self.sources {
             let (_, after) = read(path)?;
             ensure!(
@@ -211,6 +223,41 @@ requires_openai_auth=false
 experimental_bearer_token="synthetic-private-profile"
 "#
         )
+    }
+    #[test]
+    fn explicit_bearer_accepts_native_api_key_auth_without_changing_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let cwd = directory.path().join("new project");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        let config = config("http://127.0.0.1:1/v1")
+            .replace("requires_openai_auth=false", "requires_openai_auth=true");
+        let auth = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-native-api-key"}"#;
+        std::fs::write(home.join("config.toml"), &config).unwrap();
+        std::fs::write(home.join("auth.json"), auth).unwrap();
+        let profile = Profile::load(&home, &cwd, None).unwrap();
+        profile.unchanged().unwrap();
+        let scrubbed = profile
+            .policy
+            .scrub("synthetic-private-profile synthetic-native-api-key");
+        assert!(!scrubbed.as_str().contains("synthetic-private-profile"));
+        assert!(!scrubbed.as_str().contains("synthetic-native-api-key"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            config
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("auth.json")).unwrap(),
+            auth
+        );
+        std::fs::write(
+            home.join("auth.json"),
+            r#"{"tokens":{"access_token":"synthetic-chatgpt"}}"#,
+        )
+        .unwrap();
+        assert!(profile.unchanged().is_err());
+        assert!(Profile::load(&home, &cwd, None).is_err());
     }
     #[test]
     fn base_and_named_route_are_read_only_and_do_not_select_project_credentials() {
@@ -260,21 +307,27 @@ experimental_bearer_token="synthetic-private-profile"
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir(&cwd).unwrap();
-        for suffix in [
-            "env_key=\"SECRET_ENV\"",
-            "auth={command=\"private-command\"}",
-            "supports_websockets=true",
-        ] {
-            std::fs::write(
-                dir.path().join("config.toml"),
-                format!("{}\n{suffix}\n", config("http://127.0.0.1:1/v1")),
-            )
-            .unwrap();
-            let error = Profile::load(dir.path(), &cwd, None)
-                .err()
-                .unwrap()
-                .to_string();
-            assert!(!error.contains("SECRET_ENV") && !error.contains("private-command"));
+        for openai_auth in [false, true] {
+            for suffix in [
+                "env_key=\"SECRET_ENV\"",
+                "auth={command=\"private-command\"}",
+                "supports_websockets=true",
+            ] {
+                let base = config("http://127.0.0.1:1/v1").replace(
+                    "requires_openai_auth=false",
+                    &format!("requires_openai_auth={openai_auth}"),
+                );
+                std::fs::write(
+                    dir.path().join("config.toml"),
+                    format!("{base}\n{suffix}\n"),
+                )
+                .unwrap();
+                let error = Profile::load(dir.path(), &cwd, None)
+                    .err()
+                    .unwrap()
+                    .to_string();
+                assert!(!error.contains("SECRET_ENV") && !error.contains("private-command"));
+            }
         }
         std::fs::write(
             dir.path().join("config.toml"),

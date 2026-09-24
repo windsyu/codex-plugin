@@ -2,16 +2,17 @@
 
 V2 是参照 cc-viewer 机理实现的本机原生 Codex 工作台：**当前目录启动普通官方 CLI + PTY，模型 HTTP/SSE/WS 代理取得实时内容，网页直接推送，后台异步记录。** 文字、Slash、原生模型/权限设置、审批和追问继续由原生终端处理。
 
-当前工作树的默认入口是 `codex-view`，提供原生终端、用户/模型聊天、工具结果/拟议 Diff、请求提示词与用量、异步历史、文件/搜索/Git 和手机配对。旧 Session/App Server 控制内核已退役；`codex-observerd` 仅保留 V1 历史导入、只读网页/API 及显式维护命令，schema 仍为 20。历史中的角色、来源和保存缺口继续保留，切换历史不切换右侧当前 CLI。
+当前工作树的默认入口是 `codex-view`，先打开不启动 CLI 的全部历史首页。首页现在可选择已有项目或指定本机目录，核验后明确“开始新对话”；同一项目已经运行时进入该工作台，不重复启动 CLI。历史详情的“继续此会话”仅恢复经核验的原生会话，项目已有运行时会要求先进入或停止现有运行。`codex-view --project .` 仍可直接进入项目工作台。工作台提供原生终端、用户/模型聊天、工具结果/拟议 Diff、请求提示词与用量、异步历史、文件/搜索/Git 和手机配对。应用支持最多 4 个项目并行，另一个项目打开独立工作台标签，首页可分别停止；各项目的手机授权互相隔离。旧 Session/App Server 控制内核已退役；`codex-observerd` 仅保留 V1 历史导入、只读网页/API 及显式维护命令，schema 仍为 20。历史中的角色、来源和保存缺口继续保留，切换历史不切换右侧当前 CLI。
 
-[支持范围与使用边界](docs/codex-native-cli-workbench-support.md)汇总当前可试用环境、功能、资源限制和退出方式；[R5 收尾验收](docs/validation/native-cli-r5-acceptance-2026-09-22.md)串联本次回归及此前真实模型/图片/性能证据。完整阶段状态以 [V2 实施计划](docs/v2-implementation-plan.md)为准。
+[支持范围与使用边界](docs/codex-native-cli-workbench-support.md)汇总当前可试用环境、功能、资源限制和退出方式；[R5 收尾验收](docs/validation/native-cli-r5-acceptance-2026-09-22.md)串联原生工作台及真实模型/图片/性能证据，[R6-D 阅读验收](docs/validation/native-cli-r6-d-reading-2026-09-22.md)记录历史首页与三类正文；网页启动见 [R6-E 记录](docs/validation/native-cli-r6-e-launch-2026-09-22.md)，多项目与授权隔离见 [R6-F 记录](docs/validation/native-cli-r6-f-multi-project-2026-09-23.md)。完整阶段状态以 [V2 实施计划](docs/v2-implementation-plan.md)为准。
 
 ## 当前文档入口
 
 | 文档 | 职责 |
 | --- | --- |
-| [V2 实施计划](docs/v2-implementation-plan.md) | **从这里开始开发**：R0–R5 唯一状态表、需求追踪、逐片任务/验收、迁移和退役 |
+| [V2 实施计划](docs/v2-implementation-plan.md) | **从这里开始开发**：R0–R6 唯一状态表、需求追踪、逐片任务/验收、迁移和退役 |
 | [工作台方案](docs/codex-native-cli-workbench.md) | 用户体验、范围、架构选择与可靠性取舍 |
+| [R6 历史首页与项目启动](docs/codex-native-cli-workbench-history-home.md) | 默认全部历史、按项目新建/继续、独立工作台标签、schema 25 只读兼容；只读历史首页、目录/搜索/阅读、网页启动/恢复，以及多项目 Run 与设备隔离 |
 | [支持范围与使用边界](docs/codex-native-cli-workbench-support.md) | 当前运行环境、已交付操作、资源边界、构建产物与旧历史兼容 |
 | [详细设计](docs/codex-native-cli-workbench-detailed-design.md) | provider/代理、PTY、实时事件、存储与恢复契约 |
 | [历史管理与统一配置方案](docs/codex-native-cli-workbench-history-settings.md) | R3.1：统一 JSON、点击展开设置、占用、按运行清理和可选保留期限 |
@@ -45,23 +46,33 @@ cargo build --release
 
 ## 从项目目录启动 V2 工作台
 
+目录助手现以完整临时 macOS 应用包运行，已从真实窗口确认中文按钮和侧栏，并验证取消、目录选择及自动清理。[实际窗口验证](docs/validation/native-cli-r6-e-picker-bundle-2026-09-23.md)纠正了此前只验证语言资源、未覆盖实际面板的缺口。
+
+系统目录窗口的本地化由原生 AppKit 助手提供，随 macOS 语言选择资源；macOS 构建需 Apple SDK/Clang（构建脚本复用 `cc`），助手嵌入单个产物，用户运行时无需安装编译器。新建项目只确认项目路径，恢复时才显示官方 CLI 的会话来源；工作台配置、历史和元数据继续使用 `~/.codex-web`，与官方默认 `~/.codex` 分开。[修正与验证](docs/validation/native-cli-r6-e-picker-language-2026-09-22.md)。
+
+macOS 首页的“打开其他目录”会弹出系统文件夹选择窗口；旁边“输入路径”保留小型对话框输入（支持 `~/`）。选中目录后先检查，再明确点击“开始新对话”；取消不会启动 CLI。原生窗口不可用时可手动输入；Windows 运行支持尚未接入。实现与验证边界见[目录入口改进](docs/validation/native-cli-r6-e-folder-picker-2026-09-22.md)。
+
 当前入口支持 macOS 和已安装的官方 CLI，版本号不作为启动白名单。`0.154.0` 与 `0.155.1` 是当前受测基线；其他版本会提示尚未回归并继续启动，升级后无需降级或添加绕过参数。`0.155.1` 已用本机合成模型完成原生对话、审批/追问、重连、显式 resume 与历史恢复回归，范围见[版本兼容验证](docs/validation/native-cli-version-compatibility-2026-09-20.md)。工作台不自动升级、降级或修改 CLI。
 
-模型接入仍使用已验证的 `unmanaged-custom` 路由适配器。原生配置须已有 `custom` provider、Responses、显式上游地址与静态 bearer；其他 provider、登录/管理配置、环境或命令认证及真实 WS profile 尚未纳入支持。无法确认路由或认证的配置会说明原因并退出，不调整模型、权限或原生传输。版本检查与配置检查分别处理，边界见[详细设计 §2](docs/codex-native-cli-workbench-detailed-design.md#2-启动与-provider-配置)。
+模型接入仍使用已验证的 `unmanaged-custom` 路由适配器。原生配置须已有 `custom` provider、Responses、显式上游地址与静态 bearer；`requires_openai_auth` 可以为 `true` 或 `false`，原生 File API Key 配置可保持原样。其他 provider、ChatGPT/管理配置、环境或命令认证及真实 WS profile 尚未纳入支持。无法确认路由或认证时，本次 CLI 启动失败并显示具体原因，历史首页仍保留；不调整模型、权限或原生传输。版本检查与配置检查分别处理，边界见[详细设计 §2](docs/codex-native-cli-workbench-detailed-design.md#2-启动与-provider-配置)。
 
 ```bash
 # 在本仓库构建；已有依赖可使用 --locked --offline。
 npm run build --prefix web
 cargo build --locked --offline --bin codex-view
 
-# 在需要操作的项目目录，运行上面构建的二进制。
-cd <project>
+# 默认打开/复用首页，不启动 CLI；不要求已安装 Codex。
 <repository>/target/debug/codex-view
+# 直接进入当前项目；首页也可在核验目录后启动。
+cd <project>
+<repository>/target/debug/codex-view --project .
 # 使用原生命名 profile（$CODEX_HOME/named.config.toml）
-<repository>/target/debug/codex-view --profile named --no-open
+<repository>/target/debug/codex-view --project . --profile named --no-open
 ```
 
-启动器保留原 `CODEX_HOME` 和 cwd，模型接入仅对本次 CLI 覆盖模型代理地址。网页中的原生 CLI 继续负责主题、目录信任、发送和设置；这些原生操作可能按 CLI 自身规则保存偏好。默认打开本机浏览器；`--no-open` 时用 `codex-view open <entryFile>` 打开输出中指定的私有配对文件。普通输出只有本机地址、Run/PID、CLI 版本和文件位置，不包含配对密钥。可用 `--codex-bin <path>` 指定已安装 CLI；`--resume <UUID>` 只接受明确的原生会话 ID，不自动提交。
+同一配置目录和数据根重复执行会验证私有实例入口并复用已有服务，不新增 CLI。`--profile`、`--provider-profile`、`--codex-bin` 单独使用只设置启动偏好；显式设置与已有实例冲突会报错。首页可按项目、来源和子代理分组筛选，并搜索会话或消息；点击会话即可阅读用户、模型和工具记录，逐条查看已保存的上下文或调用详情。正文连续滚动、详情按需加载，更新时提示重新读取，不拼接不同版本。设置仍从同页展开。选择项目或输入绝对路径（支持 `~/`）后先执行只读核验，再开始新对话；历史“继续此会话”只对可验证的原生记录开放。启动响应遗失时页面只查询同一操作，绝不自动再次启动。同项目新对话进入已有 Run，若要恢复另一会话须先停止它；其他项目可在新标签并行启动，最多 4 个活动项目，满额时先停止不再使用的工作台。首页逐项目停止需要明确确认，停止一个项目不影响其余项目。弹窗被阻止或刷新恢复时提供“打开工作台”链接，不再次启动。详见 [R6-E 启动契约](docs/codex-native-cli-workbench-history-home.md#r6-e-launch)；验证结果见页首报告链接。
+
+明确启动项目时，启动器保留原 `CODEX_HOME` 和指定 cwd，模型接入仅对本次 CLI 覆盖模型代理地址。网页中的原生 CLI 继续负责主题、目录信任、发送和设置；这些原生操作可能按 CLI 自身规则保存偏好。默认打开本机浏览器；`--no-open` 时用 `codex-view open <entryFile>` 打开输出中指定的私有配对文件。普通输出只有本机地址、应用 ID、存在时的 Run/PID 和 CLI 版本，以及文件位置，不包含配对密钥。可用 `--codex-bin <path>` 指定已安装 CLI；`--resume <UUID>` 只接受明确的原生会话 ID，不自动提交。
 
 网页终端保留原生 ANSI 颜色、加粗、斜体、代码与表格边框。为避免非交互启动环境把网页终端误判成无色日志，CLI 子进程使用 `TERM=xterm-256color` / `COLORTERM=truecolor` 并清除继承的 `NO_COLOR`；按 2026-09-19 用户要求传 `-c tui.animations=false`，关闭原生欢迎动画、微光与旋转提示。正式入口和 R1 调试入口一致，不添加动画识别/裁剪逻辑，不写全局配置；已有 CLI 进程需下次启动才使用这组显示选项。[验证记录](docs/validation/native-cli-terminal-display-2026-09-19.md)包含原因、范围和截图。
 
@@ -69,7 +80,7 @@ cd <project>
 
 macOS 本地图片可在右侧原生终端中粘贴图片的完整路径，看到 CLI 的 `[Image #1]` 附件标记后，再输入问题并手动 Enter。当前 CLI 0.155.1 已通过真实模型识图验证；这不代表浏览器直接粘贴图片文件、拖入上传或手机相册已经支持。图片仍由 CLI 读取和发送，工作台不会自动提交。
 
-手机使用方式：在电脑工作台顶栏点击 **“手机接入 → 开启设备访问”**，用手机扫描二维码或复制配对链接。面板同时列出局域网 IP 和可用的 Tailscale MagicDNS 地址，共用一个端口及同一 Run/CLI；切换二维码不会断开另一地址。局域网需在同一可互访网络，MagicDNS 需手机连接相应 Tailscale；无需配置 Serve。配对码在本次程序运行期间保持固定，可重复扫码，刷新电脑页面也不换码；程序退出后失效，下次启动生成新码。可逐个断开或关闭设备访问，电脑工作台继续运行。
+手机使用方式：在电脑工作台顶栏点击 **“手机接入 → 开启设备访问”**，用手机扫描二维码或复制配对链接。面板同时列出局域网 IP 和可用的 Tailscale MagicDNS 地址，共用一个端口及同一 Run/CLI；切换二维码不会断开另一地址。局域网需在同一可互访网络，MagicDNS 需手机连接相应 Tailscale；无需配置 Serve。配对码在本次程序运行期间保持固定，可重复扫码，刷新电脑页面也不换码；Run 结束后设备授权失效，新 Run 生成新码。不同项目共用设备端口，但配对码和权限独立；A 的手机入口只能访问 A，不能访问其他项目、全局历史或共享设置。可逐个断开或关闭当前项目设备访问，其他项目与电脑工作台继续运行。
 
 默认仅本机访问，每次启动需手动开启。可选 `access.port` 在 `.codex-web/config/config.json` 或“设置 → 高级启动设置”修改，0 自动选择，1024–65535 固定端口，下次开启接入生效。接入不自动修改防火墙，局域网 HTTP 不加密。手机复用现有终端，冲突时点击“在此输入”；手机相册上传仍未提供。浏览器自动化与真机待验项目见[接入验证](docs/validation/native-cli-device-access-2026-09-21.md)。
 
@@ -94,6 +105,9 @@ macOS 本地图片可在右侧原生终端中粘贴图片的完整路径，看�
     index.sqlite          # 可重建的历史索引
     usage-v1/             # 占用缓存
     cleanup/              # 清理任务及暂存
+  runtime/<scope>/
+    instance.lock         # 进程独占锁；保留同一个文件身份
+    instance.json         # 私有应用发现与配对；正常退出移除
 ```
 
 本次更换默认值，旧 `$CODEX_HOME/workbench/config` 和 `$CODEX_HOME/workbench-data-v1` 保留原位，不自动迁移或合并。新默认历史列表不包含旧位置的记录；仍需读取时，用 `--config-dir <原配置目录>` 和 `--data-dir <原历史目录>` 明确指定。已有 JSON 中的绝对数据路径继续有效，`storage.dataDir: null` 则使用新默认位置。原生 Codex 的配置、认证和会话保持原处。目录选择逻辑覆盖 Windows 约定，完整 Windows 运行仍受当前 Unix 终端/文件锁实现限制，尚未验收，见 [ADR 0049](docs/decisions/0049-workbench-user-directory.md)。
@@ -104,9 +118,9 @@ macOS 本地图片可在右侧原生终端中粘贴图片的完整路径，看�
 
 自动清理另需开启“自动清理过期记录”（初值 90 天）。保存后检查已有到期记录，工作台存活时每小时再检查；只处理当前项目有可信结束凭证的正常结束记录，旧记录、异常退出及缺失凭证不自动清理。关闭策略或配置失效会暂停尚未开始的删除；已移入暂存的单次运行完成当前删除单位，服务退出后的恢复也重新校验策略。没有后台常驻清理进程。
 
-占用按文件逻辑大小估算，按当前项目隔离，单列活动运行、待清理暂存和共享管理数据；部分统计不等于完整容量，实际磁盘释放可能不同。设置显示已有历史文件夹 `<当前数据目录>/runs`，展开“本次运行日志的位置”可查看对应运行目录；日志按段保存，没有单独的归档导出文件。Codex 程序位置、启动配置名称与更改历史保存位置收进“高级启动设置”；日常面板不展示配置文件路径。配置损坏时保留 CLI 和阅读，显示需修复文件的位置，修复后重载；启动时配置无效则在创建 CLI 前停止并报告字段位置。同一配置目录供各项目共享，各工作台只管理自己的项目。验证范围见[R3.1 验收记录](docs/validation/native-cli-history-settings-2026-09-20.md)。
+占用按文件逻辑大小估算，按当前项目隔离，单列活动运行、待清理暂存和共享管理数据；部分统计不等于完整容量，实际磁盘释放可能不同。设置显示已有历史文件夹 `<当前数据目录>/runs`，展开“本次运行日志的位置”可查看对应运行目录；日志按段保存，没有单独的归档导出文件。Codex 程序位置、启动配置名称与更改历史保存位置收进“高级启动设置”；日常面板不展示配置文件路径。配置损坏时保留 CLI 和阅读，显示需修复文件的位置，修复后重载；启动时配置损坏仍可打开首页查看修复提示；不覆盖文件，创建 CLI 和清理保持禁用。同一配置目录供各项目共享，各工作台只管理自己的项目。验证范围见[R3.1 验收记录](docs/validation/native-cli-history-settings-2026-09-20.md)。
 
-1. 从同一项目目录运行正式 `codex-view`，在右侧正常完成一轮对话，查看底栏“已保存”与 Token 摘要。
+1. 从同一项目目录运行正式 `codex-view --project .`，在右侧正常完成一轮对话，查看底栏“已保存”与 Token 摘要。
 2. 在启动器按 Ctrl-C 结束，再从同一目录启动，点击“历史记录”，选择上次运行。可阅读旧消息、工具结果和上下文；旧原生输入不会自动重发。
 3. 右侧终端始终属于当前新运行；点击“返回实时阅读”恢复原面板和滚动位置。需要原生继续任务时，由用户明确操作 CLI 或传 `--resume <UUID>`。
 4. 底栏显示简短保存状态；“保存异常”或“历史有缺失”时可展开查看说明，技术水位在“诊断详情”中。记录失败时终端照常可用；恢复后的内容从新分段保存，连续水位不跨过缺口。历史卡片显示“保存时”状态，服务异常退出时说明未保存尾部数量未知。
@@ -167,6 +181,8 @@ WORKBENCH_TEST_SCREENSHOT=/private/tmp/codex-r2-request-details \
 [三列交互原型](docs/prototypes/native-cli-workbench.html)可独立打开对照，其中的终端、文件、工具与 Git 内容为合成演示，不代表当前运行时已经接入。
 
 ## 读取旧 Observer 历史
+
+`codex-view` 已提供统一后台目录和来源登记，schema 20/25 通过独立只读 reader 接入，三类历史阅读界面已在 R6-D 接入。旧 `codex-observerd import/serve` 的迁移上限仍为 20，会拒绝 schema 25；不要改库版本号绕过。下面的独立旧网页命令只适用于当前受支持的旧库。
 
 默认配置：loopback `127.0.0.1:4765`、Codex source `~/.codex`、Observer 数据目录 `./observer-data`，不提供旧控制功能。可复制 [observer.example.toml](observer.example.toml) 调整；相对路径以配置文件位置为基准。本机配置、凭证和数据库不提交仓库。
 

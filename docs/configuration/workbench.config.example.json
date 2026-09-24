@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "launch": {
     "openBrowser": true,
     "codexBin": "codex",
@@ -16,6 +16,11 @@
         "enabled": false,
         "days": 90
       }
+    },
+    "library": {
+      "enabled": true,
+      "cacheLimitMiB": 512,
+      "sources": []
     }
   }
 }

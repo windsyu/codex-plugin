@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { HistorySources, LibraryConfig, libraryDefaults } from './HistorySources';
 import { HistoryStorage, CleanupPreviewPanel } from './HistoryStorage';
+import { runApi } from './runApi';
 
 export interface WorkbenchConfig {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   access?: { port: number };
   launch: { openBrowser: boolean; codexBin: string; profile: string | null; providerProfile: string };
   storage: { dataDir: string | null };
-  history: { cleanup: { enabled: boolean; retention: { enabled: boolean; days: number } } };
+  history: { library?: LibraryConfig; cleanup: { enabled: boolean; retention: { enabled: boolean; days: number } } };
 }
 export interface Settings {
   schemaVersion: number; revision: string | null; saved: WorkbenchConfig | null; effective: WorkbenchConfig; defaults: WorkbenchConfig;
@@ -17,17 +19,18 @@ export interface Settings {
 const fieldNames: Record<string, string> = {
   'access.port': '手机接入端口', 'launch.openBrowser': '启动时自动打开浏览器', 'launch.codexBin': 'Codex 程序位置', 'launch.profile': 'Codex 启动配置',
   'launch.providerProfile': '模型连接方式', 'storage.dataDir': '历史保存位置', 'history.cleanup.enabled': '允许清理历史记录',
-  'history.cleanup.retention.enabled': '自动清理过期记录', 'history.cleanup.retention.days': '保留天数', '$': '配置文件', 'schemaVersion': '配置版本'
+  'history.library': '历史来源', 'history.cleanup.retention.enabled': '自动清理过期记录', 'history.cleanup.retention.days': '保留天数', '$': '配置文件', 'schemaVersion': '配置版本'
 };
 function errorText(code: string, field?: string) {
   const messages: Record<string, string> = {
     config_changed: '配置文件已被修改。请重新加载后再保存，当前草稿已保留。',
     config_busy: '配置正在处理，请稍后重试。', config_io_error: '无法读写配置文件，请检查文件权限和磁盘。',
     config_save_unconfirmed: '尚未确认保存结果，请重新加载核对文件；不会自动重发保存。',
-    stale_run: '工作台已重新启动，请刷新页面。', cleanup_unavailable: '历史清理暂不可用，当前保留全部记录。',
+    stale_instance: '应用已重新启动，请刷新页面。', stale_run: '工作台已重新启动，请刷新页面。', cleanup_unavailable: '历史清理暂不可用，当前保留全部记录。',
     unsupported_config_version: '暂不支持此配置版本，请检查配置文件。',
     executable_unavailable: '请填写可用的已安装 Codex CLI 绝对路径，或 codex。',
     unsafe_data_directory: '请选择独立的历史目录，不能与配置、原生会话或项目根目录重叠。',
+    overlapping_history_source: '该目录已接入，或与工作台搜索缓存重叠。请使用独立的历史位置。', invalid_source_path: '请填写有效的历史绝对路径。', invalid_source_id: '来源标识重复或无效，请重新接入。', invalid_library_budget: '最多接入 8 个额外来源，缓存上限为 64–2048 MiB。',
     invalid_field: '填写的内容不符合要求，请检查后再保存。', invalid_config: '配置格式或字段不符合要求，请检查 JSON 文件。',
     config_too_large: '配置文件超过大小限制。'
   };
@@ -35,20 +38,24 @@ function errorText(code: string, field?: string) {
 }
 function configShape(value: unknown): value is WorkbenchConfig {
   const c = value as WorkbenchConfig | null;
-  return c?.schemaVersion === 1 && typeof c.launch?.openBrowser === 'boolean' && typeof c.launch?.codexBin === 'string'
+  return (c?.schemaVersion === 1 || c?.schemaVersion === 2) && typeof c.launch?.openBrowser === 'boolean' && typeof c.launch?.codexBin === 'string'
     && (c.launch.profile === null || typeof c.launch.profile === 'string') && typeof c.launch.providerProfile === 'string'
     && !!c.storage && (c.storage.dataDir === null || typeof c.storage.dataDir === 'string')
     && typeof c.history?.cleanup?.enabled === 'boolean' && typeof c.history.cleanup.retention?.enabled === 'boolean'
-    && Number.isInteger(c.history.cleanup.retention.days);
+    && Number.isInteger(c.history.cleanup.retention.days)
+    && (c.history.library === undefined || (typeof c.history.library.enabled === 'boolean' && Number.isInteger(c.history.library.cacheLimitMiB)
+      && Array.isArray(c.history.library.sources) && c.history.library.sources.length <= 8 && c.history.library.sources.every(source => typeof source.id === 'string'
+        && (source.kind === 'native' ? typeof source.codexHome === 'string' : source.kind === 'workbench' ? typeof source.dataDirectory === 'string' : source.kind === 'observer' && typeof source.database === 'string'))));
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 class SettingsError extends Error {
   constructor(readonly code: string, field?: string) { super(errorText(code, field)); }
 }
 
-export function SettingsPanel({ epoch, open, managementAvailable = false, onClose, onDirtyChange, onViewHistory }: {
-  epoch: string; open: boolean; managementAvailable?: boolean; onClose: (restoreFocus: boolean) => void; onDirtyChange: (dirty: boolean) => void; onViewHistory?: () => void;
+export function SettingsPanel({ epoch, instanceId, open, managementAvailable = false, onClose, onDirtyChange, onViewHistory }: {
+  epoch: string; instanceId?: string; open: boolean; managementAvailable?: boolean; onClose: (restoreFocus: boolean) => void; onDirtyChange: (dirty: boolean) => void; onViewHistory?: () => void;
 }) {
+  const endpoint = instanceId ? '/workbench/v1/application/settings' : runApi('/settings');
   const [previewDays, setPreviewDays] = useState<number | null>(null);
   const [info, setInfo] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<WorkbenchConfig | null>(null);
@@ -74,13 +81,13 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
     }
     const body = await response.json();
     const value = body.settings as Settings;
-    if (body.currentRunEpoch !== epoch || value?.schemaVersion !== 1 || !configShape(value.effective) || !configShape(value.defaults)
+    if ((instanceId ? body.instanceId !== instanceId : body.currentRunEpoch !== epoch) || ![1, 2].includes(value?.schemaVersion) || !configShape(value.effective) || !configShape(value.defaults)
       || (value.saved !== null && !configShape(value.saved)) || !Array.isArray(value.errors) || !Array.isArray(value.cliOverrides)
       || !Array.isArray(value.restartRequired) || typeof value.capabilities?.manualCleanup !== 'boolean'
       || typeof value.capabilities.retention !== 'boolean' || typeof value.configPath !== 'string' || typeof value.effectiveDataDir !== 'string'
       || (value.revision !== null && !/^[a-f0-9]{64}$/.test(value.revision))) throw new Error('配置响应无法识别，请刷新页面。');
     return value;
-  }, [epoch]);
+  }, [epoch, instanceId]);
   const load = useCallback(async (replaceDraft = false) => {
     if (current.current.saving) return;
     const sequence = ++request.current;
@@ -88,7 +95,7 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
     const controller = new AbortController(); readController.current = controller;
     setLoading(true);
     try {
-      const value = await payload(await fetch('/workbench/v1/settings', { credentials: 'same-origin', signal: controller.signal }));
+      const value = await payload(await fetch(endpoint, { credentials: 'same-origin', signal: controller.signal }));
       if (!alive.current || controller.signal.aborted || sequence !== request.current) return;
       const previous = current.current;
       const edited = previous.draft && !same(previous.draft, previous.info?.saved);
@@ -104,7 +111,7 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
     } finally {
       if (alive.current && sequence === request.current) setLoading(false);
     }
-  }, [payload]);
+  }, [payload, endpoint]);
   useLayoutEffect(() => { if (open) closeButton.current?.focus({ preventScroll: true }); }, [open]);
   useEffect(() => {
     if (!open) { readController.current?.abort(); return; }
@@ -126,9 +133,9 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
     readController.current?.abort(); request.current++;
     current.current.saving = true; setSaving(true); setMessage('');
     try {
-      const value = await payload(await fetch('/workbench/v1/settings', {
+      const value = await payload(await fetch(endpoint, {
         method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'If-Match': `"${info.revision}"` },
-        body: JSON.stringify({ currentRunEpoch: epoch, config: draft })
+        body: JSON.stringify(instanceId ? { instanceId, config: draft } : { currentRunEpoch: epoch, config: draft })
       }));
       if (alive.current) { setInfo(value); setDraft(value.saved); setMessage('已保存'); setStale(false); }
     } catch (error) {
@@ -146,11 +153,12 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
     <div className="wb-settings-body">
       {!info && <p role="status">{loading ? '正在读取配置…' : '配置暂时不可用。'}</p>}
       {info && <>
-        <p className="wb-subtle">使用同一套设置的项目共享这些偏好，每个工作台只清理当前项目。</p>
+        <p className="wb-subtle">使用同一套设置的项目共享这些偏好，每个工作台只清理当前项目。{instanceId && '首页可管理历史来源与清理偏好；实际清理在对应项目工作台中进行。'}</p>
         {info.errors.map(error => <p className="wb-notice" role="alert" key={`${error.field}:${error.code}`}>{errorText(error.code, error.field)}{error.line != null ? `（第 ${error.line} 行）` : ''} 请修复文件后重新加载。</p>)}
         {!!info.errors.length && <p className="wb-subtle">需要修复的配置文件：<code>{info.configPath}</code></p>}
       </>}
       {draft && info && <form id="wb-settings-form" onSubmit={event => { event.preventDefault(); void save(); }}>
+        {instanceId && <fieldset disabled={saving}><HistorySources value={draft.history.library ?? libraryDefaults()} onChange={library => edit(c => { c.history.library = library; c.schemaVersion = 2; })} /></fieldset>}
         <fieldset disabled={saving}><legend>历史清理</legend>
           <label className="wb-settings-toggle">允许清理历史记录<input aria-label="允许清理历史记录" aria-describedby="wb-cleanup-help" type="checkbox" checked={draft.history.cleanup.enabled} disabled={!info.capabilities.manualCleanup} onChange={event => edit(c => { c.history.cleanup.enabled = event.currentTarget.checked; if (!c.history.cleanup.enabled) c.history.cleanup.retention.enabled = false; })} /></label>
           <p id="wb-cleanup-help" className="wb-settings-help">关闭时保留全部记录。开启并保存后，可在历史列表中删除单条记录，或批量选择后确认删除。</p>
@@ -168,7 +176,7 @@ export function SettingsPanel({ epoch, open, managementAvailable = false, onClos
             <dt>历史记录文件夹</dt><dd><code>{info.effectiveDataDir.replace(/\/$/, '')}/runs</code></dd>
           </dl>
           <p className="wb-settings-help">工作台历史按每次运行分文件夹保存。</p>
-          <details className="wb-settings-paths"><summary>本次运行日志的位置</summary><p><code>{info.effectiveDataDir.replace(/\/$/, '')}/runs/{epoch}</code></p><p className="wb-subtle">本次运行已保存的对话和日志在此文件夹中，日志会分段保存。</p></details>
+          {!instanceId && <details className="wb-settings-paths"><summary>本次运行日志的位置</summary><p><code>{info.effectiveDataDir.replace(/\/$/, '')}/runs/{epoch}</code></p><p className="wb-subtle">本次运行已保存的对话和日志在此文件夹中，日志会分段保存。</p></details>}
           {managementAvailable && <><HistoryStorage key={info.revision || 'invalid'} epoch={epoch} active={open} />{onViewHistory && <button type="button" onClick={onViewHistory}>查看历史</button>}</>}
         </fieldset>
         <fieldset disabled={saving}><legend>启动偏好 <small>下次启动生效</small></legend>

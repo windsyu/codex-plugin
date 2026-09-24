@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 mod discovery;
+mod shared;
+pub(crate) use shared::SharedAccess;
 const MAX_DEVICES: usize = 8;
 
 #[derive(Clone, Copy)]
@@ -46,6 +48,8 @@ pub(super) struct Access {
     data: Mutex<Data>,
     #[cfg(test)]
     discovery: Mutex<Option<discovery::Found>>,
+    #[cfg(test)]
+    discovery_hold: Mutex<Option<Arc<Semaphore>>>,
 }
 impl Access {
     pub fn new() -> Self {
@@ -68,6 +72,8 @@ impl Access {
             }),
             #[cfg(test)]
             discovery: Mutex::new(None),
+            #[cfg(test)]
+            discovery_hold: Mutex::new(None),
         }
     }
     pub fn valid_host(&self, host: &str) -> bool {
@@ -116,6 +122,15 @@ impl Access {
             device.permission.revoke();
         }
     }
+    pub(super) fn close(&self) {
+        let mut d = self.data.lock().unwrap();
+        Self::invalidate(&mut d);
+        if let Some(stop) = &d.stop {
+            stop.send_replace(true);
+        }
+        d.phase = "off";
+        d.revision += 1;
+    }
     fn finish(&self, generation: u64, error: Option<&'static str>) {
         let mut d = self.data.lock().unwrap();
         if d.generation != generation {
@@ -130,6 +145,13 @@ impl Access {
         d.revision += 1;
     }
     async fn discover(&self) -> discovery::Found {
+        #[cfg(test)]
+        {
+            let hold = self.discovery_hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                let _permit = hold.acquire().await.unwrap();
+            }
+        }
         #[cfg(test)]
         if let Some(found) = self.discovery.lock().unwrap().clone() {
             return found;
@@ -210,6 +232,14 @@ pub(super) async fn enable(
         if let Err((status, code)) = revision(&state, &headers, request.run_epoch, &d) {
             return failure(&state, status, code);
         }
+        if state
+            .options
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.exited())
+        {
+            return failure(&state, StatusCode::CONFLICT, "run_ended");
+        }
         if !matches!(d.phase, "off" | "error") {
             return failure(&state, StatusCode::CONFLICT, "access_busy");
         }
@@ -232,6 +262,10 @@ pub(super) async fn enable(
         .into_response()
 }
 async fn serve_devices(state: Arc<WebState>, generation: u64, mut stop: watch::Receiver<bool>) {
+    if let Some(shared) = &state.shared_access {
+        shared.serve_run(state.clone(), generation, stop).await;
+        return;
+    }
     let mut global_stop = state.stop.clone();
     let task = async {
         let port = if let Some(settings) = &state.options.settings {
@@ -316,7 +350,7 @@ pub(super) async fn pairing(State(state): State<Arc<WebState>>, headers: HeaderM
         .iter()
         .map(|a| {
             json!({
-                "addressId":a.id,"url":format!("{}/#pair={}", a.origin, state.access.pairing)
+                "addressId":a.id,"url":format!("{}/{}#pair={}", a.origin, if state.shared_access.is_some() { format!("?run={}",state.hub.epoch()) } else { String::new() }, state.access.pairing)
             })
         })
         .collect();

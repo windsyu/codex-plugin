@@ -6,16 +6,25 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserEntry {
     pub format: String,
+    #[serde(default, skip_serializing_if = "Uuid::is_nil")]
     pub run_epoch: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
     pub address: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub cli_pid: u32,
 }
-pub(super) struct EntryFile {
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+pub(crate) struct EntryFile {
     pub path: PathBuf,
     identity: (u64, u64),
     directory: Option<PathBuf>,
@@ -23,7 +32,10 @@ pub(super) struct EntryFile {
 impl EntryFile {
     pub fn create(path: Option<&Path>, entry: &BrowserEntry) -> Result<Self> {
         let directory = if path.is_none() {
-            let directory = std::env::temp_dir().join(format!("codex-view-{}", entry.run_epoch));
+            let directory = std::env::temp_dir().join(format!(
+                "codex-view-{}",
+                entry.instance_id.unwrap_or(entry.run_epoch)
+            ));
             std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
             Some(directory)
         } else {
@@ -75,7 +87,10 @@ pub fn read_entry(path: &Path) -> Result<BrowserEntry> {
         .open(path)?;
     let meta = file.metadata()?;
     ensure!(
-        meta.is_file() && meta.mode() & 0o077 == 0 && meta.uid() == unsafe { libc::geteuid() },
+        meta.is_file()
+            && meta.nlink() == 1
+            && meta.mode() & 0o077 == 0
+            && meta.uid() == unsafe { libc::geteuid() },
         "pairing entry must be an owner-only regular file"
     );
     let mut bytes = Vec::new();
@@ -86,15 +101,25 @@ pub fn read_entry(path: &Path) -> Result<BrowserEntry> {
     let url = reqwest::Url::parse(&entry.url)
         .map_err(|_| anyhow::anyhow!("invalid pairing entry URL"))?;
     ensure!(
-        entry.format == "codex-view-entry-v1"
+        ((entry.format == "codex-view-entry-v1"
             && !entry.run_epoch.is_nil()
+            && entry.instance_id.is_none()
+            && entry.run_id.is_none())
+            || (entry.format == "codex-view-entry-v2"
+                && entry.instance_id.is_some_and(|id| !id.is_nil())
+                && entry.run_epoch.is_nil()
+                && entry.cli_pid == 0
+                && entry.run_id.is_none_or(|id| !id.is_nil())))
             && url.scheme() == "http"
             && url.host_str() == Some("127.0.0.1")
             && url.port().is_some()
             && url.username().is_empty()
             && url.password().is_none()
             && url.path() == "/"
-            && url.query().is_none(),
+            && match entry.run_id {
+                Some(id) => url.query() == Some(format!("run={id}").as_str()),
+                None => url.query().is_none(),
+            },
         "invalid local pairing entry"
     );
     ensure!(
@@ -126,6 +151,7 @@ mod tests {
             address: "http://127.0.0.1:12345".into(),
             url: format!("http://127.0.0.1:12345/#pair={}", "a".repeat(64)),
             cli_pid: 123,
+            ..Default::default()
         };
         let owned = EntryFile::create(Some(&path), &entry).unwrap();
         assert_eq!(read_entry(&path).unwrap().run_epoch, entry.run_epoch);
@@ -149,6 +175,7 @@ mod tests {
             address: "http://127.0.0.1:12345".into(),
             url: format!("http://127.0.0.1:12345/#pair={}", "a".repeat(64)),
             cli_pid: 123,
+            ..Default::default()
         };
         let good = entry.url.clone();
         for url in [
@@ -179,5 +206,44 @@ mod tests {
         assert!(read_entry(&path).is_err());
         drop(owned);
         assert!(read_entry(dir.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod application_entry_tests {
+    use super::*;
+    #[test]
+    fn application_entry_requires_instance_identity_and_exact_optional_run_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entry.json");
+        let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let mut entry = BrowserEntry {
+            format: "codex-view-entry-v2".into(),
+            instance_id: Some(id),
+            address: "http://127.0.0.1:12345".into(),
+            url: format!("http://127.0.0.1:12345/#pair={}", "b".repeat(64)),
+            ..Default::default()
+        };
+        let file = EntryFile::create(Some(&path), &entry).unwrap();
+        let bytes = std::fs::read_to_string(&path).unwrap();
+        assert!(!bytes.contains("cliPid"));
+        assert!(!bytes.contains("runEpoch"));
+        assert_eq!(read_entry(&path).unwrap().instance_id, Some(id));
+        drop(file);
+        entry.run_id = Some(run);
+        entry.url = entry.url.replace("/#", &format!("/?run={run}#"));
+        let file = EntryFile::create(Some(&path), &entry).unwrap();
+        assert_eq!(read_entry(&path).unwrap().run_id, Some(run));
+        drop(file);
+        entry.run_id = Some(Uuid::new_v4());
+        let file = EntryFile::create(Some(&path), &entry).unwrap();
+        assert!(read_entry(&path).is_err());
+        drop(file);
+        entry.run_id = Some(run);
+        entry.instance_id = Some(Uuid::nil());
+        let file = EntryFile::create(Some(&path), &entry).unwrap();
+        assert!(read_entry(&path).is_err());
+        drop(file);
     }
 }

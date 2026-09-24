@@ -30,7 +30,7 @@ notify = "8"
 portable-pty = "0.9"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "hooks", "limits"] }
 # Keep the built UI and API together in local trial binaries as well as releases.
 rust-embed = { version = "8", features = ["debug-embed"] }
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +41,7 @@ tokio-tungstenite = "0.29"
 toml = "0.9"
 tempfile = "3"
 tower-http = { version = "0.6", features = ["catch-panic", "request-id", "set-header", "trace"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -52,5 +53,6 @@ zstd = "0.13"
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
 
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+[build-dependencies]
+# Already used by native dependencies; compile the macOS folder picker at build time.
+cc = "1"

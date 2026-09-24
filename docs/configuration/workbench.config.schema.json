@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Codex 工作台设置",
-  "description": "工作台网页与本文件使用同一份设置。启动偏好和保存位置下次启动生效，清理策略保存后生效。",
+  "description": "工作台网页与本文件使用同一份设置。schema 1 只读兼容，保存升级为 2。清理策略和历史来源保存后生效。",
   "type": "object",
   "required": [
     "schemaVersion"
@@ -9,7 +9,11 @@
   "additionalProperties": false,
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ],
+      "default": 2
     },
     "launch": {
       "type": "object",
@@ -128,6 +132,132 @@
               }
             }
           ]
+        },
+        "library": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "title": "汇总已接入的历史"
+            },
+            "cacheLimitMiB": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 2048,
+              "default": 512,
+              "title": "搜索缓存上限（MiB）"
+            },
+            "sources": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "kind",
+                      "codexHome"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^(?!default-)[A-Za-z0-9_-]+$"
+                      },
+                      "kind": {
+                        "const": "native"
+                      },
+                      "codexHome": {
+                        "type": "string",
+                        "pattern": "^/[^\\u0000]+$",
+                        "maxLength": 4096
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "kind",
+                      "dataDirectory"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^(?!default-)[A-Za-z0-9_-]+$"
+                      },
+                      "kind": {
+                        "const": "workbench"
+                      },
+                      "dataDirectory": {
+                        "type": "string",
+                        "pattern": "^/[^\\u0000]+$",
+                        "maxLength": 4096
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "kind",
+                      "database"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^(?!default-)[A-Za-z0-9_-]+$"
+                      },
+                      "kind": {
+                        "const": "observer"
+                      },
+                      "database": {
+                        "type": "string",
+                        "pattern": "^/[^\\u0000]+$",
+                        "maxLength": 4096
+                      },
+                      "blobDirectory": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^/[^\\u0000]+$",
+                            "maxLength": 4096
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "nativeHome": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^/[^\\u0000]+$",
+                            "maxLength": 4096
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "default": []
+            }
+          }
         }
       }
     },

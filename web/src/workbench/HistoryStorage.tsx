@@ -1,5 +1,6 @@
 import { browserId } from './browserId';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { runApi } from './runApi';
 
 export interface StorageSize { bytes: number | null; knownBytes: number; status: string; measuredAt: string }
 export interface StorageRun { runEpoch: string; startedAt: string; endedAt: string | null; state: string; size: StorageSize; manualEligible: boolean; reason: string | null; retentionReason: string | null }
@@ -19,7 +20,7 @@ export function sizeLabel(size?: StorageSize | null) {
   return size.knownBytes > 0 ? `部分统计 · 至少 ${bytesLabel(size.knownBytes)}` : '占用无法完整统计';
 }
 export async function managementRequest<T>(epoch: string, path: string, signal: AbortSignal, body?: unknown): Promise<T> {
-  const response = await fetch(`/workbench/v1/history/${path}`, { credentials: 'same-origin', cache: 'no-store', signal,
+  const response = await fetch(runApi(`/history/${path}`), { credentials: 'same-origin', cache: 'no-store', signal,
     ...(body == null ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentRunEpoch: epoch, ...body as object }) }) });
   if (!response.ok) throw new Error(({ 401: '连接验证已失效，请重新打开工作台。', 403: '历史删除未开启。', 409: '配置或历史已变化，请重新预览。', 413: '每批最多选择 100 次运行。', 503: '历史正在处理或暂不可读取，请稍后刷新。' } as Record<number, string>)[response.status] || '历史管理操作未成功，请重试。');
   const result = await response.json();

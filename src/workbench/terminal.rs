@@ -130,8 +130,12 @@ pub struct TerminalHandle {
     epoch: Uuid,
     process_id: u32,
     project_name: Arc<str>,
+    exited: Arc<AtomicBool>,
 }
 impl TerminalHandle {
+    pub(crate) fn exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
     pub fn epoch(&self) -> Uuid {
         self.epoch
     }
@@ -274,6 +278,8 @@ impl TerminalHost {
         let (commands, receiver) = mpsc::sync_channel(COMMANDS);
         let shutdown = Arc::new(AtomicBool::new(false));
         let stop = shutdown.clone();
+        let exited = Arc::new(AtomicBool::new(false));
+        let exit_status = exited.clone();
         let thread = std::thread::Builder::new()
             .name("workbench-terminal".into())
             .spawn(move || {
@@ -286,6 +292,7 @@ impl TerminalHost {
                     clients: HashMap::new(),
                     last_generation: 0,
                     exit: None,
+                    exit_status,
                     stopping: None,
                     read_closed: false,
                     fault: None,
@@ -299,6 +306,7 @@ impl TerminalHost {
                 epoch,
                 process_id,
                 project_name,
+                exited,
             },
             shutdown,
             thread: Some(thread),
@@ -405,6 +413,7 @@ struct Actor {
     clients: HashMap<Uuid, async_mpsc::Sender<TerminalEvent>>,
     last_generation: u64,
     exit: Option<ExitView>,
+    exit_status: Arc<AtomicBool>,
     stopping: Option<Instant>,
     read_closed: bool,
     fault: Option<TerminalError>,
@@ -661,6 +670,7 @@ impl Actor {
                 match self.pty.child.try_wait() {
                     Ok(Some(status)) => {
                         self.pty.reaped = true;
+                        self.exit_status.store(true, Ordering::Release);
                         self.exit = Some(ExitView {
                             code: status.exit_code(),
                             signal: status.signal().map(str::to_owned),

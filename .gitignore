@@ -1,7 +1,53 @@
-/target/
+# Generated build and dependency directories, including nested crates/packages.
+target/
+dist/
+node_modules/
+/build/
+/release/
+/releases/
+
+# Compiled binaries, libraries, bytecode, and debug/profiling artifacts.
+codex-view
+codex-observerd
+codex-folder-picker
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.rlib
+*.rmeta
+*.bc
+*.wasm
+*.bin
+*.pdb
+*.dSYM/
+*.profraw
+*.profdata
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+*.class
+*.jar
+
+# Packaged build outputs.
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.tgz
+*.7z
+*.dmg
+*.pkg
+*.msi
+
+# Local runtime data and browser test outputs.
 /observer-data/
-/web/node_modules/
-/web/dist/
 /web/playwright-report/
 /web/test-results/
 observer.toml

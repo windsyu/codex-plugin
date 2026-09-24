@@ -15,6 +15,7 @@ use super::live::{LiveHub, Published};
 pub(crate) mod fs;
 pub mod history;
 mod journal;
+pub(crate) mod library;
 mod lifecycle;
 pub mod management;
 pub(crate) mod replay;
@@ -55,6 +56,7 @@ pub struct RecorderOptions {
     pub(crate) private_parent: Option<PathBuf>,
     pub workspace_id: String,
     pub project_name: String,
+    pub(crate) project: Option<library::Project>,
     pub queue_bytes: usize,
     pub queue_events: usize,
     pub sync_interval: Duration,
@@ -70,6 +72,7 @@ impl RecorderOptions {
                 .to_hex()
                 .to_string(),
             project_name,
+            project: None,
             queue_bytes: 8 * 1024 * 1024,
             queue_events: 256,
             sync_interval: Duration::from_secs(1),
@@ -380,7 +383,14 @@ fn record(
                             reason: fault.unwrap_or("late_recording_start").into(),
                         });
                     }
-                    writer = Some(Writer::create(&root, meta, checkpoint.clone())?);
+                    let created = Writer::create(&root, meta, checkpoint.clone())?;
+                    if let Some(project) = &options.project {
+                        // Independent sidecar: failure cannot stop recording or the CLI.
+                        let _ = serde_json::to_vec(project)
+                            .ok()
+                            .and_then(|bytes| created.dir.atomic("project.json", &bytes).ok());
+                    }
+                    writer = Some(created);
                 }
                 committed = writer.as_ref().map(|w| w.meta.clone());
                 Ok(())

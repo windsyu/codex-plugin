@@ -6,8 +6,12 @@ import { readSnapshot, type ReadingView, type RequestView } from './reading';
 import type { ModelItem } from './viewItems';
 
 let reading: ReadingView;
+let reportExit: ((exit: { code: number; signal: string | null }) => void) | undefined;
 vi.mock('./reading', async original => ({ ...await original<typeof import('./reading')>(), useReading: () => reading }));
-vi.mock('./TerminalPanel', () => ({ TerminalPanel: () => <textarea aria-label="Native terminal" /> }));
+vi.mock('./TerminalPanel', () => ({ TerminalPanel: ({ onExit }: { onExit?: typeof reportExit }) => {
+  reportExit = onExit;
+  return <textarea aria-label="Native terminal" />;
+} }));
 const run = { runEpoch: 'live', terminalAvailable: true, projectName: 'Synthetic project', processId: 42, historyAvailable: true };
 const metadata = (id: string, purpose: RequestView['purpose'] = 'conversation'): RequestView => ({ requestId: id, clientRequestIndex: null, requestedModel: 'model', codexThreadId: 'thread', codexTurnId: 'turn', purpose, purposeBasis: 'codex_turn_metadata' });
 const model = (id: string): ModelItem => ({ kind: 'message', itemKey: id, revision: 1, orderIndex: 1, completeness: 'observed', truncated: false, streamState: 'receiving', content: [{ contentKey: 'text', text: `Body ${id}` }], author: { role: 'assistant', requestedModel: 'model', reportedModels: [] }, evidence: [{ origin: 'model', key: { requestId: id, responseId: id, wireItemId: 'message', contentIndex: 0 }, captureSeq: 1 }] });
@@ -36,11 +40,66 @@ it('keeps Git beside conversation and the same terminal through file reading and
 });
 // jsdom has no text layout; real selection geometry is covered by Chrome.
 beforeEach(() => {
+  reportExit = undefined;
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () { this.open = false; };
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] });
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() });
   document.body.append(root); reading = readSnapshot(snapshot('live'), 'live');
 });
 afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); });
+
+it('announces CLI exit centrally even with the terminal hidden and keeps records after dismissal', async () => {
+  await act(async () => render(<App run={run} applicationHome />, root));
+  const terminal = root.querySelector('textarea');
+  const messages = root.querySelector('.wb-message-list');
+  await click('终端');
+  expect(root.querySelector('dialog[open]')).toBeNull();
+  await act(async () => reportExit?.({ code: 1, signal: 'Terminated: 15' }));
+  const dialog = root.querySelector('dialog[open]')!;
+  expect(dialog?.textContent).toContain('本次运行已结束');
+  expect(dialog.textContent).toContain(run.projectName);
+  expect(dialog.querySelector('a')?.getAttribute('href')).toBe('/');
+  expect(root.querySelector('.wb-header-actions')?.textContent).toContain('已结束');
+  await click('继续查看记录');
+  expect(root.querySelector('dialog[open]')).toBeNull();
+  expect(document.activeElement).toBe(button('终端'));
+  expect(root.querySelector('textarea')).toBe(terminal);
+  expect(root.querySelector('.wb-message-list')).toBe(messages);
+  expect(messages?.textContent).toContain('Body chat');
+  await act(async () => reportExit?.({ code: 1, signal: 'Terminated: 15' }));
+  expect(root.querySelector('dialog[open]')).toBeNull();
+  await click('查看运行结束提示');
+  expect(root.querySelector('dialog[open]')).not.toBeNull();
+  await act(async () => { root.querySelector('dialog')!.dispatchEvent(new Event('cancel', { cancelable: true })); });
+  expect(root.querySelector('dialog[open]')).toBeNull();
+});
+
+it('keeps a reading disconnect distinct from an exited CLI and updates the empty state only on exit', async () => {
+  reading = { ...reading, connected: false, items: [], requests: [] };
+  await show();
+  expect(root.querySelector('dialog[open]')).toBeNull();
+  expect(root.querySelector('.wb-empty')?.textContent).toContain('等待对话回复');
+  await act(async () => reportExit?.({ code: 0, signal: null }));
+  expect(root.querySelector('dialog[open]')).not.toBeNull();
+  await click('继续查看记录');
+  expect(root.querySelector('.wb-empty')?.textContent).toContain('本次运行已结束');
+  expect(root.textContent).not.toContain('在右侧终端直接输入');
+  await click('用量与状态');
+  expect(button('本次运行已结束').disabled).toBe(true);
+});
+
+it('keeps device exit notices scoped to the current workbench and escapes exit details', async () => {
+  const unsafe = '<img src=x onerror="alert(1)">';
+  await act(async () => render(<App run={{ ...run, projectName: unsafe }} />, root));
+  await act(async () => reportExit?.({ code: 2, signal: unsafe }));
+  const dialog = root.querySelector('dialog[open]')!;
+  expect(dialog?.textContent).toContain(unsafe);
+  expect(dialog.querySelector('img')).toBeNull();
+  expect(dialog.querySelector('a')).toBeNull();
+  await click('关闭运行结束提示');
+  expect(root.querySelector('dialog[open]')).toBeNull();
+});
 
 it('opens reply details on demand without duplicating chat or disturbing streaming focus and native input', async () => {
   const fetch = vi.fn().mockResolvedValue(success(detail('live', 'chat'))); vi.stubGlobal('fetch', fetch);

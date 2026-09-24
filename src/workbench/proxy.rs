@@ -152,6 +152,10 @@ impl ProxyServer {
     pub fn address(&self) -> SocketAddr {
         self.address
     }
+    #[cfg(test)]
+    pub(crate) fn abort_for_test(&self) {
+        self.task.abort();
+    }
     pub(crate) fn is_finished(&self) -> bool {
         self.task.is_finished()
     }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { ModelMessage } from './ModelMessage';
 import { TerminalPanel } from './TerminalPanel';
+import { RunEndedNotice, type TerminalExit } from './RunEndedNotice';
 import { UserMessage } from './UserMessage';
 import { ToolCard } from './ToolCard';
 import { conversationEntries, useReading, type TextItem } from './reading';
@@ -17,11 +18,13 @@ import { FileReading } from './FileReading';
 import { WorkspaceLinks } from './WorkspaceLinks';
 import type { FileSelection, WorkspaceTab } from './workspace';
 import { Icon } from './Icons';
+import { runApi } from './runApi';
 
 export interface Run { runEpoch: string; terminalAvailable: boolean; projectName: string | null; processId: number | null; accessAvailable?: boolean; historyAvailable?: boolean; settingsAvailable?: boolean; historyManagementAvailable?: boolean; workspaceRoot?: string | null }
 
 
-export function App({ run }: { run: Run }) {
+export function App({ run, applicationHome = false }: { run: Run; applicationHome?: boolean }) {
+  useEffect(() => { document.title = `${run.projectName || '当前项目'} · Codex 工作台`; }, [run.projectName]);
   const reading = useReading(run.runEpoch);
   const users = userMessages(reading);
   const notices = reading.items.filter(item => item.kind === 'notice');
@@ -54,6 +57,13 @@ export function App({ run }: { run: Run }) {
     setInspection(null);
   };
   const [terminal, setTerminal] = useState(true);
+  const [exit, setExit] = useState<{ epoch: string; result: TerminalExit } | null>(null);
+  const [dismissedExit, setDismissedExit] = useState<string | null>(null);
+  const currentExit = exit?.epoch === run.runEpoch ? exit.result : null;
+  const onExit = useCallback((result: TerminalExit) => {
+    setExit({ epoch: run.runEpoch, result });
+    setStopConfirm(false);
+  }, [run.runEpoch]);
   const [following, setFollowing] = useState(true);
   const followRef = useRef(true);
   const [details, setDetails] = useState(false);
@@ -83,7 +93,7 @@ export function App({ run }: { run: Run }) {
   async function stop() {
     setStopConfirm(false); setStopping(true); setStopError('');
     try {
-      const result = await fetch('/workbench/v1/run/stop', {
+      const result = await fetch(runApi('/run/stop'), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ epoch: run.runEpoch })
       });
@@ -91,8 +101,10 @@ export function App({ run }: { run: Run }) {
     } catch (error) { setStopError((error as Error).message); setStopping(false); }
   }
   return <WorkspaceLinks.Provider value={run.workspaceRoot ? { root: run.workspaceRoot, open: openFile } : null}><div className={`wb-shell ${sidebar !== 'run' ? 'wb-project-open' : ''} ${terminal ? '' : 'wb-terminal-hidden'}`}>
-    <header className="wb-header"><span className="wb-brand">›_</span><strong>{run.projectName || '当前项目'}</strong><span className="wb-subtle">Codex 工作台</span>
-      <div className="wb-header-actions"><span className={`wb-connection ${reading.connected ? 'is-live' : ''}`}>{reading.connected ? '已连接' : '连接中'}</span>
+    <header className="wb-header">{applicationHome && <a className="wb-home-link" href="/">← 全部历史</a>}<span className="wb-brand">›_</span><strong>{run.projectName || '当前项目'}</strong><span className="wb-subtle">Codex 工作台</span>
+      <div className="wb-header-actions"><span className="wb-run-state">{currentExit
+        ? <button className="wb-run-ended-status" aria-label="查看运行结束提示" onClick={() => setDismissedExit(null)}><span aria-hidden="true">■</span> 已结束</button>
+        : <span className={`wb-connection ${reading.connected ? 'is-live' : ''}`}>{reading.connected ? '已连接' : '连接中'}</span>}</span>
         {run.accessAvailable && <button ref={accessButton} className="wb-access-trigger" aria-expanded={accessOpen} aria-controls="wb-access-panel" onClick={() => { setSettingsOpen(false); setDetails(false); setAccessOpen(!accessOpen); }}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><rect x="4" y="1.5" width="8" height="13" rx="1.5" /><path d="M6.5 3.5h3M7 12.5h2" /></svg>手机接入</button>}
         {run.settingsAvailable && <button id="wb-settings-button" ref={settingsButton} aria-expanded={settingsOpen} aria-controls="wb-settings-panel" onClick={() => { setDetails(false); setAccessOpen(false); setSettingsOpen(!settingsOpen); }}>设置{settingsDirty ? ' · 未保存' : ''}</button>}
         <button aria-pressed={terminal} onClick={() => setTerminal(!terminal)}>终端</button>
@@ -110,11 +122,11 @@ export function App({ run }: { run: Run }) {
         <span className="wb-section-label">项目</span><strong>{run.projectName || '当前目录'}</strong>
         <button aria-label="在中央查看实时对话" className={center === 'conversation' ? 'active' : ''} onClick={() => navigate('conversation')}><Icon name="chat" />实时对话 <span>{chat.length}</span></button>
         {run.historyAvailable && <button aria-label="在中央查看历史记录" className={center === 'history' ? 'active' : ''} onClick={() => navigate('history')}><Icon name="history" />历史记录</button>}
-        <p className="wb-subtle">在右侧原生终端输入，中央区分用户提交与模型回复。</p>
+        <p className="wb-subtle">{currentExit ? '本次运行已结束，可继续查看对话与终端记录。' : '在右侧原生终端输入，中央区分用户提交与模型回复。'}</p>
         {run.historyAvailable && <div className="wb-sidebar-note">在历史记录中查看本项目已保存的对话。</div>}
       </div></div>{run.workspaceRoot && <WorkspacePanel tab={workspaceTab} active={sidebar !== 'run'} projectName={run.projectName} selection={center === 'file' ? file : null} onClose={() => setSidebar('run')} onOpen={openFile} />}</aside>
       <main className="wb-reading">
-        <div className="wb-panel-heading"><span>{center === 'file' ? '项目阅读' : center === 'conversation' ? '实时对话' : '历史记录'}</span><span className="wb-subtle">{center === 'history' ? '内容只读 · 当前 CLI 保持运行' : '当前运行'}</span></div>
+        <div className="wb-panel-heading"><span>{center === 'file' ? '项目阅读' : center === 'conversation' ? '实时对话' : '历史记录'}</span><span className="wb-subtle">{currentExit ? '本次运行已结束 · 内容可查看' : center === 'history' ? '内容只读 · 当前 CLI 保持运行' : '当前运行'}</span></div>
         <div className="wb-message-list" ref={messages} hidden={center !== 'conversation'} inert={!!inspection || settingsOpen} onScroll={() => {
           const element = messages.current;
           if (element) {
@@ -123,7 +135,7 @@ export function App({ run }: { run: Run }) {
             setFollowing(followRef.current);
           }
         }}>
-          {!chat.length && <div className="wb-empty"><span>✳</span><h1>等待对话回复</h1><p>在右侧终端直接输入，即可使用原生 Codex。<br />调用记录可从左下角的用量概览中查看。</p></div>}
+          {!chat.length && <div className="wb-empty"><span aria-hidden="true">{currentExit ? '■' : '✳'}</span><h1>{currentExit ? '本次运行已结束' : '等待对话回复'}</h1><p>{currentExit ? '本次没有捕获到可展示的对话，终端输出仍可查看。' : '在右侧终端直接输入，即可使用原生 Codex。'}<br />调用记录可从左下角的用量概览中查看。</p></div>}
           {notices.filter(item => item.evidence.length === 0).map(item => <p key={item.itemKey} className="wb-notice" role="status">{item.text}</p>)}
           {chat.map(entry => <div key={entry.key} data-reading-key={entry.key}>{entry.kind === 'user'
             ? <UserMessage user={entry.user} orderUnconfirmed={entry.orderUnconfirmed} />
@@ -136,7 +148,7 @@ export function App({ run }: { run: Run }) {
         {run.settingsAvailable && <SettingsPanel key={run.runEpoch} epoch={run.runEpoch} open={settingsOpen} managementAvailable={run.historyManagementAvailable} onClose={closeSettings} onDirtyChange={setSettingsDirty} onViewHistory={() => { closeSettings(false); navigate('history'); }} />}
         {!following && center === 'conversation' && !inspection && <button className="wb-follow" onClick={() => { followRef.current = true; setFollowing(true); }}>↓ 跟随最新</button>}
       </main>
-      <div className="wb-terminal-container" hidden={!terminal}>{run.terminalAvailable && <TerminalPanel epoch={run.runEpoch} />}</div>
+      <div className="wb-terminal-container" hidden={!terminal}>{run.terminalAvailable && <TerminalPanel key={run.runEpoch} epoch={run.runEpoch} onExit={onExit} />}</div>
     </div>
     {details && <section id="wb-run-overview" className="wb-status-details" aria-label="用量与状态" onKeyDown={event => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDetails(); }
@@ -147,9 +159,10 @@ export function App({ run }: { run: Run }) {
       <SaveOverview reading={reading} />
       <RunDiagnostics reading={reading} epoch={run.runEpoch} processId={run.processId} />
       {stopConfirm ? <div className="wb-confirm" role="alertdialog" aria-label="确认停止运行"><p>将停止当前原生 CLI 和正在执行的任务。内存阅读仍可查看。</p><button onClick={() => void stop()}>确认停止</button><button onClick={() => setStopConfirm(false)}>取消</button></div>
-        : <button disabled={stopping} onClick={() => setStopConfirm(true)}>{stopping ? '已请求停止' : '停止当前运行'}</button>}
+        : <button disabled={stopping || !!currentExit} onClick={() => setStopConfirm(true)}>{currentExit ? '本次运行已结束' : stopping ? '已请求停止' : '停止当前运行'}</button>}
       {stopError && <p role="status">{stopError}</p>}
     </section>}
     <UsageFooter reading={reading} expanded={details} onToggle={() => { setInspection(null); setDetails(!details); }} />
+    {currentExit && dismissedExit !== run.runEpoch && <RunEndedNotice projectName={run.projectName} exit={currentExit} applicationHome={applicationHome} onClose={() => setDismissedExit(run.runEpoch)} />}
   </div></WorkspaceLinks.Provider>;
 }
