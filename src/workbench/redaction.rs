@@ -32,6 +32,7 @@ impl SafeText {
 // No Debug: these are the actual values that must never enter a log or DTO.
 pub struct RedactionPolicy {
     secrets: Vec<String>,
+    possible_start: [bool; 256],
 }
 
 impl RedactionPolicy {
@@ -45,7 +46,19 @@ impl RedactionPolicy {
         }
         secrets.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
         secrets.dedup();
-        Ok(Arc::new(Self { secrets }))
+        let mut possible_start = [false; 256];
+        for secret in &secrets {
+            possible_start[secret.as_bytes()[0] as usize] = true;
+        }
+        for (prefix, _) in PREFIXES {
+            let first = prefix.as_bytes()[0];
+            possible_start[first as usize] = true;
+            possible_start[first.to_ascii_uppercase() as usize] = true;
+        }
+        Ok(Arc::new(Self {
+            secrets,
+            possible_start,
+        }))
     }
 
     pub fn scrub(self: &Arc<Self>, text: &str) -> SafeText {
@@ -99,6 +112,8 @@ pub(crate) struct TextRedactor {
     pending: String,
     masked: Option<Mask>,
     tool_fields: bool,
+    #[cfg(test)]
+    reference: bool,
 }
 
 impl TextRedactor {
@@ -108,6 +123,8 @@ impl TextRedactor {
             pending: String::new(),
             masked: None,
             tool_fields: false,
+            #[cfg(test)]
+            reference: false,
         }
     }
 
@@ -123,6 +140,53 @@ impl TextRedactor {
     }
 
     pub fn push(&mut self, text: &str) -> SafeText {
+        #[cfg(test)]
+        if self.reference {
+            return self.push_reference(text);
+        }
+        let mut output = String::new();
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            // Only bypass the state machine when no earlier text or mask can
+            // affect this chunk. Every possible secret/prefix first byte stops
+            // the scan, including non-ASCII configured secrets. A matching
+            // non-ASCII byte is a UTF-8 leading byte, so the stop is a boundary.
+            let fast = !self.tool_fields && self.masked.is_none() && self.pending.is_empty();
+            if fast {
+                let length = remaining
+                    .as_bytes()
+                    .iter()
+                    .position(|byte| self.policy.possible_start[*byte as usize])
+                    .unwrap_or(remaining.len());
+                output.push_str(&remaining[..length]);
+                remaining = &remaining[length..];
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+            let character = remaining.chars().next().unwrap();
+            remaining = &remaining[character.len_utf8()..];
+            if let Some(mask) = self.masked {
+                let keep_masking = match mask {
+                    Mask::Rest => true,
+                    Mask::Credential => {
+                        character.is_ascii_alphanumeric() || "_-./+=%".contains(character)
+                    }
+                    Mask::DataUri => !character.is_whitespace() && !"\"'<>)]}".contains(character),
+                };
+                if keep_masking {
+                    continue;
+                }
+                self.masked = None;
+            }
+            self.pending.push(character);
+            self.drain(&mut output, false);
+        }
+        SafeText(output)
+    }
+
+    #[cfg(test)]
+    fn push_reference(&mut self, text: &str) -> SafeText {
         let mut output = String::new();
         for character in text.chars() {
             if let Some(mask) = self.masked {
@@ -364,3 +428,7 @@ mod tests {
         assert!(RedactionPolicy::new(vec!["x".repeat(8193)]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "redaction/performance_tests.rs"]
+mod performance_tests;

@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+mod library_pressure;
 mod native_cli;
 mod reading;
 mod recording;

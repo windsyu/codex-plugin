@@ -349,7 +349,8 @@ async fn dropping_query_cancels_worker_and_bounded_queue_does_not_block_async_ru
     reader.programs.rg = Some(script);
     let handle = Handle::from_reader(dir.path(), reader).unwrap();
     let client = handle.clone();
-    let slow = tokio::spawn(async move {
+    let query_requested_at = Instant::now();
+    let mut slow = tokio::spawn(async move {
         client
             .query(Query::Search {
                 text: "query".into(),
@@ -358,13 +359,21 @@ async fn dropping_query_cancels_worker_and_bounded_queue_does_not_block_async_ru
             })
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    // Startup is fixture preparation, not the cancellation latency assertion.
+    // Use the real query deadline; cancellation below must still finish in 1s.
+    tokio::time::timeout(DEADLINE, async {
         while !dir.path().join("started").exists() {
+            if slow.is_finished() {
+                panic!(
+                    "synthetic search ended before readiness: {:?}",
+                    (&mut slow).await
+                );
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("synthetic search did not start within its query deadline");
     let mut pending = Vec::new();
     for _ in 0..8 {
         let (reply, rx) = oneshot::channel();
@@ -389,9 +398,21 @@ async fn dropping_query_cancels_worker_and_bounded_queue_does_not_block_async_ru
             .unwrap_err(),
         Fault("workspace_busy")
     );
-    slow.abort();
-    let _ = slow.await;
+    // Natural expiry must remain beyond the cancellation assertion window.
+    // Otherwise a near-deadline request could pass even if cancellation broke.
+    assert!(
+        query_requested_at.elapsed() < DEADLINE - Duration::from_secs(2),
+        "fixture preparation left too little time to distinguish cancellation from natural expiry"
+    );
     let start = Instant::now();
+    slow.abort();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), slow)
+            .await
+            .expect("query cancellation did not complete within 1s")
+            .unwrap_err()
+            .is_cancelled()
+    );
     for reply in pending {
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), reply)

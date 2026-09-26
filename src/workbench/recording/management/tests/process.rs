@@ -135,7 +135,15 @@ fn job_pages_are_bounded_repeatable_and_invalidated_by_external_changes() {
     drop(w);
     let mut e = f.engine();
     let p = preview(&mut e, PreviewMode::Manual(vec![id]));
+    let preview_observed_at = Instant::now();
+    let preview_observed_wall = chrono::Utc::now();
     let create_cancelled = || {
+        let operation = Uuid::new_v4();
+        let policy_before = f
+            .config
+            .handle()
+            .history_policy()
+            .map(|(_, revision)| revision);
         let mut task = cleanup::Task::create(
             &f.root,
             &f.workspace,
@@ -143,9 +151,28 @@ fn job_pages_are_bounded_repeatable_and_invalidated_by_external_changes() {
             f.config.handle(),
             &p,
             p.config_revision.as_deref().unwrap(),
-            Uuid::new_v4(),
+            operation,
         )
-        .unwrap();
+        .unwrap_or_else(|error| {
+            // Diagnose the fail-closed branch without printing fixture paths,
+            // policy bodies or history payloads, and without retrying creation.
+            let now = chrono::Utc::now();
+            let policy_after = f.config.handle().history_policy().map(|(_, revision)| revision);
+            let root_matches = Directory::root(&f.root)
+                .and_then(|root| root.identity())
+                .map(|identity| Some(identity) == p.root_identity);
+            panic!(
+                "synthetic cancelled-job creation failed: error={error:?}, monotonic_elapsed={:?}, wall_elapsed_ms={}, expires_at={}, now={}, preview_revision={:?}, policy_revision_before={policy_before:?}, policy_revision_after={policy_after:?}, preview_root_present={}, root_matches={root_matches:?}, operation_job_exists={:?}, operation_trash_exists={:?}",
+                preview_observed_at.elapsed(),
+                now.signed_duration_since(preview_observed_wall).num_milliseconds(),
+                p.expires_at,
+                now.to_rfc3339(),
+                p.config_revision,
+                p.root_identity.is_some(),
+                f.root.join("cleanup/jobs").join(format!("{operation}.json")).try_exists(),
+                f.root.join("cleanup/trash").join(operation.to_string()).try_exists(),
+            );
+        });
         task.cancel().unwrap();
     };
     for _ in 0..25 {
