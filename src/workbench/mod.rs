@@ -35,4 +35,4 @@ pub(crate) mod probe_process;
 #[cfg(test)]
 mod test_browser;
 #[cfg(test)]
-mod test_native;
+pub(crate) mod test_native;

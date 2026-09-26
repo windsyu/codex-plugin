@@ -125,7 +125,8 @@ impl NativeProbe {
                     themed = true;
                 } else if !trusted
                     && (screen.contains("Do you trust")
-                        || screen.contains("Do you want to work in this directory"))
+                        || screen.contains("Do you want to work in this directory")
+                        || screen.contains("Trust this folder?"))
                 {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     self.write(b"\r")?;

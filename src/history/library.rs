@@ -2,6 +2,8 @@
 pub(crate) mod launch;
 mod model;
 mod native;
+#[cfg(test)]
+mod scale_browser;
 mod scan;
 #[cfg(test)]
 mod tests;
@@ -421,7 +423,10 @@ fn index_worker(shared: &Shared) {
                     0,
                     revision,
                 ));
-                match Scan::open(source.clone()) {
+                let scan = Scan::open(source.clone());
+                #[cfg(test)]
+                pressure_tests::record_scan_attempt(source, scan.as_ref().err().copied());
+                match scan {
                     Ok(scan) => jobs.push_back(Job {
                         scan,
                         generation: uuid::Uuid::new_v4().to_string(),
@@ -467,8 +472,10 @@ fn index_worker(shared: &Shared) {
                     &job.scan.source,
                     &checkpoint,
                     allowance.saturating_sub(job.bytes),
+                    (allowance / 2).saturating_sub(job.bytes),
                 ) {
-                    Ok(Some((bytes, partial))) => {
+                    Ok(Some((bytes, partial, budget_limited))) => {
+                        job.partial |= budget_limited;
                         if partial {
                             job.scan.issue("entry_coverage_partial");
                         }
@@ -489,10 +496,11 @@ fn index_worker(shared: &Shared) {
             }
             Ok(Step::Document(mut doc)) => {
                 doc.entry.title = safe_text(&doc.entry.title);
-                // These bodies cannot pass the existing admission reserve even
-                // if redaction shrinks them to zero. Never spend CPU sanitizing
-                // content that will not be retained or exposed.
-                if job.bytes.saturating_add(64 * 1024) > allowance {
+                // Reserve half the source allowance for later metadata/locators.
+                // Body/search caches must not stop discovery of small entries.
+                // Skip redaction when no body can pass admission even at size zero.
+                let body_allowance = allowance / 2;
+                if job.bytes.saturating_add(64 * 1024) > body_allowance {
                     doc.records.clear();
                     doc.entry.issue("cache_budget");
                     job.partial = true;
@@ -525,7 +533,7 @@ fn index_worker(shared: &Shared) {
                         .map(|v| v.to_string().len())
                         .sum::<usize>()
                     + 64 * 1024
-                    > allowance
+                    > body_allowance
                 {
                     doc.records.clear();
                     doc.entry.issue("cache_budget");
@@ -1150,24 +1158,68 @@ fn reuse_checkpoint(
     source: &Source,
     file: &str,
     budget: usize,
-) -> Result<Option<(usize, bool)>> {
+    body_budget: usize,
+) -> Result<Option<(usize, bool, bool)>> {
     let tx = db.transaction().map_err(|_| "cache_busy")?;
-    let previous:Option<(String,String,usize)>=tx.query_row("SELECT s.generation,c.entry,length(CAST(e.metadata AS BLOB))+length(CAST(e.search AS BLOB))+coalesce((SELECT length(CAST(path AS BLOB))+length(cwd_key)+2 FROM catalog_cwds cwd WHERE cwd.generation=e.generation AND cwd.entry=e.id),0)+coalesce((SELECT sum(length(CAST(body AS BLOB))) FROM catalog_records r WHERE r.generation=s.generation AND r.entry=c.entry),0) FROM catalog_sources s JOIN catalog_checkpoints c ON c.generation=s.generation JOIN catalog_entries e ON e.generation=c.generation AND e.id=c.entry WHERE s.id=?1 AND s.identity=?2 AND c.file=?3 AND json_extract(e.metadata,'$.sourceIdentity')=?2 AND EXISTS(SELECT 1 FROM catalog_locators l WHERE l.generation=e.generation AND l.entry=e.id)",params![source.id(),source.identity(),file],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|"cache_invalid")?;
-    let Some((old, entry, bytes)) = previous.filter(|(_, _, bytes)| *bytes <= budget) else {
+    let previous: Option<(String, String, String, usize, usize)> = tx.query_row(
+        "SELECT s.generation,c.entry,e.metadata,
+         coalesce((SELECT length(CAST(path AS BLOB))+length(cwd_key)+2 FROM catalog_cwds cwd WHERE cwd.generation=e.generation AND cwd.entry=e.id),0),
+         length(CAST(e.search AS BLOB))+coalesce((SELECT sum(length(CAST(body AS BLOB))) FROM catalog_records r WHERE r.generation=s.generation AND r.entry=c.entry),0)
+         FROM catalog_sources s JOIN catalog_checkpoints c ON c.generation=s.generation JOIN catalog_entries e ON e.generation=c.generation AND e.id=c.entry
+         WHERE s.id=?1 AND s.identity=?2 AND c.file=?3 AND json_extract(e.metadata,'$.sourceIdentity')=?2
+         AND EXISTS(SELECT 1 FROM catalog_locators l WHERE l.generation=e.generation AND l.entry=e.id)",
+        params![source.id(),source.identity(),file],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).optional().map_err(|_| "cache_invalid")?;
+    let Some((old, entry, metadata, cwd_bytes, body_bytes)) = previous else {
         return Ok(None);
     };
+    let mut metadata_entry: Entry = serde_json::from_str(&metadata).map_err(|_| "cache_invalid")?;
+    let mut bytes = metadata.len() + cwd_bytes + body_bytes;
+    let omit_body = body_bytes > 0 && bytes > body_budget;
+    if omit_body {
+        metadata_entry.issue("cache_budget");
+        bytes = serde_json::to_string(&metadata_entry).unwrap().len() + cwd_bytes;
+    }
+    if bytes > budget {
+        return Ok(None);
+    }
     tx.execute("INSERT OR REPLACE INTO catalog_entries SELECT ?1,id,source,project,kind,time,metadata,search FROM catalog_entries WHERE generation=?2 AND id=?3",params![generation,old,entry]).map_err(|_|"cache_write_failed")?;
     tx.execute("INSERT OR REPLACE INTO catalog_cwds SELECT ?1,entry,cwd_key,path FROM catalog_cwds WHERE generation=?2 AND entry=?3",params![generation,old,entry]).map_err(|_|"cache_write_failed")?;
-    tx.execute("INSERT OR REPLACE INTO catalog_records SELECT ?1,entry,seq,body FROM catalog_records WHERE generation=?2 AND entry=?3",params![generation,old,entry]).map_err(|_|"cache_write_failed")?;
+    if omit_body {
+        tx.execute(
+            "UPDATE catalog_entries SET metadata=?1,search='' WHERE generation=?2 AND id=?3",
+            params![
+                serde_json::to_string(&metadata_entry).unwrap(),
+                generation,
+                entry
+            ],
+        )
+        .map_err(|_| "cache_write_failed")?;
+        tx.execute(
+            "DELETE FROM catalog_records WHERE generation=?1 AND entry=?2",
+            params![generation, entry],
+        )
+        .map_err(|_| "cache_write_failed")?;
+    } else {
+        tx.execute("INSERT OR REPLACE INTO catalog_records SELECT ?1,entry,seq,body FROM catalog_records WHERE generation=?2 AND entry=?3",params![generation,old,entry]).map_err(|_|"cache_write_failed")?;
+    }
     tx.execute("INSERT OR REPLACE INTO catalog_locators SELECT ?1,entry,locator FROM catalog_locators WHERE generation=?2 AND entry=?3",params![generation,old,entry]).map_err(|_|"cache_write_failed")?;
     tx.execute(
         "INSERT OR REPLACE INTO catalog_checkpoints VALUES (?1,?2,?3)",
         params![generation, file, entry],
     )
     .map_err(|_| "cache_write_failed")?;
-    let partial=tx.query_row("SELECT json_extract(metadata,'$.coverage.state') != 'complete_for_source' FROM catalog_entries WHERE generation=? AND id=?",params![generation,entry],|row|row.get::<_,bool>(0)).unwrap_or(true);
     tx.commit().map_err(|_| "cache_write_failed")?;
-    Ok(Some((bytes, partial)))
+    Ok(Some((
+        bytes,
+        metadata_entry.coverage.state != "complete_for_source",
+        metadata_entry
+            .coverage
+            .reasons
+            .iter()
+            .any(|r| r == "cache_budget"),
+    )))
 }
 
 fn relate(db: &Connection, sources: &[Source], generations: &str, entry: &mut Value) -> Result<()> {
@@ -1242,3 +1294,12 @@ fn source_error(source: &Source, code: &str, count: u64) -> SourceStatus {
     result.error = Some(code.into());
     result
 }
+
+#[cfg(test)]
+mod scale_tests;
+
+#[cfg(test)]
+mod fault_tests;
+
+#[cfg(test)]
+mod pressure_tests;

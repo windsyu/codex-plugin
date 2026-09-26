@@ -16,9 +16,21 @@ fn fixture() -> (
     Arc<RwLock<LibraryConfig>>,
     HistoryLibrary,
 ) {
+    fixture_with_source(|_| {})
+}
+fn fixture_with_source(
+    prepare: impl FnOnce(&Path),
+) -> (
+    TempDir,
+    PathBuf,
+    PathBuf,
+    Arc<RwLock<LibraryConfig>>,
+    HistoryLibrary,
+) {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("native");
     fs::create_dir(&home).unwrap();
+    prepare(&home);
     let data = temp.path().join("history");
     let config = Arc::new(RwLock::new(LibraryConfig::default()));
     let policy = config.clone();
@@ -258,6 +270,95 @@ fn cwd_index_bytes_are_admitted_and_reused_within_the_same_budget() {
         "failed admission rolls back the whole document"
     );
     drop(library);
+}
+
+#[test]
+fn checkpoint_reuse_preserves_metadata_when_the_new_body_share_is_full() {
+    let (_temp, home, _data, _config, library) = fixture();
+    let file = home.join("sessions/retained.jsonl");
+    rollout(
+        &file,
+        uuid::Uuid::new_v4(),
+        Path::new("/synthetic/project"),
+        "retained source body",
+        "",
+    );
+    refresh(&library);
+    let entries = wait(&library, 1);
+    let before = fs::read(&file).unwrap();
+    let shared = library.handle.shared.clone();
+    drop(library);
+    let (_directory, _lock, mut db) = open_cache(&shared).unwrap();
+    let source = Source::Native {
+        id: "default-native".into(),
+        codex_home: home,
+    };
+    let checkpoint: String = db.query_row("SELECT c.file FROM catalog_checkpoints c JOIN catalog_sources s ON s.generation=c.generation WHERE s.id='default-native'", [], |r| r.get(0)).unwrap();
+    let entry = entries["records"][0]["entryId"].as_str().unwrap();
+    let kept = reuse_checkpoint(&mut db, "metadata-only", &source, &checkpoint, 64 * 1024, 0)
+        .unwrap()
+        .unwrap();
+    assert!(kept.0 > 0 && kept.0 < 64 * 1024 && kept.1 && kept.2);
+    let (metadata, search): (String, String) = db.query_row("SELECT metadata,search FROM catalog_entries WHERE generation='metadata-only' AND id=?1", [entry], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(metadata.contains("cache_budget"));
+    assert!(search.is_empty());
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_records WHERE generation='metadata-only'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    for table in ["catalog_locators", "catalog_checkpoints", "catalog_cwds"] {
+        assert_eq!(
+            db.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE generation='metadata-only'"),
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+    // Admission failure leaves neither a partial copy nor a changed visible source.
+    assert_eq!(
+        reuse_checkpoint(&mut db, "rejected", &source, &checkpoint, kept.0 - 1, 0).unwrap(),
+        None
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_entries WHERE generation='rejected'",
+            [],
+            |r| r.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        query(&shared, Operation::List(Query::default(), false)).unwrap()["records"],
+        entries["records"]
+    );
+    db.execute(
+        "UPDATE catalog_sources SET generation='metadata-only' WHERE id='default-native'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        reuse_checkpoint(&mut db, "next", &source, &checkpoint, 64 * 1024, 0).unwrap(),
+        Some(kept)
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT metadata FROM catalog_entries WHERE generation='next' AND id=?1",
+            [entry],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        metadata
+    );
+    assert_eq!(fs::read(file).unwrap(), before);
 }
 
 #[test]
@@ -1226,22 +1327,23 @@ fn native_replacement_oversize_and_secret_redaction_remain_explicit() {
 
 #[test]
 fn cache_body_and_response_budgets_have_explicit_coverage_and_checkpoint_reuse() {
-    let (_temp, home, data, _config, library) = fixture();
-    let file = home.join("sessions/large.jsonl");
-    rollout(
-        &file,
-        uuid::Uuid::new_v4(),
-        Path::new("/synthetic"),
-        "budget fixture",
-        "",
-    );
-    use std::io::Write;
-    let mut output = fs::OpenOptions::new().append(true).open(&file).unwrap();
-    for _ in 0..90 {
-        writeln!(output,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"x".repeat(30000)}]}})).unwrap();
-    }
-    drop(output);
-    refresh(&library);
+    // This case measures cache boundaries/reuse, not concurrent source writes.
+    // Finish the large fixture before the first scan so setup cannot race it.
+    let (_temp, _home, data, _config, library) = fixture_with_source(|home| {
+        let file = home.join("sessions/large.jsonl");
+        rollout(
+            &file,
+            uuid::Uuid::new_v4(),
+            Path::new("/synthetic"),
+            "budget fixture",
+            "",
+        );
+        use std::io::Write;
+        let mut output = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        for _ in 0..90 {
+            writeln!(output,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"x".repeat(30000)}]}})).unwrap();
+        }
+    });
     let entries = wait(&library, 1);
     let entry = &entries["records"][0];
     assert!(entry.to_string().contains("body_cache_limit"));
@@ -1510,24 +1612,24 @@ fn native_roles_context_typed_messages_and_repeated_turns_are_distinct() {
 
 #[test]
 fn source_windows_read_past_cache_and_pin_search_details_and_replacements() {
-    let (_temp, home, _data, _config, library) = fixture();
     let id = uuid::Uuid::new_v4();
+    let (_temp, home, _data, _config, library) = fixture_with_source(|home| {
+        let path = home.join("sessions/long.jsonl");
+        rollout(
+            &path,
+            id,
+            Path::new("/synthetic/window"),
+            "window title",
+            "",
+        );
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for i in 0..90 {
+            writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":format!("body {i} {}", "x".repeat(30000))}]}})).unwrap();
+        }
+        writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"AFTER_CACHE_END <script>unsafe</script> Authorization: Bearer fake-secret"}]}})).unwrap();
+    });
     let path = home.join("sessions/long.jsonl");
-    rollout(
-        &path,
-        id,
-        Path::new("/synthetic/window"),
-        "window title",
-        "",
-    );
-    use std::io::Write;
-    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    for i in 0..90 {
-        writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":format!("body {i} {}", "x".repeat(30000))}]}})).unwrap();
-    }
-    writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"AFTER_CACHE_END <script>unsafe</script> Authorization: Bearer fake-secret"}]}})).unwrap();
-    drop(file);
-    refresh(&library);
     let list = wait(&library, 1);
     let entry = &list["records"][0];
     let id = entry["entryId"].as_str().unwrap();

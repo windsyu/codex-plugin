@@ -388,3 +388,228 @@ async fn application_restart_invalidates_run_operation_and_owner_credentials_wit
         "restart must not probe or start CLI"
     );
 }
+
+#[tokio::test]
+async fn concurrent_capacity_rejection_preserves_input_and_stop_isolation_without_replay() {
+    let fixture = Fixture::new();
+    let cli = fixture.cli();
+    // Isolate even the synthetic child environment; each project records exactly
+    // the bytes consumed by its own PTY, rather than trusting an input ACK.
+    let script = std::fs::read_to_string(&cli).unwrap();
+    let script = script
+        .replace(
+            "#!/bin/sh\n",
+            "#!/bin/sh\nexport HOME=\"$CODEX_HOME\" USERPROFILE=\"$CODEX_HOME\"\n",
+        )
+        .replace(
+            "exec /bin/cat",
+            "stty -echo\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> inputs.txt; done",
+        );
+    std::fs::write(&cli, script).unwrap();
+    let app = fixture.app(Overrides {
+        codex_bin: Some(cli),
+        ..Default::default()
+    });
+    let cookie = pair(&app).await;
+    let mut runs = Vec::new();
+    for index in 0..MAX_RUNNING_RUNS - 1 {
+        let cwd = fixture.dir.path().join(format!("existing-{index}"));
+        std::fs::create_dir(&cwd).unwrap();
+        let run = connect(
+            &app.entry,
+            Connect {
+                project: Some(cwd.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        runs.push((run.run_id, cwd));
+    }
+    let mut requests = Vec::new();
+    for index in 0..4 {
+        let cwd = fixture.dir.path().join(format!("contender-{index}"));
+        std::fs::create_dir(&cwd).unwrap();
+        let target = target_for(&app, &cookie, &cwd).await;
+        requests.push((start_body(&app, &target), cwd));
+    }
+    let responses = futures_util::future::join_all(
+        requests
+            .iter()
+            .map(|(body, _)| launch_post(&app, &cookie, "/workbench/v1/runs", body.clone())),
+    )
+    .await;
+    let mut admitted = Vec::new();
+    let mut busy = Vec::new();
+    for (response, request) in responses.into_iter().zip(&requests) {
+        if response.status() == 202 {
+            admitted.push(request);
+        } else {
+            assert_eq!(response.status(), 503);
+            assert_eq!(json_body(response).await["error"]["code"], "launch_busy");
+            busy.push(request);
+        }
+    }
+    assert!(!admitted.is_empty());
+    let mut rejected = Vec::new();
+    for (body, cwd) in admitted {
+        let operation = operation_done(&app, &cookie, &body["operationId"]).await;
+        if operation["state"] == "ready" {
+            runs.push((
+                serde_json::from_value(operation["run"]["runId"].clone()).unwrap(),
+                cwd.clone(),
+            ));
+        } else {
+            assert_eq!(operation["state"], "failed", "{operation}");
+            assert_eq!(operation["error"]["code"], "run_capacity");
+            rejected.push((body.clone(), cwd.clone()));
+        }
+    }
+    // The bounded start queue can reject admission as launch_busy. Explicit
+    // retries after admitted operations settle must report capacity, not spawn.
+    for (body, cwd) in busy {
+        assert_eq!(
+            launch_post(&app, &cookie, "/workbench/v1/runs", body.clone())
+                .await
+                .status(),
+            202
+        );
+        let operation = operation_done(&app, &cookie, &body["operationId"]).await;
+        assert_eq!(operation["state"], "failed");
+        assert_eq!(operation["error"]["code"], "run_capacity");
+        rejected.push((body.clone(), cwd.clone()));
+    }
+    assert_eq!(runs.len(), MAX_RUNNING_RUNS);
+    assert_eq!(rejected.len(), 3);
+    let invocation_count = || {
+        std::fs::read_to_string(fixture.home.join("invocations"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    assert_eq!(
+        invocation_count(),
+        MAX_RUNNING_RUNS * 2,
+        "capacity rejection must not probe or spawn"
+    );
+
+    let (tx, rx) = oneshot::channel();
+    app._runs
+        .handle
+        .sender
+        .send(Request::Inspect(Box::new(move |runner| {
+            let handles: Vec<_> = runner
+                .active
+                .iter()
+                .map(|(run, _, summary)| (summary.run_id, run.terminal()))
+                .collect();
+            assert!(tx.send(handles).is_ok());
+        })))
+        .unwrap();
+    let handles = rx.await.unwrap();
+    let mut owners = Vec::new();
+    for (id, handle) in handles {
+        let page = handle.attach().await.unwrap();
+        let grant = handle.claim(page.connection_id).await.unwrap();
+        handle
+            .input(
+                page.connection_id,
+                grant.generation,
+                1,
+                format!("first-{id}\n").into_bytes(),
+            )
+            .await
+            .unwrap();
+        owners.push((id, handle, page, grant.generation));
+    }
+    async fn consumed(path: &Path, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if std::fs::read_to_string(path).is_ok_and(|text| text == expected) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the selected CLI must consume exactly its own input");
+    }
+    for (id, cwd) in &runs {
+        consumed(&cwd.join("inputs.txt"), &format!("first-{id}\n")).await;
+    }
+    let stopped = runs[0].0;
+    assert_eq!(
+        launch_post(
+            &app,
+            &cookie,
+            &format!("/workbench/v1/runs/{stopped}/stop"),
+            json!({"epoch":stopped})
+        )
+        .await
+        .status(),
+        202
+    );
+    run_state(&app, &cookie, &stopped.to_string(), "stopped").await;
+    // Reposting a failed operation after capacity is freed must retain the
+    // failure. Only a fresh explicit operation may occupy the released slot.
+    let (failed_body, replacement_cwd) = &rejected[0];
+    launch_post(&app, &cookie, "/workbench/v1/runs", failed_body.clone()).await;
+    let failed = operation_done(&app, &cookie, &failed_body["operationId"]).await;
+    assert_eq!(failed["state"], "failed");
+    assert_eq!(failed["error"]["code"], "run_capacity");
+    assert_eq!(invocation_count(), MAX_RUNNING_RUNS * 2);
+    let target = target_for(&app, &cookie, replacement_cwd).await;
+    let body = start_body(&app, &target);
+    assert_eq!(
+        launch_post(&app, &cookie, "/workbench/v1/runs", body.clone())
+            .await
+            .status(),
+        202
+    );
+    assert_eq!(
+        operation_done(&app, &cookie, &body["operationId"]).await["state"],
+        "ready"
+    );
+    for (id, handle, page, generation) in owners {
+        let result = handle
+            .input(
+                page.connection_id,
+                generation,
+                2,
+                format!("second-{id}\n").into_bytes(),
+            )
+            .await;
+        if id == stopped {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+    }
+    for (id, cwd) in &runs {
+        let expected = if *id == stopped {
+            format!("first-{id}\n")
+        } else {
+            format!("first-{id}\nsecond-{id}\n")
+        };
+        consumed(&cwd.join("inputs.txt"), &expected).await;
+    }
+    for (_, cwd) in &rejected {
+        assert!(
+            !cwd.join("inputs.txt").exists(),
+            "new or rejected Run must not inherit prior input"
+        );
+    }
+    assert_eq!(invocation_count(), (MAX_RUNNING_RUNS + 1) * 2);
+    let application = json_body(get(&app, &cookie, "/workbench/v1/application").await).await;
+    assert_eq!(
+        application["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|run| run["state"] == "running")
+            .count(),
+        MAX_RUNNING_RUNS
+    );
+    assert!(app.healthy());
+}
