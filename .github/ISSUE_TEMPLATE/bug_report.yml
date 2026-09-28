@@ -1,0 +1,33 @@
+name: Bug report
+description: 报告可复现的问题（安全漏洞请私下报告）
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先阅读支持范围。不要提交 token、Cookie、真实配置、私人会话或完整本地日志。
+        安全漏洞请按 SECURITY.md 发送至 windsyu2811@gmail.com。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题与用户影响
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现、预期与实际结果
+      description: 使用合成数据；提供步骤和脱敏错误即可。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境和版本
+      description: 平台、commit/版本、相关 CLI/provider/浏览器和构建方式，不附认证信息。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 修复验收、兼容风险与相关设计
+      description: 可选；说明建议的回归检查、依赖或阻塞。

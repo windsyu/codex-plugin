@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: mailto:windsyu2811@gmail.com
+    about: 安全漏洞私下报告，请勿公开私人数据或未修复漏洞细节。

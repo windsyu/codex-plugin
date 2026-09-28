@@ -1,0 +1,34 @@
+name: Change request
+description: 提议功能、文档或工程维护变化
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 背景与用户价值
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: 安全、数据及兼容风险
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖、阻塞和设计/ADR
+      description: 无依赖时注明无；产品进度仍以实施计划为准。
+    validations:
+      required: true

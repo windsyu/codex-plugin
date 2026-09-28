@@ -9,7 +9,7 @@
 
 ## 1. 产品目标与成功标准
 
-产品改为围绕当前目录运行的原生 Codex 工作台。R6-A–D 已接入全部历史首页，`codex-view` 默认只读历史、不创建 CLI；R6-E 已实现网页项目启动与显式原生恢复，已完成本片验证，F 的多 Run 尚待完成。当前可在首页核验已有项目或指定目录后开始新对话，也可用 `codex-view --project .` 从项目目录打开原生工作台，在右侧真实 Codex CLI 中初始化、信任、输入、审批和使用 Slash；目标是在中央同步阅读模型回复、工具调用、请求上下文，左侧浏览文件、搜索和 Git。当前工作树已接通启动器、原生终端、用户/模型聊天、工具结果/拟议 Diff、上下文与用量，以及异步保存和历史阅读。已接入当前目录文件树、代码搜索及 Git 只读阅读；当前实机/设备范围与保留限制见[支持说明](codex-native-cli-workbench-support.md)，阶段证据只在[实施计划](v2-implementation-plan.md)汇总。启动方式与支持范围见 [README](../README.md#从项目目录启动-v2-工作台)。
+产品改为围绕当前目录运行的原生 Codex 工作台。R6-A–D 已接入全部历史首页，`codex-view` 默认只读历史、不创建 CLI；R6-E 已实现网页项目启动与显式原生恢复，多项目运行和隔离的当前状态见唯一实施计划。当前可在首页核验已有项目或指定目录后开始新对话，也可用 `codex-view --project .` 从项目目录打开原生工作台，在右侧真实 Codex CLI 中初始化、信任、输入、审批和使用 Slash；目标是在中央同步阅读模型回复、工具调用、请求上下文，左侧浏览文件、搜索和 Git。当前工作树已接通启动器、原生终端、用户/模型聊天、工具结果/拟议 Diff、上下文与用量，以及异步保存和历史阅读。已接入当前目录文件树、代码搜索及 Git 只读阅读；当前实机/设备范围与保留限制见[支持说明](codex-native-cli-workbench-support.md)，阶段证据只在[实施计划](v2-implementation-plan.md)汇总。启动方式见[使用指南](guides/usage.md#从项目目录启动-v2-工作台)。
 
 新实现不以兼容旧 Gateway 控制内核为前提。启动普通官方 `codex`，在其模型网络请求前放本地流式代理；PTY、实时展示、历史保存分开。移除专属外部 App Server、`codex --remote`、持久化 Worker/ThreadLease/InputLease/TurnOwner、逐命令 CAS/audit 对新运行路径的要求。Codex 自身可能使用进程内 App Server，这是官方 CLI 的内部实现，不由本项目管理。
 
@@ -193,9 +193,9 @@ metadata/模型名/辅助隔离的初次实验见[阶段证据](validation/nativ
 
 ### 2.2 cc-viewer 可借鉴的机制
 
-[pty-manager.js:480](/Users/windsyu/magicproject/cc-viewer/packages/app/server/pty-manager.js:480) 收到 PTY 输出后累积有界 buffer，以 `setImmediate` 合并发送。[interceptor.js:1329](/Users/windsyu/magicproject/cc-viewer/packages/app/server/interceptor.js:1329) 的流循环先 `controller.enqueue(value)`，随后组装阅读内容；`:1216` 的临时快照以 latest-wins 方式发送，后续按块结束、约 100ms 或大小条件触发。网页收到带内容的 `stream-progress`，无需每次再 GET 正文。
+[pty-manager.js:480](https://github.com/weiesky/cc-viewer/blob/5b544c6ee112bb14a80670480d3c4c900b17d307/packages/app/server/pty-manager.js#L480) 收到 PTY 输出后累积有界 buffer，以 `setImmediate` 合并发送。[interceptor.js:1329](https://github.com/weiesky/cc-viewer/blob/5b544c6ee112bb14a80670480d3c4c900b17d307/packages/app/server/interceptor.js#L1329) 的流循环先 `controller.enqueue(value)`，随后组装阅读内容；`:1216` 的临时快照以 latest-wins 方式发送，后续按块结束、约 100ms 或大小条件触发。网页收到带内容的 `stream-progress`，无需每次再 GET 正文。
 
-不能把 cc-viewer 描述成完全没有同步 I/O：[v2-writer.js:514](/Users/windsyu/magicproject/cc-viewer/packages/app/server/lib/v2/v2-writer.js:514) 仍有 blob 同步持久化屏障，日志行另用异步队列。我们借鉴的是流式转发与临时展示分离的机制，并把新工作台的存储完整移出实时热路径。
+不能把 cc-viewer 描述成完全没有同步 I/O：[v2-writer.js:514](https://github.com/weiesky/cc-viewer/blob/5b544c6ee112bb14a80670480d3c4c900b17d307/packages/app/server/lib/v2/v2-writer.js#L514) 仍有 blob 同步持久化屏障，日志行另用异步队列。我们借鉴的是流式转发与临时展示分离的机制，并把新工作台的存储完整移出实时热路径。
 
 ## 3. 新架构与必须删除的耦合
 
@@ -236,10 +236,10 @@ flowchart LR
 
 官方源码 `633ab199cfd724aa78013c006b27a2b3d049fc3b` 中：
 
-- [model-provider-info/src/lib.rs:293](/Users/windsyu/magicproject/codex/codex-rs/model-provider-info/src/lib.rs:293) 按认证模式选择默认服务地址，也接受显式 base URL；内置 OpenAI 开启 websocket 支持。
-- [core/src/config/mod.rs:3704](/Users/windsyu/magicproject/codex/codex-rs/core/src/config/mod.rs:3704) 读取 `openai_base_url`；不能假设 Claude 的 `ANTHROPIC_BASE_URL` 或任意旧 Codex 环境变量等价。
-- [codex-api/src/requests/headers.rs:5](/Users/windsyu/magicproject/codex/codex-rs/codex-api/src/requests/headers.rs:5) 构造 `session-id`、`thread-id`；[responses_websocket.rs:166](/Users/windsyu/magicproject/codex/codex-rs/codex-api/src/endpoint/responses_websocket.rs:166) 使用 session/thread/turn client metadata。它们是有版本范围的关联证据，不能假定每个 provider 都保留。
-- [sse/responses.rs:353](/Users/windsyu/magicproject/codex/codex-rs/codex-api/src/sse/responses.rs:353) 解析正文、工具参数和完成事件，`:815` 有流事件测试。模型 HTTP 协议不是 App Server 的 Item 通知协议。
+- [model-provider-info/src/lib.rs:293](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/model-provider-info/src/lib.rs#L293) 按认证模式选择默认服务地址，也接受显式 base URL；内置 OpenAI 开启 websocket 支持。
+- [core/src/config/mod.rs:3704](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/core/src/config/mod.rs#L3704) 读取 `openai_base_url`；不能假设 Claude 的 `ANTHROPIC_BASE_URL` 或任意旧 Codex 环境变量等价。
+- [codex-api/src/requests/headers.rs:5](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/codex-api/src/requests/headers.rs#L5) 构造 `session-id`、`thread-id`；[responses_websocket.rs:166](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/codex-api/src/endpoint/responses_websocket.rs#L166) 使用 session/thread/turn client metadata。它们是有版本范围的关联证据，不能假定每个 provider 都保留。
+- [sse/responses.rs:353](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/codex-api/src/sse/responses.rs#L353) 解析正文、工具参数和完成事件，`:815` 有流事件测试。模型 HTTP 协议不是 App Server 的 Item 通知协议。
 
 [Responses streaming 文档](https://developers.openai.com/es-419/api/docs/guides/streaming-responses)描述正文增量；[WebSocket 文档](https://developers.openai.com/es-419/api/docs/guides/websocket-mode)另有持久连接、增量上下文和流身份。新代理必须保留 CLI 已选择的传输，不能为了好抓包强制关闭 WS、改变模型或改用另一种认证。
 

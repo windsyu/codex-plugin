@@ -54,4 +54,19 @@ observer.toml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+*.bundle
+*.pdf
+*.mp3
+*.mp4
+*.mov
+*.wav
+*.woff
+*.woff2
+*.ttf
+*.otf
 .DS_Store
+
+# Images used by documentation are allowed; content checks enforce all other binaries.
