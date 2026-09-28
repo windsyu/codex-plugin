@@ -1,0 +1,43 @@
+name: Repository checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install the repository Rust toolchain
+        run: rustup show active-toolchain
+      - name: Inspect development tools
+        run: node scripts/dev.mjs doctor
+      - name: Install locked web dependencies
+        run: node scripts/dev.mjs bootstrap
+      - name: Check source, docs and builds
+        run: node scripts/dev.mjs check --ci
+      - name: Audit all fetched branch histories
+        run: node scripts/dev.mjs binaries --all-branches
+      - name: Ensure dependency locks were preserved
+        run: git diff --exit-code -- Cargo.lock web/package-lock.json

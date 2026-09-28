@@ -44,7 +44,7 @@ R6-E 实现网页启动与显式恢复；R6-F 扩展独立项目并行 Run，具
 | 本轮用内存库执行 migrations 1–20，再对实际旧库只读比较表名及列元数据：原有表无缺失，核心历史表列一致 | schema 25 多出 7 个控制相关表，只有 `image_uploads` 多一列 `queue_entry_id`。不读取会话正文，不复制用户数据库到 fixture。列一致只是兼容设计依据，不等于 JSON 语义、查询、并发 WAL 已通过验收 |
 | schema 25 多出的表 | `native_upload_events`、`native_upload_uses`、`native_uploads`、`session_goal_owner_transitions`、`session_goal_owners`、`session_input_queue`、`session_input_queue_transitions`。R6 只读 adapter 不需要这些表，也不会恢复其行为 |
 | 当前 Workbench meta 只保存 workspace 哈希与显示名，没有 cwd | [RecorderOptions](../src/workbench/recording.rs)、[Meta](../src/workbench/recording/journal.rs)。老记录无法仅靠项目名还原路径；须保留“路径未记录”，不能猜目录 |
-| 官方当前源码的 `SessionMeta` 有稳定 thread ID、cwd、parent/fork/history_base 等信息，rollout 包有 sessions/archived_sessions 读取和测试 | [协议定义](/Users/windsyu/magicproject/codex/codex-rs/protocol/src/protocol.rs:3025)、[列表实现](/Users/windsyu/magicproject/codex/codex-rs/rollout/src/list.rs:1128)、[rollout 测试](/Users/windsyu/magicproject/codex/codex-rs/rollout/src/recorder_tests.rs)。文件名中的 rollout ID 可能不同于会话 ID，不能把文件名 UUID 直接用于 resume |
+| 官方当前源码的 `SessionMeta` 有稳定 thread ID、cwd、parent/fork/history_base 等信息，rollout 包有 sessions/archived_sessions 读取和测试 | [协议定义](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/protocol/src/protocol.rs#L3025)、[列表实现](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/list.rs#L1128)、[rollout 测试](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/recorder_tests.rs)。文件名中的 rollout ID 可能不同于会话 ID，不能把文件名 UUID 直接用于 resume |
 
 当前可达 Git 历史没有提供完整 schema 25 的 migration 链；已找到的旧输入队列演进不作为恢复整套旧内核的理由。R6-A 用最小合成结构证明读契约，未知结构单独降级；不直接把 `LATEST_SCHEMA_VERSION` 从 20 改成 25。
 

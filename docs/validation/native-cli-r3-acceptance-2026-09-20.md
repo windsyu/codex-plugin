@@ -97,6 +97,6 @@ WORKBENCH_TEST_SCREENSHOT=/private/tmp/codex-r3-final-20260920 \
 - [HistoryPanel](../../web/src/workbench/HistoryPanel.tsx)、[RecorderStatus](../../web/src/workbench/RecorderStatus.tsx)及 App、reading、ModelMessage、ToolCard、RequestDetails、样式/测试：历史阅读、保存状态和历史证据显示。
 - README、详细设计、产品方案、核心约束、实施计划及 ADR 0044 同步实际契约。本阶段新增独立文件格式/数据目录和 `--data-dir`；不运行旧数据库 migration，不改旧 `/v1` 语义。
 
-从项目目录运行已构建的 `codex-view`，完成一次对话并等到底栏确认保存，结束 launcher 后同目录重启，再打开“历史记录”。具体步骤见 [README](../../README.md#r3-历史与保存状态试用)。本次没有留下供用户持续试用的后台服务；不替用户提交真实任务。
+从项目目录运行已构建的 `codex-view`，完成一次对话并等到底栏确认保存，结束 launcher 后同目录重启，再打开“历史记录”。具体步骤见[使用指南](../guides/usage.md#r3-历史与保存状态试用)。本次没有留下供用户持续试用的后台服务；不替用户提交真实任务。
 
 当前本地实现未 commit/push，未创建/修改远程 Issue 或 PR。收到用户 R3 试用反馈或继续指令后，下一片才是 R4 的 cwd 文件、搜索和 Git 只读阅读。

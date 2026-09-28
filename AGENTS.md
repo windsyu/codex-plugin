@@ -24,27 +24,15 @@ V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再�
 
 ## 3. 事实与设计依据
 
-项目文档：
+从[文档总索引](docs/README.md)选择任务相关材料，按职责使用权威来源：
 
-- `docs/codex-local-gateway-v2-development-constraints.md`：新工作台当前核心约束；
-- `docs/codex-native-cli-workbench.md`：产品目标、架构取舍和已纳入的交互原型；
-- `docs/v2-implementation-plan.md`：唯一实施计划，RQ01–RQ15、R0–R6（含 R3.1）、验收、代码退役与状态；
-- `docs/codex-native-cli-workbench-detailed-design.md`：接入、转发、输入、记录、API、恢复与性能验收；
-- `docs/codex-native-cli-workbench-history-home.md`：R6 全部历史首页、原生/工作台/旧库只读目录、Application/Run 拆分、明确项目启动与恢复的设计，见 ADR 0053；当前状态只在实施计划维护；
-- `docs/codex-native-cli-workbench-history-settings.md`：历史占用/删除/保留期限、统一 JSON 与网页展开设置契约，见 ADR 0048；
-- `docs/codex-native-cli-workbench-device-access.md`：LAN IP/Tailscale MagicDNS、共用配对/撤销和同页二维码的实现契约，见 ADR 0051；默认 loopback，显式开启设备监听，真机结果以实施计划为准；
-- `docs/decisions/0039-cc-viewer-style-runtime.md`：新运行路径与可靠性取舍；
-- `docs/cc-viewer-function-and-implementation.md`：独立参考产品说明，不混入本项目要求；
-- `docs/cc-viewer-hands-on-2026-09-18.md`：T01–T13 实际试用记录及限制；
-- `docs/prototypes/README.md`：合成数据交互原型和维护方式，不是新运行时验收；
-- `docs/archive/v2-before-cc-viewer.md`：已删除旧设计/计划/ADR 的索引和固定 Git 基线；
-- `docs/archive/v1-development-history.md`：V1 非规范性历史归档。
+- [V2 实施计划](docs/v2-implementation-plan.md)：唯一需求追踪、逐片任务、验收和状态来源；
+- [核心约束](docs/codex-local-gateway-v2-development-constraints.md)、[产品方案](docs/codex-native-cli-workbench.md)与[详细设计](docs/codex-native-cli-workbench-detailed-design.md)：目标和实现契约，专题设计由总索引定位；
+- [支持范围](docs/codex-native-cli-workbench-support.md)：实际受测环境、能力与限制；
+- [ADR 索引](docs/decisions/README.md)：架构和兼容选择；[验证索引](docs/validation/README.md)：当时的版本、结果和限制；
+- [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布；参考研究、合成原型与历史归档是非规范性依据，不能替代新运行时验收。
 
-Codex 官方源码的本地参考路径：
-
-```text
-/Users/windsyu/magicproject/codex
-```
+需要研究官方源码时，使用自行配置的只读 checkout（可用 `CODEX_SOURCE_DIR` 指向该目录）；不把维护者机器路径作为其他贡献者的前提。该变量仅用于研究命令，不是产品运行配置。
 
 当前设计研究基线：
 
@@ -114,7 +102,7 @@ Codex 官方源码的本地参考路径：
 
 每次执行会话开始时：
 
-1. 阅读本文件及当前任务相关文档；
+1. 阅读本文件，从文档总索引选择当前任务相关契约和开发指南；
 2. 执行 `git status --short`，识别用户已有变更；
 3. 查看当前分支、remote 和最近提交；
 4. 不覆盖、不清理、不回退不属于当前任务的修改；
@@ -256,7 +244,7 @@ chore/<short-slug>
 spike/<short-slug>
 ```
 
-一个分支只承载一个可解释的目标。
+一个分支只承载一个可解释的目标。自动化执行者默认使用 `codex/<short-slug>`，人工分支可采用以上主题前缀。
 
 ### 9.4 Commit
 
@@ -347,30 +335,31 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 若任务被阻塞，应先完成所有安全、只读、范围内的调查，再准确说明阻塞条件。不得用“最好再确认一下”代替可自行验证的事实。
 
-## 12. 当前项目决策摘要
+## 12. 权威决策与标准维护流程
 
-### 2026-09-18 完全重构（当前方向）
+当前架构以 [ADR 0039](docs/decisions/0039-cc-viewer-style-runtime.md)为准。原生 CLI 保持唯一对话/审批入口；记录失败不得阻断转发，不得把模型响应完成当作整轮完成，不恢复旧控制内核。CLI 版本、用量、调用详情、历史清理、独立用户目录、文件阅读、设备访问和历史首页的决定集中在 [ADR 索引](docs/decisions/README.md)；具体设计通过[文档总索引](docs/README.md)查找，阶段状态只在 [V2 实施计划](docs/v2-implementation-plan.md)维护。研究、原型与旧验收不能替代当前运行时验收。
 
-用户明确允许完全重构，以 cc-viewer 的体验和核心机理为目标，取代同日 ADR 0038 的增量方案。按 ADR 0039：
+每次工作遵循：**检查工作树和任务归属 → 判断模块边界 → 使用标准构建及产物管理入口 → 同步权威文档 → 执行验证和二进制检查 → 审查差异、许可与敏感资料 → 报告结果与未验证项。**
 
-- 当前目录启动本机网页、PTY 与普通官方 Codex CLI；不由本项目启动外部 App Server，不用 remote TUI；
-- 模型请求走显式本机 HTTP/SSE/WS 代理，实时正文/请求上下文从同层观察副本取得；
-- 直接 push 内容，后台异步 journal/索引；raw-first 数据库提交不再阻挡网络或终端；
-- 原生 TUI 是唯一对话/审批/原生模型与权限设置入口，网页终端单写权简化为内存仲裁和明确接管；工作台自身配置按下述 R3.1 决定提供 JSON/网页表单；
-- Worker/ThreadLease/InputLease/TurnOwner、CAS 与逐命令控制审计不再是新内核要求；
-- 保存失败降级而不主动中止 CLI，接受未落盘尾部/观察副本可能丢失并明确显示；
-- 旧数据/audit 保留且可只读访问，新 namespace/数据目录独立，达标后退役旧控制代码；
-- 不把模型工具参数当执行结果，不把一次模型响应结束当整个任务结束；缺失由终端和可关联 rollout 补充；
-- 继续使用原版官方 CLI，不自动升级，不增加独立 Composer/网页队列，不提前实现 IM；
-- 2026-09-20 用户确认 CLI 升级不应因版本号不同而被阻止：已回归版本是证据元数据，不是启动白名单；未知版本提示后继续，不要求降级或 bypass 参数。可执行文件/版本探测及真实配置、路由检查继续保留，见 ADR 0045；
-- 2026-09-20 用户要求左下角面向实际使用：优先显示本次运行的 Token/输入/输出/缓存/推理统计，技术身份、保存水位和解析记录默认折叠；保存异常与历史缺失仍简短可见。累计用量须独立去重、标明未知与范围，不把缓存/推理重复计入总量，见 ADR 0046；
-- 2026-09-20 用户确认移除独立“模型请求/网络”页面：实时及历史对话的模型/工具卡提供“调用详情”，用量概览提供简洁“调用记录”；辅助/未归属内容在详情保留，不复制聊天正文。历史详情绑定其运行/窗口，底栏仍属于当前运行，见 ADR 0047；
-- 2026-09-20 用户要求历史占用、按运行/批量删除、可选保留期限和统一 JSON/网页设置。默认手动/自动删除均关闭，同一文件服务本地编辑和网页表单；清理仅针对绑定数据根的当前项目，活动运行及原生/旧数据受保护，旧记录无可靠结束时间时不自动删除。契约见 ADR 0048，实现与试用状态只看 R3.1；
-- 2026-09-20 用户进一步确认工作台独立目录：macOS/Linux 使用 `~/.codex-web`，Windows 约定 `%USERPROFILE%\.codex-web`；内部统一 `config/config.json` 与 `history/`。默认值不再依赖 `CODEX_HOME`，显式配置/数据路径覆盖继续有效。旧目录保留原位、不自动迁移或回退读取，原生配置与会话不改动；Windows 目录约定不代表完整 Windows 运行已验收。见 ADR 0049；
-- 2026-09-20 用户明确配置交互只需在当前工作台点击按钮展开可视化修改面板、用完收起；不新建独立设置页面、导航项或前端路由，不切换中央阅读或卸载终端。展开表单继续编辑同一 JSON，收起保留当前页面内未保存草稿，见历史与配置方案 §6.1；
-- 2026-09-19 用户确认终端显示保持简洁：保留原生 ANSI 样式，网页 CLI 子进程清除继承的 `NO_COLOR`、使用 truecolor，并用官方 `tui.animations=false` 关闭装饰动画；不新增动画过滤层或修改全局配置；
-- 2026-09-19 用户确认右侧终端打开即用：不显示启用/释放输入权按钮，空闲时自动可输入；仅多页面冲突时显示“在此输入”，点击一次切换，无二次确认。内部单写、重连保留和未确认输入不重发继续适用，输出始终可读；
-- 2026-09-22 用户要求 R6 整合历史入口，倾向默认先看全部历史，并确认另项目新工作台标签、保留原项目运行，默认新对话、历史单独“继续此会话”。方案将 Application 与 Run 拆分；每 Run 仍为一个普通 CLI，浏览历史不创建进程/自动输入，不恢复旧内核。旧库 schema 25 只读兼容与独立 Run 隔离须单独验收，设计完成不等于实现；见 ADR 0053；
-- 旧设计与重复计划已清理，历史原文通过固定 Git commit 追溯；交互原型保留并纳入 R1–R4，进度统一看实施计划。
+### 12.1 模块和文档组织
 
-R0 先验证当前必要 provider/profile 的原生流程，以及合成 SSE/WS 转发、真实中间态和慢记录器隔离；其余 profile 验收后逐项加入支持清单。旧路径性能可作参照，不为对比继续改造旧内核。配置入口、参考产品试用、原型或旧测试均不能替代新路径验收。文档清理不执行代码退役、用户服务切换或数据库 migration。
+- 保留单 package、library 加两个 binary，按职责收敛接口；模块默认私有，按消费者选择 `pub(crate)` / `pub`，binary 负责启动编排。共享能力归属明确，不增加模块依赖环或跨目录实现复用。
+- 大文件按职责和维护难度拆分，不设机械行数门槛。workspace 拆分须有独立复用、平台隔离或实测构建收益，先解决依赖环并形成 ADR；当前双向引用和公开面改善点见[开发指南](docs/development/README.md)。
+- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，设计契约保持现有路径，ADR 与验证分别更新索引。不得复制第二套阶段状态表。
+- 文档使用可移植相对链接；外部源码用仓库和固定 commit。历史现场绝对路径只能作为带时间和上下文的证据，不能作为通用操作要求。文档修改运行 `node scripts/dev.mjs docs`。
+
+### 12.2 构建、产物和验证
+
+- 标准入口为 `node scripts/dev.mjs`；首次 `doctor` / `bootstrap`，修改后 `build` / `check`，浏览器专项 `e2e`。开发与 CI 固定 Rust 1.95.0、Node 22.23.2，使用 `npm ci` 和 Cargo `--locked`，不宣称该 Rust 版本是已验证 MSRV。
+- 先构建前端再构建 Rust，重新启动新产物；不要让内嵌资源与后端版本不一致。专项与 ignored 测试单列条件及结果，未执行不能算通过；浏览器复用系统 Chrome。
+- 新受管任务使用 `target/artifacts/<UUID>` 并登记归属、类型、完成时间、结果与保留标记；成功诊断保留 7 天，失败诊断和独立构建保留 30 天。`build` / `check` 每日最多自动清理一次已登记过期任务，不安装定时任务。
+- 清理默认预览，明确 `--apply` 才手动删除；活动、固定保留、状态不明、元数据异常、符号链接越界均跳过。使用互斥锁并校验仓库归属，失败报告实际删除结果。
+- 主缓存超过 20 GiB 或距首次登记/最后清理 30 天只提示；显式按 Cargo profile 清理。活动构建/实例和外部共享缓存受保护，禁止无参数整体清空 `target`。
+- 未登记旧文件、数据库、`observer-data`、备份、Git bundle 只盘点；不得因其位于 `target` 而删除。已提交图片/报告不参与过期清理。该流程不清理用户工作台历史或原生数据。
+
+### 12.3 Git 与开源交付
+
+- Git 允许真实图片与文本 SVG，禁止其他二进制文件；不得改扩展名或 Base64 编码绕过。禁止项包含可执行文件、库、字体、压缩包、数据库与 bundle；合成 fixture 也须遵守。
+- 提交前执行 `node scripts/dev.mjs binaries` 检查暂存区；CI 检查提交树；历史治理执行 `binaries --all-branches` 并核实远端覆盖。没有禁止文件时不重写历史，历史改写与远端操作仍遵循当前明确授权。
+- 贡献、私下安全报告、第三方声明与版本变化分别维护在 [CONTRIBUTING](CONTRIBUTING.md)、[SECURITY](SECURITY.md)、[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md) 和 [CHANGELOG](CHANGELOG.md)。发布必须保留 vt100、Codicons 等分发依赖原许可与修改说明。
+- CI、模板和维护工具不能扩大授权：不自动 push、创建 Issue/PR、merge、发布或修改 GitHub 设置。交付区分本地验证和远端实际运行结果。
