@@ -27,6 +27,7 @@ async fn installed_cli_request_metadata_matches_native_user_events_and_separates
             observed.lock().unwrap().push(json!({
                 "thread": metadata["thread_id"], "turn": metadata["turn_id"],
                 "source": metadata["thread_source"], "kind": metadata["request_kind"],
+                "titleSchema": body.pointer("/text/format/schema/properties/title").is_some(),
                 "model": body["model"],
                 "flatAgrees": client["thread_id"] == metadata["thread_id"] && client["turn_id"] == metadata["turn_id"]
             }));
@@ -72,10 +73,14 @@ requires_openai_auth=false
     }
     cli.quit().await.unwrap();
     let requests = seen.lock().unwrap().clone();
+    println!(
+        "{}",
+        json!({"check":"native-request-kinds", "requests":requests.iter().map(|r| json!({"source":r["source"],"kind":r["kind"],"titleSchema":r["titleSchema"]})).collect::<Vec<_>>()})
+    );
     assert!(requests.iter().all(|request| request["flatAgrees"] == true));
     let turns: Vec<_> = requests
         .iter()
-        .filter(|request| request["source"] != "system")
+        .filter(|request| request["source"] == "user" && request["kind"] == "turn")
         .collect();
     assert_eq!(turns.len(), 2, "exactly two native submissions");
     assert_eq!(turns[0]["thread"], turns[1]["thread"]);
@@ -83,8 +88,17 @@ requires_openai_auth=false
     assert!(turns.iter().all(|request| request["kind"] == "turn"));
     let titles: Vec<_> = requests
         .iter()
-        .filter(|request| request["source"] == "system")
+        .filter(|request| request["titleSchema"] == true)
         .collect();
+    assert!(titles.iter().all(|request| {
+        matches!(request["source"].as_str(), Some("system" | "thread_title"))
+            && request["kind"] == "turn"
+    }));
+    assert_eq!(
+        requests.len(),
+        turns.len() + titles.len(),
+        "unclassified native request"
+    );
     assert!(
         !titles.is_empty(),
         "title request needs independent source evidence"

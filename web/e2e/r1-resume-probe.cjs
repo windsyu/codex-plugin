@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
@@ -15,11 +16,17 @@ const input=()=>page.locator('.xterm-helper-textarea');
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true');
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned','true');
-  stage='native-ready';let themed=false,trusted=false,ready=false;
+  stage='native-ready';let modelNoticeHandled = false;
+  let themed=false,trusted=false,ready=false;
   for(let n=0;n<100;n++){
     const screen=await text();
-    if(!themed&&/Choose your style|Select a theme/.test(screen)){await input().press('Enter');themed=true;}
-    else if(!trusted&&/Do you trust|Do you want to work/.test(screen)){await input().press('Enter');trusted=true;}
+    if (screen.includes('Try new model') && screen.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input().press('ArrowDown'); await input().press('Enter');
+      }
+    } else if(!themed&&/Choose your style|Select a theme/.test(screen)){await input().press('Enter');themed=true;}
+    else if(!trusted&&/Do you trust|Do you want to work|Trust this folder\?/.test(screen)){await input().press('Enter');trusted=true;}
     else if(screen.includes('OpenAI Codex')&&screen.includes('›')){ready=true;break;}
     await page.waitForTimeout(150);
   }
@@ -27,7 +34,7 @@ const input=()=>page.locator('.xterm-helper-textarea');
   if(resumed){await expect.poll(text).toContain('R1_RESUME_HISTORY');}
   stage='no-automatic-replay';
   await page.waitForTimeout(400);
-  const snapshot=await page.evaluate(async()=>(await fetch('/workbench/v1/live/snapshot')).json());
+  const snapshot=await readRun(page, '/live/snapshot');
   assert.equal(snapshot.requests.filter(request=>request.purpose==='conversation').length,0);
   await expect(page.locator('.wb-message-list [data-role="user"]')).toHaveCount(0);
   stage='new-native-submission';

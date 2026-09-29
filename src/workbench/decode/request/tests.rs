@@ -32,6 +32,26 @@ fn purpose_uses_canonical_metadata_and_never_guesses_from_user_role_or_title_sch
 }
 
 #[test]
+fn installed_thread_title_source_is_auxiliary_without_inferring_from_schema() {
+    // CLI 0.156.1 emits this canonical source for its independent title thread.
+    let title = metadata(&body("thread_title"), None, &policy());
+    assert_eq!(title.purpose, RequestPurpose::Auxiliary);
+    assert_eq!(title.purpose_basis, PurposeBasis::CodexTurnMetadata);
+    let mut conversation = body("user");
+    conversation["text"] = json!({"format":{"schema":{"properties":{"title":{"type":"string"}}}}});
+    assert_eq!(
+        metadata(&conversation, None, &policy()).purpose,
+        RequestPurpose::Conversation
+    );
+    let mut conflict = body("thread_title");
+    conflict["client_metadata"]["thread_id"] = json!("different");
+    assert_eq!(
+        metadata(&conflict, None, &policy()).purpose,
+        RequestPurpose::Unknown
+    );
+}
+
+#[test]
 fn conflicting_metadata_invalid_ids_and_secrets_cannot_create_a_chat_identity() {
     let mut value = body("user");
     value["client_metadata"]["thread_id"] = json!("different");

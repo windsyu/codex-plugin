@@ -1,9 +1,10 @@
+const { readRun } = require('./workbench-api.cjs');
 const { openCalls, closeCalls } = require('./call-inspector.cjs');
 // Real installed Chrome + ordinary CLI, all state/model data is synthetic.
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
-let browser, stage = 'launch';
+let browser, diagnosticPage, diagnosticFaults = 0, stage = 'launch';
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 
 setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, 85000).unref();
@@ -21,11 +22,11 @@ async function paste(page, value) {
 (async () => {
   browser = await chromium.launch({ executablePath: process.env.WORKBENCH_TEST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const page = await context.newPage(); page.setDefaultTimeout(15000);
+  const page = await context.newPage(); diagnosticPage = page; page.setDefaultTimeout(15000);
   let errors = 0, terminalFaults = 0, inputFrames = 0, resizeFrames = 0, reconnectFrames = 0;
   const inputKinds = [];
   const watchFaults = socket => socket.on('framereceived', ({ payload }) => {
-    try { const frame = JSON.parse(payload); if (frame.type === 'fault' || frame.fault) terminalFaults++; } catch {}
+    try { const frame = JSON.parse(payload); if (frame.type === 'fault' || frame.fault) { terminalFaults++; diagnosticFaults = terminalFaults; } } catch {}
   });
   page.on('pageerror', () => errors++);
   page.on('websocket', watchFaults);
@@ -38,14 +39,20 @@ async function paste(page, value) {
   await owned(page);
   await expect(page.getByRole('button', { name: /启用输入|释放输入权|在此输入/ })).toHaveCount(0);
   assert.equal(new URL(page.url()).hash, '');
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const before = await readRun(page, '/run');
   stage = 'native-initialization';
+  let modelNoticeHandled = false;
   let themed = false, trusted = false, ready = false;
   for (let n = 0; n < 80; n++) {
     const screen = await text(page);
-    if (!themed && (screen.includes('Choose your style') || screen.includes('Select a theme'))) {
+    if (screen.includes('Try new model') && screen.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await page.locator('.xterm-helper-textarea').press('ArrowDown'); await page.locator('.xterm-helper-textarea').press('Enter');
+      }
+    } else if (!themed && (screen.includes('Choose your style') || screen.includes('Select a theme'))) {
       await page.locator('.xterm-helper-textarea').press('Enter'); themed = true;
-    } else if (!trusted && (screen.includes('Do you trust') || screen.includes('Do you want to work'))) {
+    } else if (!trusted && (screen.includes('Do you trust') || screen.includes('Do you want to work') || screen.includes('Trust this folder?'))) {
       await page.locator('.xterm-helper-textarea').press('Enter'); trusted = true;
     } else if (screen.includes('OpenAI Codex') && screen.includes('›')) { ready = true; break; }
     await page.waitForTimeout(150);
@@ -61,7 +68,7 @@ async function paste(page, value) {
     await expect(page.getByRole('region', { name: '代码内容', exact: true })).toContainText('native workspace probe');
     stage = 'workspace-return-with-native-cli'; await page.getByRole('button', { name: '关闭文件阅读' }).click();
     await page.getByRole('button', { name: '收起项目面板' }).click();
-    const current = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+    const current = await readRun(page, '/run');
     stage = 'workspace-process-with-native-cli'; assert.equal(current.processId, before.processId); assert.equal(current.runEpoch, before.runEpoch);
     assert.ok(await native.evaluate(e => e.isConnected)); stage = 'workspace-input-with-native-cli'; assert.ok(inputKinds.slice(priorInput).every(kind => kind === 'focus'), 'navigation may report focus but must not send conversation text or Enter');
     await page.locator('.xterm-helper-textarea').focus();
@@ -147,13 +154,13 @@ async function paste(page, value) {
   await expect.poll(() => text(page)).toContain('保留草稿');
   stage = 'refresh-no-replay';
   assert.equal(inputFrames, beforeReloadInputs, 'refresh must not replay native input');
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, before.processId); assert.equal(after.runEpoch, before.runEpoch);
   await expect(list.locator('[data-role="user"]')).toHaveCount(2);
   assert.deepEqual(await list.locator('[data-reading-key]').evaluateAll(elements => elements.map(element => element.dataset.readingKey)), messageKeys);
   report({ stage: 'refresh-kept-process', inputFrames });
   stage = 'second-page-takeover';
-  const second = await context.newPage(); second.setDefaultTimeout(15000);
+  const second = await context.newPage(); diagnosticPage = second; second.setDefaultTimeout(15000);
   second.on('pageerror', () => errors++);
   second.on('websocket', watchFaults);
   await second.goto(page.url());
@@ -169,18 +176,23 @@ async function paste(page, value) {
   await page.waitForTimeout(150); assert.equal(inputFrames, deniedBefore);
   stage = 'responsive';
   for (const width of [1024, 736, 320]) {
+    stage = `responsive-overflow-${width}`;
     await second.setViewportSize({ width, height: 800 });
     await second.waitForTimeout(150);
     assert.ok(await second.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `viewport ${width} must not overflow`);
   }
   await second.setViewportSize({ width: 1440, height: 900 });
   await second.waitForTimeout(300);
+  stage = 'responsive-restored-ownership';
   await owned(second);
+  stage = 'responsive-restored-draft';
   await expect.poll(() => text(second)).toContain('保留草稿');
+  stage = 'responsive-terminal-faults';
   assert.equal(terminalFaults, 0, 'normal viewport resizing must not degrade VT reconstruction');
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) {
+    stage = 'responsive-screenshot';
     await second.locator('.wb-message-list').evaluate(element => { element.scrollTop = 0; });
-    await second.screenshot({ path: process.env.WORKBENCH_PROBE_SCREENSHOT, fullPage: true });
+    await second.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.png`, fullPage: true });
   }
   stage = 'native-exit';
   await second.locator('.xterm-helper-textarea').press('Control+u'); await second.waitForTimeout(200);
@@ -192,12 +204,12 @@ async function paste(page, value) {
   report({ stage: 'complete', browser: browser.version(), inputFrames, resizeFrames, pageErrors: errors, terminalFaults, sameCliProcess: true, automaticInput: true, singleClickPageSwitch: true });
   await close(0);
 })().catch(async () => {
-  const page = browser?.contexts()[0]?.pages()[0];
+  const page = diagnosticPage || browser?.contexts()[0]?.pages()[0];
   const metrics = await page?.evaluate(() => {
     const list = document.querySelector('.wb-message-list');
-    return { top: list?.scrollTop, height: list?.scrollHeight, clientHeight: list?.clientHeight, followButton: !!document.querySelector('.wb-follow'), terminalReady: document.querySelector('.wb-terminal')?.getAttribute('data-ready'), owned: document.querySelector('.wb-terminal')?.getAttribute('data-owned'), reconnectStored: Object.keys(sessionStorage).filter(key => key.startsWith('workbench-reconnect:')).length, navigation: performance.getEntriesByType('navigation')[0]?.type };
+    return { viewport: { width: innerWidth, height: innerHeight }, documentWidth: document.documentElement.scrollWidth, terminalWidth: document.querySelector('.wb-terminal')?.getBoundingClientRect().width, xtermWidth: document.querySelector('.xterm-screen')?.getBoundingClientRect().width, top: list?.scrollTop, height: list?.scrollHeight, clientHeight: list?.clientHeight, followButton: !!document.querySelector('.wb-follow'), terminalReady: document.querySelector('.wb-terminal')?.getAttribute('data-ready'), owned: document.querySelector('.wb-terminal')?.getAttribute('data-owned'), reconnectStored: Object.keys(sessionStorage).filter(key => key.startsWith('workbench-reconnect:')).length, navigation: performance.getEntriesByType('navigation')[0]?.type };
   }).catch(() => undefined);
   if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.failed.png`, fullPage: true }).catch(() => {});
-  report({ stage: 'failed', check: stage, reason: 'assertion (private URLs/output suppressed)', metrics });
+  report({ stage: 'failed', check: stage, reason: 'assertion (private URLs/output suppressed)', terminalFaults: diagnosticFaults, metrics });
   close(1);
 });

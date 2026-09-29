@@ -152,6 +152,8 @@ experimental_bearer_token = "synthetic-r0-token"
         std::env::var_os("WORKBENCH_TEST_CODEX").unwrap_or_else(|| "codex".into()),
     );
     command.cwd(&workspace);
+    command.env("HOME", &cli_home);
+    command.env("USERPROFILE", &cli_home);
     command.env("CODEX_HOME", &cli_home);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -194,7 +196,8 @@ experimental_bearer_token = "synthetic-r0-token"
                 theme = true;
             } else if !trusted
                 && (screen.contains("Do you trust")
-                    || screen.contains("Do you want to work in this directory"))
+                    || screen.contains("Do you want to work in this directory")
+                    || screen.contains("Trust this folder?"))
             {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 writer.write_all(b"\r").unwrap();
@@ -228,7 +231,9 @@ experimental_bearer_token = "synthetic-r0-token"
                     writer.flush().unwrap();
                     phase += 1;
                 } else if phase == 2
-                    && screen.contains("esc to interrupt")
+                    && requests.load(Ordering::SeqCst) == 3
+                    && !cancelled.load(Ordering::SeqCst)
+                    && screen.contains("R0_CANCEL_STREAM")
                     && hub
                         .snapshot()
                         .model_items()

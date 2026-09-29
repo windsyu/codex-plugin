@@ -1,11 +1,12 @@
+const { readRun, runApiPath } = require('./workbench-api.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
 const jsQR = require('jsqr');
 const assert = require('node:assert/strict');
 let stage = 'launch', owner, phone;
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
-const run = page => page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
-const status = page => page.evaluate(async () => (await fetch('/workbench/v1/access')).json());
+const run = page => readRun(page, '/run');
+const status = page => readRun(page, '/access');
 async function qr() {
   let result;
   await expect.poll(async () => {
@@ -99,7 +100,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   }
   stage = 'revoke';
   await owner.locator('.wb-access-device').filter({ hasText: '手机浏览器' }).getByRole('button', { name: '断开', exact: true }).click();
-  await expect.poll(() => phone.evaluate(async () => (await fetch('/workbench/v1/run')).status)).toBe(401);
+  await expect.poll(() => phone.evaluate(async path => (await fetch(path)).status, runApiPath(phone.url(), '/run'))).toBe(401);
   assert.equal((await run(other)).processId, before.processId);
   await owner.getByRole('button', { name: '收起', exact: true }).click();
   await expect.poll(async () => await owner.locator('.wb-terminal').getAttribute('data-owned') === 'true' || await owner.getByRole('button', { name: '在此输入', exact: true }).isVisible()).toBe(true);
