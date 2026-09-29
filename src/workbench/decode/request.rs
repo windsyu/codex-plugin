@@ -84,9 +84,10 @@ fn metadata(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) -> 
         value["thread_source"].as_str(),
     ) {
         (Some("prewarm" | "compaction" | "memory"), _) => RequestPurpose::Auxiliary,
-        (Some("turn"), Some("system" | "guardian_review" | "memory_consolidation")) => {
-            RequestPurpose::Auxiliary
-        }
+        (
+            Some("turn"),
+            Some("system" | "thread_title" | "guardian_review" | "memory_consolidation"),
+        ) => RequestPurpose::Auxiliary,
         (Some("turn"), Some("user"))
             if info.codex_thread_id.is_some() && info.codex_turn_id.is_some() =>
         {

@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 // Actual official CLI with synthetic policy/validation refusals and a cancelled stream.
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
@@ -8,7 +9,7 @@ const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const screenshot = async suffix => { if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${suffix}.png`, fullPage: true }); };
 const screen = () => page.locator('.xterm-rows').innerText();
 const input = () => page.locator('.xterm-helper-textarea');
-const snapshot = () => page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
+const snapshot = () => readRun(page, '/live/snapshot');
 async function submit(value) {
   await input().focus();
   await input().evaluate((element, value) => {
@@ -24,12 +25,18 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   let errors = 0; page.on('pageerror', () => errors++);
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
-  const beforeRun = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const beforeRun = await readRun(page, '/run');
+  let modelNoticeHandled = false;
   let themed = false, trusted = false, ready = false;
   for (let n = 0; n < 100; n++) {
     const text = await screen();
-    if (!themed && /Choose your style|Select a theme/.test(text)) { await input().press('Enter'); themed = true; }
-    else if (!trusted && /Do you trust|Do you want to work/.test(text)) { await input().press('Enter'); trusted = true; }
+    if (text.includes('Try new model') && text.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input().press('ArrowDown'); await input().press('Enter');
+      }
+    } else if (!themed && /Choose your style|Select a theme/.test(text)) { await input().press('Enter'); themed = true; }
+    else if (!trusted && /Do you trust|Do you want to work|Trust this folder\?/.test(text)) { await input().press('Enter'); trusted = true; }
     else if (text.includes('OpenAI Codex') && text.includes('›')) { ready = true; break; }
     await page.waitForTimeout(100);
   }
@@ -88,7 +95,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(messages.locator('[data-role="user"]')).toHaveCount(3);
   await expect(incomplete).toContainText('参数不完整');
   assert.deepEqual((await snapshot()).items.map(item => item.itemKey), complete.items.map(item => item.itemKey));
-  const afterRun = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const afterRun = await readRun(page, '/run');
   assert.equal(afterRun.processId, beforeRun.processId); assert.equal(afterRun.runEpoch, beforeRun.runEpoch);
   await screenshot('complete');
   assert.equal(errors, 0);

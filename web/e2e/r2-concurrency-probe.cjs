@@ -1,3 +1,4 @@
+const { readRun, runApiPath } = require('./workbench-api.cjs');
 const { openCalls } = require('./call-inspector.cjs');
 // Synthetic capture only: HTTP reverse results and multiplexed WS contexts.
 const { expect } = require('playwright/test');
@@ -7,8 +8,8 @@ let browser, page, stage = 'launch';
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 
 const screenshot = async suffix => { if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${suffix}.png`, fullPage: true }); };
-const snapshot = () => page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
-const run = () => page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+const snapshot = () => readRun(page, '/live/snapshot');
+const run = () => readRun(page, '/run');
 setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, 55000).unref();
 
 (async () => {
@@ -16,7 +17,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   page = await browser.newPage({ viewport: { width: 1600, height: 1000 } }); page.setDefaultTimeout(10000);
   let errors = 0, detailReads = 0;
   page.on('pageerror', () => errors++);
-  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/workbench/v1/requests/')) detailReads++; });
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith(runApiPath(process.env.WORKBENCH_PROBE_URL, '/requests/'))) detailReads++; });
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   const terminal = page.locator('.xterm-helper-textarea');
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');

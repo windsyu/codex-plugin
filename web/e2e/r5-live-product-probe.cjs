@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 // Explicit real-provider probe: synthetic project, native input, no route mocks.
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
@@ -10,7 +11,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
 setInterval(() => report({ stage: 'progress', check: stage, elapsedMs: Date.now() - started }), 15000).unref();
 const text = () => page.locator('.xterm-rows').innerText();
 const input = () => page.locator('.xterm-helper-textarea');
-const snapshot = () => page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
+const snapshot = () => readRun(page, '/live/snapshot');
 async function paste(value) {
   await input().focus();
   await input().evaluate((element, value) => {
@@ -45,13 +46,19 @@ async function finished(card) {
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   stage = 'terminal-auto-input';
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const before = await readRun(page, '/run');
   stage = 'native-initialization';
+  let modelNoticeHandled = false;
   let themed = false, trusted = false, ready = false;
   for (let n = 0; n < 120; n++) {
     const screen = await text();
-    if (!themed && /Choose your style|Select a theme/.test(screen)) { await input().press('Enter'); themed = true; }
-    else if (!trusted && /Do you trust|Do you want to work/.test(screen)) { await input().press('Enter'); trusted = true; }
+    if (screen.includes('Try new model') && screen.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input().press('ArrowDown'); await input().press('Enter');
+      }
+    } else if (!themed && /Choose your style|Select a theme/.test(screen)) { await input().press('Enter'); themed = true; }
+    else if (!trusted && /Do you trust|Do you want to work|Trust this folder\?/.test(screen)) { await input().press('Enter'); trusted = true; }
     else if (screen.includes('OpenAI Codex') && screen.includes('›')) { ready = true; break; }
     await page.waitForTimeout(150);
   }
@@ -84,7 +91,7 @@ async function finished(card) {
   await page.reload(); await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   await expect.poll(text).toContain('R5_UNSENT_DRAFT_7391');
   assert.equal(nonFocusInputs, inputsBeforeRefresh);
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, before.processId); assert.equal(after.runEpoch, before.runEpoch);
   await expect(page.locator('.wb-user-body')).toHaveCount(1);
   await input().press('Control+u');

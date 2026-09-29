@@ -324,6 +324,15 @@ mod tests {
             .unwrap()
             .into()
     }
+    impl crate::workbench::web::RunSurface {
+        pub(crate) fn loopback_device_discovery_for_test(&self) {
+            *self.state.access.discovery.lock().unwrap() = Some(discovery::Found {
+                hosts: vec![("127.0.0.1".into(), "test".into())],
+                notice: None,
+            });
+        }
+    }
+
     #[tokio::test]
     async fn shared_listener_isolates_capabilities_and_keeps_other_run_on_revocation() {
         let shared = SharedAccess::new();
@@ -357,13 +366,19 @@ mod tests {
         for tail in [
             "run",
             "live/snapshot",
-            "live/events?epoch=00000000-0000-4000-8000-000000000000&after=0",
-            "terminal",
+            "live/events",
             "workspace/file?path=secret",
             "history",
             "settings",
             "requests/00000000-0000-4000-8000-000000000000",
         ] {
+            let tail = if tail == "live/events" {
+                format!("{tail}?epoch={}&after=0", b.hub.epoch())
+            } else if tail.starts_with("requests/") {
+                format!("{tail}?epoch={}", b.hub.epoch())
+            } else {
+                tail.to_owned()
+            };
             let response = client
                 .get(format!("{base}{bpath}/{tail}"))
                 .header(header::COOKIE, &ca)
@@ -371,8 +386,12 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                !response.status().is_success(),
-                "cross-Run accepted: {tail}"
+                matches!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND
+                ),
+                "cross-Run accepted: {tail}: {}",
+                response.status()
             );
         }
         for tail in [
@@ -439,6 +458,28 @@ mod tests {
                     .status(),
                 StatusCode::NOT_FOUND
             );
+        }
+        for (method, path) in [
+            (reqwest::Method::POST, "/workbench/v1/launch-targets"),
+            (reqwest::Method::POST, "/workbench/v1/runs"),
+            (
+                reqwest::Method::POST,
+                "/workbench/v1/application/pick-directory",
+            ),
+            (reqwest::Method::POST, "/workbench/v1/library/preview"),
+            (reqwest::Method::POST, "/workbench/v1/library/refresh"),
+            (reqwest::Method::PUT, "/workbench/v1/application/settings"),
+        ] {
+            let response = client
+                .request(method, format!("{base}{path}"))
+                .header(header::COOKIE, &ca)
+                .header(header::ORIGIN, &base)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
         let apath = format!("/workbench/v1/runs/{}", a.hub.epoch());
         let config = client

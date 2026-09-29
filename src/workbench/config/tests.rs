@@ -471,7 +471,7 @@ fn optional_access_port_is_preserved_without_opening_network_or_rewriting_old_co
 
 #[test]
 fn schema_one_load_does_not_rewrite_and_save_upgrades_with_sources() {
-    let (_temp, prepared) = fixture();
+    let (temp, prepared) = fixture();
     let original = br#"{"schemaVersion":1,"launch":{"openBrowser":false}}"#;
     prepared.directory.atomic("config.json", original).unwrap();
     let snapshot = prepared.snapshot();
@@ -481,10 +481,17 @@ fn schema_one_load_does_not_rewrite_and_save_upgrades_with_sources() {
         prepared.directory.read("config.json", LIMIT).unwrap(),
         original
     );
+    let mut updated = snapshot.saved.as_ref().unwrap().clone();
+    updated.history.library.sources = vec![crate::history::library::Source::Observer {
+        id: "legacy".into(),
+        database: temp.path().join("legacy/observer.sqlite"),
+        blob_directory: Some(temp.path().join("legacy/blobs")),
+        native_home: None,
+    }];
     let saved = prepared
         .save(
             snapshot.revision.as_deref().unwrap(),
-            snapshot.saved.as_ref().unwrap(),
+            &updated,
             Instant::now() + Duration::from_secs(3),
         )
         .unwrap();
@@ -496,5 +503,13 @@ fn schema_one_load_does_not_rewrite_and_save_upgrades_with_sources() {
             .unwrap(),
         original
     );
-    assert!(!saved.saved.unwrap().history.cleanup.enabled);
+    let saved = saved.saved.unwrap();
+    assert!(!saved.history.cleanup.enabled);
+    assert_eq!(
+        saved.history.library.sources,
+        updated.history.library.sources
+    );
+    let reloaded = Config::parse(&prepared.directory.read("config.json", LIMIT).unwrap()).unwrap();
+    assert_eq!(reloaded, saved);
+    assert!(!temp.path().join("legacy").exists());
 }

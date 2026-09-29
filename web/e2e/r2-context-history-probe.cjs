@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { openCalls, closeCalls } = require('./call-inspector.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
@@ -16,14 +17,20 @@ const PROMPT = 'R2_CONTEXT_INPUT：同一句提交，保留合成上下文。';
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   const terminal = page.locator('.wb-terminal'), input = page.locator('.xterm-helper-textarea');
   const screen = () => page.locator('.xterm-rows').innerText();
-  const snapshot = () => page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
-  const run = () => page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const snapshot = () => readRun(page, '/live/snapshot');
+  const run = () => readRun(page, '/run');
   await expect(terminal).toHaveAttribute('data-owned', 'true');
-  stage = 'ready'; let themed = false, trusted = false, ready = false;
+  stage = 'ready'; let modelNoticeHandled = false;
+  let themed = false, trusted = false, ready = false;
   for (let i = 0; i < 100; i++) {
     const value = await screen();
-    if (!themed && /Choose your style|Select a theme/.test(value)) { await input.press('Enter'); themed = true; }
-    else if (!trusted && /Do you trust|Do you want to work/.test(value)) { await input.press('Enter'); trusted = true; }
+    if (value.includes('Try new model') && value.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input.press('ArrowDown'); await input.press('Enter');
+      }
+    } else if (!themed && /Choose your style|Select a theme/.test(value)) { await input.press('Enter'); themed = true; }
+    else if (!trusted && /Do you trust|Do you want to work|Trust this folder\?/.test(value)) { await input.press('Enter'); trusted = true; }
     else if (value.includes('OpenAI Codex') && value.includes('›')) { ready = true; break; }
     await page.waitForTimeout(120);
   }

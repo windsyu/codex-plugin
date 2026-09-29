@@ -28,6 +28,8 @@ experimental_bearer_token = "synthetic-terminal-only"
         std::env::var_os("WORKBENCH_TEST_CODEX").unwrap_or_else(|| "codex".into()),
     );
     command.cwd(&workspace);
+    command.env("HOME", &home);
+    command.env("USERPROFILE", &home);
     command.env("CODEX_HOME", &home);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -47,7 +49,8 @@ experimental_bearer_token = "synthetic-terminal-only"
                 && (contents.contains("Choose your style") || contents.contains("Select a theme")))
                 || (!trusted
                     && (contents.contains("Do you trust")
-                        || contents.contains("Do you want to work in this directory")))
+                        || contents.contains("Do you want to work in this directory")
+                        || contents.contains("Trust this folder?")))
             {
                 if contents.contains("Choose your style") || contents.contains("Select a theme") {
                     themed = true;
