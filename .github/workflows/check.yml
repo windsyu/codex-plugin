@@ -31,6 +31,12 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install the repository Rust toolchain
         run: rustup show active-toolchain
+      - name: Install workspace search dependency
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
+          rg --version
       - name: Inspect development tools
         run: node scripts/dev.mjs doctor
       - name: Install locked web dependencies
