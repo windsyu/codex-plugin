@@ -1,16 +1,41 @@
-//! Native compact, fork and explicit resume through the product and real Chrome.
+//! Native compact/fork, rejected inherited history, and explicit source resume.
 //! Request history is fixture data; no private model or Codex home is used.
-use super::launcher::{LauncherChild, launcher_command, wait_entry};
+use super::launcher::{LauncherChild, launcher_command, wait_entry, wait_rejected_entry};
 use super::*;
+use std::io::BufRead;
 use std::path::Path;
 use std::process::Stdio;
 
 const PROMPT: &str = "R2_CONTEXT_INPUT：同一句提交，保留合成上下文。";
 const SUMMARY: &str = "R2_COMPACT_SUMMARY：这是上下文摘要，不是新的用户提交。\n<script>window.contextInjected=1</script>";
 
+fn native_header(home: &Path, id: &str) -> Value {
+    let headers: Vec<_> = walkdir::WalkDir::new(home.join("sessions"))
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+        })
+        .filter_map(|entry| {
+            let file = std::fs::File::open(entry.path()).unwrap();
+            let first = std::io::BufReader::new(file)
+                .lines()
+                .next()
+                .unwrap()
+                .unwrap();
+            let value: Value = serde_json::from_str(&first).unwrap();
+            (value["type"] == "session_meta" && value["payload"]["id"] == id)
+                .then(|| value["payload"].clone())
+        })
+        .collect();
+    assert_eq!(headers.len(), 1, "unique fixture native header");
+    headers.into_iter().next().unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires built codex-view, installed CLI and Chrome; synthetic compact/fork/resume only"]
-async fn native_compact_fork_and_resume_keep_context_out_of_new_user_bubbles() {
+async fn native_compact_fork_and_supported_resume_preserve_context_and_reject_inherited_history() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");
     let workspace = directory.path().join("R2-context-project");
@@ -43,7 +68,7 @@ async fn native_compact_fork_and_resume_keep_context_out_of_new_user_bubbles() {
                 0 => {}
                 1 => { assert_eq!(metadata["thread_id"], requests[0]["thread_id"]); assert_ne!(metadata["turn_id"], requests[0]["turn_id"]); }
                 2 => { assert_ne!(metadata["thread_id"], requests[0]["thread_id"]); assert!(input.contains("R2_CONTEXT_REPLY_2")); }
-                3 => { assert_eq!(metadata["thread_id"], requests[2]["thread_id"]); assert!(input.contains("R2_CONTEXT_REPLY_3")); }
+                3 => { assert_eq!(metadata["thread_id"], requests[0]["thread_id"]); assert!(input.contains("R2_CONTEXT_REPLY_2")); assert!(!input.contains("R2_CONTEXT_REPLY_3"), "fork-only context must not enter the source session"); }
                 _ => panic!("unexpected context submission or automatic replay"),
             }
             requests.push(json!({"thread_id":metadata["thread_id"],"turn_id":metadata["turn_id"],"inputItems":body["input"].as_array().unwrap().len(),"containsSummary":input.contains("R2_COMPACT_SUMMARY")}));
@@ -65,19 +90,36 @@ experimental_bearer_token="synthetic-r2-context"
     );
     std::fs::write(home.join("config.toml"), &config).unwrap();
     let mut previous_epoch = None;
-    for resumed in [false, true] {
-        let entry_file = directory.path().join(format!("entry-{resumed}.json"));
+    for phase in 0..3 {
+        let resumed = phase == 2;
+        let rejected = phase == 1;
+        let entry_file = directory.path().join(format!("entry-{phase}.json"));
         let mut command = launcher_command(&home, &workspace, &entry_file);
-        if resumed {
-            command.args([
-                "--resume",
-                requests.lock().unwrap()[2]["thread_id"].as_str().unwrap(),
-            ]);
+        if resumed || rejected {
+            let id = requests.lock().unwrap()[if rejected { 2 } else { 0 }]["thread_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let header = native_header(&home, &id);
+            assert_eq!(header["history_base"].is_null(), !rejected);
+            if rejected {
+                assert_eq!(
+                    header["forked_from_id"],
+                    requests.lock().unwrap()[0]["thread_id"]
+                );
+            }
+            command.args(["--resume", &id]);
         }
+        let config_before = std::fs::read(home.join("config.toml")).unwrap();
         let mut child = LauncherChild(command.spawn().unwrap());
-        let entry = wait_entry(&mut child, &entry_file).await;
-        assert_ne!(previous_epoch, Some(entry.run_epoch));
-        previous_epoch = Some(entry.run_epoch);
+        let entry = if rejected {
+            wait_rejected_entry(&mut child, &entry_file, "resume_history_unsupported").await
+        } else {
+            let entry = wait_entry(&mut child, &entry_file).await;
+            assert_ne!(previous_epoch, Some(entry.run_epoch));
+            previous_epoch = Some(entry.run_epoch);
+            entry
+        };
         let mut browser = tokio::process::Command::new("node");
         browser
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("web/e2e/r2-context-history-probe.cjs"))
@@ -85,6 +127,10 @@ experimental_bearer_token="synthetic-r2-context"
             .env(
                 "WORKBENCH_PROBE_RESUMED",
                 if resumed { "true" } else { "false" },
+            )
+            .env(
+                "WORKBENCH_PROBE_REJECTED",
+                if rejected { "true" } else { "false" },
             )
             .env("DEBUG", "")
             .env("PWDEBUG", "")
@@ -107,6 +153,13 @@ experimental_bearer_token="synthetic-r2-context"
             "native context browser check failed; private URL/output suppressed"
         );
         assert_eq!(requests.lock().unwrap().len(), if resumed { 4 } else { 3 });
+        if rejected {
+            assert_eq!(entry.cli_pid, 0);
+            assert_eq!(
+                std::fs::read(home.join("config.toml")).unwrap(),
+                config_before
+            );
+        }
         assert_eq!(
             unsafe { libc::kill(child.0.id().unwrap() as i32, libc::SIGTERM) },
             0
@@ -147,6 +200,6 @@ experimental_bearer_token="synthetic-r2-context"
     assert_eq!(before["model_providers"], after["model_providers"]);
     println!(
         "{}",
-        json!({"check":"native-context-history","conversationRequests":4,"compactionRequests":1,"nativeSubmissions":4,"forkChangesThread":true,"resumeKeepsFork":true,"configurationPreserved":true})
+        json!({"check":"native-context-history","conversationRequests":4,"compactionRequests":1,"nativeSubmissions":4,"forkChangesThread":true,"inheritedResumeRejected":true,"resumeKeepsSourceThread":true,"configurationPreserved":true})
     );
 }

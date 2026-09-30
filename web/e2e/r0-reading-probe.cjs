@@ -6,6 +6,7 @@ let browser, stage = 'launch';
 const live = process.env.WORKBENCH_PROBE_MODE === 'live';
 const headless = process.env.WORKBENCH_PROBE_HEADED !== '1';
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+const pngPath = prefix => prefix.endsWith('.png') ? prefix : `${prefix}.png`;
 
 setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, live ? 330000 : 35000).unref();
 
@@ -54,7 +55,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
     await page.reload();
     await page.waitForFunction(() => document.getElementById('connection').textContent === '已连接');
     assert.ok(await page.locator(`article[data-request-id="${intermediate.requestId}"] .text`).count());
-    if (process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: process.env.WORKBENCH_PROBE_SCREENSHOT, fullPage: true });
+    if (process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: pngPath(process.env.WORKBENCH_PROBE_SCREENSHOT), fullPage: true });
     report({ stage: 'complete', requestId: intermediate.requestId, snapshots, streams, pageErrors, browser: browser.version(), headless });
     await close(0);
     return;
@@ -101,7 +102,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await page.setViewportSize({ width: 1024, height: 740 });
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) {
     stage = 'screenshot';
-    await page.screenshot({ path: process.env.WORKBENCH_PROBE_SCREENSHOT, fullPage: true });
+    await page.screenshot({ path: pngPath(process.env.WORKBENCH_PROBE_SCREENSHOT), fullPage: true });
   }
   report({ stage: 'complete', snapshots, streams, pageErrors, browser: browser.version(), headless });
   await close(0);
