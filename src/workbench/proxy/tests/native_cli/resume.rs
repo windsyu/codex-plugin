@@ -169,12 +169,21 @@ experimental_bearer_token = "synthetic-resume-token"
         } else {
             assert_eq!(Some(id), original_id);
         }
-        assert!(
-            hub.snapshot()
+        // Native durable completion and the async observation projection have
+        // independent consumers. Wait for the latter rather than assuming it
+        // completed in the same scheduler tick as the rollout write.
+        timeout(Duration::from_secs(2), async {
+            while !hub
+                .snapshot()
                 .model_items()
                 .iter()
                 .any(|item| item.text == expected)
-        );
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resumed response must reach the live projection");
         native.quit().await.unwrap();
         assert_eq!(capture.stats().dropped_chunks, 0);
         // This proxy/capability is dropped before the next explicit CLI start.

@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
@@ -72,12 +73,12 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(footer).toContainText('Token 21K');
   await expect(footer).toContainText('本次运行');
   assert.equal(await terminal.evaluate(node => node === document.querySelector('.xterm-helper-textarea')), true);
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
-  const saved = await page.evaluate(async epoch => (await fetch(`/workbench/v1/history/${encodeURIComponent(epoch)}`)).json(), before.runEpoch);
+  const before = await readRun(page, '/run');
+  const saved = await readRun(page, `/history/${encodeURIComponent(before.runEpoch)}`);
   assert.equal(saved.snapshot.usageSummary.totalTokens.tokens, 21000);
   await page.reload(); await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   await expect(footer).toContainText('Token 21K');
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, before.processId); assert.equal(after.runEpoch, before.runEpoch);
   assert.equal(inputFrames, 0, 'refresh and history must not submit input');
   await footer.getByRole('button', { name: '查看用量概览', exact: true }).click();

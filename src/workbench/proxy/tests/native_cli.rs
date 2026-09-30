@@ -259,6 +259,8 @@ experimental_bearer_token = "synthetic-project-token"
         std::env::var_os("WORKBENCH_TEST_CODEX").unwrap_or_else(|| "codex".into()),
     );
     command.cwd(&workspace);
+    command.env("HOME", &cli_home);
+    command.env("USERPROFILE", &cli_home);
     command.env("CODEX_HOME", &cli_home);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -307,7 +309,7 @@ experimental_bearer_token = "synthetic-project-token"
                     if !initialized && (screen.contains("Choose your style") || screen.contains("Select a theme")) {
                         writer.write_all(b"\r").unwrap();
                         initialized = true;
-                    } else if !trust_accepted && (screen.contains("Do you trust") || screen.contains("Do you want to work in this directory")) {
+                    } else if !trust_accepted && (screen.contains("Do you trust") || screen.contains("Do you want to work in this directory") || screen.contains("Trust this folder?")) {
                         // Initial drawing precedes the input stream becoming
                         // ready; wait for the settled native prompt, then Enter.
                         tokio::time::sleep(Duration::from_millis(300)).await;

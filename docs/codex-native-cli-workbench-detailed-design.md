@@ -247,7 +247,7 @@ interface ResponseUsage {
 }
 ```
 
-分类依据为 `client_metadata["x-codex-turn-metadata"]` 的 JSON 字符串：`request_kind=turn`、`thread_source=user` 且 thread/turn 有效才归为 conversation；prewarm/compaction/memory，或 turn 的 system/guardian_review/memory_consolidation 来源归 auxiliary。缺失、未知或与扁平 thread/turn/session 字段冲突则 unknown；冲突时清除原生身份并记录安全诊断。不能按 `role:user`、输出 schema、短文本或 JSON `title` 猜用途。
+分类依据为 `client_metadata["x-codex-turn-metadata"]` 的 JSON 字符串：`request_kind=turn`、`thread_source=user` 且 thread/turn 有效才归为 conversation；prewarm/compaction/memory，或 turn 的 system/thread_title/guardian_review/memory_consolidation 来源归 auxiliary。`thread_title` 是 CLI 0.156.1 安装版合成实验实际观测到的标题来源，保留旧 system 兼容；这是已观测变体适配，不把未知来源按名称猜成辅助调用。缺失、未知或与扁平 thread/turn/session 字段冲突则 unknown；冲突时清除原生身份并记录安全诊断。不能按 `role:user`、输出 schema、短文本或 JSON `title` 猜用途。
 
 仅白名单字段进入 DTO：模型/标识最多 128 字符且经过格式与脱敏检查；thread 为非 nil UUID，turn 不接受路径分隔符。HTTP 请求在完整、有界 JSON 到齐后发布；压缩请求暂不能解码时显示缺失，原请求转发不变。WS masked frame 可以提取 create metadata，但 create 序号没有证明 response 归属，当前所有 WS 正文保留请求级阅读，不能按到达次序冒充聊天。
 

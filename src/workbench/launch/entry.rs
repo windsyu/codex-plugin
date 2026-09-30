@@ -231,6 +231,36 @@ mod application_entry_tests {
         assert!(!bytes.contains("runEpoch"));
         assert_eq!(read_entry(&path).unwrap().instance_id, Some(id));
         drop(file);
+        for invalid in [
+            BrowserEntry {
+                instance_id: None,
+                ..entry.clone()
+            },
+            BrowserEntry {
+                run_epoch: run,
+                ..entry.clone()
+            },
+            BrowserEntry {
+                cli_pid: 123,
+                ..entry.clone()
+            },
+            BrowserEntry {
+                run_id: Some(Uuid::nil()),
+                url: entry.url.replace("/#", &format!("/?run={}#", Uuid::nil())),
+                ..entry.clone()
+            },
+            BrowserEntry {
+                format: "codex-view-entry-v1".into(),
+                ..entry.clone()
+            },
+        ] {
+            let file = EntryFile::create(Some(&path), &invalid).unwrap();
+            assert!(
+                read_entry(&path).is_err(),
+                "mixed or missing entry identity"
+            );
+            drop(file);
+        }
         entry.run_id = Some(run);
         entry.url = entry.url.replace("/#", &format!("/?run={run}#"));
         let file = EntryFile::create(Some(&path), &entry).unwrap();

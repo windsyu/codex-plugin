@@ -613,3 +613,147 @@ async fn concurrent_capacity_rejection_preserves_input_and_stop_isolation_withou
     );
     assert!(app.healthy());
 }
+
+#[tokio::test]
+async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_settings() {
+    let fixture = Fixture::new();
+    let app = fixture.app(Overrides {
+        codex_bin: Some(fixture.cli()),
+        ..Default::default()
+    });
+    let owner = pair(&app).await;
+    let target = target_for(&app, &owner, &fixture.cwd).await;
+    let body = start_body(&app, &target);
+    assert_eq!(
+        launch_post(&app, &owner, "/workbench/v1/runs", body.clone())
+            .await
+            .status(),
+        202
+    );
+    let operation = operation_done(&app, &owner, &body["operationId"]).await;
+    assert_eq!(operation["state"], "ready");
+    let id: Uuid = serde_json::from_value(operation["run"]["runId"].clone()).unwrap();
+    let (tx, rx) = oneshot::channel();
+    app._runs
+        .handle
+        .sender
+        .send(Request::Inspect(Box::new(move |runner| {
+            runner
+                .active
+                .iter()
+                .find(|(_, _, summary)| summary.run_id == id)
+                .unwrap()
+                .1
+                .loopback_device_discovery_for_test();
+            tx.send(()).unwrap();
+        })))
+        .unwrap();
+    rx.await.unwrap();
+    let run_path = format!("/workbench/v1/runs/{id}");
+    let access = json_body(get(&app, &owner, &format!("{run_path}/access")).await).await;
+    let enabled = client()
+        .post(format!("{}{run_path}/access/enable", app.entry.address))
+        .header("Cookie", &owner)
+        .header("Origin", &app.entry.address)
+        .header("If-Match", format!("\"{}\"", access["revision"]))
+        .header("Content-Type", "application/json")
+        .body(json!({"runEpoch":id}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), 202);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = json_body(get(&app, &owner, &format!("{run_path}/access")).await).await;
+            if status["state"] == "ready" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("device listener must become ready");
+    let invitation =
+        json_body(get(&app, &owner, &format!("{run_path}/access/pairing")).await).await;
+    let url = reqwest::Url::parse(invitation["links"][0]["url"].as_str().unwrap()).unwrap();
+    let device_base = url.origin().ascii_serialization();
+    let token = url.fragment().unwrap().strip_prefix("pair=").unwrap();
+    let paired = client()
+        .post(format!("{device_base}{run_path}/pair"))
+        .header("Origin", &device_base)
+        .header("Content-Type", "application/json")
+        .body(json!({"token":token}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paired.status(), 204);
+    let device = paired.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        client()
+            .get(format!("{device_base}{run_path}/run"))
+            .header("Cookie", &device)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let config_path = fixture.paths.config_dir().join("config.json");
+    let config_before = std::fs::read(&config_path).unwrap();
+    let invocations = fixture.home.join("invocations");
+    let invocations_before = std::fs::read(&invocations).unwrap();
+    let before = json_body(get(&app, &owner, "/workbench/v1/application").await).await;
+    assert_eq!(before["runs"].as_array().unwrap().len(), 1);
+    for (method, path, expected) in [
+        (reqwest::Method::GET, "/workbench/v1/application", 401),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/application/settings",
+            401,
+        ),
+        (reqwest::Method::GET, "/workbench/v1/library/entries", 401),
+        (reqwest::Method::GET, "/workbench/v1/library/sources", 401),
+        (reqwest::Method::POST, "/workbench/v1/launch-targets", 401),
+        (reqwest::Method::POST, "/workbench/v1/runs", 401),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/pick-directory",
+            401,
+        ),
+        (
+            reqwest::Method::PUT,
+            "/workbench/v1/application/settings",
+            401,
+        ),
+        (reqwest::Method::POST, "/workbench/v1/library/preview", 403),
+        (reqwest::Method::POST, "/workbench/v1/library/refresh", 403),
+    ] {
+        let response = client()
+            .request(method, format!("{}{path}", app.entry.address))
+            .header("Cookie", &device)
+            .header("Origin", &app.entry.address)
+            .header("Content-Type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected, "{path}");
+    }
+    let after = json_body(get(&app, &owner, "/workbench/v1/application").await).await;
+    assert_eq!(after["runs"], before["runs"]);
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(std::fs::read(&invocations).unwrap(), invocations_before);
+    assert!(
+        !fixture
+            .paths
+            .config_dir()
+            .join("config.previous.json")
+            .exists()
+    );
+}

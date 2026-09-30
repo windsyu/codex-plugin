@@ -1,3 +1,4 @@
+const { readRun, runApiPath } = require('./workbench-api.cjs');
 // Native interactions through real xterm/PTY. The route only injects a lost ACK;
 // all other WebSocket frames pass unchanged to the production server.
 const { expect } = require('playwright/test');
@@ -26,7 +27,7 @@ async function screenshot(suffix) {
   page = await context.newPage(); page.setDefaultTimeout(15000);
   let current, holdNextAck = false, droppedAck = false, terminalInputs = 0, connections = 0, reconnects = 0, pageErrors = 0, faults = 0;
   page.on('pageerror', () => pageErrors++);
-  await page.routeWebSocket('**/workbench/v1/terminal?*', route => {
+  await page.routeWebSocket(url => url.pathname === runApiPath(process.env.WORKBENCH_PROBE_URL, '/terminal'), route => {
     const server = route.connectToServer(); const pair = { route, server, lose: undefined }; current = pair; connections++;
     route.onMessage(message => {
       const frame = JSON.parse(message);
@@ -47,9 +48,12 @@ async function screenshot(suffix) {
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true');
   await owned();
+  await expect.poll(() => connections).toBe(1);
   stage = 'keyboard-navigation';
   const toggle = page.getByRole('button',{name:'终端',exact:true});
   const terminalElement = await page.locator('.xterm-helper-textarea').elementHandle();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: '← 全部历史', exact: true })).toBeFocused();
   // Follow the shipped header order, including settings and device access.
   for (const name of ['手机接入', '设置', '终端']) {
     stage = `keyboard-navigation-${name}`;
@@ -80,13 +84,19 @@ async function screenshot(suffix) {
   stage = 'keyboard-navigation-no-input';
   assert.equal(terminalInputs,0,'page navigation must not send native input');
   report({stage:'keyboard-navigation',terminalPreserved:true,inputs:0});
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const before = await readRun(page, '/run');
   stage = 'native-initialization';
+  let modelNoticeHandled = false;
   let themed = false, trusted = false, ready = false;
   for (let n=0;n<100;n++) {
     const screen = await text();
-    if (!themed && /Choose your style|Select a theme/.test(screen)) { await input().press('Enter'); themed=true; }
-    else if (!trusted && /Do you trust|Do you want to work/.test(screen)) { await input().press('Enter'); trusted=true; }
+    if (screen.includes('Try new model') && screen.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input().press('ArrowDown'); await input().press('Enter');
+      }
+    } else if (!themed && /Choose your style|Select a theme/.test(screen)) { await input().press('Enter'); themed=true; }
+    else if (!trusted && /Do you trust|Do you want to work|Trust this folder\?/.test(screen)) { await input().press('Enter'); trusted=true; }
     else if (screen.includes('OpenAI Codex') && screen.includes('›')) {ready=true;break;}
     await page.waitForTimeout(150);
   }
@@ -146,7 +156,7 @@ async function screenshot(suffix) {
   assert.equal(terminalInputs,beforeRefresh,'refresh must not submit the question answer');
   await input().press('ArrowDown'); await input().press('Enter');
   await expect(page.locator('.wb-message-list')).toContainText('R1_QUESTION_DONE');
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId,before.processId); assert.equal(after.runEpoch,before.runEpoch);
   await expect(page.locator('.wb-message-list [data-role="user"]')).toHaveCount(2);
   await screenshot('complete');
@@ -161,7 +171,7 @@ async function screenshot(suffix) {
   await confirmation.getByRole('button',{name:'确认停止',exact:true}).press('Enter');
   await expect(page.locator('.wb-terminal-status')).toHaveText('已结束');
   await expect(page.locator('.wb-message-list')).toContainText('R1_QUESTION_DONE');
-  const stopped=await page.evaluate(async()=>(await fetch('/workbench/v1/run')).json());
+  const stopped=await readRun(page, '/run');
   assert.equal(stopped.processId,before.processId); assert.equal(stopped.runEpoch,before.runEpoch);
   assert.equal(pageErrors,0); assert.equal(faults,0);
   report({stage:'complete',browser:browser.version(),connections,reconnects,terminalInputs,pageErrors,faults,sameCliProcess:true,keyboardNavigation:true,stopCancelledThenConfirmed:true,stoppedReadingAvailable:true});
