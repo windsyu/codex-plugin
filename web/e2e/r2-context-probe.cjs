@@ -1,3 +1,4 @@
+const { readRun, runApiPath } = require('./workbench-api.cjs');
 // Uses only synthetic observations and a cat PTY; no model account or browser download.
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
@@ -11,11 +12,11 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   browser = await chromium.launch({ executablePath: process.env.WORKBENCH_TEST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
   page = await browser.newPage({ viewport: { width: 1600, height: 1000 } }); page.setDefaultTimeout(10000);
   let errors = 0, fetches = 0; page.on('pageerror', () => errors++);
-  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/workbench/v1/requests/')) fetches++; });
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith(runApiPath(process.env.WORKBENCH_PROBE_URL, '/requests/'))) fetches++; });
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   const input = page.locator('.xterm-helper-textarea'), terminal = await input.elementHandle();
-  const run = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const run = await readRun(page, '/run');
   report({ stage: 'ready' }); stage = 'initial-context';
   await expect(page.locator('.wb-message-list')).toContainText('R2_CONTEXT_PARTIAL');
   assert.equal(fetches, 0);
@@ -74,7 +75,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await screenshot('context');
   stage = 'reload'; await page.reload();
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, run.processId); assert.equal(after.runEpoch, run.runEpoch);
   await expect(page.locator('.wb-message-list')).toContainText('R2_CONTEXT_FINAL');
   await page.locator('.wb-message-list').getByRole('button', { name: '调用详情', exact: true }).first().click();

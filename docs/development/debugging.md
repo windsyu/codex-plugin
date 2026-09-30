@@ -52,3 +52,24 @@ WORKBENCH_TEST_SCREENSHOT=/private/tmp/codex-r2-request-details \
 两个入口的 `--state-file` 都必须是尚不存在的本地文件；本次浏览器配对 `url` 只写入权限 0600 的该文件，不输出到通用日志。R0 自动提交一次合成任务，R1 等待终端原生输入；刷新均不会再次提交。Ctrl-C 结束持续调试并清理临时目录和配对文件，内存阅读记录不保存。验证失败时残留的状态文件不表示服务仍在运行。
 
 [三列交互原型](../prototypes/native-cli-workbench.html)可独立打开对照，其中的终端、文件、工具与 Git 内容为合成演示，不代表当前运行时已经接入。
+
+## 历史兼容与入口回归
+
+R6 当前 CLI/profile、历史与设备范围见 [G3 验证](../validation/native-cli-r6-g3-compatibility-2026-09-29.md)。先运行 `node scripts/dev.mjs build --offline`，再显式执行安装版 CLI 或合成浏览器矩阵；它们内部为真实 CLI 子进程隔离 HOME/USERPROFILE/CODEX_HOME，模型使用本机合成上游：
+
+```sh
+cargo test --locked --offline --lib workbench::proxy::tests::native_cli:: -- --ignored --nocapture --test-threads=1
+cargo test --locked --offline --lib workbench::web::tests:: -- --ignored --nocapture --test-threads=1
+```
+
+新诊断应按[受管产物流程](README.md#构建产物生命周期)登记。`WORKBENCH_TEST_SCREENSHOT` 使用对应任务目录中的截图前缀；测试不会下载 Chrome。非空 `history_base` 的 fork 恢复按当前契约拒绝，测试分别验证实时 fork、拒绝后历史可读及原会话显式恢复，不能把这项负向通过描述为支持继承链恢复。
+
+实际旧库只读抽查独立于合成矩阵，必须由执行者显式选择已经存在的来源和预期 schema；下面路径只是占位示例：
+
+```sh
+WORKBENCH_TEST_LEGACY_DB=/absolute/path/to/observer.sqlite \
+WORKBENCH_TEST_LEGACY_SCHEMA=25 \
+cargo test --locked --offline --test legacy_readonly_probe -- --include-ignored --nocapture --test-threads=1
+```
+
+该探针使用生产只读 reader，读取有界页及前十个会话条目，前后比较源文件/辅助文件完整 hash 与写入元数据；仅打印聚合计数，不输出正文、ID、路径、游标或 hash。它不会 import、migration、修复或复制来源，需具备只读权限；不能用一次限定抽查声称全库完整，也不应将私人来源接入日常自动化。

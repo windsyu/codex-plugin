@@ -142,10 +142,30 @@ pub(super) fn launcher_command(
 }
 
 pub(super) async fn wait_entry(child: &mut LauncherChild, path: &Path) -> BrowserEntry {
+    wait_launch_result(child, path, None).await
+}
+
+pub(super) async fn wait_rejected_entry(
+    child: &mut LauncherChild,
+    path: &Path,
+    code: &str,
+) -> BrowserEntry {
+    wait_launch_result(child, path, Some(code)).await
+}
+
+async fn wait_launch_result(
+    child: &mut LauncherChild,
+    path: &Path,
+    expected_error: Option<&str>,
+) -> BrowserEntry {
     timeout(Duration::from_secs(15), async {
         loop {
             if let Ok(mut entry) = read_entry(path) {
                 if entry.instance_id.is_none() {
+                    assert!(
+                        expected_error.is_none(),
+                        "expected an Application rejection"
+                    );
                     break entry;
                 }
                 let client = Client::builder().no_proxy().build().unwrap();
@@ -174,7 +194,15 @@ pub(super) async fn wait_entry(child: &mut LauncherChild, path: &Path) -> Browse
                     if response.status().is_success() {
                         let body: Value =
                             serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                        if !body["launchError"].is_null() {
+                            let expected = expected_error.expect("unexpected launch rejection");
+                            assert_eq!(body["launchError"].as_str(), Some(expected));
+                            assert_eq!(body["runs"], json!([]));
+                            assert_eq!(entry.cli_pid, 0);
+                            break entry;
+                        }
                         if let Some(run) = body["runs"].as_array().and_then(|runs| runs.first()) {
+                            assert!(expected_error.is_none(), "rejected launch created a Run");
                             // Legacy probe DTO; disk keeps entry v2 with no cliPid.
                             entry.run_epoch = serde_json::from_value(run["runId"].clone()).unwrap();
                             entry.cli_pid = run["cliPid"].as_u64().unwrap() as u32;
@@ -349,6 +377,18 @@ experimental_bearer_token="synthetic-launcher-project"
     // Native trust is written by the CLI into the selected named profile.
     assert!(saved_profile["projects"].as_table().is_some());
     saved_profile.as_table_mut().unwrap().remove("projects");
+    // CLI 0.156.1 records this native onboarding result. Permit only this
+    // exact boolean; additional TUI/profile changes must still fail equality.
+    if let Some(tui) = saved_profile.get_mut("tui") {
+        let tui = tui.as_table_mut().unwrap();
+        assert_eq!(
+            tui.remove("screen_reader_detection_done"),
+            Some(toml::Value::Boolean(true))
+        );
+        if tui.is_empty() {
+            saved_profile.as_table_mut().unwrap().remove("tui");
+        }
+    }
     assert_eq!(
         saved_profile,
         toml::from_str::<toml::Value>(&profile).unwrap()

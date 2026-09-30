@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { openCalls, closeCalls } = require('./call-inspector.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
@@ -13,15 +14,21 @@ const screenshot=async suffix=>{if(page&&process.env.WORKBENCH_PROBE_SCREENSHOT)
   let errors=0;page.on('pageerror',()=>errors++);
   await page.goto(process.env.WORKBENCH_PROBE_URL);await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned','true');
   const input=page.locator('.xterm-helper-textarea');const screen=()=>page.locator('.xterm-rows').innerText();
+  let modelNoticeHandled = false;
   let themed=false,trusted=false,ready=false;
   for(let i=0;i<100;i++){
     const value=await screen();
-    if(!themed&&/Choose your style|Select a theme/.test(value)){await input.press('Enter');themed=true;}
-    else if(!trusted&&/Do you trust|Do you want to work/.test(value)){await input.press('Enter');trusted=true;}
+    if (value.includes('Try new model') && value.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input.press('ArrowDown'); await input.press('Enter');
+      }
+    } else if(!themed&&/Choose your style|Select a theme/.test(value)){await input.press('Enter');themed=true;}
+    else if(!trusted&&/Do you trust|Do you want to work|Trust this folder\?/.test(value)){await input.press('Enter');trusted=true;}
     else if(value.includes('OpenAI Codex')&&value.includes('›')){ready=true;break;}
     await page.waitForTimeout(120);
   }
-  assert.ok(ready);const before=await page.evaluate(async()=>(await fetch('/workbench/v1/run')).json());
+  assert.ok(ready);const before=await readRun(page, '/run');
   const terminal=await input.elementHandle();
   stage='submit';const prompt='R2：验证四种文件修改及失败。';
   await input.evaluate((element,value)=>{const transfer=new DataTransfer();transfer.setData('text/plain',value);element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:transfer,bubbles:true}));},prompt);
@@ -66,7 +73,7 @@ const screenshot=async suffix=>{if(page&&process.env.WORKBENCH_PROBE_SCREENSHOT)
   stage='reload';await page.reload();await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned','true');await expect(tools).toHaveCount(3);
   await expect(first.locator('.wb-diff-file')).toHaveCount(4);await expect(first).toHaveAttribute('data-execution','succeeded');
   await expect(tools.nth(1)).toHaveAttribute('data-execution','result_observed');await expect(tools.nth(2)).toHaveAttribute('data-execution','failed');
-  const after=await page.evaluate(async()=>(await fetch('/workbench/v1/run')).json());assert.equal(after.processId,before.processId);assert.equal(after.runEpoch,before.runEpoch);
+  const after=await readRun(page, '/run');assert.equal(after.processId,before.processId);assert.equal(after.runEpoch,before.runEpoch);
   for(const width of [1024,736,320]){await page.setViewportSize({width,height:900});await expect.poll(()=>page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
   await screenshot('narrow');await page.setViewportSize({width:1600,height:1050});
   await expect(messages.locator('[data-role="user"]')).toHaveCount(1);await expect(messages.locator('[data-role="assistant"]')).toHaveCount(4);

@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { openCalls, closeCalls } = require('./call-inspector.cjs');
 // Real CLI, synthetic model and project; no real credentials or screenshots of user work.
 const { expect } = require('playwright/test');
@@ -17,16 +18,22 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   const input = page.locator('.xterm-helper-textarea');
   const screen = () => page.locator('.xterm-rows').innerText();
-  stage = 'native-ready'; let themed = false, trusted = false, ready = false;
+  stage = 'native-ready'; let modelNoticeHandled = false;
+  let themed = false, trusted = false, ready = false;
   for (let n = 0; n < 100; n++) {
     const text = await screen();
-    if (!themed && /Choose your style|Select a theme/.test(text)) { await input.press('Enter'); themed = true; }
-    else if (!trusted && /Do you trust|Do you want to work/.test(text)) { await input.press('Enter'); trusted = true; }
+    if (text.includes('Try new model') && text.includes('Use existing model')) {
+      if (!modelNoticeHandled) {
+        modelNoticeHandled = true;
+        await input.press('ArrowDown'); await input.press('Enter');
+      }
+    } else if (!themed && /Choose your style|Select a theme/.test(text)) { await input.press('Enter'); themed = true; }
+    else if (!trusted && /Do you trust|Do you want to work|Trust this folder\?/.test(text)) { await input.press('Enter'); trusted = true; }
     else if (text.includes('OpenAI Codex') && text.includes('›')) { ready = true; break; }
     await page.waitForTimeout(100);
   }
   assert.ok(ready);
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const before = await readRun(page, '/run');
   const prompt = 'R2_NATIVE_RESULT：验证原生退出记录。';
   await input.evaluate((element, value) => { const transfer = new DataTransfer(); transfer.setData('text/plain', value); element.dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true })); }, prompt);
   await expect.poll(screen).toContain(prompt); await input.press('Enter');
@@ -58,8 +65,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
     assert.ok(Buffer.byteLength(text, 'utf8') <= 65536);
     assert.ok(text.includes('[已脱敏]'));
     assert.equal(await card.locator('.wb-tool-result pre').evaluate(element => element.scrollHeight > element.clientHeight && ['auto', 'scroll'].includes(getComputedStyle(element).overflowY)), true);
-    assert.equal(await page.evaluate(async () => {
-      const data = JSON.stringify(await (await fetch('/workbench/v1/live/snapshot')).json());
+    assert.equal(await readRun(page, '/live/snapshot').then(value => {
+      const data = JSON.stringify(value);
       return data.includes('r2-output-credential') || data.includes('synthetic-field-value');
     }), false);
   }
@@ -67,7 +74,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   await expect(card).toHaveAttribute('data-execution', 'failed');
   await expect(messages.locator('.wb-tool-card')).toHaveCount(polled ? 2 : 1);
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, before.processId); assert.equal(after.runEpoch, before.runEpoch);
   await card.getByRole('button', { name: '调用详情', exact: true }).click();
   const records = page.locator('.wb-native-commands').first();

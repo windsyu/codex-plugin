@@ -6,6 +6,8 @@
 
 开发/CI 基线固定为 Rust 1.95.0（含 rustfmt、Clippy）和 Node 22.23.2，不据此声明最低支持 Rust 版本。macOS 原生目录助手需要 Apple SDK/Clang。首次准备运行 `node scripts/dev.mjs doctor` 和 `node scripts/dev.mjs bootstrap`；依赖安装使用 `npm ci --prefix web`，Cargo 使用 `--locked`，不能为通过检查偷偷更新锁文件。
 
+工作区搜索及其常规测试需要 PATH 中存在 ripgrep（`rg`）；macOS 可运行 `brew install ripgrep` 安装。CI 在检查前显式安装缺失的 ripgrep 并输出版本，避免依赖 runner 镜像的预装工具。
+
 从仓库根目录执行：
 
 | 命令（前缀均为 `node scripts/dev.mjs`） | 用途 |

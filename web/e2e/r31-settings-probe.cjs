@@ -1,3 +1,4 @@
+const { readRun } = require('./workbench-api.cjs');
 const { expect } = require('playwright/test');
 const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
@@ -17,7 +18,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   await expect(page.locator('.wb-model-message')).toHaveCount(20);
   const terminal = await page.locator('.xterm-helper-textarea').elementHandle();
-  const before = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const before = await readRun(page, '/run');
   const url = page.url();
   await page.locator('.wb-message-list').evaluate(e => { e.scrollTop = 200; e.dispatchEvent(new Event('scroll')); });
   const scroll = await page.locator('.wb-message-list').evaluate(e => e.scrollTop);
@@ -32,7 +33,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(panel.getByLabel('Codex 启动配置', { exact: true })).toBeHidden();
   await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeInViewport();
   await expect(panel.locator('select')).toHaveCount(0);
-  const settings = await page.evaluate(async () => (await (await fetch('/workbench/v1/settings')).json()).settings);
+  const settings = await readRun(page, '/settings').then(value => value.settings);
   await expect(panel).not.toContainText(settings.configPath);
   await expect(panel.locator('.wb-settings-locations')).toContainText(`${settings.effectiveDataDir}/runs`);
   await panel.getByText('本次运行日志的位置', { exact: true }).click();
@@ -137,7 +138,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await panel.getByRole('button', { name: '保存', exact: true }).click();
   await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
   await expect.poll(async () => {
-    const value = await page.evaluate(async () => (await fetch('/workbench/v1/history/cleanup/jobs')).json());
+    const value = await readRun(page, '/history/cleanup/jobs');
     return value.result.jobs.some(job => job.mode === 'retention' && job.status === 'complete' && job.items.some(item => item.state === 'deleted'));
   }, { timeout: 10000 }).toBe(true);
   await expect(panel).toContainText('自动保留 1 天', { timeout: 10000 });
@@ -160,7 +161,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
     await panel.getByRole('button', { name: '收起', exact: true }).click();
   }
   assert.equal(inputFrames, 0, 'settings operations never submit native input');
-  const after = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const after = await readRun(page, '/run');
   assert.equal(after.processId, before.processId); assert.equal(after.runEpoch, before.runEpoch);
   assert.ok(await terminal.evaluate(e => e.isConnected), 'same terminal node');
   await page.locator('.xterm-helper-textarea').pressSequentially('SETTINGS_KEEPS_NATIVE_INPUT');

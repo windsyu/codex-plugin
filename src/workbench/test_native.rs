@@ -110,7 +110,37 @@ impl NativeProbe {
         }
         Ok(Some(at))
     }
+    fn cursor_is_in_prompt(&self) -> bool {
+        let screen = self.terminal.screen();
+        let (row, column) = screen.cursor_position();
+        !screen.hide_cursor()
+            && column > 0
+            && screen
+                .rows(0, screen.size().1)
+                .nth(usize::from(row))
+                .is_some_and(|line| line.trim_start().starts_with('›'))
+    }
+    fn readiness_diagnostics(&self) -> serde_json::Value {
+        let screen = self.screen();
+        serde_json::json!({
+            "welcome":screen.contains("OpenAI Codex"),
+            "promptLine":screen.lines().any(|line| line.trim_start().starts_with('›')),
+            "theme":screen.contains("Choose your style") || screen.contains("Select a theme"),
+            "trust":screen.contains("Do you trust") || screen.contains("Do you want to work") || screen.contains("Trust this folder?"),
+            "folderAccess":screen.contains("Folder access"),
+            "modelNotice":screen.contains("Try new model") && screen.contains("Use existing model"),
+            "existingModelSelected":screen.lines().any(|line| {
+                let line = line.trim_start();
+                (line.starts_with('›') || line.starts_with('>')) && line.contains("Use existing model")
+            }),
+            "cursor":self.terminal.screen().cursor_position(),
+            "cursorInPrompt":self.cursor_is_in_prompt(),
+        })
+    }
     pub async fn ready(&mut self) -> Result<()> {
+        let mut model_notice_handled = false;
+        let mut model_notice_at = None;
+        let mut model_selection_sent = false;
         let mut themed = false;
         let mut trusted = false;
         let mut ready_at = None;
@@ -118,7 +148,27 @@ impl NativeProbe {
             loop {
                 self.pump().await?;
                 let screen = self.screen();
-                if !themed
+                if !self.cursor_is_in_prompt() {
+                    ready_at = None;
+                }
+                if screen.contains("Try new model") && screen.contains("Use existing model") {
+                    let settled = model_notice_at.get_or_insert_with(Instant::now).elapsed()
+                        >= Duration::from_millis(300);
+                    if settled && !model_selection_sent {
+                        model_selection_sent = true;
+                        self.write(b"\x1b[B")?;
+                    } else if model_selection_sent
+                        && !model_notice_handled
+                        && screen.lines().any(|line| {
+                            let line = line.trim_start();
+                            (line.starts_with('›') || line.starts_with('>'))
+                                && line.contains("Use existing model")
+                        })
+                    {
+                        model_notice_handled = true;
+                        self.write(b"\r")?;
+                    }
+                } else if !themed
                     && (screen.contains("Choose your style") || screen.contains("Select a theme"))
                 {
                     self.write(b"\r")?;
@@ -132,16 +182,22 @@ impl NativeProbe {
                     self.write(b"\r")?;
                     trusted = true;
                 } else if screen.contains("OpenAI Codex")
-                    && screen.contains('›')
+                    && self.cursor_is_in_prompt()
                     && ready_at.get_or_insert_with(Instant::now).elapsed()
                         >= Duration::from_millis(250)
                 {
+                    println!("NATIVE_READY {}", self.readiness_diagnostics());
                     return Ok::<_, anyhow::Error>(());
                 }
             }
         })
         .await
-        .map_err(|_| anyhow::anyhow!("native readiness deadline; raw screen suppressed"))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "native readiness deadline; {}",
+                self.readiness_diagnostics()
+            )
+        })?
     }
     pub async fn submit(&mut self, prompt: &str) -> Result<()> {
         let pasted_at = Instant::now();
@@ -157,7 +213,12 @@ impl NativeProbe {
             }
         })
         .await
-        .map_err(|_| anyhow::anyhow!("native draft not displayed; no Enter sent"))??;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "native draft not displayed; no Enter sent; {}",
+                self.readiness_diagnostics()
+            )
+        })??;
         self.write(b"\r")
     }
     pub async fn quit(&mut self) -> Result<()> {

@@ -1,3 +1,4 @@
+const { readRun, runApiPath } = require('./workbench-api.cjs');
 const { openCalls, closeCalls } = require('./call-inspector.cjs');
 // Synthetic decoder/PTY fixture, using the real workbench UI in installed Chrome.
 const { expect } = require('playwright/test');
@@ -11,7 +12,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   browser = await chromium.launch({ executablePath: process.env.WORKBENCH_TEST_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } }); page.setDefaultTimeout(10000);
   let errors = 0, snapshotReads = 0; page.on('pageerror', () => errors++);
-  page.on('request', request => { if (new URL(request.url()).pathname === '/workbench/v1/live/snapshot') snapshotReads++; });
+  page.on('request', request => { if (new URL(request.url()).pathname === runApiPath(process.env.WORKBENCH_PROBE_URL, '/live/snapshot')) snapshotReads++; });
   await page.addInitScript(() => {
     const NativeEventSource = window.EventSource;
     window.dropNextReadingTextPatch = false;
@@ -39,8 +40,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(model).toContainText('R2_IDENTITY_PARTIAL');
   await expect(tool).toContainText('echo partial');
   const modelNode = await model.elementHandle(), toolNode = await tool.elementHandle();
-  const snapshotBefore = await page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
-  const runBefore = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const snapshotBefore = await readRun(page, '/live/snapshot');
+  const runBefore = await readRun(page, '/run');
   await tool.locator('summary').first().press('Enter');
   await page.locator('.xterm-helper-textarea').focus();
   const readsBeforeGap = snapshotReads;
@@ -62,7 +63,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(tool.locator('details').first()).toHaveAttribute('open', '');
   await expect(page.locator('.xterm-helper-textarea')).toBeFocused();
   await expect(tool).toContainText('尚未观察到执行');
-  const snapshotAfter = await page.evaluate(async () => (await fetch('/workbench/v1/live/snapshot')).json());
+  const snapshotAfter = await readRun(page, '/live/snapshot');
   assert.equal(snapshotAfter.schemaVersion, 2);
   assert.equal(snapshotAfter.tools, undefined); assert.equal(snapshotAfter.userMessages, undefined);
   assert.deepEqual(snapshotAfter.items.map(item => item.itemKey), snapshotBefore.items.map(item => item.itemKey));
@@ -71,8 +72,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await closeCalls(page);
   await expect(tool.locator('details').first()).toHaveAttribute('open', '');
   stage = 'refresh';
-  await page.route('**/workbench/v1/live/snapshot', async route => {
-    const response = await route.fetch(); const value = await response.json();
+  await page.route(url => url.pathname === runApiPath(process.env.WORKBENCH_PROBE_URL, '/live/snapshot'), async route => {
+    const response = await route.fetch(); assert.ok(response.ok(), "snapshot interception must read a successful response"); const value = await response.json();
     value.items.push({ kind: 'future_unrecognized', itemKey: 'future:item', revision: 1, orderIndex: value.viewSeq + 1, payload: '<img src=x onerror="window.unknownExecuted=1">PRIVATE_UNKNOWN_PAYLOAD' });
     await route.fulfill({ response, json: value });
   });
@@ -82,7 +83,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   assert.equal(await page.evaluate(() => window.unknownExecuted), undefined);
   await expect(model).toHaveCount(1); await expect(tool).toHaveCount(1);
   await expect(model).toContainText('R2_IDENTITY_FINAL'); await expect(tool).toContainText('echo final');
-  const runAfter = await page.evaluate(async () => (await fetch('/workbench/v1/run')).json());
+  const runAfter = await readRun(page, '/run');
   assert.equal(runAfter.processId, runBefore.processId); assert.equal(runAfter.runEpoch, runBefore.runEpoch);
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.identity.png`, fullPage: true });
   assert.equal(errors, 0);
