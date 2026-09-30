@@ -25,6 +25,51 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+// These exact values are native onboarding writes observed in 0.156.1 and
+// 0.159.2. Everything else remains in the full profile equality assertion.
+fn remove_known_native_onboarding(profile: &mut toml::Value) {
+    let Some(tui) = profile.get_mut("tui").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    if tui.get("screen_reader_detection_done") == Some(&toml::Value::Boolean(true)) {
+        tui.remove("screen_reader_detection_done");
+    }
+    let known_notice: toml::Value = toml::from_str("\"gpt-6.1-sol\" = 1").unwrap();
+    if tui.get("model_availability_nux") == Some(&known_notice) {
+        tui.remove("model_availability_nux");
+    }
+    if tui.is_empty() {
+        profile.as_table_mut().unwrap().remove("tui");
+    }
+}
+
+#[test]
+fn native_onboarding_allowance_keeps_other_profile_changes_visible() {
+    let original: toml::Value = toml::from_str("model = 'original'").unwrap();
+    for onboarding in [
+        "screen_reader_detection_done = true",
+        "model_availability_nux = { 'gpt-6.1-sol' = 1 }",
+        "screen_reader_detection_done = true\nmodel_availability_nux = { 'gpt-6.1-sol' = 1 }",
+    ] {
+        let mut profile =
+            toml::from_str(&format!("model = 'original'\n[tui]\n{onboarding}")).unwrap();
+        remove_known_native_onboarding(&mut profile);
+        assert_eq!(profile, original);
+    }
+    for changed in [
+        "model = 'changed'\n[tui]\nmodel_availability_nux = { 'gpt-6.1-sol' = 1 }",
+        "model = 'original'\n[model_providers.custom]\nbase_url = 'http://changed.invalid'",
+        "model = 'original'\n[tui]\nscreen_reader_detection_done = false",
+        "model = 'original'\n[tui]\nmodel_availability_nux = { 'gpt-6.1-sol' = 2 }",
+        "model = 'original'\n[tui]\nmodel_availability_nux = { 'gpt-6.1-sol' = 1, 'unexpected' = 1 }",
+        "model = 'original'\n[tui]\nmodel_availability_nux = { 'gpt-6.1-sol' = 1 }\nanimations = false",
+    ] {
+        let mut profile = toml::from_str(changed).unwrap();
+        remove_known_native_onboarding(&mut profile);
+        assert_ne!(profile, original, "unexpected profile change was hidden");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires freshly built codex-view and installed CLI; no model requests"]
 async fn closing_launch_terminal_cleans_native_cli_listener_and_entry() {
@@ -377,18 +422,7 @@ experimental_bearer_token="synthetic-launcher-project"
     // Native trust is written by the CLI into the selected named profile.
     assert!(saved_profile["projects"].as_table().is_some());
     saved_profile.as_table_mut().unwrap().remove("projects");
-    // CLI 0.156.1 records this native onboarding result. Permit only this
-    // exact boolean; additional TUI/profile changes must still fail equality.
-    if let Some(tui) = saved_profile.get_mut("tui") {
-        let tui = tui.as_table_mut().unwrap();
-        assert_eq!(
-            tui.remove("screen_reader_detection_done"),
-            Some(toml::Value::Boolean(true))
-        );
-        if tui.is_empty() {
-            saved_profile.as_table_mut().unwrap().remove("tui");
-        }
-    }
+    remove_known_native_onboarding(&mut saved_profile);
     assert_eq!(
         saved_profile,
         toml::from_str::<toml::Value>(&profile).unwrap()

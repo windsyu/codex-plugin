@@ -311,6 +311,7 @@ async fn version_probe_accepts_other_releases_and_prereleases_without_an_allowli
     for release in [
         "0.155.1",
         "0.156.0",
+        "0.159.2",
         "1.0.0",
         "0.155.0-alpha.1",
         "0.155.1+build.42",

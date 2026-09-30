@@ -1298,6 +1298,9 @@ fn source_error(source: &Source, code: &str, count: u64) -> SourceStatus {
 #[cfg(test)]
 mod scale_tests;
 
+#[cfg(all(test, target_os = "macos"))]
+mod resource_tests;
+
 #[cfg(test)]
 mod fault_tests;
 

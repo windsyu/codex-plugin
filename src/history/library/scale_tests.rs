@@ -7,10 +7,10 @@ use std::{
     path::Path,
 };
 
-fn emit(stage: &str, value: Value) {
+pub(super) fn emit(stage: &str, value: Value) {
     println!("R6_G1 {}", json!({"stage":stage,"data":value}));
 }
-fn resources() -> Value {
+pub(super) fn resources() -> Value {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
     let seconds = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
@@ -20,7 +20,7 @@ fn resources() -> Value {
     let rss = usage.ru_maxrss as u64 * 1024;
     json!({"processCpuSeconds":seconds(usage.ru_utime)+seconds(usage.ru_stime),"processLifetimePeakRssBytes":rss,"scope":"test process including fixture generation; not separate worker CPU","queuePeak":null,"browserHeap":null,"browserDom":null,"paint":null})
 }
-fn disk(path: &Path) -> u64 {
+pub(super) fn disk(path: &Path) -> u64 {
     walkdir::WalkDir::new(path)
         .into_iter()
         .filter_map(|v| v.ok())
@@ -61,7 +61,7 @@ pub(super) fn generate_fixture(base: &Path, count: usize) -> (PathBuf, Value) {
     )
 }
 
-fn start(home: &Path, data: &Path, config: LibraryConfig) -> HistoryLibrary {
+pub(super) fn start(home: &Path, data: &Path, config: LibraryConfig) -> HistoryLibrary {
     HistoryLibrary::with_policy(
         home.into(),
         data.into(),
@@ -69,7 +69,7 @@ fn start(home: &Path, data: &Path, config: LibraryConfig) -> HistoryLibrary {
     )
     .unwrap()
 }
-async fn published(library: &HistoryLibrary, deadline_seconds: u64) -> bool {
+pub(super) async fn published(library: &HistoryLibrary, deadline_seconds: u64) -> bool {
     let start = Instant::now();
     let mut report = Instant::now();
     loop {
@@ -135,6 +135,11 @@ async fn run(sessions: usize, full: bool) {
         json!({"elapsedMs":cold_ms,"result":cold.as_ref().map(|v|json!({"revision":v["revision"],"rows":v["records"].as_array().map(Vec::len),"coverage":v["coverage"]})),"scope":"API responsiveness only; not browser interactivity"}),
     );
     let ready = published(&library, 900).await;
+    #[cfg(target_os = "macos")]
+    emit(
+        "publication_worker_cpu",
+        super::resource_tests::workers(&library),
+    );
     emit(
         "publication",
         json!({"ready":ready,"elapsedMs":at.elapsed().as_millis(),"sources":handle.statuses(),"derivedBytes":disk(&data),"resources":resources()}),
@@ -258,6 +263,8 @@ async fn run(sessions: usize, full: bool) {
         ),
     ];
     let mut metadata_ok = true;
+    #[cfg(target_os = "macos")]
+    let query_cpu_before = super::resource_tests::workers(&library);
     for (name, q, p) in cases {
         let result = measured(&handle, q, p, 30).await;
         if !name.starts_with("search")
@@ -268,6 +275,11 @@ async fn run(sessions: usize, full: bool) {
         }
         emit(name, result);
     }
+    #[cfg(target_os = "macos")]
+    emit(
+        "warm_query_worker_cpu",
+        json!({"before":query_cpu_before,"after":super::resource_tests::workers(&library),"scope":"six sequential query groups, 30 calls each; lifetime counters, subtract before from after"}),
+    );
     // Explicit queued cancellation: cancellation is observed by the production worker,
     // and next-request recovery is measured separately from task abort delivery.
     let cancel_at = Instant::now();
@@ -332,6 +344,8 @@ async fn run(sessions: usize, full: bool) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     let old_revision = first["revision"].clone();
+    #[cfg(target_os = "macos")]
+    let rescan_cpu_before = super::resource_tests::workers(&library);
     handle.refresh().await.unwrap();
     let changed_generation = loop {
         if native_generation()
@@ -346,6 +360,11 @@ async fn run(sessions: usize, full: bool) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let rescan = changed_generation && published(&library, 900).await;
+    #[cfg(target_os = "macos")]
+    emit(
+        "rescan_worker_cpu",
+        json!({"before":rescan_cpu_before,"after":super::resource_tests::workers(&library),"scope":"unchanged refresh through committed generation; subtract lifetime counters"}),
+    );
     let after = handle.list(Query::default(), false).await.unwrap();
     emit(
         "unchanged_rescan",
