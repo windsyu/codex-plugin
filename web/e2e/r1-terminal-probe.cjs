@@ -6,6 +6,7 @@ const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
 let browser, diagnosticPage, diagnosticFaults = 0, stage = 'launch';
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+const pngPath = prefix => prefix.endsWith('.png') ? prefix : `${prefix}.png`;
 
 setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, 85000).unref();
 const text = page => page.locator('.xterm-rows').innerText();
@@ -192,7 +193,7 @@ async function paste(page, value) {
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) {
     stage = 'responsive-screenshot';
     await second.locator('.wb-message-list').evaluate(element => { element.scrollTop = 0; });
-    await second.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.png`, fullPage: true });
+    await second.screenshot({ path: pngPath(process.env.WORKBENCH_PROBE_SCREENSHOT), fullPage: true });
   }
   stage = 'native-exit';
   await second.locator('.xterm-helper-textarea').press('Control+u'); await second.waitForTimeout(200);

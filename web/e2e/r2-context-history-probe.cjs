@@ -5,9 +5,10 @@ const { chromium, close } = require('./browser-lifecycle.cjs');
 const assert = require('node:assert/strict');
 let browser, page, stage = 'launch';
 const resumed = process.env.WORKBENCH_PROBE_RESUMED === 'true';
+const rejected = process.env.WORKBENCH_PROBE_REJECTED === 'true';
 const report = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 
-async function screenshot(name) { if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${resumed ? 'resume' : 'fork'}.${name}.png`, fullPage: true }); }
+async function screenshot(name) { if (page && process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${rejected ? 'rejected' : resumed ? 'resume' : 'fork'}.${name}.png`, fullPage: true }); }
 setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' }); close(1); }, 60000).unref();
 const PROMPT = 'R2_CONTEXT_INPUT：同一句提交，保留合成上下文。';
 (async () => {
@@ -15,6 +16,36 @@ const PROMPT = 'R2_CONTEXT_INPUT：同一句提交，保留合成上下文。';
   page = await browser.newPage({ viewport: { width: 1600, height: 1000 } }); page.setDefaultTimeout(12000);
   let errors = 0; page.on('pageerror', () => errors++);
   await page.goto(process.env.WORKBENCH_PROBE_URL);
+  if (rejected) {
+    stage = 'inherited-resume-rejected';
+    await expect(page.getByRole('alert')).toContainText('这条会话包含尚未验证的继承历史，暂不能从此处恢复。首页仍可使用。');
+    await expect(page.locator('.wb-terminal')).toHaveCount(0);
+    const state = await page.evaluate(async () => {
+      const response = await fetch('/workbench/v1/application');
+      if (!response.ok) throw new Error('application read failed');
+      return response.json();
+    });
+    assert.equal(state.launchError, 'resume_history_unsupported');
+    assert.deepEqual(state.runs, []);
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await expect(page.locator('.wb-settings-panel')).toBeVisible();
+    await page.locator('.wb-settings-panel').getByRole('button', { name: '收起', exact: true }).click();
+    stage = 'rejected-history-still-readable';
+    await page.getByLabel('历史来源筛选').selectOption('default-native');
+    await page.getByLabel('搜索会话和消息').fill('R2_CONTEXT_REPLY_3');
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await expect(page.locator('.wb-library-entry')).toHaveCount(1);
+    await page.locator('.wb-library-entry').click();
+    await expect(page.getByRole('region', { name: '历史会话阅读' })).toBeVisible();
+    await expect(page.locator('.wb-library-body-scroll')).toContainText('R2_CONTEXT_REPLY_3');
+    await expect(page.getByRole('button', { name: '继续此会话', exact: true })).toHaveCount(0);
+    await expect(page.locator('.wb-terminal')).toHaveCount(0);
+    await screenshot('home-available');
+    assert.equal(errors, 0);
+    report({ stage: 'complete', rejected: true, runs: 0, homeAvailable: true, historyReadable: true, pageErrors: errors, browser: browser.version() });
+    await close(0);
+    return;
+  }
   const terminal = page.locator('.wb-terminal'), input = page.locator('.xterm-helper-textarea');
   const screen = () => page.locator('.xterm-rows').innerText();
   const snapshot = () => readRun(page, '/live/snapshot');
@@ -37,7 +68,7 @@ const PROMPT = 'R2_CONTEXT_INPUT：同一句提交，保留合成上下文。';
   assert.ok(ready); const before = await run();
   const messages = page.locator('.wb-message-list');
   const users = messages.locator('[data-role="user"]'), models = messages.locator('[data-role="assistant"]');
-  if (resumed) await expect.poll(screen).toContain('R2_CONTEXT_REPLY_3');
+  if (resumed) await expect.poll(screen).toContain('R2_CONTEXT_REPLY_2');
   await page.waitForTimeout(400);
   assert.equal((await snapshot()).requests.filter(request => request.purpose === 'conversation').length, 0);
   await expect(users).toHaveCount(0);
