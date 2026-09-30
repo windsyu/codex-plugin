@@ -1,8 +1,8 @@
 # Codex Local Gateway
 
-本机原生 Codex 工作台：当前目录启动普通官方 CLI 与 PTY，模型 HTTP/SSE/WS 代理提供实时阅读，网页直接推送，后台异步记录。原生终端负责输入、审批、追问和模型/权限设置。
+本机原生 Codex 工作台：先阅读全部历史，再明确选择项目启动普通官方 CLI 与 PTY；模型 HTTP/SSE/WS 代理提供实时阅读，网页直接推送，后台异步记录。原生终端负责输入、审批、追问和模型/权限设置。
 
-默认入口 `codex-view` 打开全部历史首页，浏览历史不创建 CLI。核验项目后可明确开始新对话或继续原生会话；工作台提供对话与工具阅读、调用详情、用量、文件/搜索/Git、手机配对和最多 4 个项目并行。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令。
+默认入口 `codex-view` 打开全部历史首页，浏览历史不创建 CLI。核验项目后可明确开始新对话或继续可恢复的原生会话；工作台提供对话与工具阅读、调用详情、用量、文件/搜索/Git、手机配对和最多 4 个项目并行。返回首页或关闭网页保留运行，停止项目只结束其 CLI，退出启动器结束全部自有运行。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令。
 
 ## 支持范围
 
@@ -22,7 +22,7 @@ node scripts/dev.mjs build
 <repository>/target/debug/codex-view --project .
 ```
 
-运行项目需已安装并配置官方 Codex CLI。构建先生成 Web 资源，再编译两个 Rust 入口，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`；常规检查使用 `node scripts/dev.mjs check`。详情见[开发指南](docs/development/README.md)。
+浏览首页不要求安装 CLI；开始项目需已安装并配置官方 Codex CLI。工作台默认配置和记录位于 `~/.codex-web`，独立于原生 `CODEX_HOME`。构建先生成 Web 资源，再编译两个 Rust 入口，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`；常规检查使用 `node scripts/dev.mjs check`。详情见[开发指南](docs/development/README.md)。
 
 ## 文档与参与
 

@@ -2,9 +2,9 @@
 
 > 日期：2026-09-18；按用户完全重构授权改写。进度与逐片验收统一见 [V2 实施计划](v2-implementation-plan.md)。
 > 上位方案：[工作台方案](codex-native-cli-workbench.md)；决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)。
-> 本文包含目标契约与已验证的实现说明；只有明确链接验收证据的部分才表示已接入，完整 V2 仍未交付。
+> 本文包含目标契约与已验证的实现说明；本地交付验收与用户确认以实施计划为准，只有明确链接验收证据的部分才表示已接入；不据此扩大支持范围或宣称正式版本已发布。
 
-2026-09-22 新增的 [R6 历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。其中 A–D 已实现独立只读 reader、无 CLI 首页、目录/搜索/来源登记及三类历史阅读；E 已实现网页目录启动、显式原生恢复、操作查询与 Run 范围客户端路由，当前已完成本片验证。生产入口按 Application 身份配对，F 扩展为最多 4 个活动 Run；每 Run 明确寻址，手机共用设备 listener 与地址目录而不共享授权。本文件下述 Run 数据契约继续适用，默认启动与认证以 [R6-B 验证](validation/native-cli-r6-b-application-2026-09-22.md)为准，E 的报告[验证记录](validation/native-cli-r6-e-launch-2026-09-22.md)；schema 25 已可显式登记为只读来源，真实正文抽查及规模验收仍待 G。
+2026-09-22 新增的 [R6 历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。其中 A–D 已实现独立只读 reader、无 CLI 首页、目录/搜索/来源登记及三类历史阅读；E 已实现网页目录启动、显式原生恢复、操作查询与 Run 范围客户端路由。生产入口按 Application 身份配对，F 已实现最多 4 个活动 Run；每 Run 明确寻址，手机共用设备 listener 与地址目录而不共享授权，F.1 已修正项目归属与恢复校验的混用。本文件下述 Run 数据契约继续适用，默认启动与认证见 [R6-B 验证](validation/native-cli-r6-b-application-2026-09-22.md)，网页启动见[R6-E 验证](validation/native-cli-r6-e-launch-2026-09-22.md)。schema 25 可显式登记为只读来源；G1 的[规模与故障](validation/native-cli-r6-g-scale-2026-09-24.md)及[资源补充](validation/native-cli-r6-g1-resources-2026-09-30.md)、G2 的[隔离验证](validation/native-cli-r6-g2-isolation-2026-09-25.md)与 G3 的[限定旧库抽查及兼容回归](validation/native-cli-r6-g3-compatibility-2026-09-29.md)已有分项证据，完整 R6 交付和用户试用仍以实施计划为准。
 
 前端视觉与交互基准见[方案 §1.1–1.4](codex-native-cli-workbench.md#ui-prototype)及[交互原型](prototypes/native-cli-workbench.html)。原型使用合成数据；聊天角色、内容类型、原生终端生命周期、数据来源与异常状态仍以下述契约为准。
 
@@ -47,11 +47,11 @@ codex-view open <private-entry-file>
 
 R3.1 已接入独立工作台 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](codex-native-cli-workbench-history-settings.md#2-配置目录与文件契约)；增量验证与后续清理任务见实施计划。
 
-生命周期分别处理：关闭网页仅断开 UI；原生 CLI 退出或 `POST /workbench/v1/run/stop` 停止本次子进程后，终端显示已结束，内存阅读与配对入口继续可用；启动器收到 SIGINT/SIGTERM/SIGHUP、装配失败或关键运行线程意外退出才清理其启动的 CLI 进程组、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell。首版不做 daemon 脱离和 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。[R5 退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)记录了实际信号回归及测试浏览器回收范围。
+生命周期分别处理：返回首页或关闭网页不停止 CLI；原生 CLI 退出或 `POST /workbench/v1/runs/{runId}/stop` 停止本次子进程后，终端显示已结束，电脑保留有界内存阅读，该 Run 的设备许可撤销且不能重新开启。某个 Run 的代理或关键运行线程故障只回收该 Run；启动失败只清理本次部分资源，其余 Run 和首页继续可用。启动器收到 SIGINT/SIGTERM/SIGHUP，或 Application 本身关键线程异常退出时，才回收全部自有 Run、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell；应用重启不自动恢复 Run。首版不做 daemon 脱离和 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。[R5 退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)与[R6-F 验证](validation/native-cli-r6-f-multi-project-2026-09-23.md)记录实际信号和多 Run 退出范围。
 
-默认私有入口为系统临时目录下的 `codex-view-<epoch>/entry.json`（目录 0700、文件 0600），也可用 `--entry-file` 指定尚不存在的文件。配对 capability 仅写此文件，经系统浏览器打开；普通输出为安全地址、epoch、CLI PID、`cliVersion` 与文件位置。`open` 只接受当前 OS 用户拥有、无组/其他权限的普通文件，拒绝符号链接、超限文件和非 loopback/非法配对 URL。清理仅删除仍匹配原 inode/device 的自有文件及空的自有目录；异常被杀后的残留文件不是持久历史或服务存活证据。
+默认私有入口为 `~/.codex-web/runtime/<scope>/instance.json`，scope 绑定有效配置目录和数据根；目录 0700、文件 0600。Application entry v2 使用 instanceId 和可选目标 runId，首页不携带旧格式的 runEpoch/cliPid；`--entry-file` 可将同一入口另写到用户指定的尚不存在文件，不替换实例发现文件。配对 capability 仅写私有入口，经系统浏览器打开；普通首页 ready 输出只有安全地址、instanceId 与文件位置，明确项目就绪后才另输出 Run/PID/cliVersion。`open` 同时接受 v1/v2，只读当前 OS 用户拥有、无组/其他权限的普通文件，拒绝符号链接、超限文件和非 loopback/非法配对 URL；可选 runId 必须与 URL 一致。清理仅删除仍匹配原 inode/device 的自有入口及空的自有目录，instance.lock 保留相同文件身份；异常被杀后的残留文件不是持久历史或服务存活证据。同配置/数据根重复启动通过锁和实例握手复用应用，不根据 PID 杀进程。
 
-按 [ADR 0045](decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
+按 [ADR 0045](decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。当前诊断的受测版本为 0.154.0、0.155.1、0.156.1 和 0.159.2，后两者分别有[R6-F](validation/native-cli-r6-f-multi-project-2026-09-23.md)及[G4 版本回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)证据，均不作为准入锁。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
 
 目录就是 workspace 根。网页打开目录不改变 CLI cwd，原生导航也不自动扩大文件读取根。需要其他目录时新建一次运行。浏览器刷新、切面板或重新获得输入权不重新 spawn。
 
@@ -424,20 +424,20 @@ interface NativeFileChange {
 ### 5.1 新 API 与实时契约
 
 ```text
-GET  /workbench/v1/run
-GET  /workbench/v1/live/snapshot
-GET  /workbench/v1/live/events?epoch=<runEpoch>&after=<viewSeq>
-GET  /workbench/v1/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>
-GET  /workbench/v1/history?cursor=<opaque>
-GET  /workbench/v1/history/{runEpoch}?before=<viewSeq>
-GET  /workbench/v1/history/{runEpoch}/requests/{requestId}?cursor=<opaque>&before=<viewSeq>
-WS   /workbench/v1/terminal?epoch=<runEpoch>
-POST /workbench/v1/run/stop
+GET  /workbench/v1/runs/{runId}/run
+GET  /workbench/v1/runs/{runId}/live/snapshot
+GET  /workbench/v1/runs/{runId}/live/events?epoch=<runEpoch>&after=<viewSeq>
+GET  /workbench/v1/runs/{runId}/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>
+GET  /workbench/v1/runs/{runId}/history?cursor=<opaque>
+GET  /workbench/v1/runs/{runId}/history/{runEpoch}?before=<viewSeq>
+GET  /workbench/v1/runs/{runId}/history/{runEpoch}/requests/{requestId}?cursor=<opaque>&before=<viewSeq>
+WS   /workbench/v1/runs/{runId}/terminal?epoch=<runEpoch>
+POST /workbench/v1/runs/{runId}/stop
 ```
 
-控制接口只服务当前 Run；历史接口读取当前项目的已保存 Run。初版没有网页创建任意 CLI、通用 shell 或 JSON-RPC 透传路由。当前 mutation 包括输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验配对身份、Origin/CSRF 和本次 runEpoch，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。R3.1 已接入工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，完整契约见[管理 API](codex-native-cli-workbench-history-settings.md#62-管理接口契约)。
+运行接口明确绑定 URL 中的 Run；其中 history 读取该项目的已保存 Run。Application 不再提供无 Run 前缀的运行路径，即使只有一个项目也返回 404；内部独立 ReadingServer 的测试/兼容路径不作为产品公开别名。网页项目启动与显式恢复通过 Application 的 launch-targets/runs/launch-operations，具体契约见[R6 启动接口](codex-native-cli-workbench-history-home.md#62-启动接口与同源-run-寻址)，没有通用 shell 或 JSON-RPC 透传。当前 mutation 包括目录核验后的明确启动、输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验对应作用域的配对身份、Origin/CSRF 和实例/Run 身份，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。R3.1 已接入工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，其[管理 API](codex-native-cli-workbench-history-settings.md#62-管理接口契约)在产品中同样置于 Run 前缀，共享设置仅电脑 owner 可用，全局 library 保持只读。
 
-终端接入时将原草案的 claim/release/takeover 三个 POST 收敛为上述 WebSocket 内的类型化消息，原因是操作必须绑定实际终端连接，私有 grant 也只应回给该连接；不增加用于跨 HTTP 请求认领连接的第二套 token。尚未发布的 POST 草案没有兼容消费者，旧 `/v1`、`/v2` 不变。运行停止仍为 HTTP POST，JSON body 为 `{ "epoch": "<runEpoch>" }`。
+终端接入时将原草案的 claim/release/takeover 三个 POST 收敛为上述 WebSocket 内的类型化消息，原因是操作必须绑定实际终端连接，私有 grant 也只应回给该连接；不增加用于跨 HTTP 请求认领连接的第二套 token。尚未发布的 POST 草案没有兼容消费者；旧 `/v1` 仍只读，旧 `/v2` 已退役并返回 404。运行停止仍为 HTTP POST，JSON body 为 `{ "epoch": "<runEpoch>" }`。
 
 ```ts
 interface LiveSnapshot {
@@ -476,7 +476,7 @@ Recorder 健康与保存水位作为同一连接的独立 `recorder.status` 控�
 
 正式 Launcher 已接入 R3 Recorder。底栏优先显示 §5.1.2 的用户用量与简短保存状态，保存异常/历史缺失不被折叠；水位与技术故障说明位于“诊断详情”。`saved` 只表示已观察副本已确认保存，不代表捕获完整或整个任务结束。未安装记录器的旧 R0/R1 合成演示仍为 `disabled`。恢复后连续水位与新分段水位分开，底栏显示“历史有缺失”，诊断中保留原“已保存 · 曾有缺口”。上下文文档也参与待保存判断，即使 viewSeq 没有增加也不能提前显示已保存。
 
-当前快照的 `schemaVersion=2`，`items: ViewItem[]` 是唯一消息/工具/notice 列表；另含 requests、responses、diagnostics、userCapture、toolContexts、nativeCommands、nativeFileChanges 这些来源和状态数据。旧 tools/userMessages 数组已移除。`/workbench/v1/run` 的 scope 为 typed-conversation-items，并返回 readingSchemaVersion=2 及 `historyAvailable`。未发布的 R1/R2 阅读契约在本次同步升级，旧 `/v1` 不受影响；旧页面应刷新加载新脚本。
+当前快照的 `schemaVersion=2`，`items: ViewItem[]` 是唯一消息/工具/notice 列表；另含 requests、responses、diagnostics、userCapture、toolContexts、nativeCommands、nativeFileChanges 这些来源和状态数据。旧 tools/userMessages 数组已移除。`/workbench/v1/runs/{runId}/run` 的 scope 为 typed-conversation-items，并返回 readingSchemaVersion=2 及 `historyAvailable`。未发布的 R1/R2 阅读契约在本次同步升级，旧 `/v1` 不受影响；旧页面应刷新加载新脚本。
 
 SSE 的 view envelope 保留 runEpoch/viewSeq/requestId/captureSeq。项目内容只使用以下封闭变体：
 
@@ -505,7 +505,7 @@ rollout 原生事件顶层 requestId=null，不伪造网络 ID。所有项目与
 
 #### 5.1.1 R2 按需上下文与响应用量（已实现）
 
-`GET /workbench/v1/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>` 读取当前 Run 的脱敏内存副本。沿用配对 Cookie、严格 Host/Origin/Fetch-Site 边界和 `Cache-Control: no-store`；epoch 必填，未知/重复 query 字段和无效 UUID 拒绝，cursor 最长 160 字节。此 API 不读取磁盘、不访问模型、不取得终端输入权。
+`GET /workbench/v1/runs/{runId}/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>` 读取明确 Run 的脱敏内存副本。沿用配对 Cookie、严格 Host/Origin/Fetch-Site 边界和 `Cache-Control: no-store`；epoch 必填，未知/重复 query 字段和无效 UUID 拒绝，cursor 最长 160 字节。此 API 不读取磁盘、不访问模型、不取得终端输入权。
 
 ```ts
 type DetailSource =
@@ -731,12 +731,12 @@ RolloutReader 后台只读 `sessions` 和 `archived_sessions`，以明确 thread
 ## 8. 文件、搜索与 Git 阅读
 
 ```text
-GET /workbench/v1/workspace/files?path=<relative>&cursor=<opaque>
-GET /workbench/v1/workspace/file?path=<relative>
-GET /workbench/v1/workspace/search?q=<text>&regex=false&caseSensitive=false
-GET /workbench/v1/workspace/git/status
-GET /workbench/v1/workspace/git/diff?scope=working|staged&path=<relative>
-GET /workbench/v1/workspace/git/log?cursor=<opaque>
+GET /workbench/v1/runs/{runId}/workspace/files?path=<relative>&cursor=<opaque>
+GET /workbench/v1/runs/{runId}/workspace/file?path=<relative>
+GET /workbench/v1/runs/{runId}/workspace/search?q=<text>&regex=false&caseSensitive=false
+GET /workbench/v1/runs/{runId}/workspace/git/status
+GET /workbench/v1/runs/{runId}/workspace/git/diff?scope=working|staged&path=<relative>
+GET /workbench/v1/runs/{runId}/workspace/git/log?cursor=<opaque>
 ```
 
 R4 实现为独立 WorkspaceReader 线程、8 项有界队列和每请求 5 秒预算（含排队），不与代理、PTY 或历史查询共用工作队列。只读根取 Launcher 确认的 canonical cwd，绑定启动时目录描述符；浏览器不能传 executable/env/root。`/run.workspaceRoot` 只供当前本机工具路径归属判断，根外及远程环境路径不生成文件打开动作。
@@ -800,6 +800,6 @@ rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安�
 | P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve | R5，见[设备接入设计](codex-native-cli-workbench-device-access.md)与[实施顺序](v2-implementation-plan.md#device-access-slices) |
 | P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 | R6-A/C/D/G |
 | P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容 | R6-B/D/E/G；E 实现已完成本片验证，见本片验证报告 |
-| P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI | R6-E/F/G；多 Run 与跨 Run 隔离仍由 F 验收 |
+| P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI | R6-E/F/G；已有[F 多 Run 分片验证](validation/native-cli-r6-f-multi-project-2026-09-23.md)及[G2 压力隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)证据，整片验收以实施计划为准 |
 
 所有 fixture 合成或脱敏，不写真实用户 home。没有性能测量、安装版接入成功和 P07 故障证据，不能把本设计标为已实现；cc-viewer 的 T01–T13 不能替代本项目验收。
