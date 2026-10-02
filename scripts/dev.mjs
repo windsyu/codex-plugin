@@ -10,6 +10,7 @@ const help = `Usage: node scripts/dev.mjs <command>
   doctor                              Inspect tools without changing files
   bootstrap [--offline]               Install locked web dependencies (npm ci)
   build [--release] [--offline]        Build web, then both Rust binaries
+  package [--offline]                  Build and package tested macOS arm64 release
   check [--ci] [--offline]             Docs, binary policy, tool/web/Rust checks
   test-tools                          Test maintenance tools with synthetic data
   docs                                Check local Markdown links and structure
@@ -48,7 +49,7 @@ export function parseArgs(args) {
     else throw new Error(`Unknown option: ${flag}`);
   }
   const allowed = {
-    doctor: [], bootstrap: ['--offline'], build: ['--offline', '--release'],
+    doctor: [], bootstrap: ['--offline'], build: ['--offline', '--release'], package: ['--offline'],
     check: ['--offline', '--ci'], 'test-tools': [], docs: [], e2e: [],
     binaries: ['--tree', '--all-branches'], artifacts: ['--apply'], cache: ['--profile', '--apply'],
   }[command];
@@ -96,7 +97,7 @@ async function managed(options, action) {
       for (const entry of report.artifacts || []) if (entry.error) console.warn(`Artifact ${entry.id}: ${entry.error}`);
     } catch (error) { console.warn(`Artifact cleanup skipped: ${error.message}`); }
   }
-  const run = artifacts.createRun(root, { label: options.command });
+  const run = artifacts.createRun(root, { label: options.command, kind: options.command === 'package' ? 'build' : 'task' });
   console.log(`Task artifacts: ${run.path}`);
   let success = false, interrupted = false, child, forceStop, step = 0;
   function stop(signal) {
@@ -180,6 +181,8 @@ export async function main(args = process.argv.slice(2)) {
       await execute('npm', ['run', 'typecheck', '--prefix', 'web']);
       await execute('npm', ['test', '--prefix', 'web']);
     }
+    const releaseTarget = options.command === 'package'
+      ? (await import('./lib/release.mjs')).releaseTarget(root) : undefined;
     await execute('npm', ['run', 'build', '--prefix', 'web']);
     if (options.command === 'check') {
       await execute('cargo', ['fmt', '--all', '--check']);
@@ -187,7 +190,14 @@ export async function main(args = process.argv.slice(2)) {
       await execute('cargo', ['test', ...locked, '--all-targets', '--', '--test-threads=4']);
       await execute('cargo', ['build', ...locked, '--bins']);
       await execute('cargo', ['build', ...locked, '--release', '--bins']);
-    } else await execute('cargo', ['build', ...locked, '--bins', ...(options.release ? ['--release'] : [])]);
+    } else await execute('cargo', ['build', ...locked, '--bins', ...(options.release || options.command === 'package' ? ['--release'] : []), ...(releaseTarget ? ['--target', releaseTarget] : [])]);
+    if (options.command === 'package') {
+      const { packageRelease } = await import('./lib/release.mjs');
+      const release = packageRelease(root, run.path, options);
+      const { verifyRelease } = await import('./lib/release-smoke.mjs');
+      const verification = await verifyRelease(release.archive, run.path, release.version);
+      printReport({ ...release, ...verification });
+    }
   });
 }
 

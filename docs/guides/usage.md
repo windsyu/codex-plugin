@@ -4,6 +4,8 @@
 
 构建和测试入口见[开发指南](../development/README.md)。本指南描述操作；阶段完成状态只在[V2 实施计划](../v2-implementation-plan.md)维护。
 
+发布包的安装见[安装与快速启动](installation.md)：安装后在项目目录执行 `code-view`，或执行 `code-view /项目路径`；`code-view --history` 保留全部历史首页。
+
 <a id="从项目目录启动-v2-工作台"></a>
 
 ## 打开全部历史首页

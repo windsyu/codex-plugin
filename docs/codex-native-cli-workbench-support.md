@@ -49,6 +49,8 @@
 
 ## 4. 构建产物与旧历史
 
+`0.3.0` 提供 macOS / Apple Silicon release 安装包与 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 首页。安装流程见[安装指南](guides/installation.md)，正式发行资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准。此包装不扩展上述平台、provider 或 CLI 兼容边界；本地打包输出不代表已经正式发布。
+
 `codex-view` 已接入原生、工作台及 Observer 20/25 的统一后台目录/搜索 API 和同页来源登记，项目/会话导航与按需正文阅读已由 R6-D 接入；规模与资源证据见上述 G1 记录，当前交付和自动回归结果见 [G4 报告](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)，用户整片试用状态只看实施计划。独立 `codex-observerd serve/import` 仍只允许迁移至 schema 20，不能用它直接打开 schema 25；新目录使用 A 的零写 reader，不调用该旧装配。2026-09-29 已完成实际 schema 25 的限定正文只读抽查，范围及零写证据见 [G3 阶段记录](validation/native-cli-r6-g3-compatibility-2026-09-29.md)，不代表全库完整性验证；缺必要 WAL/SHM 或需修复时返回来源不可用。
 
 先构建 Web，再构建 Rust；debug/release 都内嵌对应前端。源码或磁盘上的 `web/dist` 更新不会改变已经运行的实例，试用新版需要重新启动新二进制。
