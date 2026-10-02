@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+launcher_dir=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
+backend=$launcher_dir/codex-view
+case "${1-}" in
+  -h|--help|help)
+    cat <<'HELP'
+Usage: code-view [DIRECTORY] [OPTIONS]
+       code-view --history [OPTIONS]
+       code-view open ENTRY_FILE
+
+With no directory, start Codex in the current working directory.
+DIRECTORY selects another project. --history opens the history home.
+Other options are passed to codex-view; --project overrides the default.
+
+Backend options:
+HELP
+    exec "$backend" --help ;;
+  --history) shift; exec "$backend" "$@" ;;
+  open|--version|-V) exec "$backend" "$@" ;;
+  version) shift; exec "$backend" --version "$@" ;;
+esac
+for argument do
+  case "$argument" in
+    --project|--project=*) exec "$backend" "$@" ;;
+  esac
+done
+case "${1-}" in
+  ''|-*) exec "$backend" --project . "$@" ;;
+  *) project=$1; shift; exec "$backend" --project "$project" "$@" ;;
+esac

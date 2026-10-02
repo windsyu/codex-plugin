@@ -102,7 +102,9 @@ const PROMPT = 'R2_CONTEXT_INPUT：同一句提交，保留合成上下文。';
     stage = 'repeat-after-compact'; await submit(PROMPT); await reply(2, 2);
     await expect(users.nth(0)).toContainText(PROMPT); await expect(users.nth(1)).toContainText(PROMPT);
     stage = 'fork'; await submit('/fork');
-    await expect.poll(screen).toContain('To continue this session');
+    // 0.159.2 announces the in-place fork instead of printing resume advice.
+    // The subsequent request/header checks still prove the new thread identity.
+    await expect.poll(screen).toMatch(/To continue this session|Fork created\. You can continue here\./);
     await expect(users).toHaveCount(2); await expect(models).toHaveCount(2);
     stage = 'after-fork'; await submit(PROMPT); await reply(3, 3);
     const state = await snapshot(); const requests = state.requests.filter(request => request.purpose === 'conversation');

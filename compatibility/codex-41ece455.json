@@ -1,6 +1,6 @@
 {
   "codexCommit": "41ece455b7fa7166f4fc38522952afdaa2604e18",
-  "observerVersion": "0.2.0",
+  "observerVersion": "0.3.0",
   "observerSchemaVersion": 20,
   "liveMode": "opt_in_tui",
   "rolloutTopLevelTypes": [

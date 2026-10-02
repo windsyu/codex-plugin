@@ -8,6 +8,8 @@ node_modules/
 
 # Compiled binaries, libraries, bytecode, and debug/profiling artifacts.
 codex-view
+code-view
+!scripts/release/code-view
 codex-observerd
 codex-folder-picker
 *.exe

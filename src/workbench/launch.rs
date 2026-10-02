@@ -26,7 +26,7 @@ use failure::LaunchFailure;
 
 // Evidence for diagnostics, never a startup allowlist. Different releases can
 // use the same native flags and model protocol; the actual route checks remain.
-const CHECKED_CLI_VERSIONS: &[&str] = &["0.154.0", "0.155.1"];
+const CHECKED_CLI_VERSIONS: &[&str] = &["0.154.0", "0.155.1", "0.156.1", "0.159.2"];
 
 pub struct LaunchOptions {
     pub cwd: PathBuf,
