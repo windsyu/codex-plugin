@@ -22,7 +22,9 @@
 
 新增或更新的验证包括默认无参数安装、固定版本跳过 latest、固定 tag 同时下载归档和校验文件、无效/外仓库/非 HTTPS/预发布跳转拒绝、三个下载阶段 HTTP 失败零用户写入、旧 `.local` 显式卸载后重新安装、旧清单符号链接拒绝，以及 README 下载到实际临时文件再执行的完整入口。README 的 Bash/zsh 回归覆盖下载失败、临时文件失败、安装失败和成功后的 PATH 更新。未来包内安装器另验证默认前缀与显式重装。
 
-独立评审的 8 个增量定点测试、Bash 语法检查与 diff 检查通过。首轮完整检查的维护工具测试为 79/80，一处旧手动安装默认路径断言仍指向 `.local`；修正后默认安装的 2 个专项通过，再重跑完整检查。最终 `node scripts/dev.mjs check` 通过：80 项维护工具、234 项前端、445 项 Rust，另 56 项 opt-in ignored 未运行；格式、Clippy、类型、Web/debug/release 构建全部通过。106 份文档检查无问题，13 个暂存文件与 1,256 个历史 blob 的二进制检查无禁止项。完整检查产物为 `target/artifacts/c1634ecc-527d-45c0-bb34-ce2be04f6a2e`。
+独立评审的 8 个增量定点测试、Bash 语法检查与 diff 检查通过。首轮完整检查的维护工具测试为 79/80，一处旧手动安装默认路径断言仍指向 `.local`；修正后默认安装的 2 个专项通过，再重跑完整检查。安装实现提交 `9826717` 的本地 `node scripts/dev.mjs check` 通过：80 项维护工具、234 项前端、445 项 Rust，另 56 项 opt-in ignored 未运行；格式、Clippy、类型、Web/debug/release 构建全部通过。106 份文档检查无问题，13 个暂存文件与 1,256 个历史 blob 的二进制检查无禁止项。完整检查产物为 `target/artifacts/c1634ecc-527d-45c0-bb34-ce2be04f6a2e`。
+
+同提交的 [PR CI](https://github.com/windsyu/codex-plugin/actions/runs/36990060971) 通过，但 [push CI](https://github.com/windsyu/codex-plugin/actions/runs/36990034548) 在已有 `stopped_run_cannot_reenable_devices_but_owner_can_read_it` 测试出现 412/409 差异。独立分析确认 `close()` 先更新 revision 并发出停止信号，异步 `finish()` 再更新 revision；测试 GET/POST 间可能恰好发生收尾，正确返回 `access_changed`。修正仅让测试有界等待监听收尾，再获取新 revision；仍严格验证 409、`run_ended`、设备授权撤销与所有者只读访问，不放宽断言或修改生产权限逻辑。修正后精确用例在隔离 HOME 重复 30/30 通过，相关 access 专项 8 通过、2 个原有 ignored 未执行；格式与 diff 检查通过。最初受限沙箱的 loopback EPERM 单列，授权后原命令通过；没有把原竞态记作本地已复现。
 
 完整本地检查、PR/main CI 和公开后的真实匿名下载结果在对应 Issue/PR 中分别登记，不以合成网络测试代替公开访问证明。公开后的实际验证须使用无凭证环境、仅系统工具 PATH、隔离 HOME，下载 main README 并执行其首个安装块，验证真实版本、来源、许可、两个 shell 的 PATH 和禁用网络工具后的离线卸载。
 
