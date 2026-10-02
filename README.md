@@ -14,11 +14,10 @@
 
 ```sh
 (
-  set -e
-  installer_file=$(mktemp)
+  installer_file=$(mktemp) || exit
   trap 'rm -f "$installer_file"' EXIT
   gh api 'repos/windsyu/codex-plugin/contents/scripts/install-macos.sh?ref=main' \
-    -H 'Accept: application/vnd.github.v3.raw+json' > "$installer_file"
+    -H 'Accept: application/vnd.github.v3.raw+json' > "$installer_file" || exit
   bash "$installer_file"
 ) && export PATH="$HOME/.local/bin:$PATH"
 ```

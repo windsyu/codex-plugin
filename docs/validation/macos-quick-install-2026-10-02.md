@@ -10,7 +10,7 @@
 
 独立测试文件 `scripts/tests/install-macos.test.mjs` 使用真实 tar.gz、旧包安装器、合成 binary、模拟 gh 与独立 HOME/USERPROFILE/CODEX_HOME；不写真实用户目录，不调用私人 CLI/模型，不把真实 credential 放入 fixture。
 
-25 项用例覆盖：
+26 项用例覆盖：
 
 - 0.3.0 安装与 0.3.1 合成升级、指定版本/前缀、权限与卸载器、强制重装、`--no-path`；
 - zsh 与 Bash 的特殊字符 PATH、区块去重、精确原文（含无末尾换行）恢复、ZDOTDIR 变化后的登记路径；
@@ -18,10 +18,13 @@
 - 不支持平台、认证/归档校验失败，已通过校验的越界/穿越/链接归档仍拒绝；
 - 删除失败保留清单并重试，PATH 中途写失败原文件不变，旧包复制/首次管理文件复制/原子提交失败回滚；
 - 下载期间的已管理文件修改、计划期间与快照期间的 shell 编辑均保留，不以 `--force` 跳过管理保护。
+- README 复制命令在 Bash/zsh 下遇到临时文件创建或下载失败立即退出，不执行不完整下载；安装失败不修改父 shell PATH，各路径均清理临时脚本。
 
 初次独立审查实际复现了 PATH 截断写入、升级中断后清单不一致，以及两处并发快照混用问题；均先增加失败回归，再修正为私有 staging、同目录完整临时文件与原子替换、初始清单锁内/逐文件复验、同一 shell 快照生成与比较、已提交且仍匹配新内容的文件受控回滚。最终独立审查未发现残留阻断，Bash 语法和 diff 检查通过。
 
 `node scripts/dev.mjs test-tools`：70 项全部通过，包含上述 25 项。受管诊断任务 `4d0323b9-dcb4-4e70-ac16-f640004f07ef`。
+
+随后最终检查 README 复制命令时，复现了条件组中的 `set -e` 不会终止失败步骤；改为显式退出并增加第 26 项回归。`node --test --test-name-pattern 'README bootstrap' scripts/tests/install-macos.test.mjs` 通过，该用例在系统 Bash 与 zsh 下分别验证下载失败、临时文件失败、安装失败和成功 4 种路径。最终远端标准入口会执行总计 71 项工具检查，以 PR workflow 为准。
 
 ## 已发布真实包
 

@@ -499,3 +499,26 @@ test('profile edit immediately before snapshot is retained through install and u
   }
   assert.equal(fs.readFileSync(profile, 'utf8'), original + edit);
 });
+
+test('README bootstrap stops failed downloads and temp creation, cleans up and exports PATH only on success', t => {
+  const f = fixture(t);
+  const readme = fs.readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
+  const snippet = readme.match(/```sh\n([\s\S]*?)\n```/)[1];
+  fs.writeFileSync(path.join(f.tools, 'gh'), '#!/bin/sh\ncat <<\'INSTALLER\'\n#!/bin/bash\nprintf "executed\\n" > "$HOME/installer-ran"\nexit "${BOOTSTRAP_INSTALL_EXIT:-0}"\nINSTALLER\n[ "$BOOTSTRAP_MODE" != download-failure ] || exit 5\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.tools, 'mktemp'), '#!/bin/sh\n[ "$BOOTSTRAP_MODE" != mktemp-failure ] || exit 6\nexec /usr/bin/mktemp "$@"\n', { mode: 0o755 });
+  const initialPath = `${f.tools}:/usr/bin:/bin`;
+  for (const shell of ['/bin/bash', '/bin/zsh'].filter(shell => fs.existsSync(shell))) {
+    for (const [mode, expectedExit, shouldExecute] of [['download-failure', 5, false], ['mktemp-failure', 6, false], ['installer-failure', 7, true], ['success', 0, true]]) {
+      const home = path.join(f.root, `${path.basename(shell)} ${mode}`);
+      const temporary = path.join(home, 'tmp');
+      fs.mkdirSync(temporary, { recursive: true });
+      const env = { ...f.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), TMPDIR: temporary, PATH: initialPath, BOOTSTRAP_MODE: mode, BOOTSTRAP_INSTALL_EXIT: mode === 'installer-failure' ? '7' : '0' };
+      const script = `${snippet}\nbootstrap_status=$?\nprintf '%s' "$PATH" > "$HOME/bootstrap-path"\nexit "$bootstrap_status"\n`;
+      const result = command(shell, ['-f', '-c', script], { env });
+      assert.equal(result.status, expectedExit, `${shell}: ${mode}: ${result.stderr}`);
+      assert.equal(fs.existsSync(path.join(home, 'installer-ran')), shouldExecute, `${shell}: ${mode}`);
+      assert.equal(fs.readFileSync(path.join(home, 'bootstrap-path'), 'utf8'), mode === 'success' ? `${home}/.local/bin:${initialPath}` : initialPath, `${shell}: ${mode}`);
+      assert.deepEqual(fs.readdirSync(temporary), [], `${shell}: temporary script must be removed`);
+    }
+  }
+});
