@@ -517,3 +517,5 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 本地包装已通过，证据见[0.3.0 验证记录](validation/v2-release-packaging-2026-10-02.md)。2026-10-02 用户进一步明确授权评审后正式发布并上传 GitHub；独立评审通过，按 PR、main CI、干净 tag 重建包的顺序交付。正式资产、主分支 CI 与源码 provenance 以 [v0.3.0 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准，不将已有本地包当成远端发布证据。安装及使用见[安装指南](guides/installation.md)。
 
 2026-10-02 用户追加 README 快速安装到 macOS PATH 及卸载要求。使用独立 Bash 脚本下载已有 release，默认安装至 `~/.local/bin`，管理 zsh/Bash 登录终端 PATH，并提供按清单卸载的 `code-view-uninstall`；安装、卸载和错误恢复通过独立临时 HOME 验证，见[增量验证](validation/macos-quick-install-2026-10-02.md)。该维护变更不改写 `v0.3.0` 资产、不改变运行时或用户数据格式；源码交付和 GitHub README 更新按 [Issue #8](https://github.com/windsyu/codex-plugin/issues/8) 的 PR/CI 记录核验。
+
+2026-10-02 用户确认公开现有 GitHub 仓库及历史，恢复 README 的产品与操作说明，安装改用系统 curl 匿名下载，默认前缀改为 `~/.codex-view`。旧 `~/.local` 快速安装先按清单卸载，再安装到新位置；工作台数据目录仍为 `~/.codex-web`。本次沿用不可变 `v0.3.0` 资产，维护后续打包模板的默认路径；源码评审与 CI、公开可见性及匿名真实安装分别留证，见[公开安装验证](validation/public-install-2026-10-02.md)与 [Issue #12](https://github.com/windsyu/codex-plugin/issues/12)。
