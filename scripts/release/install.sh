@@ -2,7 +2,7 @@
 # Install this extracted release locally. No downloads or shell configuration.
 set -eu
 fail() { printf '%s\n' "install: $*" >&2; exit 1; }
-prefix=${HOME:?HOME must be set}/.local
+prefix=${HOME:?HOME must be set}/.codex-view
 force=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
