@@ -27,6 +27,8 @@ node scripts/dev.mjs package --offline
 
 ## 发布门槛
 
+README 的[快速安装脚本](../../scripts/install-macos.sh)是单独维护的 Bash 3.2 入口，可下载现有稳定 release，增加用户级 PATH 和卸载清单，不需要改写已发布的资产。它使用包内安装器在私有 staging 校验复制，再准备同目录临时文件并原子替换；安装失败按旧文件快照及已知新内容回滚。卸载使用固定路径范围的 SHA256 清单，保留未知文件与用户数据，不把整个前缀视为可删除目录。该脚本的合成归档、升级、卸载、shell 配置和故障测试纳入 `test-tools` / `check`；运行时 binary/API/schema 保持原版。
+
 正式 GitHub Release 必须从干净、已评审且 CI 通过的 `main` tag 生成，tag 与 Cargo/Web 版本一致。核对常规检查、实际解压安装/项目启动、第三方许可、支持范围及已知问题后准备 release notes；GitHub Release 上传压缩包与 SHA256SUMS，二进制不进入 Git。
 
 本地 `package` 不执行 push、创建 Issue/PR、merge、tag 或发布，不安装到真实用户目录。远程操作按当前用户授权执行，不因添加维护命令而扩大授权。发布前需区分此前 R6 功能验收、新包的安装验证和远端 CI 的实际结果。
