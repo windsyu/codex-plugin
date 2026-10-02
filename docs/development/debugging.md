@@ -55,7 +55,9 @@ WORKBENCH_TEST_SCREENSHOT=/private/tmp/codex-r2-request-details \
 
 ## 历史兼容与入口回归
 
-R6 当前 CLI/profile、历史与设备范围见 [G3 验证](../validation/native-cli-r6-g3-compatibility-2026-09-29.md)。先运行 `node scripts/dev.mjs build --offline`，再显式执行安装版 CLI 或合成浏览器矩阵；它们内部为真实 CLI 子进程隔离 HOME/USERPROFILE/CODEX_HOME，模型使用本机合成上游：
+历史规模与资源复现见 [G1 线程资源验证](../validation/native-cli-r6-g1-resources-2026-09-30.md#7-复现与交付边界)。纯正文、缓存压力与 10k 会话专项串行执行，避免其它编译/测试污染计时；macOS 线程 CPU 探针只存在于测试构建，fixture 准备不进入索引计时。完整正文缓存与搜索摘录覆盖分开验证。
+
+R6 的 CLI/profile、历史与设备范围见 [G3 验证](../validation/native-cli-r6-g3-compatibility-2026-09-29.md)，CLI 0.159.2 的完整矩阵及 release 产物检查见 [G4 回归](../validation/native-cli-r6-g4-cli-01592-2026-09-30.md)。先运行 `node scripts/dev.mjs build --offline`，再显式执行安装版 CLI 或合成浏览器矩阵；用 `WORKBENCH_TEST_CODEX` 固定受测版本文件，它们内部为真实 CLI 子进程隔离 HOME/USERPROFILE/CODEX_HOME，模型使用本机合成上游：
 
 ```sh
 cargo test --locked --offline --lib workbench::proxy::tests::native_cli:: -- --ignored --nocapture --test-threads=1

@@ -54,11 +54,26 @@ requires_openai_auth=false
     .unwrap();
     let mut cli = NativeProbe::start(&home, &workspace, &[]).unwrap();
     cli.ready().await.unwrap();
+    let mut folder_trust_confirmed = false;
     for index in 1..=2 {
         cli.submit(PROMPT).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
+        let reply = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 cli.pump().await.unwrap();
+                let screen = cli.screen();
+                // CLI 0.159.2 can defer folder trust until the first submission.
+                // Confirm only this isolated fixture folder and never replay input.
+                if !folder_trust_confirmed
+                    && screen.contains("Folder access")
+                    && screen.contains("Trust this folder?")
+                {
+                    assert_eq!(index, 1);
+                    assert_eq!(requests.load(Ordering::SeqCst), 0);
+                    folder_trust_confirmed = true;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    cli.write(b"\r").unwrap();
+                    println!("{}", json!({"check":"deferred-native-folder-trust", "confirmed":true, "requestsBeforeConfirmation":0, "inputReplayed":false}));
+                }
                 if cli
                     .screen()
                     .contains(&format!("R1_CHAT_SOURCE_REPLY_{index}"))
@@ -67,8 +82,25 @@ requires_openai_auth=false
                 }
             }
         })
-        .await
-        .expect("native reply deadline; raw screen suppressed");
+        .await;
+        if reply.is_err() {
+            let screen = cli.screen();
+            println!(
+                "{}",
+                json!({"check":"native-chat-deadline", "submission":index,
+                "conversationRequests": requests.load(Ordering::SeqCst),
+                "observedRequests":seen.lock().unwrap().len(),
+                "reply1":screen.contains("R1_CHAT_SOURCE_REPLY_1"),
+                "reply2":screen.contains("R1_CHAT_SOURCE_REPLY_2"),
+                "promptVisible":screen.contains(PROMPT),
+                "modelNotice":screen.contains("Try new model"),
+                "existingModel":screen.contains("Use existing model"),
+                "error":screen.to_lowercase().contains("error"),
+                "retry":screen.to_lowercase().contains("retry"),
+                "unsupported":screen.to_lowercase().contains("not supported")})
+            );
+        }
+        reply.expect("native reply deadline; raw screen suppressed");
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     cli.quit().await.unwrap();

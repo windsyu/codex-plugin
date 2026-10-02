@@ -1,6 +1,6 @@
 # ADR 0053：历史首页、按项目启动与旧历史只读整合
 
-- Status：Proposed（产品入口与并行/恢复选择已由用户确认；A–D 的只读兼容、独立应用、目录与阅读验证已完成；E 的网页启动/恢复实现已完成本片验证，F 的多 Run 和 G 的整片验收尚待完成）
+- Status：Accepted（已确认的入口、只读整合、显式启动/恢复与多 Run 决策已实现，并有 A–F.1 分片验证；规模/隔离与限定旧库抽查已有 G1–G3 证据，完整 R6 交付和用户试用仍以实施计划为准）
 - Date：2026-09-22
 
 ## Context
@@ -13,7 +13,7 @@ R0–R5 将普通官方 CLI、PTY、模型代理和工作台直接绑定为一�
 
 ## Decision
 
-设计采用以下方向，执行门槛以[实施计划 R6](../v2-implementation-plan.md#r6-history-home)为准：
+采用以下决定；代码已实现的行为与证据边界见 Consequences，执行门槛以[实施计划 R6](../v2-implementation-plan.md#r6-history-home)为准：
 
 1. `codex-view` 默认启动 Application 与全部历史首页，零 CLI/PTY/模型代理；CLI 安装/profile 校验延后到明确开始工作。保留显式目录/会话直达入口，不自动恢复最近任务。
 2. Application 拥有同源网页、配对、配置和历史目录；独立 WorkbenchRuntime 拥有一个项目的原生 CLI/PTY/Proxy/Recorder。内存 RunRegistry 隔离并行项目，同项目重复点击进入已有 Run。它不是持久控制账本，不恢复旧 Worker/App Server。
@@ -44,6 +44,8 @@ R0–R5 将普通官方 CLI、PTY、模型代理和工作台直接绑定为一�
 
 先完成 R6-A 的只读兼容探针，再逐片接入首页、目录、阅读与 Run。列一致、静态原型、默认忽略的测试或当前 R5 Passed 都不能替代 R6 实际验收。R6-A 已以专用只读 VFS + readonly_shm 的方式验证不写源文件，保留 SQLite 锁和一致性协议；需要补建/恢复辅助文件的情况返回不可用，不用 immutable 绕过。证据和范围见[R6-A 记录](../validation/native-cli-r6-a-legacy-reader-2026-09-22.md)。B 已接入 Application 与单 Run 装配及首页，C/D 已接入目录与阅读；不运行或替换用户服务。
 
-R6-B 验证见[独立应用与首页](../validation/native-cli-r6-b-application-2026-09-22.md)。该阶段将默认入口切为无 CLI 首页；跨项目目录/来源登记已由 C/D 接入，E/F 的项目启动及并行运行见后续契约；不把 B 的部分落地声明为本 ADR 全部实现。
+R6-B 验证见[独立应用与首页](../validation/native-cli-r6-b-application-2026-09-22.md)。该阶段将默认入口切为无 CLI 首页；跨项目目录/来源登记已由 C/D 接入，E/F 的项目启动及并行运行现已实现；分片结果不代替整片验收。
 
-R6-C 的具体目录格式、缓存预算、查询/来源撤销及 schema 1→2 兼容实现见[R6 §10](../codex-native-cli-workbench-history-home.md#10-r6-c-目录与来源的实现契约)。它保留独立正文与 partial 信息。R6-D 已接入项目/来源/会话导航、三类按需正文和详情、有界连续阅读及位置恢复，具体契约见 [R6 §11](../codex-native-cli-workbench-history-home.md#11-r6-d-阅读界面与按需正文)，证据见 [R6-D 验证](../validation/native-cli-r6-d-reading-2026-09-22.md)。R6-E 已实现网页目录启动、显式恢复、丢失启动响应后的只查询恢复，以及单运行项目停止后的新 Run；它不根据最后观察到的模型 metadata 自动接管现有 CLI，恢复所选历史前须停止同项目的现有 Run。该实现已完成本片验证，报告[验证记录](../validation/native-cli-r6-e-launch-2026-09-22.md)。F 已扩展最多 4 个活动 Run、4 个已结束内存阅读，取消 Application 的无 Run 前缀别名；共享设备监听与地址发现，授权、撤销、停止仍按 Run。settings 因共用配置限电脑 owner，手机不获得全局来源路径或启动权限。见 [F 实现契约](../codex-native-cli-workbench-history-home.md#r6-f-multi-project)。规模门槛与真实旧库正文抽查仍待 G，状态及证据以实施计划为准。
+R6-C 的具体目录格式、缓存预算、查询/来源撤销及 schema 1→2 兼容实现见[R6 §10](../codex-native-cli-workbench-history-home.md#10-r6-c-目录与来源的实现契约)。它保留独立正文与 partial 信息。R6-D 已接入项目/来源/会话导航、三类按需正文和详情、有界连续阅读及位置恢复，具体契约见 [R6 §11](../codex-native-cli-workbench-history-home.md#11-r6-d-阅读界面与按需正文)，证据见 [R6-D 验证](../validation/native-cli-r6-d-reading-2026-09-22.md)。R6-E 已实现网页目录启动、显式恢复、丢失启动响应后的只查询恢复，以及单运行项目停止后的新 Run；它不根据最后观察到的模型 metadata 自动接管现有 CLI，恢复所选历史前须停止同项目的现有 Run。该实现已完成本片验证，报告[验证记录](../validation/native-cli-r6-e-launch-2026-09-22.md)。F 已扩展最多 4 个活动 Run、4 个已结束内存阅读，取消 Application 的无 Run 前缀别名；共享设备监听与地址发现，授权、撤销、停止仍按 Run。settings 因共用配置限电脑 owner，手机不获得全局来源路径或启动权限。见 [F 实现契约](../codex-native-cli-workbench-history-home.md#r6-f-multi-project)与[分片验证](../validation/native-cli-r6-f-multi-project-2026-09-23.md)。F.1 已将展示项目归属与 recordedCwd 恢复校验分离，并重建派生缓存，见[纠偏记录](../validation/native-cli-r6-f1-project-classification-2026-09-23.md)。
+
+G1 已有[规模与故障](../validation/native-cli-r6-g-scale-2026-09-24.md)及[资源补充](../validation/native-cli-r6-g1-resources-2026-09-30.md)证据；G2 的[历史压力与运行隔离](../validation/native-cli-r6-g2-isolation-2026-09-25.md)和 G3 的[限定旧库抽查及兼容回归](../validation/native-cli-r6-g3-compatibility-2026-09-29.md)分别说明受测范围，不承诺任意负载性能或全库完整性。非空 history_base 的继承历史仍可读但暂不恢复，真手机多项目体验不据合成浏览器结果扩展。Accepted 表示采用且实现这些架构决定，不表示整片 R6 验收已通过；当前状态与剩余用户试用只在实施计划维护。
