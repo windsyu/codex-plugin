@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- README 提供 macOS 用户级快速安装脚本，使用已登录的 GitHub CLI 下载/校验稳定 release，并配置 zsh/Bash 登录终端 PATH；提供按清单保护卸载的 `code-view-uninstall`，保留用户历史和原生数据。
+
 ## 0.3.0（2026-10-02）
 
 - 提供 macOS / Apple Silicon release 安装包及 `code-view` 快速项目入口：无参数启动当前目录，也支持指定路径；历史首页使用 `code-view --history` 或原有 `codex-view`。
