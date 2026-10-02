@@ -522,3 +522,31 @@ test('README bootstrap stops failed downloads and temp creation, cleans up and e
     }
   }
 });
+
+test('install preserves the active Bash login profile and its settings without shadowing lower-priority files', t => {
+  for (const existing of [['.profile'], ['.bash_login', '.profile'], ['.bash_profile', '.bash_login', '.profile']]) {
+    const f = fixture(t);
+    const originals = new Map(existing.map((name, index) => [name, `export CODE_VIEW_LOGIN_SETTING=profile${index}\n# original ${name}`]));
+    for (const [name, text] of originals) fs.writeFileSync(path.join(f.home, name), text);
+    succeeds(f.install());
+    if (!existing.includes('.bash_profile')) assert.equal(fs.existsSync(path.join(f.home, '.bash_profile')), false, 'must not shadow an existing Bash login file');
+    const login = command('/bin/bash', ['--login', '-c', 'printf "%s\\n" "$CODE_VIEW_LOGIN_SETTING"; command -v code-view'], { env: f.env });
+    succeeds(login);
+    assert.equal(login.stdout, `profile0\n${f.prefix}/bin/code-view\n`);
+    assert.match(fs.readFileSync(path.join(f.home, existing[0]), 'utf8'), /code-view PATH/);
+    for (const name of existing.slice(1)) assert.equal(fs.readFileSync(path.join(f.home, name), 'utf8'), originals.get(name));
+    succeeds(f.uninstall());
+    for (const [name, text] of originals) assert.equal(fs.readFileSync(path.join(f.home, name), 'utf8'), text);
+  }
+});
+
+test('an active Bash login profile symlink is refused without creating a shadow profile', t => {
+  const f = fixture(t);
+  const original = path.join(f.root, 'outside-login-profile');
+  fs.writeFileSync(original, '# valuable settings\n');
+  fs.symlinkSync(original, path.join(f.home, '.profile'));
+  const before = snapshot(f.home);
+  fails(f.install());
+  assert.deepEqual(snapshot(f.home), before);
+  assert.equal(fs.readFileSync(original, 'utf8'), '# valuable settings\n');
+});

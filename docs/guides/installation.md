@@ -22,7 +22,7 @@ bash scripts/install-macos.sh --no-path
 
 默认在 `~/.local/bin` 安装三个原有入口及 `code-view-uninstall`，许可与安装清单位于 `~/.local/share/code-view`，无需 sudo。程序运行不依赖 `gh`；只有下载/升级需要它，卸载可以离线完成。
 
-脚本在 `${ZDOTDIR:-$HOME}/.zshrc` 与 `~/.bash_profile` 添加带 `code-view PATH` 标记的区块，保留其他内容。路径通过 shell 转义写入，避免重复追加；已有 dotfile 使用原子替换并保留权限。新 zsh 交互终端或 Bash 登录终端自动加载。安装脚本不能改变父 shell，当前终端执行：
+脚本在 `${ZDOTDIR:-$HOME}/.zshrc` 与 Bash 当前生效的登录配置添加带 `code-view PATH` 标记的区块，保留其他内容。Bash 按 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 的顺序选择第一个已有文件；全部不存在时才创建 `.bash_profile`，避免遮蔽已有设置。路径通过 shell 转义写入，避免重复追加；已有 dotfile 使用原子替换并保留权限。新 zsh 交互终端或 Bash 登录终端自动加载。安装脚本不能改变父 shell，当前终端执行：
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -46,6 +46,8 @@ code-view-uninstall
 程序文件被修改、PATH 区块残缺/重复、清单异常或路径被替换为符号链接时，卸载会在写入前停止并报告冲突；保存修改后恢复该文件，或自行移除已改的区块后重试。`--force` 仅用于安装，不跳过卸载保护。普通删除/配置写入失败保留清单和卸载器，修复原因后可以重试。安装用私有 staging、原子文件替换与旧文件快照处理失败回滚；若回滚本身因 I/O 或并发修改未完成，日志指出实际未恢复文件，不报告成功。进程被 SIGKILL 或机器突然断电时不承诺事务恢复。
 
 旧 `v0.3.0` 包直接运行 `install.sh` 的安装没有这份快速安装清单；运行快速安装脚本并明确 `--force --version v0.3.0` 重装后，即可使用卸载命令。脚本不改写已发布资产，原 binary 和用户数据格式保持不变。
+
+已登记的快速安装保留原来的 PATH 管理对象；若早期辅助脚本曾新建 `.bash_profile` 并遮蔽你的 `.bash_login` / `.profile`，先运行其 `code-view-uninstall`，再执行当前 README 的安装命令。卸载会移除仅由安装器创建且未添加个人内容的 `.bash_profile`，新安装按上述优先级选择，不自动迁移个人 shell 配置。
 
 ## 手动安装发布包
 

@@ -237,7 +237,7 @@ load_profiles() {
   while IFS=$'\t' read -r created profile extra || [[ -n $created$profile$extra ]]; do
     [[ ($created == 0 || $created == 1) && -z $extra ]] || fail 'invalid PATH profile record'
     valid_path "$profile"
-    case $profile in */.zshrc|"$HOME/.bash_profile") ;; *) fail 'invalid shell profile path' ;; esac
+    case $profile in */.zshrc|"$HOME/.bash_profile"|"$HOME/.bash_login"|"$HOME/.profile") ;; *) fail 'invalid shell profile path' ;; esac
     [[ $seen != *$'\n'"$profile"$'\n'* ]] || fail 'duplicate PATH profile record'
     seen=$seen$profile$'\n'
     profile_paths[${#profile_paths[@]}]=$profile
@@ -382,7 +382,13 @@ for file in "$receipt" "$block_file" "$profiles_file" "$uninstaller"; do
 done
 if [[ $configure_path == true ]]; then
   add_profile "${ZDOTDIR:-$HOME}/.zshrc"
-  add_profile "$HOME/.bash_profile"
+  # Bash reads only its first existing login file. Creating .bash_profile over
+  # an existing .bash_login/.profile would silently hide the user's settings.
+  bash_login_profile=$HOME/.bash_profile
+  for candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    if [[ -e $candidate || -L $candidate ]]; then bash_login_profile=$candidate; break; fi
+  done
+  add_profile "$bash_login_profile"
 fi
 plan_profiles
 # Fixed package-to-install mapping; never claim unknown files left by --force.
