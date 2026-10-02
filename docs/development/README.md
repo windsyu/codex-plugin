@@ -15,6 +15,7 @@
 | `doctor` | 检查工具与环境 |
 | `bootstrap` | 按锁文件安装前端依赖 |
 | `build` / `build --release` | 先构建 Web，再构建两个 Rust binary |
+| `package` / `package --offline` | 构建并生成当前受测 macOS arm64 安装包、许可与校验和，见[发布指南](releasing.md) |
 | `check` | 文档、待提交二进制、维护工具、前端和 Rust 常规质量检查 |
 | `check --ci` | CI 检查提交树，不把空暂存区当成完成二进制检查 |
 | `docs` | 本地文档链接、锚点及结构检查 |

@@ -10,6 +10,14 @@
 
 ## 构建与启动
 
+`0.3.0` macOS / Apple Silicon 发布包见 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0)，校验与安装见[安装指南](docs/guides/installation.md)。安装后可在任意已有项目目录快速启动：
+
+```sh
+cd /path/to/project
+code-view
+# 或 code-view /path/to/project；只读首页使用 code-view --history
+```
+
 开发基线：Rust 1.95.0、Node 22.23.2；macOS 需 Apple SDK/Clang。首次安装依赖需要网络。
 
 ```bash
@@ -22,7 +30,7 @@ node scripts/dev.mjs build
 <repository>/target/debug/codex-view --project .
 ```
 
-浏览首页不要求安装 CLI；开始项目需已安装并配置官方 Codex CLI。工作台默认配置和记录位于 `~/.codex-web`，独立于原生 `CODEX_HOME`。构建先生成 Web 资源，再编译两个 Rust 入口，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`；常规检查使用 `node scripts/dev.mjs check`。详情见[开发指南](docs/development/README.md)。
+浏览首页不要求安装 CLI；开始项目需已安装并配置官方 Codex CLI。工作台默认配置和记录位于 `~/.codex-web`，独立于原生 `CODEX_HOME`。构建先生成 Web 资源，再编译两个 Rust 入口，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`，安装包使用 `node scripts/dev.mjs package`；常规检查使用 `node scripts/dev.mjs check`。详情见[开发指南](docs/development/README.md)。
 
 ## 文档与参与
 

@@ -4,9 +4,11 @@
 
 ## 使用与开发
 
+- [安装与快速启动](guides/installation.md)：发布包校验、本地安装及 `code-view` 项目入口。
 - [使用指南](guides/usage.md)：启动、终端、手机接入、历史、配置和旧 Observer。
 - [支持范围与限制](codex-native-cli-workbench-support.md)：可试用环境、兼容基线与资源边界。
 - [开发与维护](development/README.md)：模块、检查、构建产物生命周期、Git 文件规则和发布。
+- [Release 包装与发布](development/releasing.md)：许可收集、来源与校验和、正式发布门槛。
 - [合成调试与专项测试](development/debugging.md)：安装版 CLI、Chrome 与合成模型的显式验证。
 
 ## 产品计划与设计

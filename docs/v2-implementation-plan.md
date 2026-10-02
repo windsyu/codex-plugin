@@ -36,6 +36,7 @@
 | R4 项目阅读工具 | cwd 内文件、代码搜索与 Git 只读视图 | R3、R3.1 | Passed | [R4 验收与截图](validation/native-cli-r4-acceptance-2026-09-20.md)：固定根文件树/行号阅读、rg 搜索、Git 分区/内容 Diff/log、特殊路径/嵌套 cwd、凭证/链接/并发替换、分页/预算/取消/有界队列通过；87 项前端、231 项 Rust、Chrome 1024/736/320 与实际安装版 CLI 同进程文件阅读/原生对话回归通过。仅当前 macOS 受测范围。[2026-09-21 界面反馈](validation/native-cli-r4-ui-2026-09-21.md)优化文件树层级/选中态、Git 文件/路径/状态与活动栏图标及中文标签；随后按用户要求换成 [VS Code 官方 Codicons](validation/native-cli-r4-codicons-2026-09-21.md)，随后于 2026-09-22 完成[连续文件阅读与内存验证](validation/native-cli-continuous-files-2026-09-22.md)，用户随后认可并要求继续下一部分 |
 | R5 完整验收与退役 | 实际模型/设备矩阵、性能与故障门槛、旧控制代码退役 | R4 | Passed | 2026-09-21 用户授权继续；[桌面阶段证据](validation/native-cli-r5-desktop-2026-09-21.md)已验证正式产物真实模型/图片、取消状态修复、当前界面性能、schema 20 只读副本及顺序回退。[退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)补齐 SIGHUP 清理及测试 Chrome 进程组回收；[终端工具独立化](validation/native-cli-r5-terminal-extraction-2026-09-21.md)移除新工作台对旧 Session 目录的引用并补漏早期调试入口。用户已确认电脑端右侧终端中文输入正常；[LAN/MagicDNS 接入](codex-native-cli-workbench-device-access.md)的 A–B 已实现并通过[自动化与 Chrome 验证](validation/native-cli-device-access-2026-09-21.md)，用户已确认手机接入及输入成功，其他手机体验按用户要求留待后续优化；锁屏/双网络等未逐项确认；2026-09-21 用户明确授权拆除旧 Session/App Server 内核，旧内核已移除，341 项 Rust、150 项前端、10 项历史 Chrome 及 5 项原生/上下文/设备回归通过，见[退役验证](validation/native-cli-r5-kernel-retirement-2026-09-21.md)。[2026-09-22 收尾验收](validation/native-cli-r5-acceptance-2026-09-22.md)统一 RQ01–RQ12 / P01–P14 的证据与范围，修复调用记录/手机接入面板的即时 Esc 焦点问题；156 项前端、341 项 Rust、10 项安装版 CLI/Chrome、10 项旧历史 Chrome 通过，release 产物另通过 3 项正式入口回归。按已确认 macOS/custom 接入范围交付，其他平台/provider 和暂缓手机优化保持未验证；本阶段完成后暂停供用户试用 |
 | R6 历史首页与按项目启动 | codex-view 默认全部历史、三类来源、旧库 20/25 只读、显式新建/恢复、多项目标签与隔离 | R5 | Passed | A–F.1 已通过分片验证与用户试用；[G1 资源与缓存边界](validation/native-cli-r6-g1-resources-2026-09-30.md)、[G2 压力/容量隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)、[G3 兼容与实际旧库限定只读抽查](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 交付/CLI 0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)已通过。2026-09-30 用户明确确认本次交付试用通过；按现有 macOS/custom 接入范围收尾，不扩大未验证平台/provider/手机组合 |
+| Release 包装 | 0.3.0 安装包、code-view 当前项目/指定路径、许可与校验、隔离安装验证 | R6 | Passed | [包装验证](validation/v2-release-packaging-2026-10-02.md)：445 项 Rust、234 项 Web、45 项维护工具及格式/Clippy/类型/debug/release 通过；实际归档解压安装、中文/空格 cwd、实例复用、历史入口、资源与 SIGINT 回收通过。显式 Cargo target 回归通过；限 macOS / Apple Silicon；本条证据为本地包装验证，正式发行资产以 GitHub Release 记录为准 |
 
 状态只在本表维护：`Pending`、`In progress`、`Blocked`、`Passed`。`Passed` 必须链接本项目的版本、操作、断言、结果和限制；设计文本、源码阅读及 cc-viewer 试用均不能充当通过记录。出现阻塞须写明具体失败与下一项实验，不能只写“兼容性待确认”。
 
@@ -60,6 +61,7 @@ R5 的 Passed 限于当时明确验证的范围。随后发现实际旧库 schem
 | RQ13 | 用户 2026-09-22 要求整合 V1 历史，2026-09-23 指出误归类 | 同一 codex-view 首页读取原生/工作台/旧 Observer 跨项目历史与搜索；保留无项目语义，cwd 不无条件等于项目，项目按最近记录排序；旧库 20/25 只读、不迁移、不混来源 | R6-A/C/D/F.1/G / P15 |
 | RQ14 | 用户确认首页优先与项目入口 | 默认无 CLI 的全部历史；已有项目/指定现有路径明确开始；默认新对话、指定会话显式恢复，重复启动复用实例；无项目归类不抹去原 cwd 或可靠恢复资格 | R6-B/D/E/F.1/G / P16 |
 | RQ15 | 用户确认另项目新标签、原项目继续 | 独立 Run/PTY/代理/目录/保存，手机授权与清理仍按 Run/项目限制，停止与退出不串线、不恢复旧控制 | R6-E/F/G / P17、P07/P08 |
+| RQ16 | 用户 2026-10-02 要求最终 release 包装与快速启动 | 0.3.0 macOS arm64 安装包、code-view 当前目录/指定路径、独立历史入口、许可/校验与隔离安装验证；不扩展原运行边界 | §10 Release 包装 |
 
 F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；多用户远程控制、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入本轮交付。RQ12 只扩展同一使用者的设备入口，不引入远程多用户或公网服务。
 
@@ -503,3 +505,13 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 当前确认的 V2 分片开发及验证目标已完成，没有自动进入下一功能片的任务。本次本地提交与合并须核对暂存内容和全部分支历史的二进制策略，远端覆盖与提交前审计见 [G4 Git 交付核对](validation/native-cli-r6-g4-cli-01592-2026-09-30.md#8-git-交付与全分支二进制核对)；推送、PR 和发布继续遵循授权。G1 资源、G2 压力和 G3/G4 兼容保留各自证据；原生继承历史、缓存/搜索覆盖、手机权限及 Stale 诊断边界不因本次验收被改变。不重复读取私人正文或扩大 V3 范围。
 
 当前受测平台/provider 仍见[支持范围](codex-native-cli-workbench-support.md)。R6 不自动迁移旧库、修改原生配置、清理真实历史、替换当前实例、推送或发布，也不将尚未执行的设计验收算作通过。
+
+## 10. V2 Release 包装
+
+2026-10-02 用户要求将已完成的 V2 包装为 release，便于在任意项目目录执行 `code-view`；用户确认无参数直接启动当前目录项目。版本按 pre-1.0 约定设为 `0.3.0`，保留 `codex-view` 无 CLI 首页和两个 Rust binary，不改变运行 API、配置 schema、模型代理或数据存储。
+
+交付为原生 macOS / Apple Silicon tar.gz、外部 SHA256SUMS、包内校验、来源 manifest、安装器与实际依赖许可；安装后支持 `code-view`、`code-view <directory>`、`code-view --history`、原有启动参数及版本输出。安装器默认用户前缀，无下载/sudo/shell 编辑，冲突需显式 --force。当前不扩展其他平台、provider、自动更新或 V3。
+
+通过条件：标准 check 通过，实际包解压到中文/空格路径后在独立 HOME/USERPROFILE/CODEX_HOME 中安装；合成 CLI 验证项目 cwd、实例复用、零 CLI 历史、内嵌网页与退出；检查许可、动态链接、校验和及 Git 二进制策略。正式远端发布另需干净已评审且 CI 通过的 main tag 和用户授权。本地包装与远端发布状态分别报告。
+
+本地包装已通过，证据见[0.3.0 验证记录](validation/v2-release-packaging-2026-10-02.md)。2026-10-02 用户进一步明确授权评审后正式发布并上传 GitHub；独立评审通过，按 PR、main CI、干净 tag 重建包的顺序交付。正式资产、主分支 CI 与源码 provenance 以 [v0.3.0 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准，不将已有本地包当成远端发布证据。安装及使用见[安装指南](guides/installation.md)。

@@ -8,7 +8,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(about = "Open local project history; explicitly select a project to start Codex CLI")]
+#[command(
+    name = "codex-view",
+    version,
+    about = "Open local project history; explicitly select a project to start Codex CLI"
+)]
 struct Args {
     /// Keep the browser closed; use the private entry with `codex-view open`.
     #[arg(long)]
@@ -179,4 +183,21 @@ async fn run(args: Args) -> Result<()> {
     }
     drop(application);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_reports_the_workbench_binary_and_package_version() {
+        let error = Args::try_parse_from(["codex-view", "--version"])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(
+            error.to_string(),
+            format!("codex-view {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
