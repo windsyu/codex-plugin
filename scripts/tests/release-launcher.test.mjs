@@ -70,7 +70,7 @@ test('launcher preserves cwd and passes arguments exactly', t => {
 
 test('installation uses isolated default prefix, installs resources and supports explicit reinstall', t => {
   const f = fixture(t);
-  const prefix = path.join(f.home, '.local');
+  const prefix = path.join(f.home, '.codex-view');
   let result = f.install();
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /: OK/);

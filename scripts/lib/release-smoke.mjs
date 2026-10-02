@@ -27,7 +27,7 @@ export async function verifyRelease(archive, workspace, version) {
   const native = path.join(home, '.codex');
   const project = path.join(root, '项目 with spaces');
   const other = path.join(root, '另一个项目');
-  const prefix = path.join(home, '.local');
+  const prefix = path.join(home, '.codex-view');
   for (const directory of [native, project, other]) fs.mkdirSync(directory, { recursive: true });
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: native, PATH: `${prefix}/bin:${process.env.PATH}` };
   const options = { cwd: project, env };

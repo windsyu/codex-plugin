@@ -709,6 +709,19 @@ async fn stopped_run_cannot_reenable_devices_but_owner_can_read_it() {
             )
             .is_none()
     );
+    // close() revokes permission immediately, but the listener's asynchronous
+    // finish() advances the revision again. Wait for that completion before
+    // action() reads the revision used by its conditional enable request.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if f.server.state.access.data.lock().unwrap().stop.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     let response = f.action("enable").await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(json_response(response).await["error"]["code"], "run_ended");

@@ -17,14 +17,14 @@ function command(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: 'utf8', ...options });
   return result;
 }
-function fixture(t, { specialPrefix = false, zdot = false } = {}) {
+function fixture(t, { specialPrefix = false, zdot = false, legacyPrefix = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'code-view-quick-install-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, 'isolated home 中文');
   const tools = path.join(root, 'tools');
   const downloads = path.join(root, 'downloads');
   const sentinel = path.join(root, 'injection-sentinel');
-  const prefix = specialPrefix ? path.join(root, `prefix ' quoted $(touch ${sentinel})`) : path.join(home, '.local');
+  const prefix = specialPrefix ? path.join(root, `prefix ' quoted $(touch ${sentinel})`) : path.join(home, legacyPrefix ? '.local' : '.codex-view');
   const zdotdir = zdot ? path.join(root, 'custom ZDOTDIR') : home;
   for (const directory of [home, tools, downloads, zdotdir]) fs.mkdirSync(directory, { recursive: true });
   const releaseName = 'code-view-0.3.0-aarch64-apple-darwin';
@@ -44,11 +44,26 @@ function fixture(t, { specialPrefix = false, zdot = false } = {}) {
   const tar = command('/usr/bin/tar', ['-czf', path.join(downloads, archive), '-C', root, releaseName]);
   assert.equal(tar.status, 0, tar.stderr);
   fs.writeFileSync(path.join(downloads, 'SHA256SUMS'), `${hash(fs.readFileSync(path.join(downloads, archive)))}  ${archive}\n`);
-  const log = path.join(root, 'gh-log.jsonl');
+  const log = path.join(root, 'curl-log.jsonl');
   fs.writeFileSync(path.join(tools, 'uname'), '#!/bin/sh\ncase "$1" in -s) echo "${MOCK_SYSTEM:-Darwin}";; -m) echo "${MOCK_ARCH:-arm64}";; *) exit 1;; esac\n', { mode: 0o755 });
-  const gh = `#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path');\nconst args=process.argv.slice(2);\nfs.appendFileSync(process.env.MOCK_GH_LOG,JSON.stringify(args)+'\\n');\nif(args[0]==='auth'&&args[1]==='status'){process.exit(process.env.MOCK_GH_UNAUTH==='1'?1:0)}\nif(args[0]==='release'&&args[1]==='view'){\nconst tag=process.env.MOCK_RELEASE_TAG||'v0.3.0';const data={tagName:tag,isDraft:false,isPrerelease:false,assets:fs.readdirSync(process.env.MOCK_RELEASE_DOWNLOADS).map(name=>({name}))};\nconsole.log(args.includes('--jq')||args.includes('-q')?tag:JSON.stringify(data));\nprocess.exit(0);}\nif(args[0]==='release'&&args[1]==='download'){\nif(process.env.MOCK_DOWNLOAD_EDIT)fs.appendFileSync(process.env.MOCK_DOWNLOAD_EDIT,'# concurrent binary edit\\n');\nlet directory=process.cwd();for(let i=0;i<args.length;i++){if(args[i]==='--dir'||args[i]==='-D')directory=args[++i];else if(args[i].startsWith('--dir='))directory=args[i].slice(6);}\nfs.mkdirSync(directory,{recursive:true});for(const name of fs.readdirSync(process.env.MOCK_RELEASE_DOWNLOADS))fs.copyFileSync(path.join(process.env.MOCK_RELEASE_DOWNLOADS,name),path.join(directory,name));process.exit(0);}\nconsole.error('Unexpected mock gh invocation',args);process.exit(70);\n`;
-  fs.writeFileSync(path.join(tools, 'gh'), gh, { mode: 0o755 });
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), PATH: `${tools}:${process.env.PATH}`, MOCK_RELEASE_DOWNLOADS: downloads, MOCK_GH_LOG: log };
+  const curl = `#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path');
+const args=process.argv.slice(2);
+fs.appendFileSync(process.env.MOCK_CURL_LOG,JSON.stringify(args)+'\\n');
+let output, url;for(let i=0;i<args.length;i++){if(args[i]==='--output'||args[i]==='-o')output=args[++i];else if(args[i].startsWith('https://'))url=args[i];}
+const kind=args.includes('--head')||args.includes('-I')?'latest':url&&url.endsWith('SHA256SUMS')?'checksum':url&&url.startsWith('https://raw.githubusercontent.com/')?'raw':'archive';
+if(process.env.MOCK_CURL_FAIL==='all'||process.env.MOCK_CURL_FAIL===kind){console.error('mock HTTP failure');process.exit(22);}
+if(kind==='latest'){process.stdout.write(process.env.MOCK_LATEST_URL||'https://github.com/windsyu/codex-plugin/releases/tag/'+(process.env.MOCK_RELEASE_TAG||'v0.3.0'));process.exit(0);}
+if(!output||!url){console.error('mock requires --output and HTTPS URL');process.exit(70);}
+if(kind==='archive'&&process.env.MOCK_DOWNLOAD_EDIT)fs.appendFileSync(process.env.MOCK_DOWNLOAD_EDIT,'# concurrent binary edit\\n');
+const source=kind==='raw'?process.env.MOCK_INSTALLER_SOURCE:path.join(process.env.MOCK_RELEASE_DOWNLOADS,url.split('/').pop());
+if(!fs.existsSync(source)){console.error('fixture download missing',url);process.exit(22);}
+fs.mkdirSync(path.dirname(output),{recursive:true});fs.copyFileSync(source,output);
+`;
+  fs.writeFileSync(path.join(tools, 'curl'), curl, { mode: 0o755 });
+  fs.writeFileSync(path.join(tools, 'gh'), '#!/bin/sh\necho "unexpected GitHub CLI dependency" >&2\nexit 77\n', { mode: 0o755 });
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), PATH: `${tools}:${process.env.PATH}`, MOCK_RELEASE_DOWNLOADS: downloads, MOCK_CURL_LOG: log, MOCK_INSTALLER_SOURCE: installer };
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_CONFIG_DIR', 'CURL_HOME']) delete env[key];
   delete env.ZDOTDIR;
   if (zdot) env.ZDOTDIR = zdotdir;
   const share = path.join(prefix, 'share/code-view');
@@ -112,7 +127,7 @@ function snapshot(root) {
   return result;
 }
 
-test('authenticated old release installs complete files, PATH, receipt and a standalone uninstaller', t => {
+test('public old release installs complete files, PATH, receipt and a standalone uninstaller', t => {
   const f = fixture(t);
   succeeds(f.install());
   for (const name of ['code-view', 'codex-view', 'codex-observerd', 'code-view-uninstall']) assert.equal(fs.statSync(path.join(f.prefix, 'bin', name)).mode & 0o111, 0o111);
@@ -123,9 +138,20 @@ test('authenticated old release installs complete files, PATH, receipt and a sta
     assert.equal(text.split(beginMarker).length - 1, 1);
     assert.equal(text.split(endMarker).length - 1, 1);
   }
-  assert.ok(f.calls().some(args => args[0] === 'auth' && args[1] === 'status'));
-  assert.ok(f.calls().some(args => args[0] === 'release' && args[1] === 'download'));
-  for (const args of f.calls().filter(args => args[0] === 'release')) assert.ok(args.includes('windsyu/codex-plugin'), JSON.stringify(args));
+  assert.ok(f.calls().some(args => args.includes('--head')));
+  assert.ok(f.calls().some(args => args.some(arg => arg.endsWith('.tar.gz'))));
+  for (const args of f.calls()) {
+    assert.equal(args[0], '--disable', 'curlrc suppression must be the first curl option');
+    for (const flag of ['--disable', '--fail', '--silent', '--show-error', '--location']) assert.ok(args.includes(flag), JSON.stringify(args));
+    assert.equal(args[args.indexOf('--proto') + 1], '=https');
+    assert.equal(args[args.indexOf('--proto-redir') + 1], '=https');
+    assert.equal(args[args.indexOf('--connect-timeout') + 1], '10');
+    assert.equal(args[args.indexOf('--max-time') + 1], '120');
+    if (args.includes('--head')) {
+      assert.equal(args[args.indexOf('--output') + 1], '/dev/null');
+      assert.equal(args[args.indexOf('--write-out') + 1], '%{url_effective}');
+    }
+  }
   succeeds(f.run(['--prefix', f.prefix], {}, path.join(f.prefix, 'bin/code-view-uninstall')));
   assert.equal(fs.existsSync(path.join(f.prefix, 'bin/code-view')), false);
   assert.equal(fs.existsSync(path.join(f.prefix, 'bin/code-view-uninstall')), false);
@@ -179,7 +205,8 @@ test('custom ZDOTDIR and explicit version work without touching HOME zshrc', t =
   succeeds(f.install(['--version', 'v0.3.0']));
   assert.equal(fs.existsSync(path.join(f.home, '.zshrc')), false);
   assert.match(fs.readFileSync(path.join(f.zdotdir, '.zshrc'), 'utf8'), /code-view PATH/);
-  assert.ok(f.calls().some(args => args[0] === 'release' && args.includes('v0.3.0')));
+  assert.equal(f.calls().some(args => args.includes('--head')), false);
+  assert.ok(f.calls().some(args => args.some(arg => arg.includes('/download/v0.3.0/'))));
   succeeds(f.uninstall());
   assert.equal(fs.existsSync(path.join(f.zdotdir, '.zshrc')), false);
 });
@@ -207,7 +234,7 @@ test('modified installed file prevents every uninstall write', t => {
 });
 
 test('modified PATH block or management profiles refuse uninstall before any write', t => {
-  for (const relative of ['.zshrc', '.local/share/code-view/.install-path-profiles', '.local/share/code-view/.install-path-block']) {
+  for (const relative of ['.zshrc', '.codex-view/share/code-view/.install-path-profiles', '.codex-view/share/code-view/.install-path-block']) {
     const f = fixture(t);
     succeeds(f.install());
     const file = path.join(f.home, relative);
@@ -270,8 +297,8 @@ test('extra management and profile conflicts reject installation before package 
   assert.equal(fs.readFileSync(outside, 'utf8'), '# untouched\n');
 });
 
-test('platform, authentication and archive checksum failures create no installation files', t => {
-  for (const extra of [{ MOCK_SYSTEM: 'Linux' }, { MOCK_ARCH: 'x86_64' }, { MOCK_GH_UNAUTH: '1' }]) {
+test('platform, HTTP and archive checksum failures create no installation files', t => {
+  for (const extra of [{ MOCK_SYSTEM: 'Linux' }, { MOCK_ARCH: 'x86_64' }, { MOCK_CURL_FAIL: 'archive' }]) {
     const f = fixture(t);
     fails(f.run(['install', '--prefix', f.prefix], extra));
     assert.equal(fs.existsSync(f.prefix), false);
@@ -474,7 +501,7 @@ test('binary edit during release download rejects force upgrade and preserves th
   fails(result);
   const expected = Buffer.concat([original, Buffer.from(edit)]);
   assert.deepEqual(fs.readFileSync(binary), expected, 'download-time edit must not be overwritten');
-  before['.local/bin/codex-view'] = hash(expected);
+  before['.codex-view/bin/codex-view'] = hash(expected);
   assert.deepEqual(snapshot(f.home), before, 'all other managed bytes must remain from the old installation');
 });
 
@@ -500,11 +527,107 @@ test('profile edit immediately before snapshot is retained through install and u
   assert.equal(fs.readFileSync(profile, 'utf8'), original + edit);
 });
 
+test('default public installation needs neither GitHub CLI nor authentication and uses the isolated product prefix', t => {
+  const f = fixture(t);
+  succeeds(f.run([]));
+  assert.equal(fs.existsSync(path.join(f.home, '.codex-view/bin/code-view')), true);
+  assert.equal(fs.existsSync(path.join(f.home, '.local')), false);
+  const latest = f.calls().filter(args => args.includes('--head'));
+  assert.equal(latest.length, 1);
+  assert.ok(latest[0].includes('https://github.com/windsyu/codex-plugin/releases/latest'));
+  assert.deepEqual(f.calls().flat().filter(arg => arg.startsWith('https://')), [
+    'https://github.com/windsyu/codex-plugin/releases/latest',
+    'https://github.com/windsyu/codex-plugin/releases/download/v0.3.0/code-view-0.3.0-aarch64-apple-darwin.tar.gz',
+    'https://github.com/windsyu/codex-plugin/releases/download/v0.3.0/SHA256SUMS',
+  ], 'both downloads must use the one resolved tag, never latest/download');
+  succeeds(f.run(['uninstall']));
+});
+
+test('explicit version stays pinned and skips latest release discovery', t => {
+  const f = fixture(t);
+  succeeds(f.run(['--version', 'v0.3.0'], { MOCK_LATEST_URL: 'https://github.com/unrelated/repository/releases/tag/v9.9.9' }));
+  assert.equal(f.calls().some(args => args.includes('--head')), false);
+  const urls = f.calls().flat().filter(arg => arg.startsWith('https://'));
+  assert.equal(urls.length, 2);
+  for (const url of urls) assert.ok(url.startsWith('https://github.com/windsyu/codex-plugin/releases/download/v0.3.0/'), url);
+  assert.match(command(path.join(f.prefix, 'bin/code-view'), ['--version'], { env: f.env }).stdout, /0\.3\.0/);
+  succeeds(f.uninstall());
+});
+
+test('malformed, foreign, insecure and prerelease latest redirects reject before user writes', t => {
+  for (const url of [
+    'not-a-url',
+    'https://github.com/other/repo/releases/tag/v0.3.0',
+    'http://github.com/windsyu/codex-plugin/releases/tag/v0.3.0',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0-beta.1',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0?ignored=1',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0',
+  ]) {
+    const f = fixture(t);
+    const before = snapshot(f.home);
+    fails(f.run([], { MOCK_LATEST_URL: url }));
+    assert.deepEqual(snapshot(f.home), before, url);
+    assert.equal(f.calls().length, 1, 'invalid discovery must not proceed to downloads');
+  }
+});
+
+test('HTTP errors at discovery, archive or checksum download leave no installation or PATH edits', t => {
+  for (const kind of ['latest', 'archive', 'checksum']) {
+    const f = fixture(t);
+    fs.writeFileSync(path.join(f.home, '.zshrc'), '# keep this configuration');
+    const before = snapshot(f.home);
+    fails(f.run([], { MOCK_CURL_FAIL: kind }));
+    assert.deepEqual(snapshot(f.home), before, kind);
+  }
+});
+
+test('default prefix rejects the previous local installation, and installs cleanly after its explicit uninstall', t => {
+  const f = fixture(t, { legacyPrefix: true });
+  succeeds(f.install());
+  const before = snapshot(f.home);
+  const downloadsBefore = f.calls().length;
+  const refused = f.run([]);
+  fails(refused);
+  assert.match(refused.stderr, /uninstall/i);
+  assert.deepEqual(snapshot(f.home), before);
+  assert.equal(f.calls().length, downloadsBefore, 'legacy receipt must be detected before network discovery');
+  succeeds(f.run([], {}, path.join(f.prefix, 'bin/code-view-uninstall')));
+  succeeds(f.run([]));
+  assert.equal(fs.existsSync(path.join(f.home, '.codex-view/bin/code-view')), true);
+  assert.equal(fs.existsSync(path.join(f.home, '.local/bin/code-view')), false);
+  succeeds(f.run(['uninstall']));
+});
+
+test('a linked previous receipt also refuses a default install before downloading', t => {
+  const f = fixture(t);
+  const oldReceipt = path.join(f.home, '.local/share/code-view/.install-receipt');
+  fs.mkdirSync(path.dirname(oldReceipt), { recursive: true });
+  fs.symlinkSync(path.join(f.root, 'missing-receipt-target'), oldReceipt);
+  const before = snapshot(f.home);
+  fails(f.run([]));
+  assert.deepEqual(snapshot(f.home), before);
+  assert.deepEqual(f.calls(), []);
+});
+
+test('the first README shell block downloads to an explicit file and installs without GitHub CLI', t => {
+  const f = fixture(t);
+  const readme = fs.readFileSync(fileURLToPath(new URL('../../README.md', import.meta.url)), 'utf8');
+  const match = readme.match(/```(?:sh|bash)\n([\s\S]*?)```/);
+  assert.ok(match, 'README must provide a runnable initial shell block');
+  succeeds(command('/bin/bash', ['-c', match[1]], { cwd: f.root, env: f.env }));
+  assert.equal(fs.existsSync(path.join(f.home, '.codex-view/bin/code-view')), true);
+  const raw = f.calls().find(args => args.some(arg => arg.startsWith('https://raw.githubusercontent.com/windsyu/codex-plugin/')));
+  assert.ok(raw, 'README must download the repository installer');
+  assert.ok(raw.includes('--output'), 'curl must write the installer into the named temporary file');
+  assert.equal(fs.existsSync(raw[raw.indexOf('--output') + 1]), false, 'README must remove its temporary installer');
+  succeeds(f.run(['uninstall']));
+});
+
 test('README bootstrap stops failed downloads and temp creation, cleans up and exports PATH only on success', t => {
   const f = fixture(t);
   const readme = fs.readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
   const snippet = readme.match(/```sh\n([\s\S]*?)\n```/)[1];
-  fs.writeFileSync(path.join(f.tools, 'gh'), '#!/bin/sh\ncat <<\'INSTALLER\'\n#!/bin/bash\nprintf "executed\\n" > "$HOME/installer-ran"\nexit "${BOOTSTRAP_INSTALL_EXIT:-0}"\nINSTALLER\n[ "$BOOTSTRAP_MODE" != download-failure ] || exit 5\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.tools, 'curl'), '#!/bin/sh\noutput=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in --output) output=$2; shift 2 ;; *) shift ;; esac\ndone\n[ -n "$output" ] || exit 70\ncat > "$output" <<\'INSTALLER\'\n#!/bin/bash\nprintf "executed\\n" > "$HOME/installer-ran"\nexit "${BOOTSTRAP_INSTALL_EXIT:-0}"\nINSTALLER\n[ "$BOOTSTRAP_MODE" != download-failure ] || exit 5\n', { mode: 0o755 });
   fs.writeFileSync(path.join(f.tools, 'mktemp'), '#!/bin/sh\n[ "$BOOTSTRAP_MODE" != mktemp-failure ] || exit 6\nexec /usr/bin/mktemp "$@"\n', { mode: 0o755 });
   const initialPath = `${f.tools}:/usr/bin:/bin`;
   for (const shell of ['/bin/bash', '/bin/zsh'].filter(shell => fs.existsSync(shell))) {
@@ -517,7 +640,7 @@ test('README bootstrap stops failed downloads and temp creation, cleans up and e
       const result = command(shell, ['-f', '-c', script], { env });
       assert.equal(result.status, expectedExit, `${shell}: ${mode}: ${result.stderr}`);
       assert.equal(fs.existsSync(path.join(home, 'installer-ran')), shouldExecute, `${shell}: ${mode}`);
-      assert.equal(fs.readFileSync(path.join(home, 'bootstrap-path'), 'utf8'), mode === 'success' ? `${home}/.local/bin:${initialPath}` : initialPath, `${shell}: ${mode}`);
+      assert.equal(fs.readFileSync(path.join(home, 'bootstrap-path'), 'utf8'), mode === 'success' ? `${home}/.codex-view/bin:${initialPath}` : initialPath, `${shell}: ${mode}`);
       assert.deepEqual(fs.readdirSync(temporary), [], `${shell}: temporary script must be removed`);
     }
   }

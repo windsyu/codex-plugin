@@ -6,30 +6,36 @@
 
 ## 快速安装与 PATH
 
-[README 的复制脚本](../../README.md#macos-快速安装与卸载)通过 GitHub CLI 下载本仓库的最新稳定 release，先校验归档和包内校验和，再调用包安装器。仓库目前为私有，需安装 `gh` 并运行 `gh auth login`，账号须有仓库访问权限；脚本不会要求把 token 填入命令。
+[README 的复制脚本](../../README.md#macos-快速安装与卸载)通过系统 `curl` 匿名下载本仓库的最新稳定 release，无需 GitHub 账号、GitHub CLI 或编译环境。脚本先解析公开的 latest 重定向并固定版本，再下载同一版本的归档与校验文件；校验归档和包内文件后调用包安装器。下载只使用 HTTPS，忽略用户 curl 配置；下载、版本解析或校验失败不会修改安装文件和 shell 配置。
 
 已有源码 checkout 时，从仓库根目录运行同一个脚本，无需构建：
 
 ```sh
 bash scripts/install-macos.sh
 # 可固定版本或指定绝对安装前缀
-bash scripts/install-macos.sh --version v0.3.0 --prefix "$HOME/.local"
+bash scripts/install-macos.sh --version v0.3.0 --prefix "$HOME/.codex-view"
 # 明确升级已有安装：先 Ctrl-C 退出旧工作台，再运行
 bash scripts/install-macos.sh --force
 # 只安装程序，由自己管理 PATH
 bash scripts/install-macos.sh --no-path
 ```
 
-默认在 `~/.local/bin` 安装三个原有入口及 `code-view-uninstall`，许可与安装清单位于 `~/.local/share/code-view`，无需 sudo。程序运行不依赖 `gh`；只有下载/升级需要它，卸载可以离线完成。
+默认在 `~/.codex-view/bin` 安装三个原有入口及 `code-view-uninstall`，许可与安装清单位于 `~/.codex-view/share/code-view`，无需 sudo。安装与升级只需系统 `curl`，卸载可以离线完成。
 
 脚本在 `${ZDOTDIR:-$HOME}/.zshrc` 与 Bash 当前生效的登录配置添加带 `code-view PATH` 标记的区块，保留其他内容。Bash 按 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 的顺序选择第一个已有文件；全部不存在时才创建 `.bash_profile`，避免遮蔽已有设置。路径通过 shell 转义写入，避免重复追加；已有 dotfile 使用原子替换并保留权限。新 zsh 交互终端或 Bash 登录终端自动加载。安装脚本不能改变父 shell，当前终端执行：
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.codex-view/bin:$PATH"
 code-view --version
 ```
 
 自定义前缀时使用该前缀的 `bin`。前缀必须是绝对路径，支持空格和中文，拒绝冒号、换行、`.` / `..` 组件与符号链接。dotfile 或其祖先为符号链接时可用 `--no-path` 并手动管理 PATH；升级时 `--no-path` 保留此前已登记的 PATH 区块，便于日后卸载。
+
+## 从旧安装目录切换
+
+曾用旧快速脚本安装到 `~/.local` 时，先退出工作台，再运行 `"$HOME/.local/bin/code-view-uninstall"`，然后执行当前 README 的安装命令。新默认安装发现旧清单时会提示停止，避免留下两套命令和 PATH 区块；不自动迁移或删除旧文件。已有自定义前缀仍可通过 `--prefix` 明确管理。
+
+旧手动包安装没有快速卸载清单；如需纳入管理，先用 `bash scripts/install-macos.sh --prefix "$HOME/.local" --force --version v0.3.0` 登记，再运行该前缀的卸载器。用户配置和历史无需搬迁，仍在 `~/.codex-web` 与原生 `CODEX_HOME`。
 
 ## 卸载
 
@@ -38,7 +44,7 @@ code-view --version
 ```sh
 code-view-uninstall
 # PATH 尚未刷新或被手动改过时，也可用绝对路径
-"$HOME/.local/bin/code-view-uninstall"
+"$HOME/.codex-view/bin/code-view-uninstall"
 ```
 
 自定义前缀使用 `<prefix>/bin/code-view-uninstall`。源码脚本也支持 `bash scripts/install-macos.sh uninstall --prefix <prefix>`。卸载读取安装清单，只删除已登记且未被修改的普通文件，移除安装时登记的精确 PATH 区块，并清理空资源目录；未知文件及 `~/.codex-web`、原生 `CODEX_HOME`、旧数据库保留。
@@ -59,12 +65,12 @@ code-view-uninstall
 shasum -a 256 -c SHA256SUMS
 tar -xzf code-view-0.3.0-aarch64-apple-darwin.tar.gz
 cd code-view-0.3.0-aarch64-apple-darwin
-./install.sh --prefix "$HOME/.local"
-export PATH="$HOME/.local/bin:$PATH"
+./install.sh --prefix "$HOME/.codex-view"
+export PATH="$HOME/.codex-view/bin:$PATH"
 code-view --version
 ```
 
-包内安装器先校验内容、平台与目标冲突，再复制到指定前缀的 `bin` 和 `share/code-view`；默认前缀也是 `~/.local`，无需 sudo。这个手动入口不编辑 shell 配置或生成快速卸载清单；需要 PATH 和卸载管理时使用上面的快速脚本。手动安装器遇到已有文件会停止，明确升级时使用 `./install.sh --prefix "$HOME/.local" --force`。升级前先在原启动器中 Ctrl-C 退出旧应用，再启动新版本。
+包内安装器先校验内容、平台与目标冲突，再复制到指定前缀的 `bin` 和 `share/code-view`；已发布的 `v0.3.0` 包内默认仍为 `~/.local`，所以上面显式传入新前缀，无需 sudo；后续从当前源码生成的包默认使用 `~/.codex-view`。这个手动入口不编辑 shell 配置或生成快速卸载清单；需要 PATH 和卸载管理时使用上面的快速脚本。手动安装器遇到已有文件会停止，明确升级时使用 `./install.sh --prefix "$HOME/.codex-view" --force`。升级前先在原启动器中 Ctrl-C 退出旧应用，再启动新版本。
 
 包也可以不安装，直接使用解压目录中的 `bin/code-view`。校验和用于检查传输完整性；当前本地包没有 Apple 签名或 notarization。Linux、Windows 和 Intel macOS 未完成验收。
 
