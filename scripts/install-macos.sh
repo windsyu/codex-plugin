@@ -4,7 +4,7 @@ set -euo pipefail
 fail() { printf 'code-view installer: %s\n' "$*" >&2; exit 1; }
 repository=windsyu/codex-plugin
 action=install
-prefix=${HOME:?HOME must be set}/.local
+prefix=${HOME:?HOME must be set}/.codex-view
 version=latest
 force=false
 configure_path=true
@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       printf '%s\n' 'Usage: bash install-macos.sh [install|uninstall] [--prefix ABSOLUTE_PATH]' \
         '       install: [--version v0.x.y] [--force] [--no-path]' \
-        'Default: latest stable macOS arm64 release, ~/.local, managed zsh/bash PATH.' \
+        'Default: latest stable macOS arm64 release, ~/.codex-view, managed zsh/bash PATH.' \
         'Uninstall keeps user history/configuration and refuses modified owned files.'
       exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -350,13 +350,26 @@ if [[ $action == uninstall ]]; then
   exit 0
 fi
 [[ $version == latest || $version =~ ^v0\.[0-9]+\.[0-9]+$ ]] || fail 'version must be latest or v0.x.y'
-command -v gh >/dev/null || fail 'install GitHub CLI (gh) first, then run gh auth login'
-gh auth status --active --hostname github.com >/dev/null 2>&1 || fail 'run gh auth login with an account that can access the repository'
-if [[ $version == latest ]]; then version=$(gh release view --repo "$repository" --json tagName --jq .tagName); fi
+if [[ $prefix == "$HOME/.codex-view" && ( -e $HOME/.local/share/code-view/.install-receipt || -L $HOME/.local/share/code-view/.install-receipt ) ]]; then
+  fail 'previous ~/.local installation found; first run "$HOME/.local/bin/code-view-uninstall", then install again'
+fi
+command -v curl >/dev/null || fail 'curl is required to download the public release'
+# Ignore curlrc and use public HTTPS URLs; no GitHub account or API is needed.
+download() {
+  curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 120 "$@"
+}
+release_url=https://github.com/$repository/releases
+if [[ $version == latest ]]; then
+  resolved_url=$(download --head --output /dev/null --write-out '%{url_effective}' "$release_url/latest") || fail 'could not resolve the latest public release'
+  case $resolved_url in "$release_url/tag/"*) version=${resolved_url#"$release_url/tag/"} ;; *) fail 'release redirected to an unexpected URL' ;; esac
+fi
 [[ $version =~ ^v0\.[0-9]+\.[0-9]+$ ]] || fail 'release did not return a supported version'
 archive_name=code-view-${version#v}-aarch64-apple-darwin.tar.gz
 bundle_name=${archive_name%.tar.gz}
-gh release download "$version" --repo "$repository" --dir "$work" --pattern "$archive_name" --pattern SHA256SUMS
+# Both files use the resolved tag even if latest changes during installation.
+download --output "$work/$archive_name" "$release_url/download/$version/$archive_name" || fail 'could not download the release archive'
+download --output "$work/SHA256SUMS" "$release_url/download/$version/SHA256SUMS" || fail 'could not download release checksums'
 check_file "$work/$archive_name"
 check_file "$work/SHA256SUMS"
 [[ -f $work/$archive_name && -f $work/SHA256SUMS ]] || fail 'missing release downloads'
