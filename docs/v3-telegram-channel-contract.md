@@ -78,6 +78,10 @@ receipt journal 新写版本为 v5，读取器接受有序的 v1/v2/v3/v4/v5 混
 
 有效文字回答保存 `bot ID + chat ID + 用户回复 message ID + update ID + task UUID + interaction UUID`，同样先实际 fsync，再更新选择或尝试回答；不保存回答、被回复正文、提示 ID 或原生 RPC ID。task 须仍处于相同 bot/chat 的 Submitting，回答的 update/message 身份与任务、拒绝和 callback 共用去重域。收件不能证明原生采纳，恢复不能重放回答或还原问题授权。
 
+当前 Service 在领取任何审批、问题或取消引用之前，先在短内存锁中保留输入身份，再异步查询全部已消费域：Received、Rejected、CallbackReceived、QuestionReplyReceived 与 QueuedCanceled 的 bot/update，全部消息 key，以及 bot/query 摘要。冲突输入不消费当前提示，不追加记录，也不学习其另一个身份。提示消息 ID 不作为用户消息 key。查询只做去重，不能授予当前授权；后续仍复验绑定、来源和准确引用，实际收件写者仍执行原有原子校验。该入口比历史 Received 写入规则更保守，不更改旧 journal 回放校验或格式。
+
+输入身份最多保留 17 项，包含随机独立 owner、bot/update、可安全提取的 message key 和固定 32 字节 query 摘要；没有正文、按钮引用或原始 query。仅该 owner 的正常处理返回释放身份；错误、调用取消或丢失调用者均保守保留至 Service 结束，撤销或重新配置不清空。容量满时停止渠道并报告 `channel_input_capacity`，需要重新启动服务、重新确认绑定；不淘汰旧身份来继续，不阻塞原生转发。这个入口保留与取消引用的内部保留分别有界，不恢复任何执行权限。
+
 | 阶段 | 能证明什么 | 退出或重启后的处理 |
 | --- | --- | --- |
 | Rejected（v2） | 已持久拒绝该 update/message 身份，不含任务正文 | 不在新绑定窗口重新执行 |
@@ -178,3 +182,5 @@ Run 退出、目标卸载/退订、TUI 协议断线、连接 epoch 变化、解�
 P1 应交付可操作的本机配置/绑定/撤销与同一 Thread 文本闭环；P2 补齐上述明确支持交互及失效矩阵。合成 bot API 证明身份负例、重复消息、发送不确定、慢发送、慢存储和存储故障；安装版原生 CLI 证明严格已加载输入、来源连续性和不阻塞转发。最后由使用者配置自己的凭证，完成真实 Telegram 上下文、本机来源隔离和必要交互验收。合成结果和只读报告页不代替生产或跨设备验收。
 
 Run 移除、关闭/退订请求和畸形 JSON 的 Service 增量回归见[验收记录](validation/v3-channel-p2-acceptance-2026-10-10.md#3-service-失效入口)。退订请求发出即保守失效，不能以迟到响应重新授予旧资格；解析失败保留转发字节并暂扣旧渠道 final。各层证据按该记录的边界组合，不宣称完整故障或实际同时响应矩阵已通过。
+
+[输入身份与重新绑定专项](validation/v3-channel-input-rebind-2026-10-10.md)覆盖重复身份不消费当前提示，以及同一原版 Thread 的撤销后恢复：旧原生审批仍可由本机完成，新绑定任务等待后继续同一上下文，旧输入和旧 final 不外发。它没有进程/Service 重启、传输重连或旧 actor 清理与确认竞争，不替代完整故障矩阵和真实 Telegram 验收。

@@ -27,6 +27,7 @@ const QUEUE_LIMIT: usize = 16;
 const TASK_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const OFFSET_LIFETIME: Duration = Duration::from_secs(6 * 24 * 60 * 60);
 mod cancellations;
+mod inputs;
 mod interactions;
 
 #[derive(Clone, Copy, Serialize)]
@@ -78,6 +79,7 @@ struct Inner {
     cancel_offers: BTreeMap<Uuid, Arc<cancellations::Offer>>,
     cancel_outbox: VecDeque<cancellations::Outbound>,
     cancel_pending: BTreeMap<Uuid, (DeliveryKey, i64)>,
+    inputs: inputs::Pending,
     interactions: BTreeMap<Uuid, interactions::Pending>,
     active_interaction: Option<(Uuid, ActiveBinding, session::InteractionHandle)>,
     last_task: Option<TaskView>,
@@ -90,8 +92,9 @@ impl Inner {
         self.queue.clear();
         self.cancel_offers.clear();
         self.cancel_outbox.clear();
-        // In-flight dedup reservations survive revocation; they grant no
-        // authority and remain bounded until their durable result is known.
+        // In-flight dedup reservations survive revocation and grant no
+        // authority. Only the owning caller's normal completion releases them;
+        // a lost or uncertain result remains bounded until service destruction.
     }
     fn revoke(&mut self) {
         self.binding.revoke();
@@ -131,6 +134,7 @@ impl Service {
                     cancel_offers: BTreeMap::new(),
                     cancel_outbox: VecDeque::new(),
                     cancel_pending: BTreeMap::new(),
+                    inputs: inputs::Pending::default(),
                     interactions: BTreeMap::new(),
                     active_interaction: None,
                     last_task: None,
@@ -596,14 +600,46 @@ async fn process_update(
         core.failed("channel_update_order_invalid");
         return Err(());
     };
-    let key = private_message_key(bot, update);
     if cancellations::pending(core, bot, update) {
         return Ok(());
     }
+    let identity = inputs::Identity::new(bot, update_id, update);
+    // Reserve before the asynchronous lookup. A second ingress cannot race a
+    // completed lookup/receipt and consume a different still-current prompt.
+    let reservation = core.inner.lock().unwrap().inputs.reserve(identity);
+    let owner = match reservation {
+        inputs::Reservation::Owned(owner) => owner,
+        inputs::Reservation::Conflict => return Ok(()),
+        inputs::Reservation::Full => {
+            core.failed("channel_input_capacity");
+            return Err(());
+        }
+    };
+    let result = process_reserved_update(core, client, generation, update, identity).await;
+    // Cancellation or an uncertain receipt leaves this bounded reservation in
+    // place until service destruction. Revocation cannot turn it into fresh input.
+    if result.is_ok() {
+        core.inner.lock().unwrap().inputs.release(owner);
+    }
+    result
+}
+async fn process_reserved_update(
+    core: &Arc<Core>,
+    client: &Arc<Client>,
+    generation: Uuid,
+    update: &serde_json::Value,
+    identity: inputs::Identity,
+) -> Result<(), ()> {
+    let inputs::Identity {
+        bot,
+        update: update_id,
+        key,
+        query,
+    } = identity;
     let writer = core.writer().map_err(|code| {
         core.failed(code);
     })?;
-    match writer.is_rejected(bot, update_id, key).await {
+    match writer.input_seen(bot, update_id, key, query).await {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(error) => {

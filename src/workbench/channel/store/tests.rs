@@ -2148,3 +2148,158 @@ fn cancel_input_query_sees_every_event_without_learning_identities_or_writing() 
         Err(Failure::Poisoned)
     );
 }
+
+#[test]
+fn input_seen_queries_every_identity_domain_without_learning_conflicts_across_reopen() {
+    let (dir, mut store) = setup();
+    let (active, interaction) = submitting(&mut store);
+    let canceled = Uuid::from_u128(9);
+    store.admit(key(9), 9, canceled).unwrap();
+    store.reject(123, 20, Some(key(20))).unwrap();
+    store
+        .admit_callback(123, 30, "SYNTHETIC_INPUT_SEEN_QUERY", active, interaction)
+        .unwrap();
+    store
+        .admit_question_reply(key(40), 40, active, interaction)
+        .unwrap();
+    store.cancel_queued(key(50), 50, canceled).unwrap();
+    let digest = *blake3::hash(b"SYNTHETIC_INPUT_SEEN_QUERY").as_bytes();
+    let unknown_digest = *blake3::hash(b"SYNTHETIC_UNSEEN_QUERY").as_bytes();
+    let path = dir.path().join("channel");
+    let before = fs::read(path.join(JOURNAL)).unwrap();
+    let expected_tasks = store.recover().unwrap();
+    let expected_sequence = store.sequence;
+    for reopen in [false, true] {
+        if reopen {
+            drop(store);
+            store = Store::open(&path).unwrap();
+        }
+        // Bare update identities cover Received, Rejected, CallbackReceived,
+        // QuestionReplyReceived and QueuedCanceled without a message fallback.
+        for update in [1, 9, 20, 30, 40, 50] {
+            assert_eq!(store.input_seen(123, update, None, None), Ok(true));
+            assert_eq!(store.input_seen(124, update, None, None), Ok(false));
+            assert_eq!(
+                store.input_seen(123, update, Some(key(100)), Some(unknown_digest)),
+                Ok(true)
+            );
+        }
+        // Every message-key domain works independently of update identity.
+        for message in [1, 9, 20, 40, 50] {
+            assert_eq!(
+                store.input_seen(123, 100, Some(key(message)), None),
+                Ok(true)
+            );
+            assert_eq!(
+                store.input_seen(
+                    124,
+                    100,
+                    Some(DeliveryKey {
+                        bot_id: 124,
+                        ..key(message)
+                    }),
+                    None
+                ),
+                Ok(false)
+            );
+            assert_eq!(
+                store.input_seen(
+                    123,
+                    100,
+                    Some(DeliveryKey {
+                        chat_id: 457,
+                        ..key(message)
+                    }),
+                    None
+                ),
+                Ok(false)
+            );
+        }
+        assert_eq!(store.input_seen(123, 100, None, Some(digest)), Ok(true));
+        assert_eq!(store.input_seen(124, 100, None, Some(digest)), Ok(false));
+        // A hit on one axis must not associate either conflicting fresh axis.
+        assert_eq!(
+            store.input_seen(123, 100, Some(key(100)), Some(digest)),
+            Ok(true)
+        );
+        assert_eq!(
+            store.input_seen(123, 100, Some(key(1)), Some(unknown_digest)),
+            Ok(true)
+        );
+        assert_eq!(store.input_seen(123, 100, None, None), Ok(false));
+        assert_eq!(store.input_seen(123, 101, Some(key(100)), None), Ok(false));
+        assert_eq!(
+            store.input_seen(123, 101, None, Some(unknown_digest)),
+            Ok(false)
+        );
+        assert_eq!(
+            store.input_seen(123, 100, Some(key(100)), Some(unknown_digest)),
+            Ok(false)
+        );
+        // Validate all supplied identities even when the update already hits.
+        for (bot, update, input) in [
+            (0, 1, None),
+            (123, -1, None),
+            (124, 1, Some(key(1))),
+            (123, 1, Some(key(0))),
+            (
+                123,
+                1,
+                Some(DeliveryKey {
+                    chat_id: 0,
+                    ..key(1)
+                }),
+            ),
+        ] {
+            assert_eq!(
+                store.input_seen(bot, update, input, Some(digest)),
+                Err(Failure::InvalidInput)
+            );
+        }
+        assert_eq!(store.sequence, expected_sequence);
+        assert_eq!(store.bytes, before.len());
+        assert_eq!(store.recover().unwrap(), expected_tasks);
+        assert_eq!(fs::read(path.join(JOURNAL)).unwrap(), before);
+    }
+}
+
+#[test]
+fn input_seen_keeps_historical_same_update_different_message_received_rows_readable() {
+    let (dir, store) = setup();
+    let path = dir.path().join("channel");
+    // Initialize a legitimate private Store first; keep its lock and inode
+    // safeguards while replacing only the synthetic journal after writer exit.
+    drop(store);
+    for version in [1, 5] {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let bytes: Vec<_> = [(key(1), first), (key(2), second)]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, (key, task))| {
+                fixture_line(Record {
+                    version,
+                    sequence: index as u64 + 1,
+                    event: Event::Received {
+                        key,
+                        update_id: 7,
+                        task,
+                    },
+                })
+            })
+            .collect();
+        fs::write(path.join(JOURNAL), &bytes).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.recover().unwrap(),
+            vec![(first, Status::Received), (second, Status::Received)]
+        );
+        assert_eq!(store.input_seen(123, 7, None, None), Ok(true));
+        assert_eq!(store.input_seen(123, 8, Some(key(1)), None), Ok(true));
+        assert_eq!(store.input_seen(123, 8, Some(key(2)), None), Ok(true));
+        assert_eq!(store.input_seen(123, 8, Some(key(3)), None), Ok(false));
+        assert_eq!(store.input_seen(124, 7, None, None), Ok(false));
+        assert_eq!(fs::read(path.join(JOURNAL)).unwrap(), bytes);
+        drop(store);
+    }
+}
