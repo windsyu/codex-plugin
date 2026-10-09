@@ -13,10 +13,11 @@
 
 ## 产品计划与设计
 
-[V2 实施计划](v2-implementation-plan.md)是唯一实施状态、需求追踪和逐片验收来源。下列文档负责契约和理由，不维护另一套进度表。
+[V2 实施计划](v2-implementation-plan.md)是 V2 唯一实施状态、需求追踪和逐片验收来源。[V3 实施计划](v3-implementation-plan.md)独立记录未来需求排序与待设计事项，不代表 V3 功能已实现，也不改变 V2 验收。下列文档按各自职责维护，不复制 V2 进度表。
 
 | 文档 | 职责 |
 | --- | --- |
+| [V3 实施计划](v3-implementation-plan.md) | 先接入 Telegram 渠道，再独立设计跨会话管理；后端按需求补齐 |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |

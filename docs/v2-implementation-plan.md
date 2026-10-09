@@ -506,6 +506,8 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 
 当前受测平台/provider 仍见[支持范围](codex-native-cli-workbench-support.md)。R6 不自动迁移旧库、修改原生配置、清理真实历史、替换当前实例、推送或发布，也不将尚未执行的设计验收算作通过。
 
+V3 后续工作见独立的 [V3 实施计划](v3-implementation-plan.md)。该计划记录未来需求及实施顺序，不改写上述 V2 验收，也不代表 V3 功能已实现。
+
 ## 10. V2 Release 包装
 
 2026-10-02 用户要求将已完成的 V2 包装为 release，便于在任意项目目录执行 `code-view`；用户确认无参数直接启动当前目录项目。版本按 pre-1.0 约定设为 `0.3.0`，保留 `codex-view` 无 CLI 首页和两个 Rust binary，不改变运行 API、配置 schema、模型代理或数据存储。
