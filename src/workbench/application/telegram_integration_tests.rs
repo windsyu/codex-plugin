@@ -865,4 +865,5 @@ mod telegram_native_integration {
     include!("telegram_tui_interaction_integration_tests.rs");
     include!("telegram_tui_inflight_integration_tests.rs");
     include!("telegram_rebind_integration_tests.rs");
+    include!("telegram_restart_integration_tests.rs");
 }

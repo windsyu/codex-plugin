@@ -91,6 +91,11 @@ cargo test --locked --offline --lib \
 workbench::application::tests::telegram_native_integration::installed_cli_production_telegram_rebind_recovery_path \
 -- --exact --ignored --nocapture
 
+CODEX_CHANNEL_TEST_BINARY=/absolute/path/to/codex \
+cargo test --locked --offline --lib \
+workbench::application::tests::telegram_native_integration::installed_cli_production_telegram_host_restart_path \
+-- --exact --ignored --nocapture
+
 cargo test --locked --offline --lib \
 interaction_duplicate_identity_ -- --test-threads=4
 
@@ -115,6 +120,8 @@ workbench::channel::service::tests::p2_invalidation_ -- --test-threads=1
 [输入身份与重绑专项](../validation/v3-channel-input-rebind-2026-10-10.md)先复现当前提示被冲突身份消费，再检验生产入口的并发保留及只读全域查询。原版重绑测试在旧审批未决时撤销、重新确认同一 Thread，证明新排队对话随后自动完成；不覆盖进程/Service 重启、传输重连或旧清理竞态。
 
 [Service 重建专项](../validation/v3-channel-service-restart-2026-10-10.md)使用真实 Service、写者和受控 Bot polling；销毁旧 Service 后，新 Service 复用同一合成 Session，重新配置、配对确认并完成新任务，旧授权和队列不恢复。静态提示回归分别检查当前归属、外来、撤销及未授权。不使用安装版 CLI，不计作原版宿主重启专项。
+
+[原版宿主重启专项](../validation/v3-channel-host-restart-2026-10-10.md)顺序启动两个私有隔离宿主，在准确旧 peer/wrapper 消失后由本机显式恢复同一 Thread，重新加载凭证和配对授权。真实 polling 拒绝旧输入/引用，新任务沿用完成历史并仅发准确 final；不分类 reaper fallback、不证明所有工具或崩溃恢复。
 
 `v3-channel-runtime-acceptance` 只呈现经过检查的汇总 JSON，不执行测试、不读取仓库或会话文件、不提供工作台控制。报告 schema 与校验以[示例源码](../../examples/v3-channel-runtime-acceptance.rs)为准：产品提交与安装版 CLI 分开记录，固定七项证据包含状态及受管 artifact UUID，另列常规 passed/failed/ignored、限制和待用户执行的清单。内容须来自实际证据，不复制原始日志或私人正文。
 

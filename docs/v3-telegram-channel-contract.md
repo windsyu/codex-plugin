@@ -167,6 +167,20 @@ QueuedCanceled 仅保存取消输入的 bot/chat/message/update 身份和准确 
 
 因此 command/file decline 只表示拒绝该操作；撤销渠道只停止后续渠道处理和外发，原生任务可能继续。问题 error 或畸形 typed answer 会消费 callback 并生成空答案，不能用于取消。不得锁住或阻断原版 TUI 转发来制造互斥，也不得伪造模型错误。精确整轮取消保持明确未完成项；上述源码结论不能由单次竞态测试通过消除。
 
+#### 精确取消的实现准入门（尚未满足）
+
+2026-10-10 只读复核的实际源码仍为上述 commit。公开 [TurnInterruptParams](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server-protocol/src/protocol/v2/turn.rs#L342)携带 thread/turn ID，但不能仅由参数推断内部消费也受该 ID 限定；[公共测试](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/tests/suite/v2/turn_interrupt.rs#L109)证明错误 ID、普通中断和已结束 Turn 的拒绝，不证明检查后的目标切换安全。core 内部另有带目标的 InterruptIfNoPendingInput 分支，但当前公共协议没有暴露它，不能作为工作台可用接口。这些是该源码的事实，不是 CLI 0.156.1 的构建来源证明。
+
+后续精确取消实现必须同时满足以下条件；本节只定义能力与验收门，不增加路由、取消命令、receipt 格式或当前支持承诺：
+
+1. 原生公开接口在实际消费取消时，原子比较并中断准确、非空的 Thread/Turn；任何目标变化都无副作用地拒绝。渠道不能借用空 turnId 的 startup interrupt 分支跳过目标检查。前置比较后再提交无目标操作、提高本地复验频率或阻断 TUI 都不满足此条件。
+2. 渠道权限绑定当前 bot/user/chat、binding、Run/transport/subscription generation、准确 task 和已确认 Accepted Turn。观察缺口、本机输入混入或身份变化关闭旧权限；审批 request ID 和队列引用不能替代 Turn 身份。
+3. 单次取消输入与现有消费身份共用去重，尝试前实际保存无正文意图。未知写入/ACK/终态不自动重发，不在重启后恢复取消权；原生取消、工具结束和渠道确认分别表达。journal 变更只能在原生能力通过后独立设计，不先写一个永远无法安全执行的意图。
+4. 可控原生竞态在最终原子比较/消费之前结束旧 Turn、开始新的本机 Turn，再放行迟到取消；新 Turn 不被中断。若正确实现没有可分离的比较/消费窗口，以实现和测试证明目标切换无法穿插该原子临界区。另验证准确当前取消、重复/迟到请求、丢 ACK、来源失效、本机混入及重启不重放；合成客户端复验不能代替原生消费边界证据。
+5. 公开 schema、实现和测试一致后，再以准确安装版原生 CLI 验证完整生产链。单次普通中断通过不解除该门；不自动升级或修改官方 CLI，也不将更宽的“停止当前工作”悄悄改称精确取消。
+
+当前未满足第 1 项，不能进入渠道写入实现。保留该验收项；延期或缩小它、放宽停止语义、升级或修改原版 CLI 都须先由使用者明确决定，不能以新增测试或局部 guard 代替。
+
 ## 6. 原生退出与同 HOME 启动边界
 
 仅 opt-in App Server 设置 `thread_unload_delay_secs=0`，不修改普通 V2 CLI 或用户原生配置文件。停止时先使控制与外发失效、关闭本 Run relay，再向核验后的单个 native peer 发 SIGTERM；有限时间内尝试原生 interrupt/后台终端清理，超时只回收本 Run 独占组，不扫描全机 PPID。socket 清理只针对归属和 inode 匹配的物理叶子，保留官方共享目录。
@@ -186,3 +200,5 @@ Run 移除、关闭/退订请求和畸形 JSON 的 Service 增量回归见[验�
 [输入身份与重新绑定专项](validation/v3-channel-input-rebind-2026-10-10.md)覆盖重复身份不消费当前提示，以及同一原版 Thread 的撤销后恢复：旧原生审批仍可由本机完成，新绑定任务等待后继续同一上下文，旧输入和旧 final 不外发。它没有进程/Service 重启、传输重连或旧 actor 清理与确认竞争，不替代完整故障矩阵和真实 Telegram 验收。
 
 [Service 重建专项](validation/v3-channel-service-restart-2026-10-10.md)补充真实 Service Drop、独立写者锁释放、显式加载保存凭证、重新配对授权和正常新任务；Session/transport 为连续合成来源，不是安装版 CLI/宿主进程重启。另一个生产 offer 回归检查不支持交互的静态提示：当前归属且明确授权时最多一次，外来/撤销/未授权均不发送，也不写答案或收件。
+
+[原版宿主重启专项](validation/v3-channel-host-restart-2026-10-10.md)随后检查两个独立宿主：准确旧 peer/wrapper 消失后才重开，凭证必须显式加载，Thread 由本机明确恢复，重新取得完整 target 及渠道授权后才执行新任务。旧输入、审批与取消引用不重放；生命周期只证明准确进程消失，不分类 NativeExited/fallback，也不证明所有工具或真实崩溃恢复。
