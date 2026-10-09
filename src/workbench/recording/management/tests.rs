@@ -415,6 +415,9 @@ fn cleanup_global_lock_replaced_targets_corrupt_policy_and_changed_revision_fail
     let elsewhere = f._tmp.path().join("preserved-original");
     std::fs::rename(&original, &elsewhere).unwrap();
     std::fs::create_dir(&original).unwrap();
+    // This unsafe replacement must fail the private-directory gate regardless
+    // of the caller's umask; a private empty directory is safely skipped instead.
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut task = cleanup::Task::resume(
         &f.root,
         &f.workspace,
