@@ -1825,3 +1825,4 @@ async fn interaction_paused_receipt_text_claim_excludes_buttons_and_rechecks_loc
 }
 
 include!("cancel_tests.rs");
+include!("invalidation_tests.rs");

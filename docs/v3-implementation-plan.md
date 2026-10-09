@@ -75,6 +75,8 @@ V3 实验实现不改写 [ADR 0039](decisions/0039-cc-viewer-style-runtime.md) �
 | P3：第一阶段真实 Telegram 验收 | 尚未验收 | 用户本机配置 bot 凭证并绑定后，实测上下文延续、本机任务不外发、必要交互与故障状态；不以合成结果代替 |
 | 第二阶段：跨会话管理 | 尚未设计 | 第一阶段闭环后独立确认体验与范围 |
 
+P2 于 2026-10-10 补充原版 CLI 的混合 Add/Update/Delete/Move 允许与拒绝、三个 Service 失效入口回归，以及可离线生成的只读证据报告；定向结果和准确边界见[增量验收记录](validation/v3-channel-p2-acceptance-2026-10-10.md)。这些证据没有完成真实 Telegram、实际同时响应或精确整轮取消验收，不改变上表阶段状态。
+
 已补齐第一阶段的用户流程草案和接入契约，并完成 P0a/P0b/P0c 隔离探针。P0b 的 queue/resume 只在候选原生协议进程中证明顺序和来源；P0c 改用透明 TUI relay 与 loaded-only `turn/start`，没有采用可能重新加载目标的附加操作。普通工作台继续以 `-c` 覆盖启动；本地源码新增默认关闭的 `--channel-ready` / `launch.channelReady` 实验入口，普通已有 Run 仍无热附加入口。当前实验模式仅支持默认原生配置，named profile 明确拒绝。绑定、授权、持久收件与发送 actor 已取得定向及分段标准检查证据，未配置页面完成本机 Chrome 检查；具体数量和两次检查修复见[验证记录](validation/v3-channel-runtime-2026-10-09.md#51-集成标准检查分段执行及修复边界)。正常宿主退出的并行回收等待和未发布 Owner 取消清理已落源码；真实宿主 normal/forced 增量回归已有结果，增强同一 handle witness 断言后的最终 Rust 575 项、单列原生宿主退出/Owner 专项与 debug/release 构建已通过。统一 18 秒是 reaper 等待策略，不是总 Drop 硬上限，也不证明所有工具或多个真实 Run 并发退出。本轮分段标准检查与最终退出修复复验已完成；完整本机操作链已在原版 CLI 加合成 Bot/model 专项中通过，用途修复后最终 Rust 585 项、单列三项原生专项及 debug/release 构建通过；具体断言与夹具修复见[新增证据](validation/v3-channel-runtime-2026-10-09.md#53-用户线程用途与完整生产操作链)。独立排队取消已接入，本片验证单列；下一步安排真实 Telegram 用户验收并核对剩余失效矩阵，精确整轮取消保持已知缺口，P2/P3 仍未完成。用户结果仍须映射到具体证据，不能将原生运行部分算作生产 Telegram 交付。
 
 2026-10-09 的源码核对、用户流程草案、能力缺口与首片验收用例见 [Telegram 渠道开工检查](v3-channel-preparation.md)。该准备记录不锁定技术路线，不改变本计划已确认范围，也不表示渠道功能已实现。
