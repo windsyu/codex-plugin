@@ -45,7 +45,7 @@ fn supported(value: &Value, scope: Option<&FileScope>) -> Request {
     }
 }
 
-fn response(request: &Request, action: Action, selected: &[(usize, usize)]) -> Value {
+fn response(request: &Request, action: Action, selected: &[Answer]) -> Value {
     request
         .response(&action, selected)
         .expect("valid selection")
@@ -110,7 +110,14 @@ fn ordinary_command_has_only_typed_once_and_decline_and_no_cwd() {
             )
             .is_err()
     );
-    assert!(request.response(&Action::Accept, &[(0, 0)]).is_err());
+    assert!(
+        request
+            .response(
+                &Action::Accept,
+                &[supported(&question(), None).select(0, 0).unwrap()]
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -361,7 +368,7 @@ fn questions_answer_original_ids_and_exact_labels_without_partial_results() {
             question: 1,
             option: 1,
         },
-        &[(0, 0)],
+        &[request.select(0, 0).unwrap()],
     );
     assert_eq!(
         envelope,
@@ -393,14 +400,18 @@ fn questions_answer_original_ids_and_exact_labels_without_partial_results() {
                 question: 0,
                 option: 0,
             },
-            vec![(0, 1)],
+            vec![request.select(0, 1).unwrap()],
         ),
         (
             Action::Choose {
                 question: 0,
                 option: 0,
             },
-            vec![(9, 0)],
+            vec![{
+                let mut answer = request.select(0, 0).unwrap();
+                answer.question = 9;
+                answer
+            }],
         ),
     ] {
         assert!(request.response(&action, &prior).is_err());
@@ -408,20 +419,13 @@ fn questions_answer_original_ids_and_exact_labels_without_partial_results() {
 }
 
 #[test]
-fn questions_reject_secret_free_text_unknown_fields_and_malformed_values() {
-    for (field, content) in [
-        ("isSecret", json!(true)),
-        ("isOther", json!(true)),
-        ("options", Value::Null),
-        ("options", json!([])),
-    ] {
-        let mut value = question();
-        value["params"]["questions"][0][field] = content;
-        assert!(matches!(
-            decode_request(&value, None),
-            Ok(Decode::Unsupported)
-        ));
-    }
+fn questions_reject_secret_unknown_fields_and_malformed_values() {
+    let mut secret = question();
+    secret["params"]["questions"][0]["isSecret"] = json!(true);
+    assert!(matches!(
+        decode_request(&secret, None),
+        Ok(Decode::Unsupported)
+    ));
     for (field, content) in [
         ("isSecret", json!("false")),
         ("isOther", Value::Null),
@@ -516,4 +520,308 @@ fn unrelated_notifications_are_ignored_and_unknown_requests_unsupported() {
     let mut value = command();
     value["result"] = json!({});
     assert!(decode_request(&value, None).is_err());
+}
+
+fn mixed_questions() -> Request {
+    let mut value = question();
+    let original = value["params"]["questions"][0].clone();
+    let mut other = original.clone();
+    other["id"] = json!("other-original");
+    other["header"] = json!("Second");
+    other["isOther"] = json!(true);
+    let mut text = original.clone();
+    text["id"] = json!("free-original");
+    text["header"] = json!("Third");
+    text["options"] = Value::Null;
+    value["params"]["questions"] = json!([original, other, text]);
+    supported(&value, None)
+}
+
+#[test]
+fn no_options_and_other_questions_have_precise_answer_modes() {
+    for options in [None, Some(Value::Null), Some(json!([]))] {
+        for is_other in [false, true] {
+            let mut value = question();
+            let fields = value["params"]["questions"][0].as_object_mut().unwrap();
+            fields.insert("isOther".into(), json!(is_other));
+            if let Some(options) = &options {
+                fields.insert("options".into(), options.clone());
+            } else {
+                fields.remove("options");
+            }
+            let request = supported(&value, None);
+            assert!(request.allows_text(0));
+            assert!(!request.allows_text(1));
+            assert!(request.actions().is_empty());
+            assert!(request.select(0, 0).is_err());
+            let answer = request
+                .answer_text(0, " custom answer\ncontinued ")
+                .unwrap();
+            assert_eq!(
+                request
+                    .answers_response(&[answer])
+                    .unwrap()
+                    .unwrap()
+                    .envelope(&request.id)["result"],
+                json!({"answers": {"original-question": {"answers": [" custom answer\ncontinued "]}}})
+            );
+        }
+    }
+    let mixed = mixed_questions();
+    assert!(!mixed.allows_text(0));
+    assert!(mixed.answer_text(0, "wrong mode").is_err());
+    assert!(mixed.allows_text(1));
+    assert!(mixed.select(1, 1).is_ok());
+    assert!(mixed.answer_text(1, "Another option").is_ok());
+    assert!(mixed.allows_text(2));
+    let mut single_option = question();
+    single_option["params"]["questions"][0]["options"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(matches!(
+        decode_request(&single_option, None),
+        Err(Invalid::Limit)
+    ));
+}
+
+#[test]
+fn mixed_answers_complete_once_per_question_with_exact_original_content() {
+    let request = mixed_questions();
+    let mut selected = Vec::new();
+    assert_eq!(request.next_question(&selected).unwrap(), Some(0));
+    assert!(request.answers_response(&selected).unwrap().is_none());
+    // Arrival order does not change the original question association.
+    selected.push(
+        request
+            .answer_text(2, "  自定义 😀\nsecond line  ")
+            .unwrap(),
+    );
+    assert_eq!(request.next_question(&selected).unwrap(), Some(0));
+    assert!(request.answers_response(&selected).unwrap().is_none());
+    selected.push(request.select(0, 1).unwrap());
+    assert_eq!(request.next_question(&selected).unwrap(), Some(1));
+    assert!(request.answers_response(&selected).unwrap().is_none());
+    let via_choice = response(
+        &request,
+        Action::Choose {
+            question: 1,
+            option: 0,
+        },
+        &selected,
+    );
+    assert_eq!(
+        via_choice["result"]["answers"]["other-original"],
+        json!({"answers": ["Yes (Recommended)"]})
+    );
+    selected.push(request.answer_text(1, "my other answer").unwrap());
+    assert_eq!(request.next_question(&selected).unwrap(), None);
+    let envelope = request
+        .answers_response(&selected)
+        .unwrap()
+        .unwrap()
+        .envelope(&request.id);
+    assert_eq!(
+        envelope,
+        json!({"id": "question-rpc", "result": {"answers": {
+            "original-question": {"answers": ["No"]},
+            "other-original": {"answers": ["my other answer"]},
+            "free-original": {"answers": ["  自定义 😀\nsecond line  "]}
+        }}})
+    );
+    assert!(
+        request
+            .response(
+                &Action::Choose {
+                    question: 1,
+                    option: 1
+                },
+                &selected
+            )
+            .is_err()
+    );
+    selected.push(request.select(1, 0).unwrap());
+    assert!(request.answers_response(&selected).is_err());
+    assert!(request.next_question(&selected).is_err());
+}
+
+#[test]
+fn per_question_text_has_one_question_original_numbering_and_no_native_ids() {
+    let request = mixed_questions();
+    let text = request.question_text(1).unwrap();
+    assert!(text.contains("2. Second") && text.contains("2.1 Yes (Recommended)"));
+    assert!(text.contains("Reply directly to this message"));
+    for excluded in [
+        "1. Choice",
+        "3. Third",
+        "other-original",
+        "question-rpc",
+        THREAD,
+        "synthetic-turn",
+        "synthetic-item",
+    ] {
+        assert!(!text.contains(excluded));
+    }
+    assert!(!request.question_text(0).unwrap().contains("Reply directly"));
+    assert!(request.question_text(3).is_err());
+    assert!(request.text().encode_utf16().count() <= TEXT_LIMIT);
+    let command = supported(&command(), None);
+    assert!(command.question_text(0).is_err());
+    assert!(!command.allows_text(0));
+    assert!(command.next_question(&[]).is_err());
+    assert!(command.answers_response(&[]).is_err());
+    assert!(command.answer_text(0, "answer").is_err());
+}
+
+#[test]
+fn free_text_preserves_content_and_enforces_unicode_control_and_length_limits() {
+    let request = mixed_questions();
+    for text in [
+        "x".repeat(1024),
+        "😀".repeat(512),
+        "界".repeat(1024),
+        "\nline\n".into(),
+        " /start is literal input ".into(),
+    ] {
+        let answer = request.answer_text(2, &text).unwrap();
+        assert!(request.next_question(&[answer]).is_ok());
+    }
+    for text in [
+        String::new(),
+        " \n ".into(),
+        "x".repeat(1025),
+        "😀".repeat(513),
+        "界".repeat(1366),
+    ] {
+        assert!(matches!(request.answer_text(2, &text), Err(Invalid::Limit)));
+    }
+    for control in [
+        '\t', '\r', '\0', '\u{1b}', '\u{7f}', '\u{85}', '\u{061c}', '\u{200e}', '\u{200f}',
+        '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
+    ] {
+        assert!(matches!(
+            request.answer_text(2, &format!("a{control}b")),
+            Err(Invalid::Control)
+        ));
+    }
+}
+
+#[test]
+fn selected_answers_are_revalidated_for_duplicates_forgery_and_changed_schema() {
+    let request = mixed_questions();
+    let original = request.answer_text(1, "custom").unwrap();
+    for selected in [
+        vec![original.clone(), original.clone()],
+        vec![original.clone(), request.select(1, 0).unwrap()],
+    ] {
+        assert!(request.answers_response(&selected).is_err());
+        assert!(request.next_question(&selected).is_err());
+        assert!(
+            request
+                .response(
+                    &Action::Choose {
+                        question: 0,
+                        option: 0
+                    },
+                    &selected
+                )
+                .is_err()
+        );
+    }
+    let mut forged_index = original.clone();
+    forged_index.question = 3;
+    let mut forged_text = original.clone();
+    forged_text.value = AnswerValue::Text("bad\ttext".into());
+    let mut forged_option = original.clone();
+    forged_option.value = AnswerValue::Option {
+        index: 0,
+        label: "unknown answer".into(),
+    };
+    for answer in [forged_index, forged_text, forged_option] {
+        assert!(
+            request
+                .answers_response(std::slice::from_ref(&answer))
+                .is_err()
+        );
+        assert!(request.next_question(&[answer]).is_err());
+    }
+    let mut changed = request.clone();
+    if let Kind::Questions(questions) = &mut changed.kind {
+        questions[1].allows_text = false;
+    }
+    assert!(changed.answers_response(&[original]).is_err());
+    let answer = request.select(0, 0).unwrap();
+    if let Kind::Questions(questions) = &mut changed.kind {
+        questions[0].options[0].label = "changed".into();
+    }
+    assert!(changed.answers_response(&[answer]).is_err());
+}
+
+#[test]
+fn answers_cannot_be_reused_across_request_or_question_identities() {
+    let request = mixed_questions();
+    let answer = request.answer_text(1, "private answer").unwrap();
+    for field in ["rpc", "rpc-type", "thread", "turn", "item", "question"] {
+        let mut foreign = request.clone();
+        match field {
+            "rpc" => foreign.id = RpcId::String("different-rpc".into()),
+            "rpc-type" => foreign.id = RpcId::Number(1),
+            "thread" => foreign.thread = Uuid::nil(),
+            "turn" => foreign.turn = "different-turn".into(),
+            "item" => foreign.item = "different-item".into(),
+            "question" => {
+                if let Kind::Questions(questions) = &mut foreign.kind {
+                    questions[1].id = "different-question".into();
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            foreign
+                .answers_response(std::slice::from_ref(&answer))
+                .is_err()
+        );
+        assert!(
+            foreign
+                .next_question(std::slice::from_ref(&answer))
+                .is_err()
+        );
+        assert!(
+            foreign
+                .response(
+                    &Action::Choose {
+                        question: 0,
+                        option: 0
+                    },
+                    std::slice::from_ref(&answer)
+                )
+                .is_err()
+        );
+    }
+    let mut numeric = request.clone();
+    numeric.id = RpcId::Number(1);
+    let numeric_answer = numeric.answer_text(1, "answer").unwrap();
+    numeric.id = RpcId::String("1".into());
+    assert!(numeric.answers_response(&[numeric_answer]).is_err());
+}
+
+#[test]
+fn secret_question_anywhere_keeps_entire_mixed_request_local() {
+    for position in 0..3 {
+        let mut value = question();
+        let original = value["params"]["questions"][0].clone();
+        let mut questions = Vec::new();
+        for index in 0..3 {
+            let mut question = original.clone();
+            question["id"] = json!(format!("q{index}"));
+            question["options"] = Value::Null;
+            question["isSecret"] = json!(index == position);
+            questions.push(question);
+        }
+        value["params"]["questions"] = json!(questions);
+        assert!(matches!(
+            decode_request(&value, None),
+            Ok(Decode::Unsupported)
+        ));
+    }
 }

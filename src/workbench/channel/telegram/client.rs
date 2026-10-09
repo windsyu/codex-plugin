@@ -106,6 +106,25 @@ impl Client {
     }
 
     pub async fn send_text(&self, chat_id: i64, text: &str, buttons: &[Button]) -> SendOutcome {
+        self.send_message(chat_id, text, buttons, false).await
+    }
+
+    pub(crate) async fn send_question_prompt(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: &[Button],
+    ) -> SendOutcome {
+        self.send_message(chat_id, text, buttons, true).await
+    }
+
+    async fn send_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: &[Button],
+        question: bool,
+    ) -> SendOutcome {
         if chat_id <= 0
             || !valid_text(text, 4096)
             || buttons.len() > 4
@@ -124,6 +143,9 @@ impl Client {
             request["reply_markup"] = json!({"inline_keyboard": [buttons.iter().map(|button| {
                 json!({"text": button.label, "callback_data": button.reference})
             }).collect::<Vec<_>>() ]});
+        } else if question {
+            request["reply_markup"] =
+                json!({"force_reply":true,"input_field_placeholder":"Reply to this question"});
         }
         match self.call("sendMessage", request).await {
             Err(Failure::Connect) => SendOutcome::Rejected { retry_after: None },
@@ -525,6 +547,26 @@ mod tests {
             "opaque_123-abc"
         );
         assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn free_question_prompt_uses_reply_interface_without_changing_ordinary_text() {
+        let mock = Mock::start(vec![sent(7), sent(7)]).await;
+        let client = mock.client();
+        assert!(matches!(
+            client
+                .send_question_prompt(7, "Synthetic free question", &[])
+                .await,
+            SendOutcome::Confirmed { .. }
+        ));
+        assert!(matches!(
+            client.send_text(7, "Synthetic ordinary text", &[]).await,
+            SendOutcome::Confirmed { .. }
+        ));
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests[0]["reply_markup"]["force_reply"], true);
+        assert!(requests[0].get("parse_mode").is_none());
+        assert!(requests[1].get("reply_markup").is_none());
     }
 
     #[tokio::test]

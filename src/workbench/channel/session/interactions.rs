@@ -2,7 +2,7 @@
 use super::{Failure, Handle, PendingAttempt, QualifiedTarget, State};
 use crate::workbench::{
     channel::{
-        interaction::{self, Action, Decode, FileScope, RpcId},
+        interaction::{self, Action, Answer, Decode, FileScope, NativeResponse, RpcId},
         native::Direction,
     },
     launch::{ControlFailure, ResponseWrite},
@@ -310,7 +310,7 @@ impl InteractionHandle {
         &self,
         id: Uuid,
         action: Action,
-        selected: Vec<(usize, usize)>,
+        selected: Vec<Answer>,
         validate: Box<dyn FnOnce() -> bool + Send>,
     ) -> ResponseWrite {
         let prepared = {
@@ -326,6 +326,42 @@ impl InteractionHandle {
                 Ok((entry.request.id.clone(), response))
             })
         };
+        self.respond_prepared(id, prepared, validate).await
+    }
+    pub(crate) async fn answer_text(
+        &self,
+        id: Uuid,
+        question: usize,
+        text: String,
+        mut selected: Vec<Answer>,
+        validate: Box<dyn FnOnce() -> bool + Send>,
+    ) -> ResponseWrite {
+        let prepared = {
+            let mut state = self.handle.shared.state.lock().unwrap();
+            self.validate(&mut state).and_then(|attempt| {
+                let entry = attempt.interaction_entry(id)?;
+                let answer = entry
+                    .request
+                    .answer_text(question, &text)
+                    .map_err(|_| Failure::InteractionUnavailable)?;
+                selected.push(answer);
+                let response = entry
+                    .request
+                    .answers_response(&selected)
+                    .ok()
+                    .flatten()
+                    .ok_or(Failure::InteractionUnavailable)?;
+                Ok((entry.request.id.clone(), response))
+            })
+        };
+        self.respond_prepared(id, prepared, validate).await
+    }
+    async fn respond_prepared(
+        &self,
+        id: Uuid,
+        prepared: Result<(RpcId, NativeResponse), Failure>,
+        validate: Box<dyn FnOnce() -> bool + Send>,
+    ) -> ResponseWrite {
         let Ok((rpc_id, response)) = prepared else {
             return ResponseWrite::NotSent {
                 reason: ControlFailure::InvalidInput,

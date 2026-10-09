@@ -101,6 +101,12 @@ enum Event {
         task: Uuid,
         interaction: Uuid,
     },
+    QuestionReplyReceived {
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+        interaction: Uuid,
+    },
     Submitting {
         task: Uuid,
         client_id: Uuid,
@@ -127,10 +133,12 @@ pub struct Store {
     rejected_updates: HashSet<(i64, i64)>,
     rejected_keys: HashSet<DeliveryKey>,
     tasks: BTreeMap<Uuid, Status>,
-    task_bots: BTreeMap<Uuid, i64>,
+    task_keys: BTreeMap<Uuid, DeliveryKey>,
     received_updates: HashSet<(i64, i64)>,
     callback_updates: HashSet<(i64, i64)>,
     callback_queries: HashSet<(i64, String)>,
+    question_reply_updates: HashSet<(i64, i64)>,
+    question_reply_keys: HashSet<DeliveryKey>,
     clients: HashSet<Uuid>,
     sequence: u64,
     bytes: usize,
@@ -195,10 +203,12 @@ impl Store {
             rejected_updates: HashSet::new(),
             rejected_keys: HashSet::new(),
             tasks: BTreeMap::new(),
-            task_bots: BTreeMap::new(),
+            task_keys: BTreeMap::new(),
             received_updates: HashSet::new(),
             callback_updates: HashSet::new(),
             callback_queries: HashSet::new(),
+            question_reply_updates: HashSet::new(),
+            question_reply_keys: HashSet::new(),
             clients: HashSet::new(),
             sequence: 0,
             bytes: 0,
@@ -240,10 +250,12 @@ impl Store {
             }
             let line: Line = serde_json::from_slice(line).map_err(|_| Failure::Corrupt)?;
             let encoded = serde_json::to_vec(&line.record).map_err(|_| Failure::Corrupt)?;
-            if !matches!(line.record.version, 1..=3)
+            if !matches!(line.record.version, 1..=4)
                 || (line.record.version == 1 && matches!(line.record.event, Event::Rejected { .. }))
                 || (line.record.version < 3
                     && matches!(line.record.event, Event::CallbackReceived { .. }))
+                || (line.record.version < 4
+                    && matches!(line.record.event, Event::QuestionReplyReceived { .. }))
                 || line.record.sequence != store.sequence + 1
                 || line.digest != blake3::hash(&encoded).to_hex().as_str()
             {
@@ -274,6 +286,7 @@ impl Store {
         // Message identity survives update redelivery and binding generations.
         if self.keys.contains(&key)
             || self.callback_updates.contains(&(key.bot_id, update_id))
+            || self.question_reply_seen(key.bot_id, update_id, Some(key))
             || self.rejected(key.bot_id, update_id, Some(key))
         {
             return Ok(Admission::Duplicate);
@@ -317,16 +330,60 @@ impl Store {
         })?;
         Ok(Admission::Fresh)
     }
+    /// Persist only the identity of a text reply to an existing task. The
+    /// answer body, question choices and native response remain volatile. A
+    /// fresh receipt permits one revalidated actor attempt, never replay.
+    pub fn admit_question_reply(
+        &mut self,
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+        interaction: Uuid,
+    ) -> Result<Admission, Failure> {
+        self.verify()?;
+        if !key.valid() || update_id < 0 || task.is_nil() || interaction.is_nil() {
+            return Err(Failure::InvalidInput);
+        }
+        // Dedup precedes current task ownership/status and learns no extra
+        // identity from a conflicting duplicate.
+        if self.reply_input_seen(key, update_id) {
+            return Ok(Admission::Duplicate);
+        }
+        self.append(Event::QuestionReplyReceived {
+            key,
+            update_id,
+            task,
+            interaction,
+        })?;
+        Ok(Admission::Fresh)
+    }
+    fn question_reply_seen(&self, bot: i64, update: i64, key: Option<DeliveryKey>) -> bool {
+        self.question_reply_updates.contains(&(bot, update))
+            || key.is_some_and(|key| self.question_reply_keys.contains(&key))
+    }
+    fn update_seen(&self, bot: i64, update: i64) -> bool {
+        self.rejected_updates.contains(&(bot, update))
+            || self.received_updates.contains(&(bot, update))
+            || self.callback_updates.contains(&(bot, update))
+            || self.question_reply_updates.contains(&(bot, update))
+    }
+    fn reply_input_seen(&self, key: DeliveryKey, update_id: i64) -> bool {
+        self.update_seen(key.bot_id, update_id)
+            || self.keys.contains(&key)
+            || self.rejected_keys.contains(&key)
+            || self.question_reply_keys.contains(&key)
+    }
     fn callback_seen(&self, bot_id: i64, update_id: i64, query_digest: &str) -> bool {
-        self.rejected_updates.contains(&(bot_id, update_id))
-            || self.received_updates.contains(&(bot_id, update_id))
-            || self.callback_updates.contains(&(bot_id, update_id))
+        self.update_seen(bot_id, update_id)
             || self
                 .callback_queries
                 .contains(&(bot_id, query_digest.to_owned()))
     }
     fn receipt_count(&self) -> usize {
-        self.tasks.len() + self.rejected_updates.len() + self.callback_updates.len()
+        self.tasks.len()
+            + self.rejected_updates.len()
+            + self.callback_updates.len()
+            + self.question_reply_updates.len()
     }
     /// Exact rejection identities survive offset resets, reconfiguration and
     /// restart. No monotonic Telegram update-ID assumption is required.
@@ -353,6 +410,7 @@ impl Store {
         validate_rejection(bot_id, update_id, key)?;
         if self.rejected(bot_id, update_id, key)
             || self.callback_updates.contains(&(bot_id, update_id))
+            || self.question_reply_seen(bot_id, update_id, key)
         {
             return Ok(());
         }
@@ -466,6 +524,7 @@ impl Store {
                 validate_rejection(*bot_id, *update_id, *message_key)?;
                 if self.rejected(*bot_id, *update_id, *message_key)
                     || self.callback_updates.contains(&(*bot_id, *update_id))
+                    || self.question_reply_seen(*bot_id, *update_id, *message_key)
                 {
                     return Err(Failure::InvalidTransition);
                 }
@@ -483,6 +542,7 @@ impl Store {
                 }
                 if self.keys.contains(key)
                     || self.callback_updates.contains(&(key.bot_id, *update_id))
+                    || self.question_reply_seen(key.bot_id, *update_id, Some(*key))
                     || self.tasks.contains_key(task)
                     || self.rejected(key.bot_id, *update_id, Some(*key))
                 {
@@ -511,7 +571,31 @@ impl Store {
                 }
                 if self.callback_seen(*bot_id, *update_id, query_digest)
                     || self.tasks.get(task) != Some(&Status::Submitting)
-                    || self.task_bots.get(task) != Some(bot_id)
+                    || self
+                        .task_keys
+                        .get(task)
+                        .is_none_or(|key| key.bot_id != *bot_id)
+                {
+                    return Err(Failure::InvalidTransition);
+                }
+                if self.receipt_count() >= MAX_TASKS {
+                    return Err(Failure::Capacity);
+                }
+            }
+            Event::QuestionReplyReceived {
+                key,
+                update_id,
+                task,
+                interaction,
+            } => {
+                if !key.valid() || *update_id < 0 || task.is_nil() || interaction.is_nil() {
+                    return Err(Failure::InvalidInput);
+                }
+                if self.reply_input_seen(*key, *update_id)
+                    || self.tasks.get(task) != Some(&Status::Submitting)
+                    || self.task_keys.get(task).is_none_or(|original| {
+                        original.bot_id != key.bot_id || original.chat_id != key.chat_id
+                    })
                 {
                     return Err(Failure::InvalidTransition);
                 }
@@ -558,7 +642,7 @@ impl Store {
                 task,
             } => {
                 self.keys.insert(key);
-                self.task_bots.insert(task, key.bot_id);
+                self.task_keys.insert(task, key);
                 self.received_updates.insert((key.bot_id, update_id));
                 self.tasks.insert(task, Status::Received);
             }
@@ -570,6 +654,10 @@ impl Store {
             } => {
                 self.callback_updates.insert((bot_id, update_id));
                 self.callback_queries.insert((bot_id, query_digest));
+            }
+            Event::QuestionReplyReceived { key, update_id, .. } => {
+                self.question_reply_updates.insert((key.bot_id, update_id));
+                self.question_reply_keys.insert(key);
             }
             Event::Submitting { task, client_id } => {
                 self.clients.insert(client_id);
@@ -584,9 +672,9 @@ impl Store {
         self.verify()?;
         self.validate(&event)?;
         let record = Record {
-            // Older readers fail closed on new metadata. Existing v1/v2
+            // Older readers fail closed on new metadata. Existing v1/v2/v3
             // rows remain readable in a mixed, continuously sequenced journal.
-            version: 3,
+            version: 4,
             sequence: self.sequence + 1,
             event,
         };

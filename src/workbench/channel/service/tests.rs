@@ -62,6 +62,7 @@ impl Bot {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
         let task = tokio::spawn(async move {
+            let mut next_message_id = 77;
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
@@ -103,7 +104,9 @@ impl Bot {
                 let body = if callback_ack {
                     json!({"ok":true,"result":true})
                 } else {
-                    json!({"ok":true,"result":{"message_id":77,"chat":{"id":CHAT,"type":"private"}}})
+                    let id = next_message_id;
+                    next_message_id += 1;
+                    json!({"ok":true,"result":{"message_id":id,"chat":{"id":CHAT,"type":"private"}}})
                 }.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -914,6 +917,260 @@ fn callback_receipts(journal: &str) -> usize {
         .count()
 }
 
+fn question_reply_update(
+    update_id: i64,
+    message_id: i64,
+    prompt_message_id: i64,
+    text: &str,
+) -> Value {
+    let mut value = update(update_id, message_id, text);
+    value["message"]["reply_to_message"] = json!({"message_id":prompt_message_id,"date":1,
+        "from":{"id":BOT,"is_bot":true},"chat":{"id":CHAT,"type":"private"},
+        "text":"SYNTHETIC_QUOTED_BODY_MUST_NOT_BE_RETAINED"});
+    value
+}
+
+fn question_reply_receipts(journal: &str) -> usize {
+    journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|line| line["record"]["event"]["kind"] == "question_reply_received")
+        .count()
+}
+
+fn one_question(id: Value, options: Value, is_other: bool) -> Value {
+    json!({"id":id,"method":"item/tool/requestUserInput","params":{
+        "threadId":thread(),"turnId":interaction_turn(),"itemId":"question-item","questions":[{
+            "id":"original-question","header":"Synthetic","question":"SYNTHETIC_FREE_QUESTION",
+            "isOther":is_other,"isSecret":false,"options":options}]}})
+}
+
+#[tokio::test]
+async fn interaction_mixed_questions_bind_text_to_current_prompt_and_never_queue_replies() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt,json!({"id":"mixed-rpc","method":"item/tool/requestUserInput","params":{
+        "threadId":thread(),"turnId":interaction_turn(),"itemId":"question-item","questions":[
+            {"id":"first-id","header":"First","question":"SYNTHETIC_FIRST_QUESTION","isOther":true,"isSecret":false,
+             "options":[{"label":"First A","description":"A"},{"label":"First B","description":"B"}]},
+            {"id":"second-id","header":"Second","question":"SYNTHETIC_SECOND_QUESTION","isOther":true,"isSecret":false,
+             "options":[{"label":"Second A","description":"A"},{"label":"Second B","description":"B"}]}
+        ]}})).await;
+    f.offer_interaction(&job, &attempt).await;
+    assert!(
+        !f.prompt(0)["text"]
+            .as_str()
+            .unwrap()
+            .contains("SYNTHETIC_SECOND_QUESTION")
+    );
+    let first = button_reference(&f.prompt(0), "1.1");
+    f.process_callback(&callback_update(21, "SYNTHETIC_MIXED_FIRST", &first))
+        .await;
+    f.no_native_answer().await;
+    assert!(
+        !f.prompt(1)["text"]
+            .as_str()
+            .unwrap()
+            .contains("SYNTHETIC_FIRST_QUESTION")
+    );
+    let generation = f.service.snapshot().binding.generation;
+    for value in [
+        question_reply_update(22, 22, 77, "SYNTHETIC_OLD_QUESTION_REPLY"),
+        question_reply_update(23, 23, 999, "SYNTHETIC_WRONG_PROMPT_REPLY"),
+        update(24, 24, "SYNTHETIC_UNATTACHED_TEXT"),
+    ] {
+        process_update(&f.service.core, &f.bot.client, BOT, generation, &value)
+            .await
+            .unwrap();
+    }
+    assert_eq!(f.service.snapshot().queued, 0);
+    assert_eq!(question_reply_receipts(&f.journal()), 0);
+    f.no_native_answer().await;
+    let text = "SYNTHETIC_OTHER_ANSWER 😀\n保留原文";
+    let reply = question_reply_update(25, 25, 78, text);
+    process_update(&f.service.core, &f.bot.client, BOT, generation, &reply)
+        .await
+        .unwrap();
+    assert_eq!(question_reply_receipts(&f.journal()), 1);
+    assert_eq!(callback_receipts(&f.journal()), 1);
+    assert_eq!(
+        read(&mut f.control).await,
+        json!({"id":"mixed-rpc","result":{"answers":{
+        "first-id":{"answers":["First A"]},"second-id":{"answers":[text]}}}})
+    );
+    assert_eq!(attempt.interactions().awaiting_question(), Ok(true));
+    for value in [
+        reply.clone(),
+        question_reply_update(26, 25, 78, text),
+        question_reply_update(27, 27, 78, text),
+    ] {
+        process_update(&f.service.core, &f.bot.client, BOT, generation, &value)
+            .await
+            .unwrap();
+    }
+    assert_eq!(question_reply_receipts(&f.journal()), 1);
+    assert_eq!(f.service.snapshot().queued, 0);
+    f.no_native_answer().await;
+    for private in [
+        text,
+        "SYNTHETIC_FIRST_QUESTION",
+        "SYNTHETIC_SECOND_QUESTION",
+        "SYNTHETIC_QUOTED_BODY_MUST_NOT_BE_RETAINED",
+        "First A",
+        &first,
+    ] {
+        assert!(!f.journal().contains(private));
+    }
+}
+
+#[tokio::test]
+async fn interaction_pure_text_question_requires_reply_and_preserves_unicode() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, one_question(json!(83), Value::Null, false))
+        .await;
+    f.offer_interaction(&job, &attempt).await;
+    assert_eq!(f.prompt(0)["reply_markup"]["force_reply"], true);
+    let generation = f.service.snapshot().binding.generation;
+    for (i, text) in [
+        (21, " "),
+        (22, "\n\n"),
+        (23, "SYNTHETIC\u{202e}"),
+        (24, "x"),
+    ] {
+        let mut value = question_reply_update(i, i, 77, text);
+        if i == 24 {
+            value["message"]["reply_to_message"]["from"]["id"] = json!(BOT + 1);
+        }
+        process_update(&f.service.core, &f.bot.client, BOT, generation, &value)
+            .await
+            .unwrap();
+    }
+    assert_eq!(f.service.core.inner.lock().unwrap().interactions.len(), 1);
+    assert_eq!(question_reply_receipts(&f.journal()), 0);
+    f.no_native_answer().await;
+    let text = "  SYNTHETIC_FREE_TEXT😀\n第二行  ";
+    let reply = question_reply_update(25, 25, 77, text);
+    process_update(&f.service.core, &f.bot.client, BOT, generation, &reply)
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&mut f.control).await,
+        json!({"id":83,"result":{"answers":{
+        "original-question":{"answers":[text]}}}})
+    );
+    assert_eq!(question_reply_receipts(&f.journal()), 1);
+    assert_eq!(f.service.snapshot().queued, 0);
+    assert!(!f.journal().contains("SYNTHETIC_FREE_TEXT"));
+}
+
+#[tokio::test]
+async fn interaction_question_reply_is_withheld_after_native_retirement_expiry_or_revoke() {
+    for mode in ["resolved", "local", "expired", "revoke", "choiceOnly"] {
+        let mut f = Fixture::new(false).await;
+        f.bind_with_consent().await;
+        let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+        let options = if mode == "choiceOnly" {
+            json!([{"label":"Yes","description":"Continue"},{"label":"No","description":"Stop"}])
+        } else {
+            Value::Null
+        };
+        f.native_interaction(&attempt, one_question(json!(83), options, false))
+            .await;
+        f.offer_interaction(&job, &attempt).await;
+        let id = *f
+            .service
+            .core
+            .inner
+            .lock()
+            .unwrap()
+            .interactions
+            .keys()
+            .next()
+            .unwrap();
+        let generation = f.service.snapshot().binding.generation;
+        match mode {
+            "resolved" => {
+                f.native_interaction(
+                    &attempt,
+                    json!({"method":"serverRequest/resolved","params":{
+                "threadId":thread(),"requestId":83}}),
+                )
+                .await
+            }
+            "local" => {
+                let answer = json!({"id":83,"result":{"answers":{}}});
+                send(&mut f.tui, answer.clone()).await;
+                assert_eq!(read(&mut f.native).await, answer);
+            }
+            "expired" => attempt.interactions().expire_for_test(id),
+            "revoke" => {
+                f.service.revoke();
+            }
+            _ => {}
+        }
+        if matches!(mode, "resolved" | "local") {
+            bounded(async {
+                while attempt.interactions().current(id).is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        }
+        let value = question_reply_update(21, 21, 77, "SYNTHETIC_STALE_TEXT");
+        process_update(&f.service.core, &f.bot.client, BOT, generation, &value)
+            .await
+            .unwrap();
+        assert_eq!(question_reply_receipts(&f.journal()), 0);
+        assert_eq!(f.service.snapshot().queued, 0);
+        f.no_native_answer().await;
+    }
+}
+
+#[tokio::test]
+async fn interaction_reply_before_prompt_confirmation_or_unknown_send_has_no_authority() {
+    let mut f = Fixture::new(true).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, one_question(json!(83), Value::Null, false))
+        .await;
+    let core = f.service.core.clone();
+    let handle = attempt.interactions();
+    let mut offering = Some(tokio::spawn(async move {
+        interactions::offer(&core, &job, &handle).await
+    }));
+    bounded(async {
+        while f.bot.requests.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let generation = f.service.snapshot().binding.generation;
+    for i in [21, 22] {
+        if i == 22 {
+            bounded(async {
+                offering.take().unwrap().await.unwrap();
+            })
+            .await;
+        }
+        process_update(
+            &f.service.core,
+            &f.bot.client,
+            BOT,
+            generation,
+            &question_reply_update(i, i, 77, "SYNTHETIC_UNCONFIRMED_REPLY"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(question_reply_receipts(&f.journal()), 0);
+        assert_eq!(f.service.snapshot().queued, 0);
+    }
+    f.no_native_answer().await;
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+}
+
 #[tokio::test]
 async fn interaction_confirmed_prompt_callback_is_durable_once_and_preserves_rpc_id() {
     let mut f = Fixture::new(false).await;
@@ -1079,12 +1336,13 @@ async fn interaction_questions_collect_all_choices_before_one_typed_native_answe
         second_prompt["text"]
             .as_str()
             .unwrap()
-            .contains("Earlier choices recorded")
+            .contains("Earlier answers recorded")
     );
     let second = button_reference(&second_prompt, "2.1");
     assert_ne!(first, second);
-    f.process_callback(&callback_update(23, "SYNTHETIC_QUESTION_QUERY_2", &second))
-        .await;
+    let mut callback = callback_update(23, "SYNTHETIC_QUESTION_QUERY_2", &second);
+    callback["callback_query"]["message"]["message_id"] = json!(78);
+    f.process_callback(&callback).await;
     assert_eq!(
         read(&mut f.control).await,
         json!({"id":"questions-rpc","result":{"answers":{
@@ -1473,4 +1731,95 @@ async fn interaction_execute_job_loop_prompts_answers_completes_and_cleans_up() 
     assert_eq!(callback_receipts(&f.journal()), 1);
     assert!(!f.journal().contains("SYNTHETIC_EXECUTOR_QUERY"));
     assert!(!f.journal().contains(&reference));
+}
+
+#[tokio::test]
+async fn interaction_paused_receipt_text_claim_excludes_buttons_and_rechecks_local_or_revoke() {
+    for invalidation in ["none", "local", "revoke"] {
+        let mut f = Fixture::new(false).await;
+        f.bind_with_consent().await;
+        let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+        f.native_interaction(&attempt, one_question(json!(83),
+            json!([{"label":"Yes","description":"Continue"},{"label":"No","description":"Stop"}]), true)).await;
+        f.offer_interaction(&job, &attempt).await;
+        let reference = button_reference(&f.prompt(0), "1.1");
+        let id = *f
+            .service
+            .core
+            .inner
+            .lock()
+            .unwrap()
+            .interactions
+            .keys()
+            .next()
+            .unwrap();
+        let core = f.service.core.clone();
+        let client = f.bot.client.clone();
+        let generation = f.service.snapshot().binding.generation;
+        let writer = core.writer().unwrap();
+        let before = f.journal();
+        let resume = bounded(writer.pause_for_test()).await.unwrap();
+        let text = "SYNTHETIC_PAUSED_TEXT_REPLY";
+        let reply = question_reply_update(21, 21, 77, text);
+        // Enter the production handler directly to isolate its first durable
+        // await from process_update's earlier dedup lookup. The real worker is
+        // paused, so no timing assumption can let this receipt finish early.
+        let mut replying = Box::pin(interactions::question_reply(
+            &core, &client, BOT, generation, &reply, &writer,
+        ));
+        assert!(futures_util::poll!(replying.as_mut()).is_pending());
+        assert!(core.inner.lock().unwrap().interactions.is_empty());
+        assert_eq!(f.journal(), before);
+        let button = callback_update(22, "SYNTHETIC_PAUSED_BUTTON_QUERY", &reference);
+        let mut clicking = Box::pin(interactions::callback(
+            &core, &client, BOT, generation, &button, &writer,
+        ));
+        assert!(futures_util::poll!(clicking.as_mut()).is_pending());
+        assert!(core.inner.lock().unwrap().interactions.is_empty());
+        assert_eq!(f.journal(), before);
+        match invalidation {
+            "local" => {
+                let local = json!({"id":83,"result":{"answers":{"original-question":{"answers":["Local answer"]}}}});
+                send(&mut f.tui, local.clone()).await;
+                assert_eq!(read(&mut f.native).await, local);
+                bounded(async {
+                    while attempt.revalidate().is_err()
+                        || attempt.interactions().current(id).is_ok()
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+            }
+            "revoke" => {
+                f.service.revoke();
+            }
+            _ => {
+                assert!(attempt.interactions().current(id).is_ok());
+            }
+        }
+        // No fsync has run since the pause. Resume both queued operations, then
+        // await their actual completion before checking the native socket.
+        assert_eq!(f.journal(), before);
+        resume.send(()).unwrap();
+        let (text_result, button_result) =
+            bounded(async { tokio::join!(replying, clicking) }).await;
+        assert!(text_result.is_ok() && button_result.is_ok());
+        assert_eq!(question_reply_receipts(&f.journal()), 1);
+        assert_eq!(callback_receipts(&f.journal()), 0);
+        assert!(writer.is_rejected(BOT, 22, None).await.unwrap());
+        if invalidation == "none" {
+            assert_eq!(
+                read(&mut f.control).await,
+                json!({"id":83,"result":{"answers":{"original-question":{"answers":[text]}}}})
+            );
+            assert_eq!(attempt.interactions().awaiting_question(), Ok(true));
+        }
+        f.no_native_answer().await;
+        assert!(core.inner.lock().unwrap().interactions.is_empty());
+        assert_eq!(f.service.snapshot().queued, 0);
+        for private in [text, "SYNTHETIC_PAUSED_BUTTON_QUERY", &reference] {
+            assert!(!f.journal().contains(private));
+        }
+    }
 }

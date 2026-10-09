@@ -358,3 +358,119 @@ async fn cancelled_queued_callback_is_not_written_and_query_bytes_are_bounded_be
     );
     shutdown(worker).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_queued_question_reply_has_no_receipt_and_does_not_become_task() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    let interaction = Uuid::from_u128(2);
+    handle.admit(key(1), 1, task).await.unwrap();
+    handle
+        .mark_submitting(task, Uuid::from_u128(3))
+        .await
+        .unwrap();
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let resume = pause(&handle).await;
+    let (reply, result) = oneshot::channel();
+    handle
+        .send(Operation::AdmitQuestionReply {
+            key: key(20),
+            update_id: 20,
+            task,
+            interaction,
+            reply,
+        })
+        .unwrap();
+    drop(result);
+    resume.send(()).unwrap();
+    let expected = Counts {
+        received: 0,
+        submitting: 1,
+        closed: 0,
+    };
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    assert_eq!(
+        handle
+            .admit_question_reply(key(20), 20, task, interaction)
+            .await,
+        Ok(Admission::Fresh)
+    );
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    shutdown(worker).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lost_question_reply_result_survives_restart_as_dedup_metadata_only() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    let interaction = Uuid::from_u128(2);
+    handle.admit(key(1), 1, task).await.unwrap();
+    handle
+        .mark_submitting(task, Uuid::from_u128(3))
+        .await
+        .unwrap();
+    let (entered, waiting) = oneshot::channel();
+    let (resume, paused) = mpsc::channel();
+    let (reply, result) = oneshot::channel();
+    handle
+        .send(Operation::PauseAfterQuestionReply {
+            task,
+            interaction,
+            entered,
+            resume: paused,
+            reply,
+        })
+        .unwrap();
+    waiting.await.unwrap(); // real receipt write and fsync, only IDs went to worker
+    drop(result);
+    resume.send(()).unwrap();
+    let expected = Counts {
+        received: 0,
+        submitting: 1,
+        closed: 0,
+    };
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    shutdown(worker).await;
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    assert_eq!(
+        handle
+            .admit_question_reply(key(20), 21, task, interaction)
+            .await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle
+            .admit_question_reply(key(21), 20, task, interaction)
+            .await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle.admit(key(20), 22, Uuid::from_u128(4)).await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle
+            .admit_callback(
+                101,
+                20,
+                "query-cannot-reuse-text-update".into(),
+                task,
+                interaction
+            )
+            .await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    shutdown(worker).await;
+}

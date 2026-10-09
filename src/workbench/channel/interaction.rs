@@ -71,12 +71,32 @@ pub struct Question {
     header: String,
     question: String,
     options: Vec<OptionText>,
+    allows_text: bool,
 }
 
 #[derive(Clone)]
 struct OptionText {
     label: String,
     description: String,
+}
+
+/// A validated answer bound to the complete original native request identity.
+/// Its private text and identifiers must never be logged or serialized wholesale.
+#[derive(Clone)]
+pub struct Answer {
+    question: usize,
+    value: AnswerValue,
+    request_id: RpcId,
+    thread: Uuid,
+    turn: String,
+    item: String,
+    question_id: String,
+}
+
+#[derive(Clone)]
+enum AnswerValue {
+    Option { index: usize, label: String },
+    Text(String),
 }
 
 pub enum Decode {
@@ -244,28 +264,27 @@ impl Request {
         match &self.kind {
             Kind::Command(approval) | Kind::File(approval) => approval.text.clone(),
             Kind::Questions(questions) => {
-                let mut text =
-                    String::from("Please answer every question using the numbered options.\n");
+                let mut text = String::from("Please answer every question.\n");
                 for (index, question) in questions.iter().enumerate() {
-                    text.push_str(&format!(
-                        "\n{}. {}\n{}\n",
-                        index + 1,
-                        question.header,
-                        question.question
-                    ));
-                    for (option, content) in question.options.iter().enumerate() {
-                        text.push_str(&format!(
-                            "{}.{} {} — {}\n",
-                            index + 1,
-                            option + 1,
-                            content.label,
-                            content.description
-                        ));
-                    }
+                    text.push_str(&render_question(index, question));
                 }
                 text
             }
         }
+    }
+
+    pub fn question_text(&self, question: usize) -> Result<String, Invalid> {
+        let content = self.questions()?.get(question).ok_or(Invalid::Action)?;
+        let text = render_question(question, content);
+        check_text(&text)?;
+        Ok(text)
+    }
+
+    pub fn allows_text(&self, question: usize) -> bool {
+        self.questions()
+            .ok()
+            .and_then(|questions| questions.get(question))
+            .is_some_and(|question| question.allows_text)
     }
 
     pub fn actions(&self) -> Vec<Action> {
@@ -288,12 +307,61 @@ impl Request {
         }
     }
 
-    /// `selected` contains earlier choices, excluding the current action. Each
-    /// question may be selected only once; no partial answer reaches native RPC.
+    pub fn select(&self, question: usize, option: usize) -> Result<Answer, Invalid> {
+        let content = self.questions()?.get(question).ok_or(Invalid::Action)?;
+        let label = content
+            .options
+            .get(option)
+            .ok_or(Invalid::Action)?
+            .label
+            .clone();
+        Ok(self.answer(
+            question,
+            content,
+            AnswerValue::Option {
+                index: option,
+                label,
+            },
+        ))
+    }
+
+    pub fn answer_text(&self, question: usize, text: &str) -> Result<Answer, Invalid> {
+        let content = self.questions()?.get(question).ok_or(Invalid::Action)?;
+        if !content.allows_text {
+            return Err(Invalid::Action);
+        }
+        validate_answer_text(text)?;
+        Ok(self.answer(question, content, AnswerValue::Text(text.to_owned())))
+    }
+
+    pub fn next_question(&self, selected: &[Answer]) -> Result<Option<usize>, Invalid> {
+        Ok(self
+            .validated_answers(selected)?
+            .iter()
+            .position(Option::is_none))
+    }
+
+    pub fn answers_response(&self, selected: &[Answer]) -> Result<Option<NativeResponse>, Invalid> {
+        let answers = self.validated_answers(selected)?;
+        let mut complete = Vec::with_capacity(answers.len());
+        for answer in answers {
+            let Some(answer) = answer else {
+                return Ok(None);
+            };
+            let text = match &answer.value {
+                AnswerValue::Option { label, .. } | AnswerValue::Text(label) => label.clone(),
+            };
+            complete.push((answer.question_id.clone(), text));
+        }
+        Ok(Some(NativeResponse::Answers(Answers(complete))))
+    }
+
+    /// `selected` excludes the current action. Every question is answered once;
+    /// mixed text and option answers reach native RPC only when all are present.
     pub fn response(
         &self,
         action: &Action,
-        selected: &[(usize, usize)],
+        selected: &[Answer],
     ) -> Result<Option<NativeResponse>, Invalid> {
         if !self.actions().contains(action) {
             return Err(Invalid::Action);
@@ -310,42 +378,115 @@ impl Request {
                     },
                 )))
             }
-            (Kind::Questions(questions), Action::Choose { question, option }) => {
-                if selected.len() >= questions.len() {
-                    return Err(Invalid::Action);
-                }
-                let mut choices = vec![None; questions.len()];
-                for &(question, option) in selected
-                    .iter()
-                    .chain(std::iter::once(&(*question, *option)))
-                {
-                    let content = questions.get(question).ok_or(Invalid::Action)?;
-                    if option >= content.options.len()
-                        || choices[question].replace(option).is_some()
-                    {
-                        return Err(Invalid::Action);
-                    }
-                }
-                if choices.iter().any(Option::is_none) {
-                    return Ok(None);
-                }
-                let answers = questions
-                    .iter()
-                    .zip(choices)
-                    .map(|(question, choice)| {
-                        (
-                            question.id.clone(),
-                            question.options[choice.expect("all choices checked")]
-                                .label
-                                .clone(),
-                        )
-                    })
-                    .collect();
-                Ok(Some(NativeResponse::Answers(Answers(answers))))
+            (Kind::Questions(_), Action::Choose { question, option }) => {
+                // Validate before cloning potentially private caller-supplied state.
+                self.validated_answers(selected)?;
+                let mut answers = selected.to_vec();
+                answers.push(self.select(*question, *option)?);
+                self.answers_response(&answers)
             }
             _ => Err(Invalid::Action),
         }
     }
+
+    fn questions(&self) -> Result<&[Question], Invalid> {
+        match &self.kind {
+            Kind::Questions(questions) if (1..=3).contains(&questions.len()) => Ok(questions),
+            _ => Err(Invalid::Action),
+        }
+    }
+
+    fn answer(&self, question: usize, content: &Question, value: AnswerValue) -> Answer {
+        Answer {
+            question,
+            value,
+            request_id: self.id.clone(),
+            thread: self.thread,
+            turn: self.turn.clone(),
+            item: self.item.clone(),
+            question_id: content.id.clone(),
+        }
+    }
+
+    fn validated_answers<'a>(
+        &self,
+        selected: &'a [Answer],
+    ) -> Result<Vec<Option<&'a Answer>>, Invalid> {
+        let questions = self.questions()?;
+        if selected.len() > questions.len() {
+            return Err(Invalid::Action);
+        }
+        let mut answers = vec![None; questions.len()];
+        for answer in selected {
+            let question = questions.get(answer.question).ok_or(Invalid::Action)?;
+            if answer.request_id != self.id
+                || answer.thread != self.thread
+                || answer.turn != self.turn
+                || answer.item != self.item
+                || answer.question_id != question.id
+                || answers[answer.question].replace(answer).is_some()
+            {
+                return Err(Invalid::Action);
+            }
+            match &answer.value {
+                AnswerValue::Option { index, label } => {
+                    if question
+                        .options
+                        .get(*index)
+                        .is_none_or(|option| option.label != *label)
+                    {
+                        return Err(Invalid::Action);
+                    }
+                }
+                AnswerValue::Text(text) => {
+                    if !question.allows_text {
+                        return Err(Invalid::Action);
+                    }
+                    validate_answer_text(text)?;
+                }
+            }
+        }
+        Ok(answers)
+    }
+}
+
+fn render_question(index: usize, question: &Question) -> String {
+    let mut text = format!(
+        "\n{}. {}\n{}\n",
+        index + 1,
+        question.header,
+        question.question
+    );
+    for (option, content) in question.options.iter().enumerate() {
+        text.push_str(&format!(
+            "{}.{} {} — {}\n",
+            index + 1,
+            option + 1,
+            content.label,
+            content.description
+        ));
+    }
+    if question.allows_text {
+        text.push_str("Reply directly to this message with your answer.\n");
+    }
+    text
+}
+
+fn validate_answer_text(text: &str) -> Result<(), Invalid> {
+    if text.len() > 4096 || text.encode_utf16().count() > 1024 || text.trim().is_empty() {
+        return Err(Invalid::Limit);
+    }
+    if text
+        .chars()
+        .any(|c| (c.is_control() && c != '\n') || bidi_control(c))
+    {
+        return Err(Invalid::Control);
+    }
+    Ok(())
+}
+
+fn bidi_control(c: char) -> bool {
+    matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 pub fn decode_request(value: &Value, file_scope: Option<&FileScope>) -> Result<Decode, Invalid> {
@@ -550,23 +691,21 @@ pub fn decode_request(value: &Value, file_scope: Option<&FileScope>) -> Result<D
                     question,
                     &["id", "header", "question", "isOther", "isSecret", "options"],
                 )?;
-                if boolean(question, "isSecret", false)? || boolean(question, "isOther", false)? {
+                if boolean(question, "isSecret", false)? {
                     return Ok(Decode::Unsupported);
                 }
+                let is_other = boolean(question, "isOther", false)?;
                 let id = required(question, "id", ID_LIMIT, false)?.to_owned();
                 if !ids.insert(id.clone()) {
                     return Err(Invalid::Duplicate);
                 }
                 let header = required(question, "header", 64, true)?.to_owned();
                 let text = required(question, "question", 512, true)?.to_owned();
-                if !nonnull(question, "options") {
-                    return Ok(Decode::Unsupported);
-                }
-                let options = question["options"].as_array().ok_or(Invalid::Shape)?;
-                if options.is_empty() {
-                    return Ok(Decode::Unsupported);
-                }
-                if !(2..=4).contains(&options.len()) {
+                let options = match question.get("options") {
+                    None | Some(Value::Null) => &[][..],
+                    Some(value) => value.as_array().ok_or(Invalid::Shape)?.as_slice(),
+                };
+                if !options.is_empty() && !(2..=4).contains(&options.len()) {
                     return Err(Invalid::Limit);
                 }
                 let mut labels = HashSet::new();
@@ -586,6 +725,7 @@ pub fn decode_request(value: &Value, file_scope: Option<&FileScope>) -> Result<D
                     header,
                     question: text,
                     options: parsed_options,
+                    allows_text: options.is_empty() || is_other,
                 });
             }
             Kind::Questions(parsed)
@@ -640,7 +780,12 @@ fn string(value: &Value, limit: usize, multiline: bool) -> Result<&str, Invalid>
     if value.is_empty() || value.encode_utf16().count() > limit {
         return Err(Invalid::Limit);
     }
-    if value.chars().any(|c| (c.is_control() && !(multiline && matches!(c, '\n' | '\t'))) || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')) { return Err(Invalid::Control); }
+    if value
+        .chars()
+        .any(|c| (c.is_control() && !(multiline && matches!(c, '\n' | '\t'))) || bidi_control(c))
+    {
+        return Err(Invalid::Control);
+    }
     Ok(value)
 }
 fn required<'a>(

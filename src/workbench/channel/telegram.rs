@@ -35,6 +35,14 @@ pub enum Inbound {
         message_id: i64,
         text: String,
     },
+    /// A reply is classified separately so a stale or malformed answer can
+    /// never fall back to executable task text.
+    QuestionReply {
+        update_id: i64,
+        message_id: i64,
+        prompt_message_id: i64,
+        text: String,
+    },
     Callback {
         update_id: i64,
         query_id: String,
@@ -60,6 +68,7 @@ pub enum Reject {
     InvalidText,
     InvalidEntity,
     InvalidCallback,
+    InvalidReply,
 }
 
 pub fn authorize(update: &Value, binding: &TelegramBinding) -> Inbound {
@@ -147,6 +156,50 @@ fn authorize_inner(update: &Value, binding: &TelegramBinding) -> Result<Inbound,
                 return Err(Reject::InvalidText);
             }
             validate_entities(text, message.get("entities"))?;
+            if let Some(original) = message.get("reply_to_message") {
+                if [
+                    "forward_origin",
+                    "is_automatic_forward",
+                    "external_reply",
+                    "quote",
+                    "edit_date",
+                    "via_bot",
+                ]
+                .iter()
+                .any(|key| message.contains_key(*key))
+                {
+                    return Err(Reject::InvalidReply);
+                }
+                let original = original.as_object().ok_or(Reject::InvalidReply)?;
+                let prompt_message_id =
+                    positive(original.get("message_id")).ok_or(Reject::InvalidReply)?;
+                let chat = original.get("chat").ok_or(Reject::InvalidReply)?;
+                let sender = original.get("from").ok_or(Reject::InvalidReply)?;
+                if chat["type"] != "private"
+                    || positive(chat.get("id")) != Some(binding.chat_id)
+                    || positive(sender.get("id")) != Some(binding.bot_id)
+                    || binding.bot_id <= 0
+                    || sender["is_bot"] != true
+                    || positive(original.get("date")).is_none()
+                    || [
+                        "forward_origin",
+                        "is_automatic_forward",
+                        "external_reply",
+                        "via_bot",
+                    ]
+                    .iter()
+                    .any(|key| original.contains_key(*key))
+                {
+                    return Err(Reject::InvalidReply);
+                }
+                // Do not retain the quoted bot body, markup, or nested entities.
+                return Ok(Inbound::QuestionReply {
+                    update_id,
+                    message_id,
+                    prompt_message_id,
+                    text: text.to_owned(),
+                });
+            }
             Ok(Inbound::Text {
                 update_id,
                 message_id,
@@ -382,5 +435,55 @@ mod tests {
         value["callback_query"]["data"] = json!("ref");
         value["callback_query"]["from"]["id"] = json!(7);
         rejected(&value, Reject::UnauthorizedUser);
+    }
+
+    #[test]
+    fn question_replies_require_exact_accessible_bot_message_metadata() {
+        let mut value = message("synthetic answer");
+        value["message"]["reply_to_message"] = json!({"message_id":45,"date":3,
+            "from":{"id":9,"is_bot":true},"chat":{"id":1_i64<<40,"type":"private"},
+            "text":"SYNTHETIC_QUOTED_BODY_NOT_RETAINED"});
+        assert!(matches!(
+            authorize(&value, &binding()),
+            Inbound::QuestionReply {
+                prompt_message_id: 45,
+                message_id: 2,
+                ..
+            }
+        ));
+        for field in ["message_id", "date", "from", "chat"] {
+            let mut bad = value.clone();
+            bad["message"]["reply_to_message"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            rejected(&bad, Reject::InvalidReply);
+        }
+        for (field, replacement) in [
+            ("message_id", json!(0)),
+            ("date", json!(0)),
+            ("from", json!({"id":8,"is_bot":true})),
+            ("from", json!({"id":9,"is_bot":false})),
+            ("chat", json!({"id":1_i64<<40,"type":"group"})),
+            ("chat", json!({"id":8,"type":"private"})),
+        ] {
+            let mut bad = value.clone();
+            bad["message"]["reply_to_message"][field] = replacement;
+            rejected(&bad, Reject::InvalidReply);
+        }
+        for field in [
+            "forward_origin",
+            "is_automatic_forward",
+            "external_reply",
+            "quote",
+            "edit_date",
+            "via_bot",
+        ] {
+            let mut bad = value.clone();
+            bad["message"][field] = json!(true);
+            rejected(&bad, Reject::InvalidReply);
+        }
+        value["message"]["reply_to_message"] = Value::Null;
+        rejected(&value, Reject::InvalidReply);
     }
 }

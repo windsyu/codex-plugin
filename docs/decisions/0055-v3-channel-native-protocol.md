@@ -26,12 +26,12 @@ V3 要为本机指定的已有受管原生会话增加 Telegram 输入、限定�
 
 1. 保留普通 CLI 的 V2 默认启动方式。渠道能力运行方式使用本次 Run 独占的私有 Unix socket、原版 App Server 与原版 TUI。TUI 经项目透明 WebSocket relay 连接本次 App Server；relay 转发原始消息，不改写原生 RPC，也不等待解码、保存或渠道 ACK。有界观察副本只用于原生来源证据。模型 HTTP/SSE/WS 代理、PTY 和异步观察仍独立。不开公网协议端口，不修改官方 CLI，不自动升级。
 2. 订阅请求和 ACK 必须同时符合普通用户用途；显式 ephemeral=true、非 user 的 threadSource 或畸形用途不能因 source=vscode 等普通客户端来源取得资格。缺省字段兼容旧公共协议，不按请求 ID 前缀猜测用途。先由本机 TUI 建立正常会话，再在本机明确选择其已有且仍被该 TUI 订阅的 Thread、绑定 Telegram 私聊。精确绑定 Thread，不按第一个 loaded ID、cwd、活动状态或网页消息猜测 TUI 当前焦点，不自动跟随 TUI 切换。不是为每条消息新建或恢复另一会话。现有无语义端点的普通 Run 明确显示不支持热附加，不自动停止、恢复、迁移或偷偷替换目标。
-3. 独立原生控制连接只用 `turn/start` 向已加载目标提交文本，不以 `thread/resume` 或 `thread/queue/add` 获取附加资格。渠道在自己的有界队列中等待可提交条件；本机输入仍可能在检查之后抢先进入同一 Turn，因此等待不能承诺渠道独占。每次实际提交使用新 UUID client ID，提交前保存渠道收件与提交意图；ID 仅关联来源，不提供原生幂等。写入后超时或 ACK 丢失不自动重放；没有 Accepted ACK 时不释放回复，即使已有原生回显也不自动重发。receipt v2 的收件、提交意图与拒绝记录边界见接入契约，不恢复旧控制内核。
+3. 独立原生控制连接只用 `turn/start` 向已加载目标提交文本，不以 `thread/resume` 或 `thread/queue/add` 获取附加资格。渠道在自己的有界队列中等待可提交条件；本机输入仍可能在检查之后抢先进入同一 Turn，因此等待不能承诺渠道独占。每次实际提交使用新 UUID client ID，提交前保存渠道收件与提交意图；ID 仅关联来源，不提供原生幂等。写入后超时或 ACK 丢失不自动重放；没有 Accepted ACK 时不释放回复，即使已有原生回显也不自动重发。独立 receipt 的收件、提交意图与拒绝记录边界及当前格式版本见接入契约，不恢复旧控制内核。
 4. 来源证据取自 TUI 自己不中断的原生订阅流，不能依赖第二客户端通过 resume 订阅。观察到准确 Thread/Turn 开始、同一个 UserMessage 的 started/completed 及 client ID 后，建立外发资格。混入任何其他用户 item，包括复用同一 client ID 的另一个 item，均使该 Turn 的自动回复外发失效。安装版 `0.156.1` 的隔离 P0c 已提供完整 v2 生命周期，也验证未订阅控制连接回答命令审批和 Plan 问题；不能据此忽略其他版本可能的通知筛选。
 5. 初片仅允许明确 `final_answer` 的原生 assistant 文本，并等到匹配的 Accepted ACK 和成功的原生 `turn/completed` 后释放。completion 中的 items 是摘要，不能用它证明没有本机输入。模型完成、assistant item 完成、工具完成均不代替 Turn 完成。不发 reasoning、工具输出、终端、历史快照或 diff。
 6. 全部客户端请求 ID 使用有界、永不驱逐的身份记录，重复、畸形或耗尽预算关闭渠道资格而不阻断转发；排除用途的 ACK 清除既有 pending，旧 ACK 不恢复资格。断线、解析失败、观察溢出、目标退订/卸载、Run/transport epoch 或本机绑定目标变化、本机撤销及无法解释的事件顺序均关闭旧外发资格。重连不能恢复未完成任务的来源证明；失效 generation 的待发送内容不得继续发送。TUI 焦点是客户端内部状态，不能承诺能探测每次焦点切换。已经外发的内容不能召回。
 7. Telegram 只匹配一个绑定 user ID 和 private chat ID；不得按用户名、转发来源或第一个 `/start` 自动授予权限。凭证保存在本机独立配置范围内，绑定、收件与必要交互规则见 [接入契约草案](../v3-telegram-channel-contract.md)。本机 owner 入口已接入，精确目标包含 subscription generation，设备 token 不得配置；真实 Telegram 仍须用户实测。
-8. 必要交互使用独立且缺省 false 的本机 `interactiveConsent`，只随当前 binding generation 生效。严格解析普通单次命令审批、完整范围文件审批和有界非秘密选项问题；真实来源与 request 状态在提示发送和 typed response 接纳前复验。Telegram 确认提示 chat/message 后才激活一次性 reference；先持久收件，再选择下一题或回答，未知写结果不重发。未支持、宽范围或秘密问题回本机；自由文本不误排成任务。已接纳的在途原生回答不能撤回，不将 WebSocket flush 或 resolved 当作远程决定生效。
+8. 必要交互使用独立且缺省 false 的本机 `interactiveConsent`，只随当前 binding generation 生效。严格解析普通单次命令审批、完整范围文件审批和有界非秘密问题；真实来源与 request 状态在提示发送和 typed response 接纳前复验。Telegram 确认单题提示 chat/message 后才激活一次性 reference 或准确 Reply 文字资格；前题持久收件后才发下一题，全部齐全才写完整 typed answer。文字只用于允许 Other 或公共协议无选项的问题，原样组成 `answers: [文字]`，不添加原版 TUI 内部 UI 标记。先实际 fsync，再选择或回答，未知写结果不重发。未支持、宽范围或秘密问题回本机；无效或未附着文字不误排成任务。已接纳的在途原生回答不能撤回，不将 WebSocket flush 或 resolved 当作远程决定生效。
 
 这是对 ADR 0039 原生唯一输入入口的有限实验扩展，不恢复旧 Session Kernel、持久 ThreadOwner、command ledger/CAS、raw-first 转发或 `/v2`。本文同步本地实现决定，保留 Proposed 直至该片验证与验收完成。
 
@@ -53,7 +53,7 @@ V3 要为本机指定的已有受管原生会话增加 Telegram 输入、限定�
 
 P2 对必要交互另行要求本机显式授权、匹配 Accepted ID 的完整实时来源和准确 request 身份；写入成功及 resolved 不表示远程决定被采纳。文件范围须取同一 item 的完整 started，不以流式预览代替。固定公共原生取消路径存在前置 Turn 检查之后的异步切换窗口，approval cancel 也不能排除中断新任务；精确整轮取消保持未完成，不通过锁住原版 TUI 或伪造错误实现。来源、typed answer 与降级候选见[接入契约 §5](../v3-telegram-channel-contract.md#5-输出与必要交互)，九个安装版原生用例见[历史边界探针](../validation/v3-channel-interactions-2026-10-09.md)。后续生产 callback 和原版 CLI 操作链的本地证据见[接入记录](../validation/v3-channel-callbacks-2026-10-09.md)，真实 Telegram 与 P2 整体验收尚未完成。
 
-P0 新增来源门、Telegram 输入校验与 HTTP 传输、私有原生 relay、隔离收件/凭证存储及探针和只读验收页。当时生产启动、配置、数据库和 migration 均未改变；历史证据见[验证记录](../validation/v3-channel-origin-2026-10-09.md)。P1 随后接入默认关闭的 `--channel-ready` / `launch.channelReady`、订阅候选消费者、本机 owner 六个 Telegram API、lazy 凭证加载、绑定 UI、持久收件/拒绝记录和串行文本 actor，历史 receipt v2 事实见[接入记录](../validation/v3-channel-runtime-2026-10-09.md)。P2 本地实现另加临时交互授权和 digest-only CallbackReceived；当前新写 v3，兼容读取 v1/v2/v3，旧读取器不兼容 v3，不重写旧行。callback 与 Received/Rejected 共用容量，恢复只去重，不重放按钮或回答；旧数据库和 migration 不变。代码可用不等于整体验收。
+P0 新增来源门、Telegram 输入校验与 HTTP 传输、私有原生 relay、隔离收件/凭证存储及探针和只读验收页。当时生产启动、配置、数据库和 migration 均未改变；历史证据见[验证记录](../validation/v3-channel-origin-2026-10-09.md)。P1 随后接入默认关闭的 `--channel-ready` / `launch.channelReady`、订阅候选消费者、本机 owner 六个 Telegram API、lazy 凭证加载、绑定 UI、持久收件/拒绝记录和串行文本 actor，历史 receipt v2 事实见[接入记录](../validation/v3-channel-runtime-2026-10-09.md)。P2 本地实现另加临时交互授权、digest-only CallbackReceived 与只留消息身份的 QuestionReplyReceived；当前新写 v4，兼容读取 v1/v2/v3/v4，旧读取器不兼容 v4，不重写旧行。交互与 Received/Rejected 共用容量，恢复只去重，不重放按钮或回答；旧数据库和 migration 不变。文字回答的编码、协议覆盖与原生专项边界见[新增记录](../validation/v3-channel-question-replies-2026-10-09.md)。代码可用不等于整体验收。
 
 ### 原生退出保证的限定
 
