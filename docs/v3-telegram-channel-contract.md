@@ -94,15 +94,43 @@ P1 当前只发送自己的最终文本；审批、问题等必要交互留在�
 
 | 交互 | 第一阶段候选处理 | 仍需证明 |
 | --- | --- | --- |
-| 本次渠道任务的 command approval | 明确允许/拒绝，与本机共享原生 first-response-wins；独立连接响应路径已有隔离证据 | 生产请求归属、同时竞速、撤销后迟到 callback |
-| 本次渠道任务的 file approval | 明确允许/拒绝 | 文件审批响应路径、生产归属和竞速仍须独立实测 |
-| 支持 schema 的 `requestUserInput` | 有界问题/选项与精确回答；独立连接回答阻塞 Plan 问题已有隔离证据 | 生产 task/request/question 归属，过期、重复、已解决与本机抢先 |
+| 本次渠道任务的 command approval | 明确允许/拒绝，共享原生 first raw response/error wins；两个独立连接并发答复已有隔离证据 | 生产请求归属、callback 与本机实际输入竞速、撤销后迟到 callback |
+| 本次渠道任务的 file approval | 展示完整有界路径与操作，明确允许/拒绝 | 安装版单文件 Add 的允许/拒绝/竞争已有隔离证据；生产归属、多文件和 rename 尚须实测 |
+| 支持 schema 的 `requestUserInput` | 有界问题/选项与精确回答；阻塞 Plan 问题、并发及畸形/未知 ID 边界已有隔离证据 | 生产 task/request/question 归属，过期、重复、已解决与本机实际输入抢先 |
 | 未支持 approval、MCP 或原生设置/picker | 明确提示回本机完成；不自动默许 | 不外发无关请求正文，不代答客户端独占流程 |
-| 取消 | 仅针对当前已归属渠道 task，并经准确 native Turn ID 检查 | 不得中断混入本机输入的 Turn；API 不确定不能伪装已取消 |
+| 取消 | 排队任务可取消；已提交任务的整轮取消尚无可证明安全的公共原生路径 | 精确 native Turn ID 的前置检查不足以避免原生处理中的 Turn 切换；此能力保持未完成，不以撤销输出冒充已取消 |
 
-callback 数据只携带有界 opaque reference。actor 必须核对绑定身份、bot、原始私聊消息、generation、task、native request、期限和一次性消费；callback ACK 只停止 Telegram spinner，不等于执行授权成功。原生 `serverRequest/resolved` 使旧按钮失效。P0c 已验证独立连接回答命令审批和阻塞 Plan 问题；文件审批和生产 callback 规则仍须实测，不能因观察到请求便宣称所有请求可回答。
+callback 数据只携带有界 opaque reference。actor 必须核对绑定身份、bot、原始私聊消息、generation、task、native request、期限和一次性消费；callback ACK 只停止 Telegram spinner，不等于执行授权成功。原生 `serverRequest/resolved` 使旧按钮失效。P0c 已验证独立连接回答命令审批和阻塞 Plan 问题；[P2 原生探针](validation/v3-channel-interactions-2026-10-09.md)补证单文件 Add 允许/拒绝/竞争及问题负例。生产 callback 规则与其他文件范围仍须实测，不能因观察到请求便宣称所有请求可回答。
 
 官方只读源码 `2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4` 的 [callback 路由](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/outgoing_message.rs#L568)只对 MCP UserVerification 限制响应连接，普通请求可以由独立控制连接回答。但原生 callback 在解析 typed answer 之前已被消费，是 first raw response/error wins；必须严格构造已知 schema，不能发送占位或试探响应。响应没有应用层 ACK，resolved 也可能由本机回答或取消产生，不能当作 Telegram 决定获胜的证明。具体组合以安装版实测为准，未知和客户端独占请求留在本机。
+
+### 5.1 P2 的本机授权与实时来源门
+
+以下是 P2 待接入的契约，当前 P1 确认 API 和界面尚无此能力。本机激活时另行明确确认 `interactiveConsent`，默认 false，不将已有的共享上下文确认解释为允许发送必要命令、文件名和问题正文。该授权只随当前 binding generation 生效，不保存或在重启后恢复。
+
+必要交互要求匹配 Accepted 的 Turn ID、该 Turn 的 started、同一个渠道 user item 的 started/completed，以及准确 request 的 Thread/Turn/item。`OriginProof.live_owned_turn()` 只证明当前来源；它不授予回答任意 RPC 的权限。ACK 迟到时可以有界保留候选请求，但不得先发送提示或答复。混入本机输入、终态、撤销、退订、epoch 变化、观察缺口或捕获水位领先解码水位时，旧交互失效。
+
+本机客户端对同一个原生 request ID 发出 result 或 error 时，立即撤销远端资格，不等待 resolved。numeric ID 与 string ID 保持不同；原生 RPC request ID、item ID、approvalId 和 question ID 不互相替代。发送提示和写入答复前均复验来源、水位、请求状态和 binding generation；这些检查仍允许原生两客户端同时回答，由原生消费首个 raw response/error。
+
+### 5.2 必要内容与 typed answer
+
+- 命令审批只支持已识别的普通 command 和本次单次 accept/decline，校验原生 availableDecisions。展示有界 command、reason 和实际权限含义，不外发 cwd、stdout/stderr、环境变量或完整附加权限对象。网络策略、额外权限、writeStdin、会话授权与 policy amendment 不得以普通“允许一次”按钮降格表达；未知请求回本机处理。
+- 文件审批必须先观察同一 Thread/Turn/item 的完整 `item/started(fileChange)`。只保留有界 path、kind 和 rename 的目标路径，解析时丢弃 diff。无完整范围、未知操作、冲突、超限或提示后范围变化时，不提供远端 accept。`grantRoot != null` 是更广范围授权，禁止远端 accept，不能显示为单次文件修改。
+- `requestUserInput` 只处理已识别的有界 schema。问题、选项和答案逐一关联原始 question ID；拒绝重复 ID、未知 ID、未知字段和超限，不构造部分答案或占位空回答。`isSecret=true` 不发往 Telegram。自由文本回答须有明确的待回答状态，不能当作新的渠道任务或误答其他问题。
+
+文件顺序有固定源码、schema 和测试依据：[apply_patch handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/handlers/apply_patch.rs#L531)先发完整 begin，再进入审批 orchestrator；[tool events](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/events.rs#L242)将其发为完整 FileChange item；[App Server 测试](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/tests/suite/v2/turn_start.rs#L3866)核对 item 在 approval 前且身份相同。`patchUpdated` 可以是流式解析预览，不能单独替代完整 started。安装版单文件 Add 已补证该顺序；其他范围与生产绑定仍须独立实测。
+
+### 5.3 callback 与响应结果
+
+只有 Telegram 发送确认返回准确 chat/message ID 后，才激活提示中的 opaque reference；未知或部分投递不激活按钮。回调须匹配原 bot/user/chat/message、binding generation、task、准确原生 request、动作和期限，并只能消费一次。迟到、重复、发送确认前或本机已回答的 callback 不写入原生。callback ACK 只结束 spinner。
+
+独立连接只写入已验证的 typed result，不提供通用 RPC 或 JSON-RPC error 兜底。结果区分 `NotSent`、`WrittenUnconfirmed` 和 `Unknown`；写成功不表示原生采纳，更不表示操作成功。resolved 只撤销旧请求，最终工具/Turn 结果与 Telegram 投递分别记录。不自动重试未知响应，也不在重启后重放 callback。callback 的无正文收件格式与 v1/v2 兼容读取仍须在实施中明确，不能将现有 Rejected 记录描述为交互成功。
+
+### 5.4 已提交 Turn 的取消缺口
+
+固定源码的 [turn/interrupt handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/request_processors/turn_processor.rs#L1610)先检查 Turn ID，再异步记录请求并提交不带 Turn ID 的 Interrupt。检查之后发生本机 Turn 切换时，不能证明不会中断新任务。approval 的 `cancel` 也不是安全替代：[approval response](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/bespoke_event_handling.rs#L1926)经异步路径转换为 Abort，[core handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/session/handlers.rs#L200)中断当前任务，未用该审批的 Turn ID 限定目标。
+
+因此 command/file decline 只表示拒绝该操作；撤销渠道只停止后续渠道处理和外发，原生任务可能继续。问题 error 或畸形 typed answer 会消费 callback 并生成空答案，不能用于取消。不得锁住或阻断原版 TUI 转发来制造互斥，也不得伪造模型错误。精确整轮取消保持明确未完成项；上述源码结论不能由单次竞态测试通过消除。
 
 ## 6. 原生退出与同 HOME 启动边界
 

@@ -50,6 +50,8 @@ V3 要为本机指定的已有受管原生会话增加 Telegram 输入、限定�
 
 来源隔离不等于上下文保密过滤。渠道沿用同一 Thread，模型为渠道生成的回复可能引用本机先前对话；本机绑定时须明确说明共享上下文，不能承诺这些回复绝不包含历史内容。
 
+P2 对必要交互另行要求本机显式授权、匹配 Accepted ID 的完整实时来源和准确 request 身份；写入成功及 resolved 不表示远程决定被采纳。文件范围须取同一 item 的完整 started，不以流式预览代替。固定公共原生取消路径存在前置 Turn 检查之后的异步切换窗口，approval cancel 也不能排除中断新任务；精确整轮取消保持未完成，不通过锁住原版 TUI 或伪造错误实现。来源、typed answer 与降级候选见[接入契约 §5](../v3-telegram-channel-contract.md#5-输出与必要交互)，九个安装版原生用例见[增量记录](../validation/v3-channel-interactions-2026-10-09.md)，不据此宣称生产 callback 已完成。
+
 P0 新增来源门、Telegram 输入校验与 HTTP 传输、私有原生 relay、隔离收件/凭证存储及探针和只读验收页。当时生产启动、配置、数据库和 migration 均未改变；历史证据见[验证记录](../validation/v3-channel-origin-2026-10-09.md)。P1 随后接入默认关闭的 `--channel-ready` / `launch.channelReady`、订阅候选消费者、本机 owner 六个 Telegram API、lazy 凭证加载、绑定 UI、持久收件/拒绝记录和串行文本 actor。代码可用不等于已验收。旧数据库和 migration 不变，receipt 新写 v2 且读取 v1/v2 混合；增量事实与限制见[实验运行接入记录](../validation/v3-channel-runtime-2026-10-09.md)。
 
 ### 原生退出保证的限定
