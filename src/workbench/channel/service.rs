@@ -88,6 +88,8 @@ struct Core {
     root: PathBuf,
     changed: Notify,
     configuring: tokio::sync::Mutex<()>,
+    #[cfg(all(test, target_os = "macos"))]
+    test_api: Mutex<Option<std::net::SocketAddr>>,
 }
 pub(crate) struct Service {
     core: Arc<Core>,
@@ -119,9 +121,17 @@ impl Service {
                 root,
                 changed: Notify::new(),
                 configuring: tokio::sync::Mutex::new(()),
+                #[cfg(all(test, target_os = "macos"))]
+                test_api: Mutex::new(None),
             }),
             tasks: Mutex::new(Vec::new()),
         }
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn api_for_test(&self, address: std::net::SocketAddr) {
+        assert!(address.ip().is_loopback());
+        assert!(self.core.inner.lock().unwrap().client.is_none());
+        *self.core.test_api.lock().unwrap() = Some(address);
     }
     pub(crate) fn start(&self) {
         let mut tasks = self.tasks.lock().unwrap();
@@ -227,7 +237,16 @@ impl Service {
         let loaded = writer.load().await.map_err(|error| error.code())?;
         let save = supplied.is_some();
         let token = supplied.or(loaded.token).ok_or("channel_token_missing")?;
-        let client = Arc::new(Client::new(token.clone()).map_err(bot_failure)?);
+        let client = Client::new(token.clone()).map_err(bot_failure)?;
+        // Test binaries can exercise the owner configure path against a
+        // synthetic loopback Bot API. Production has no endpoint override.
+        #[cfg(all(test, target_os = "macos"))]
+        let client = if let Some(address) = *self.core.test_api.lock().unwrap() {
+            Client::local(address, Duration::from_secs(30)).map_err(bot_failure)?
+        } else {
+            client
+        };
+        let client = Arc::new(client);
         let bot = client.inspect().await.map_err(bot_failure)?;
         self.core.configuration_current(operation)?;
         if save {

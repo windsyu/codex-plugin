@@ -32,6 +32,10 @@ struct StateData {
 #[derive(Clone)]
 pub(crate) struct SurfaceHandle(Arc<StateData>);
 impl SurfaceHandle {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn telegram_api_for_test(&self, address: std::net::SocketAddr) {
+        self.0.telegram.api_for_test(address);
+    }
     pub fn attach(
         &self,
         run: &crate::workbench::launch::WorkbenchRuntime,
