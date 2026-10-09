@@ -588,6 +588,15 @@ async fn process_update(
     if update.get("callback_query").is_some() {
         return interactions::callback(core, client, bot, generation, update, &writer).await;
     }
+    if update.get("message").is_some_and(|message| {
+        ["reply_to_message", "external_reply", "quote"]
+            .iter()
+            .any(|key| message.get(*key).is_some())
+    }) {
+        // Replies are never reinterpreted as new tasks, even after the original
+        // interaction has retired or the metadata fails authorization.
+        return interactions::question_reply(core, client, bot, generation, update, &writer).await;
+    }
     // Classify under the current authorization, then release the lock before
     // fsync. Pairing candidates are published only after their input is durably
     // non-executable, so a later binding cannot reinterpret the nonce message.
@@ -659,7 +668,7 @@ async fn process_update(
                 .map(|a| a.chat_id);
             if let Some(chat) = chat {
                 let _ = client.send_text(chat,
-                    "This text was not queued as a new task. Use the pending numbered choices, or answer in local Codex.", &[]).await;
+                    "This text was not queued as a new task. Use the buttons or Reply to the current question message, or answer in local Codex.", &[]).await;
             }
         }
         return Ok(());

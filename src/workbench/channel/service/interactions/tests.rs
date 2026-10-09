@@ -28,7 +28,8 @@ fn question_buttons_are_bounded_opaque_and_advance_without_partial_answers() {
             .iter()
             .all(|b| b.reference.len() == 32 && b.reference.bytes().all(|c| c.is_ascii_hexdigit()))
     );
-    let (second, second_refs) = buttons(&request, &[(0, 2)]);
+    let selected = vec![request.select(0, 2).unwrap()];
+    let (second, second_refs) = buttons(&request, &selected);
     assert_eq!(second.len(), 2);
     assert_eq!(second[0].label, "2.1");
     assert!(second_refs.keys().all(|r| !refs.contains_key(r)));
@@ -51,7 +52,7 @@ fn question_buttons_are_bounded_opaque_and_advance_without_partial_answers() {
                     question: 1,
                     option: 1
                 },
-                &[(0, 2)]
+                &selected
             )
             .unwrap()
             .is_some()

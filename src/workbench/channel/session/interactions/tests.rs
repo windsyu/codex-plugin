@@ -607,3 +607,191 @@ fn question_classification_requires_ack_and_complete_owned_user_proof() {
         }
     }
 }
+
+fn mixed_question_value(thread: Uuid) -> Value {
+    json!({"id":"mixed-question", "method":"item/tool/requestUserInput", "params":{
+    "threadId":thread,"turnId":turn(),"itemId":"mixed-item", "questions":[{
+        "id":"choice", "header":"Choice", "question":"Continue?", "isOther":false, "isSecret":false,
+        "options":[{"label":"Yes","description":"Continue"},{"label":"No","description":"Stop"}]
+    }, {
+        "id":"details", "header":"Details", "question":"Describe the task", "isOther":false, "isSecret":false,
+        "options":null
+    }]}})
+}
+fn install_question(f: &Fixture, value: Value) -> Option<Prompt> {
+    {
+        let mut state = f.handle.handle.shared.state.lock().unwrap();
+        observe(state.attempt.as_mut().unwrap(), Direction::ToTui, value);
+    }
+    f.handle.next().unwrap()
+}
+async fn assert_no_native_write(f: &mut Fixture) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), f.native.next())
+            .await
+            .is_err()
+    );
+}
+#[tokio::test]
+async fn mixed_text_and_choice_emit_one_complete_typed_answer_in_either_order() {
+    for text_last in [false, true] {
+        let mut f = fixture().await;
+        let prompt = install_question(&f, mixed_question_value(f.handle.target.thread_id)).unwrap();
+        // Neither a lone text answer nor a lone choice may reach the socket.
+        assert!(matches!(
+            f.handle
+                .answer_text(
+                    prompt.id,
+                    1,
+                    "Synthetic details".into(),
+                    vec![],
+                    Box::new(|| true)
+                )
+                .await,
+            ResponseWrite::NotSent { .. }
+        ));
+        assert!(matches!(
+            f.handle
+                .answer(
+                    prompt.id,
+                    Action::Choose {
+                        question: 0,
+                        option: 0
+                    },
+                    vec![],
+                    Box::new(|| true)
+                )
+                .await,
+            ResponseWrite::NotSent { .. }
+        ));
+        assert!(f.handle.current(prompt.id).is_ok());
+        assert_no_native_write(&mut f).await;
+        let result = if text_last {
+            let selected = vec![prompt.request.select(0, 0).unwrap()];
+            f.handle
+                .answer_text(
+                    prompt.id,
+                    1,
+                    "Synthetic details".into(),
+                    selected,
+                    Box::new(|| true),
+                )
+                .await
+        } else {
+            let selected = vec![prompt.request.answer_text(1, "Synthetic details").unwrap()];
+            f.handle
+                .answer(
+                    prompt.id,
+                    Action::Choose {
+                        question: 0,
+                        option: 0,
+                    },
+                    selected,
+                    Box::new(|| true),
+                )
+                .await
+        };
+        assert_eq!(result, ResponseWrite::WrittenUnconfirmed);
+        let message = tokio::time::timeout(Duration::from_secs(2), f.native.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap(),
+            json!({"id":"mixed-question","result":{"answers":{"choice":{"answers":["Yes"]},"details":{"answers":["Synthetic details"]}}}})
+        );
+        assert!(f.handle.current(prompt.id).is_err());
+        assert_eq!(f.handle.awaiting_question(), Ok(true));
+        assert!(matches!(
+            f.handle
+                .answer_text(
+                    prompt.id,
+                    1,
+                    "Replay".into(),
+                    vec![prompt.request.select(0, 0).unwrap()],
+                    Box::new(|| true)
+                )
+                .await,
+            ResponseWrite::NotSent { .. }
+        ));
+        assert_no_native_write(&mut f).await;
+    }
+}
+#[tokio::test]
+async fn text_answers_reject_choice_only_bounds_invalid_text_and_duplicate_answers() {
+    let mut f = fixture().await;
+    let prompt = install_question(&f, mixed_question_value(f.handle.target.thread_id)).unwrap();
+    for (question, text, duplicate) in [
+        (0, "Synthetic", false),
+        (2, "Synthetic", false),
+        (1, "", false),
+        (1, "  ", false),
+        (1, "bad\u{0}", false),
+        (1, "Synthetic", true),
+    ] {
+        let selected = if duplicate {
+            vec![prompt.request.answer_text(1, "Earlier").unwrap()]
+        } else {
+            vec![prompt.request.select(0, 0).unwrap()]
+        };
+        let result = f
+            .handle
+            .answer_text(
+                prompt.id,
+                question,
+                text.into(),
+                selected,
+                Box::new(|| true),
+            )
+            .await;
+        assert!(matches!(result, ResponseWrite::NotSent { .. }));
+        assert!(f.handle.current(prompt.id).is_ok());
+    }
+    assert_no_native_write(&mut f).await;
+}
+#[tokio::test]
+async fn secret_or_unsupported_question_never_acquires_text_answer_authority() {
+    for secret in [false, true] {
+        let mut f = fixture().await;
+        let mut value = mixed_question_value(f.handle.target.thread_id);
+        if secret {
+            value["params"]["questions"][1]["isSecret"] = json!(true);
+        } else {
+            value["params"]["questions"][1]["unknownField"] = json!("unsupported");
+        }
+        assert!(install_question(&f, value).is_none());
+        assert_eq!(f.handle.awaiting_question(), Ok(true));
+        assert!(matches!(
+            f.handle
+                .answer_text(Uuid::new_v4(), 1, "Text".into(), vec![], Box::new(|| true))
+                .await,
+            ResponseWrite::NotSent { .. }
+        ));
+        assert_no_native_write(&mut f).await;
+    }
+}
+#[tokio::test]
+async fn text_answer_actor_revalidates_resolution_consent_source_and_expiry() {
+    for mode in 0..5 {
+        let mut f = fixture().await;
+        let prompt = install_question(&f, mixed_question_value(f.handle.target.thread_id)).unwrap();
+        let selected = vec![prompt.request.select(0, 0).unwrap()];
+        let shared = f.handle.handle.shared.clone();
+        let thread = f.handle.target.thread_id;
+        let id = prompt.id;
+        let result = tokio::time::timeout(Duration::from_secs(2), f.handle.answer_text(id, 1, "Text".into(), selected, Box::new(move || {
+            let mut state = shared.state.lock().unwrap();
+            match mode {
+                0 => return false,
+                1 => observe(state.attempt.as_mut().unwrap(), Direction::ToTui, json!({"method":"serverRequest/resolved","params":{"threadId":thread,"requestId":"mixed-question"}})),
+                2 => observe(state.attempt.as_mut().unwrap(), Direction::ToServer, json!({"id":"mixed-question","result":{}})),
+                3 => state.sequence += 1,
+                _ => state.attempt.as_mut().unwrap().interaction_entry(id).unwrap().deadline = Instant::now() - Duration::from_secs(1),
+            }
+            true
+        }))).await.unwrap();
+        assert!(matches!(result, ResponseWrite::NotSent { .. }));
+        assert_no_native_write(&mut f).await;
+    }
+}

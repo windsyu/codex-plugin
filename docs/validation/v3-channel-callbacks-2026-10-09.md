@@ -1,5 +1,7 @@
 # V3 P2 授权交互与 callback 接入（2026-10-09）
 
+> 本文保留先前 callback 切片的事实和数量；同日后续的 Reply/Other 文字回答、receipt v4 及最终增量检查见[文字回答记录](v3-channel-question-replies-2026-10-09.md)。当前阶段状态只在 V3 计划维护。
+
 [验证索引](README.md) · [V3 实施计划](../v3-implementation-plan.md) · [接入契约](../v3-telegram-channel-contract.md#5-输出与必要交互)
 
 ## 1. 本片结果与边界

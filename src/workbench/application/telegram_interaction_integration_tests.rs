@@ -1,5 +1,9 @@
 // Included in telegram_native_integration; shares only synthetic transport and
 // the original fixture's kernel-identified native process cleanup guard.
+const MIXED_ANSWER: &str = "SYNTHETIC_FREE_TEXT_答案\nsecond line";
+const FIRST_QUESTION: &str = "SYNTHETIC_QUESTION_SELECT";
+const SECOND_QUESTION: &str = "SYNTHETIC_QUESTION_OTHER";
+
 struct InteractionWire {
     transport: Arc<Wire>,
     journal: PathBuf,
@@ -17,6 +21,11 @@ fn interaction_receipts(wire: &InteractionWire) -> Vec<Value> {
         "Allow once",
         "apply_patch",
         "printf",
+        "SYNTHETIC_QUESTION_",
+        "SYNTHETIC_OPTION_",
+        "SYNTHETIC_FREE_TEXT_",
+        "synthetic_choice",
+        "synthetic_other",
     ] {
         assert!(
             !text.contains(private),
@@ -38,6 +47,9 @@ fn interaction_receipts(wire: &InteractionWire) -> Vec<Value> {
                 row["digest"],
                 blake3::hash(record.as_bytes()).to_hex().to_string()
             );
+            if row["record"]["event"]["kind"] == "question_reply_received" {
+                assert_eq!(row["record"]["version"], 4);
+            }
             row["record"]["event"].clone()
         })
         .collect()
@@ -66,10 +78,48 @@ async fn interaction_bot(
 async fn interaction_model(State(wire): State<Arc<InteractionWire>>, body: Bytes) -> Response {
     let request: Value = serde_json::from_slice(&body).unwrap();
     let sequence = wire.transport.model_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-    assert!(sequence <= 12);
     let title = request["text"]["format"]["type"] == "json_schema"
         && request["text"]["format"]["schema"]["properties"]["title"]["type"] == "string"
         && request["text"]["format"]["schema"]["required"] == json!(["title"]);
+    fn question_tool(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields
+                    .get("name")
+                    .is_some_and(|name| name == "request_user_input")
+                    || fields.values().any(question_tool)
+            }
+            Value::Array(values) => values.iter().any(question_tool),
+            _ => false,
+        }
+    }
+    if sequence <= 12 {
+        // Only bounded boolean shape checks survive child teardown. Retain the
+        // first failing handler's evidence even if the CLI retries its request.
+        let input = request["input"].as_array();
+        let question_output = input.and_then(|items| {
+            items.iter().find(|item| {
+                item["type"] == "function_call_output" && item["call_id"] == "call_interaction_3"
+            })
+        });
+        let diagnostic = json!({"sequence":sequence,"title":title,
+            "questionTool":question_tool(&request["tools"]),
+            "mixedInput":input.is_some_and(|items| items.iter().any(|item| item["role"]=="user" && item["content"].to_string().contains("SYNTHETIC_INTERACTION_MIXED"))),
+            "questionOutput":question_output.is_some(),
+            "defaultModeUnavailable":question_output.is_some_and(|item| item["output"].as_str().is_some_and(|text| text.contains("request_user_input is unavailable in Default mode"))),
+            "planModeUnavailable":question_output.is_some_and(|item| item["output"].as_str().is_some_and(|text| text.contains("request_user_input is unavailable in Plan mode")))
+        });
+        if let Some(path) = wire.transport.model_diagnostic.lock().unwrap().as_ref() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            use std::io::Write;
+            writeln!(file, "{diagnostic}").unwrap();
+        }
+    }
+    assert!(sequence <= 12);
     let (turn, tool) = if title {
         wire.transport.title_requests.fetch_add(1, Ordering::SeqCst);
         (0, false)
@@ -84,11 +134,16 @@ async fn interaction_model(State(wire): State<Arc<InteractionWire>>, body: Bytes
                 [
                     ("SYNTHETIC_INTERACTION_COMMAND", 1),
                     ("SYNTHETIC_INTERACTION_FILE", 2),
+                    ("SYNTHETIC_INTERACTION_MIXED", 3),
                 ]
                 .into_iter()
                 .find_map(|(marker, turn)| text.contains(marker).then_some(turn))
             })
             .expect("known synthetic interaction turn");
+        // Tool declaration shape is diagnostic only: the installed binary is
+        // qualified through the actual native request and exact returned answers,
+        // as in the upstream request_user_input round-trip fixture. A native
+        // mode/config rejection still fails the positive interaction assertions.
         let call = format!("call_interaction_{turn}");
         let output = input
             .iter()
@@ -108,16 +163,34 @@ async fn interaction_model(State(wire): State<Arc<InteractionWire>>, body: Bytes
                     text.contains("SYNTHETIC_COMMAND_OUTPUT") && text.contains("code 0"),
                     "approved native command must succeed"
                 );
-            } else {
+            } else if turn == 2 {
                 assert!(
                     text.contains("rejected") || text.contains("declined"),
                     "native file operation must report rejection"
+                );
+            } else {
+                let answers: Value =
+                    serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    answers,
+                    json!({"answers": {
+                        "synthetic_choice": {"answers": ["SYNTHETIC_OPTION_ALPHA"]},
+                        "synthetic_other": {"answers": [MIXED_ANSWER]}
+                    }}),
+                    "native tool output must preserve original question IDs and exact mixed answers"
+                );
+                assert_eq!(
+                    receipts
+                        .iter()
+                        .filter(|row| row["kind"] == "question_reply_received")
+                        .count(),
+                    1
                 );
             }
         }
         let tool = output.is_none();
         let mut requests = wire.transport.model.lock().unwrap();
-        assert!(requests.len() < 4);
+        assert!(requests.len() < 6);
         requests.push(request);
         (turn, tool)
     };
@@ -133,10 +206,21 @@ async fn interaction_model(State(wire): State<Arc<InteractionWire>>, body: Bytes
         let item = if tool {
             let arguments = if turn == 1 {
                 json!({"cmd":"printf SYNTHETIC_COMMAND_OUTPUT","login":false,"sandbox_permissions":"require_escalated","justification":"Synthetic literal-output acceptance","yield_time_ms":1000})
-            } else {
+            } else if turn == 2 {
                 json!({"cmd":"apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: synthetic-denied.txt\n+SYNTHETIC_PRIVATE_PATCH_BODY\n*** End Patch\nPATCH","login":false,"yield_time_ms":1000})
+            } else {
+                // The original tool normalizer supplies isOther=true. Both
+                // questions have real options, as required by its model schema.
+                json!({"questions":[
+                    {"id":"synthetic_choice","header":"Select","question":FIRST_QUESTION,"options":[
+                        {"label":"SYNTHETIC_OPTION_ALPHA","description":"Synthetic first option"},
+                        {"label":"SYNTHETIC_OPTION_BETA","description":"Synthetic second option"}]},
+                    {"id":"synthetic_other","header":"Other","question":SECOND_QUESTION,"options":[
+                        {"label":"SYNTHETIC_OPTION_RED","description":"Synthetic red option"},
+                        {"label":"SYNTHETIC_OPTION_BLUE","description":"Synthetic blue option"}]}
+                ]})
             };
-            json!({"id":format!("interaction_item_{sequence}"),"type":"function_call","call_id":format!("call_interaction_{turn}"),"name":"exec_command","arguments":arguments.to_string()})
+            json!({"id":format!("interaction_item_{sequence}"),"type":"function_call","call_id":format!("call_interaction_{turn}"),"name":if turn==3 {"request_user_input"} else {"exec_command"},"arguments":arguments.to_string()})
         } else {
             let text = if title { r#"{"title":"Synthetic interactions"}"#.to_owned() }
                 else { format!("SYNTHETIC_INTERACTION_FINAL_{turn}") };
@@ -159,6 +243,130 @@ fn interaction_callback(
     reference: &str,
 ) -> Value {
     json!({"update_id":update,"callback_query":{"id":query,"from":{"id":user,"is_bot":false},"message":{"message_id":message,"date":1,"from":{"id":101,"is_bot":true},"chat":{"id":202,"type":"private"}},"data":reference}})
+}
+
+fn interaction_reply(id: i64, message: i64, user: i64, prompt: i64, text: &str) -> Value {
+    let mut value = update(id, message, user, text);
+    value["message"]["reply_to_message"] = json!({
+        "message_id":prompt,"date":1,"from":{"id":101,"is_bot":true},
+        "chat":{"id":202,"type":"private"}
+    });
+    value
+}
+
+async fn interaction_plan_mode(app: &Application) {
+    // Exercise the normal original TUI /plan path. It emits the native settings
+    // update itself; the fixture never forges a collaborationMode RPC.
+    let (tx, rx) = oneshot::channel();
+    app._runs
+        .handle
+        .sender
+        .send(Request::Inspect(Box::new(move |runner| {
+            assert!(tx.send(runner.active[0].0.terminal()).is_ok());
+        })))
+        .unwrap();
+    let terminal = rx.await.unwrap();
+    let page = terminal.attach().await.unwrap();
+    let grant = terminal.claim(page.connection_id).await.unwrap();
+    let mut sequence = 0;
+    let mut themed = false;
+    let mut trusted = false;
+    let mut ready = None;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = terminal.attach().await.unwrap();
+            let mut parser = vt100::Parser::new(view.snapshot.rows, view.snapshot.cols, 0);
+            parser.process(&view.snapshot.screen);
+            parser.process(&view.snapshot.replay);
+            let contents = parser.screen().contents();
+            let theme =
+                contents.contains("Choose your style") || contents.contains("Select a theme");
+            let trust = contents.contains("Do you trust")
+                || contents.contains("Do you want to work in this directory")
+                || contents.contains("Trust this folder?");
+            if (!themed && theme) || (!trusted && trust) {
+                themed |= theme;
+                trusted |= trust;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                sequence += 1;
+                terminal
+                    .input(
+                        page.connection_id,
+                        grant.generation,
+                        sequence,
+                        b"\r".to_vec(),
+                    )
+                    .await
+                    .unwrap();
+            } else if contents.contains("OpenAI Codex")
+                && contents.contains('›')
+                && ready.get_or_insert_with(std::time::Instant::now).elapsed()
+                    > Duration::from_millis(300)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("original TUI composer readiness; raw screen suppressed");
+    sequence += 1;
+    terminal
+        .input(
+            page.connection_id,
+            grant.generation,
+            sequence,
+            b"\x1b[200~/plan\x1b[201~".to_vec(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let view = terminal.attach().await.unwrap();
+            let mut parser = vt100::Parser::new(view.snapshot.rows, view.snapshot.cols, 0);
+            parser.process(&view.snapshot.screen);
+            parser.process(&view.snapshot.replay);
+            if parser.screen().contents().contains("/plan") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("synthetic slash command must render before Enter");
+    sequence += 1;
+    terminal
+        .input(
+            page.connection_id,
+            grant.generation,
+            sequence,
+            b"\r".to_vec(),
+        )
+        .await
+        .unwrap();
+    let mut plan_since = None;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let view = terminal.attach().await.unwrap();
+            let mut parser = vt100::Parser::new(view.snapshot.rows, view.snapshot.cols, 0);
+            parser.process(&view.snapshot.screen);
+            parser.process(&view.snapshot.replay);
+            if parser.screen().contents().contains("Plan mode") {
+                if plan_since
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    > Duration::from_millis(500)
+                {
+                    break;
+                }
+            } else {
+                plan_since = None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("original TUI Plan mode indicator; raw screen suppressed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -245,6 +453,29 @@ async fn installed_cli_production_telegram_interaction_path() {
         {
             println!("TELEGRAM_INTERACTION_FAILED fixture_line={line}");
         }
+        if let Ok(checks) = std::fs::read_to_string(root.path().join("question-model-checks")) {
+            for row in checks
+                .lines()
+                .take(12)
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            {
+                if let Some(sequence) = row["sequence"].as_u64().filter(|sequence| *sequence <= 12)
+                {
+                    for key in [
+                        "title",
+                        "questionTool",
+                        "mixedInput",
+                        "questionOutput",
+                        "defaultModeUnavailable",
+                        "planModeUnavailable",
+                    ] {
+                        if let Some(value) = row[key].as_bool() {
+                            println!("TELEGRAM_QUESTION_MODEL sequence={sequence} {key}={value}");
+                        }
+                    }
+                }
+            }
+        }
         let safe_stage = STAGES
             .iter()
             .copied()
@@ -260,7 +491,7 @@ async fn installed_cli_production_telegram_interaction_path() {
             "primary lifecycle must finish before host exit"
         );
         println!(
-            "TELEGRAM_INTERACTION_PRODUCTION original_cli_01561=true same_thread=true command_allow_once=true file_add_deny=true callback_receipts_before_continuation=true wrong_user_excluded=true stale_callback_excluded=true final_only_after_native_completion=true plain_bounded_prompts=true receipt_bodies_absent=true"
+            "TELEGRAM_INTERACTION_PRODUCTION original_cli_01561=true same_thread=true command_allow_once=true file_add_deny=true callback_receipts_before_continuation=true wrong_user_excluded=true stale_callback_excluded=true final_only_after_native_completion=true plain_bounded_prompts=true receipt_bodies_absent=true native_plan_mode=true native_question_tool_explicitly_enabled=true mixed_question_answers=true question_reply_receipt_before_continuation=true unaddressed_and_old_replies_excluded=true"
         );
         return;
     }
@@ -274,7 +505,16 @@ async fn installed_cli_production_telegram_interaction_path() {
                 .file()
                 .ends_with("telegram_interaction_integration_tests.rs")
         {
-            let _ = std::fs::write(&failure_line, location.line().to_string());
+            // The model transport may retry after a handler panic. Preserve the
+            // first fixture failure rather than replacing it with the retry cap.
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&failure_line)
+            {
+                use std::io::Write;
+                let _ = write!(file, "{}", location.line());
+            }
         }
     }));
     stage(root, "starting");
@@ -302,6 +542,7 @@ async fn installed_cli_production_telegram_interaction_path() {
         journal: paths.root.join("channel/receipts.jsonl"),
         acknowledgments: AtomicUsize::new(0),
     });
+    *wire.transport.model_diagnostic.lock().unwrap() = Some(root.join("question-model-checks"));
     let transport = &wire.transport;
     let (bot_addr, _bot) = server(
         Router::new()
@@ -322,7 +563,7 @@ async fn installed_cli_production_telegram_interaction_path() {
     )
     .unwrap();
     std::fs::write(home.join("config.toml"), format!(
-        "model=\"gpt-6-astra\"\nmodel_provider=\"custom\"\napproval_policy=\"on-request\"\napprovals_reviewer=\"user\"\nsandbox_mode=\"read-only\"\ncheck_for_update_on_startup=false\n[features]\ndaemon_auto_start=false\n[model_providers.custom]\nname=\"Synthetic interaction integration\"\nbase_url=\"http://{model_addr}/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nexperimental_bearer_token=\"synthetic-only\"\n[projects.{}]\ntrust_level=\"trusted\"\n", toml::Value::String(cwd.display().to_string()))).unwrap();
+        "model=\"gpt-6-astra\"\nmodel_provider=\"custom\"\napproval_policy=\"on-request\"\napprovals_reviewer=\"user\"\nsandbox_mode=\"read-only\"\ncheck_for_update_on_startup=false\n[features]\ndaemon_auto_start=false\n[model_providers.custom]\nname=\"Synthetic interaction integration\"\nbase_url=\"http://{model_addr}/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nexperimental_bearer_token=\"synthetic-only\"\n[tools.experimental_request_user_input]\nenabled=true\n[projects.{}]\ntrust_level=\"trusted\"\n", toml::Value::String(cwd.display().to_string()))).unwrap();
     let prepared = Prepared::load_application(
         &home,
         &cwd,
@@ -661,6 +902,288 @@ async fn installed_cli_production_telegram_interaction_path() {
             .filter(|row| row["kind"] == "callback_received")
             .count(),
         2
+    );
+    stage(root, "local");
+    interaction_plan_mode(&app).await;
+    assert_eq!(
+        transport.model.lock().unwrap().len(),
+        4,
+        "changing TUI mode does not submit a conversation turn"
+    );
+    assert_eq!(transport.sent.lock().unwrap().len(), 4);
+    stage(root, "context");
+    transport.permit_final.store(false, Ordering::SeqCst);
+    update_id += 1;
+    let mixed_input = update_id;
+    transport.updates.lock().unwrap().push_back(update(
+        update_id,
+        mixed_input,
+        202,
+        "SYNTHETIC_INTERACTION_MIXED",
+    ));
+    until(|| transport.sent.lock().unwrap().len() == 5).await;
+    let first = transport.sent.lock().unwrap()[4].clone();
+    assert!(first["text"].as_str().unwrap().contains(FIRST_QUESTION));
+    assert!(
+        !first["text"].as_str().unwrap().contains(SECOND_QUESTION),
+        "each prompt must expose only its current question"
+    );
+    assert!(first.get("parse_mode").is_none());
+    assert!(first["text"].as_str().unwrap().encode_utf16().count() <= 4096);
+    assert!(
+        !first["text"]
+            .as_str()
+            .unwrap()
+            .contains(cwd.to_str().unwrap())
+    );
+    let reference = first["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap())
+        .find(|button| button["text"] == "1.1")
+        .unwrap()["callback_data"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mixed_task = status(&app, &cookie).await["channel"]["lastTask"]["id"].clone();
+    update_id += 1;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_callback(
+            update_id,
+            202,
+            5,
+            "callback_query_mixed_choice",
+            &reference,
+        ));
+    until(|| {
+        transport.sent.lock().unwrap().len() == 6
+            && wire.acknowledgments.load(Ordering::SeqCst) == 3
+    })
+    .await;
+    let second = transport.sent.lock().unwrap()[5].clone();
+    let text = second["text"].as_str().unwrap();
+    assert!(text.contains(SECOND_QUESTION) && !text.contains(FIRST_QUESTION));
+    assert!(text.contains("Reply directly to this message"));
+    assert!(text.encode_utf16().count() <= 4096 && second.get("parse_mode").is_none());
+    assert!(
+        !text.contains(cwd.to_str().unwrap()) && !text.contains("SYNTHETIC_PRIVATE_PATCH_BODY")
+    );
+    assert_eq!(
+        transport.model.lock().unwrap().len(),
+        5,
+        "partial answers must not reach native continuation"
+    );
+    assert_eq!(
+        status(&app, &cookie).await["channel"]["lastTask"]["nativeCompleted"],
+        false
+    );
+    stage(root, "dedup");
+    // Ordinary text while a native question is pending cannot become another task.
+    update_id += 1;
+    transport.updates.lock().unwrap().push_back(update(
+        update_id,
+        update_id,
+        202,
+        "SYNTHETIC_FREE_TEXT_UNADDRESSED",
+    ));
+    update_id += 1;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_reply(
+            update_id,
+            update_id,
+            999,
+            6,
+            "SYNTHETIC_FREE_TEXT_WRONG_USER",
+        ));
+    update_id += 1;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_reply(
+            update_id,
+            update_id,
+            202,
+            5,
+            "SYNTHETIC_FREE_TEXT_OLD_PROMPT",
+        ));
+    update_id += 1;
+    let mut foreign_reply = interaction_reply(
+        update_id,
+        update_id,
+        202,
+        6,
+        "SYNTHETIC_FREE_TEXT_WRONG_BOT",
+    );
+    foreign_reply["message"]["reply_to_message"]["from"]["id"] = json!(999);
+    transport.updates.lock().unwrap().push_back(foreign_reply);
+    fresh_poll(transport).await;
+    fresh_poll(transport).await;
+    assert_eq!(transport.model.lock().unwrap().len(), 5);
+    assert_eq!(
+        status(&app, &cookie).await["channel"]["lastTask"]["id"],
+        mixed_task
+    );
+    assert_eq!(status(&app, &cookie).await["channel"]["queued"], 0);
+    assert_eq!(
+        interaction_receipts(&wire)
+            .iter()
+            .filter(|row| row["kind"] == "question_reply_received")
+            .count(),
+        0
+    );
+    assert_eq!(
+        interaction_receipts(&wire)
+            .iter()
+            .filter(|row| row["kind"] == "received")
+            .count(),
+        3
+    );
+    update_id += 1;
+    let reply_message = update_id;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_reply(
+            update_id,
+            reply_message,
+            202,
+            6,
+            MIXED_ANSWER,
+        ));
+    until(|| transport.model.lock().unwrap().len() == 6).await;
+    let receipts = interaction_receipts(&wire);
+    let question_receipt = receipts
+        .iter()
+        .find(|row| row["kind"] == "question_reply_received")
+        .unwrap();
+    assert_eq!(question_receipt["task"], mixed_task);
+    assert_eq!(
+        question_receipt["key"],
+        json!({"bot_id":101,"chat_id":202,"message_id":reply_message})
+    );
+    let choice_receipt = receipts
+        .iter()
+        .find(|row| row["kind"] == "callback_received" && row["task"] == mixed_task)
+        .unwrap();
+    assert_eq!(
+        question_receipt["interaction"],
+        choice_receipt["interaction"]
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .find(|row| row["kind"] == "received" && row["task"] == mixed_task)
+            .unwrap()["key"],
+        json!({"bot_id":101,"chat_id":202,"message_id":mixed_input})
+    );
+    assert_eq!(
+        status(&app, &cookie).await["channel"]["lastTask"]["nativeCompleted"],
+        false
+    );
+    assert!(
+        !transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message["text"] == "SYNTHETIC_INTERACTION_FINAL_3")
+    );
+    let before_final = transport.sent.lock().unwrap().len();
+    transport.permit_final.store(true, Ordering::SeqCst);
+    until(|| transport.sent.lock().unwrap().len() == before_final + 1).await;
+    let final_message = transport.sent.lock().unwrap().last().unwrap().clone();
+    assert_eq!(final_message["text"], "SYNTHETIC_INTERACTION_FINAL_3");
+    assert_eq!(final_message["chat_id"], 202);
+    assert!(final_message.get("reply_markup").is_none());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if status(&app, &cookie).await["channel"]["lastTask"]["nativeCompleted"] == true {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Repeated delivery keys and fresh replies to a retired prompt remain replies,
+    // even after the native question and Turn have completed.
+    update_id += 1;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_reply(
+            update_id,
+            reply_message,
+            202,
+            6,
+            MIXED_ANSWER,
+        ));
+    update_id += 1;
+    transport
+        .updates
+        .lock()
+        .unwrap()
+        .push_back(interaction_reply(
+            update_id,
+            update_id,
+            202,
+            6,
+            "SYNTHETIC_FREE_TEXT_RETIRED_PROMPT",
+        ));
+    fresh_poll(transport).await;
+    fresh_poll(transport).await;
+    assert_eq!(transport.model.lock().unwrap().len(), 6);
+    assert_eq!(transport.sent.lock().unwrap().len(), before_final + 1);
+    assert_eq!(
+        status(&app, &cookie).await["channel"]["lastTask"]["id"],
+        mixed_task
+    );
+    assert_eq!(status(&app, &cookie).await["channel"]["queued"], 0);
+    let receipts = interaction_receipts(&wire);
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|row| row["kind"] == "question_reply_received")
+            .count(),
+        1
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|row| row["kind"] == "received")
+            .count(),
+        3
+    );
+    assert_eq!(
+        status(&app, &cookie).await["channel"]["binding"]["active"]["target"],
+        qualified
+    );
+    let current = sources(&app, &cookie).await;
+    assert_eq!(
+        current["runs"][0]["source"]["targets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        current["runs"][0]["source"]["targets"][0]["threadId"],
+        thread
+    );
+    let context = transport.model.lock().unwrap()[4]["input"].to_string();
+    assert!(
+        context.contains("SYNTHETIC_INTERACTION_FINAL_2")
+            && context.contains("SYNTHETIC_INTERACTION_MIXED")
     );
     stage(root, "shutdown");
     drop(app);

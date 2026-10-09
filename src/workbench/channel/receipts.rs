@@ -95,6 +95,13 @@ enum Operation {
         interaction: Uuid,
         reply: Reply<Admission>,
     },
+    AdmitQuestionReply {
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+        interaction: Uuid,
+        reply: Reply<Admission>,
+    },
     Submitting {
         task: Uuid,
         client: Uuid,
@@ -124,6 +131,14 @@ enum Operation {
         reply: Reply<Admission>,
     },
     #[cfg(test)]
+    PauseAfterQuestionReply {
+        task: Uuid,
+        interaction: Uuid,
+        entered: oneshot::Sender<()>,
+        resume: Receiver<()>,
+        reply: Reply<Admission>,
+    },
+    #[cfg(test)]
     PauseAfterIntent {
         task: Uuid,
         client: Uuid,
@@ -138,7 +153,9 @@ impl Operation {
             Self::Load(reply) => reply.is_closed(),
             Self::IsRejected { reply, .. } => reply.is_closed(),
             Self::Reject { reply, .. } => reply.is_closed(),
-            Self::Admit { reply, .. } | Self::AdmitCallback { reply, .. } => reply.is_closed(),
+            Self::Admit { reply, .. }
+            | Self::AdmitCallback { reply, .. }
+            | Self::AdmitQuestionReply { reply, .. } => reply.is_closed(),
             Self::Submitting { reply, .. }
             | Self::Close { reply, .. }
             | Self::SaveToken { reply, .. }
@@ -150,6 +167,8 @@ impl Operation {
             Self::PauseAfterIntent { reply, .. } => reply.is_closed(),
             #[cfg(test)]
             Self::PauseAfterCallback { reply, .. } => reply.is_closed(),
+            #[cfg(test)]
+            Self::PauseAfterQuestionReply { reply, .. } => reply.is_closed(),
         }
     }
 }
@@ -159,6 +178,19 @@ pub(crate) struct Handle {
     stopped: Arc<AtomicBool>,
 }
 impl Handle {
+    /// Pause this test's worker before subsequent receipt operations. Sending
+    /// or dropping the returned sender resumes it, including on test panic.
+    #[cfg(test)]
+    pub(crate) async fn pause_for_test(&self) -> Result<mpsc::Sender<()>, Failure> {
+        let (entered, waiting) = oneshot::channel();
+        let (resume, receiver) = mpsc::channel();
+        self.send(Operation::Pause {
+            entered,
+            resume: receiver,
+        })?;
+        waiting.await.map_err(|_| Failure::WorkerUnavailable)?;
+        Ok(resume)
+    }
     fn send(&self, operation: Operation) -> Result<(), Failure> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Failure::Stopped);
@@ -242,6 +274,22 @@ impl Handle {
             bot_id,
             update_id,
             query_id,
+            task,
+            interaction,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn admit_question_reply(
+        &self,
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+        interaction: Uuid,
+    ) -> Result<Admission, Failure> {
+        self.call(|reply| Operation::AdmitQuestionReply {
+            key,
+            update_id,
             task,
             interaction,
             reply,
@@ -409,6 +457,19 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
                     .map_err(Failure::Store)
             }));
         }
+        Operation::AdmitQuestionReply {
+            key,
+            update_id,
+            task,
+            interaction,
+            reply,
+        } => {
+            let _ = reply.send(ready(store).and_then(|store| {
+                store
+                    .admit_question_reply(key, update_id, task, interaction)
+                    .map_err(Failure::Store)
+            }));
+        }
         Operation::Submitting {
             task,
             client,
@@ -449,6 +510,32 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
             let result = ready(store).and_then(|store| {
                 store
                     .admit_callback(101, 20, "synthetic-query", task, interaction)
+                    .map_err(Failure::Store)
+            });
+            let _ = entered.send(());
+            let _ = resume.recv();
+            let _ = reply.send(result);
+        }
+        #[cfg(test)]
+        Operation::PauseAfterQuestionReply {
+            task,
+            interaction,
+            entered,
+            resume,
+            reply,
+        } => {
+            let result = ready(store).and_then(|store| {
+                store
+                    .admit_question_reply(
+                        DeliveryKey {
+                            bot_id: 101,
+                            chat_id: 202,
+                            message_id: 20,
+                        },
+                        20,
+                        task,
+                        interaction,
+                    )
                     .map_err(Failure::Store)
             });
             let _ = entered.send(());
