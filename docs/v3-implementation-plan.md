@@ -1,7 +1,7 @@
 # V3 实施计划：先接入消息渠道，再设计跨会话管理
 
 > 需求确认日期：2026-10-09。
-> 当前状态：P0a/P0b/P0c 隔离探针自动化通过，等待用户查看。P1 文本闭环及 P2 授权审批、选项 callback 和显式 Reply 文字回答已接入本地源码，均未整体验收；P2 剩余能力、P3 和跨会话管理未完成。代码入口可用不等于阶段验收通过。
+> 当前状态：P0a/P0b/P0c 隔离探针自动化通过，等待用户查看。P1 文本闭环及 P2 授权审批、选项 callback、显式 Reply 文字回答和独立排队取消已接入本地源码，均未整体验收；P2 剩余能力、P3 和跨会话管理未完成。代码入口可用不等于阶段验收通过。
 
 [文档总索引](README.md) · [V2 实施计划](v2-implementation-plan.md) · [支持范围](codex-native-cli-workbench-support.md) · [开发指南](development/README.md)
 
@@ -71,15 +71,15 @@ V3 实验实现不改写 [ADR 0039](decisions/0039-cc-viewer-style-runtime.md) �
 | P0b：输入与必要交互的原生边界 | 定向自动化已通过，待用户查看 | [同一验证记录 §5](validation/v3-channel-origin-2026-10-09.md#5-p0b-后续原生边界专项)单列十项 `passed`：原生允许/拒绝、已解决请求的旧响应、阻塞提问、忙碌队列、交错及 final 后 steer 暂扣、故意未读 ACK 后不重发、未发送草稿保留。未验证同时响应 race、真实丢包/崩溃恢复、picker 或 Telegram；不计入 P0a 的 462 项全回归 |
 | P0c：已有 loaded Thread 的严格附加验证 | 定向自动化已通过，待用户查看 | [验证记录 §6](validation/v3-channel-origin-2026-10-09.md#6-p0c-严格已有线程附加与基础模块)五项通过：TUI 现有订阅提供完整来源，独立连接不 resume/queue 即可提交、回答命令审批与追问；失去观察不阻 CLI，卸载后拒绝且无冷加载/排队。14 项 relay 回归与完整检查通过；仍未生产启用 |
 | P1：一个已有会话与一个绑定私聊的文本闭环 | 进行中，源码已接通、未验收 | 本机 owner 六个 Telegram API、配置/配对/确认/撤销 UI、持久元数据收件及串行文本 actor 已接入；已验证拒绝记录、旧授权窗口、来源 attempt、原生停止、用途/RPC 身份门禁及原版 CLI 加合成 Bot/model 的完整生产操作链；真实 Telegram 用户验收待完成。`telegramImplemented: true` 只表示实现入口可用 |
-| P2：必要交互、失效和恢复 | 进行中，授权交互、callback 与文字回答已接入、未整体验收 | [原生记录](validation/v3-channel-interactions-2026-10-09.md)九个隔离用例与[生产 callback 记录](validation/v3-channel-callbacks-2026-10-09.md)的命令允许、文件拒绝通过；有界非秘密问题、单题 Reply/Other、来源/失效门与 v4 无正文收件已接源码，本片结果见[文字回答记录](validation/v3-channel-question-replies-2026-10-09.md)。真实 Telegram、独立排队取消及精确整轮取消未完成，不标为完成 |
+| P2：必要交互、失效和恢复 | 进行中，授权交互、文字回答与排队取消已接入、未整体验收 | [原生记录](validation/v3-channel-interactions-2026-10-09.md)九个隔离用例与[生产 callback 记录](validation/v3-channel-callbacks-2026-10-09.md)的命令允许、文件拒绝通过；有界非秘密问题、单题 Reply/Other、来源/失效门与无正文收件已接源码，文字回答片当时的新写 v4 结果见[文字回答记录](validation/v3-channel-question-replies-2026-10-09.md)。当前独立排队取消的提交竞争、原子 v5 收件和慢确认隔离见[排队取消记录](validation/v3-channel-queue-cancel-2026-10-09.md)；真实 Telegram 及精确整轮取消未完成，不标为完成 |
 | P3：第一阶段真实 Telegram 验收 | 尚未验收 | 用户本机配置 bot 凭证并绑定后，实测上下文延续、本机任务不外发、必要交互与故障状态；不以合成结果代替 |
 | 第二阶段：跨会话管理 | 尚未设计 | 第一阶段闭环后独立确认体验与范围 |
 
-已补齐第一阶段的用户流程草案和接入契约，并完成 P0a/P0b/P0c 隔离探针。P0b 的 queue/resume 只在候选原生协议进程中证明顺序和来源；P0c 改用透明 TUI relay 与 loaded-only `turn/start`，没有采用可能重新加载目标的附加操作。普通工作台继续以 `-c` 覆盖启动；本地源码新增默认关闭的 `--channel-ready` / `launch.channelReady` 实验入口，普通已有 Run 仍无热附加入口。当前实验模式仅支持默认原生配置，named profile 明确拒绝。绑定、授权、持久收件与发送 actor 已取得定向及分段标准检查证据，未配置页面完成本机 Chrome 检查；具体数量和两次检查修复见[验证记录](validation/v3-channel-runtime-2026-10-09.md#51-集成标准检查分段执行及修复边界)。正常宿主退出的并行回收等待和未发布 Owner 取消清理已落源码；真实宿主 normal/forced 增量回归已有结果，增强同一 handle witness 断言后的最终 Rust 575 项、单列原生宿主退出/Owner 专项与 debug/release 构建已通过。统一 18 秒是 reaper 等待策略，不是总 Drop 硬上限，也不证明所有工具或多个真实 Run 并发退出。本轮分段标准检查与最终退出修复复验已完成；完整本机操作链已在原版 CLI 加合成 Bot/model 专项中通过，用途修复后最终 Rust 585 项、单列三项原生专项及 debug/release 构建通过；具体断言与夹具修复见[新增证据](validation/v3-channel-runtime-2026-10-09.md#53-用户线程用途与完整生产操作链)。下一步补齐独立排队取消，并安排真实 Telegram 用户验收；精确整轮取消保持已知缺口，P2/P3 仍未完成。用户结果仍须映射到具体证据，不能将原生运行部分算作生产 Telegram 交付。
+已补齐第一阶段的用户流程草案和接入契约，并完成 P0a/P0b/P0c 隔离探针。P0b 的 queue/resume 只在候选原生协议进程中证明顺序和来源；P0c 改用透明 TUI relay 与 loaded-only `turn/start`，没有采用可能重新加载目标的附加操作。普通工作台继续以 `-c` 覆盖启动；本地源码新增默认关闭的 `--channel-ready` / `launch.channelReady` 实验入口，普通已有 Run 仍无热附加入口。当前实验模式仅支持默认原生配置，named profile 明确拒绝。绑定、授权、持久收件与发送 actor 已取得定向及分段标准检查证据，未配置页面完成本机 Chrome 检查；具体数量和两次检查修复见[验证记录](validation/v3-channel-runtime-2026-10-09.md#51-集成标准检查分段执行及修复边界)。正常宿主退出的并行回收等待和未发布 Owner 取消清理已落源码；真实宿主 normal/forced 增量回归已有结果，增强同一 handle witness 断言后的最终 Rust 575 项、单列原生宿主退出/Owner 专项与 debug/release 构建已通过。统一 18 秒是 reaper 等待策略，不是总 Drop 硬上限，也不证明所有工具或多个真实 Run 并发退出。本轮分段标准检查与最终退出修复复验已完成；完整本机操作链已在原版 CLI 加合成 Bot/model 专项中通过，用途修复后最终 Rust 585 项、单列三项原生专项及 debug/release 构建通过；具体断言与夹具修复见[新增证据](validation/v3-channel-runtime-2026-10-09.md#53-用户线程用途与完整生产操作链)。独立排队取消已接入，本片验证单列；下一步安排真实 Telegram 用户验收并核对剩余失效矩阵，精确整轮取消保持已知缺口，P2/P3 仍未完成。用户结果仍须映射到具体证据，不能将原生运行部分算作生产 Telegram 交付。
 
 2026-10-09 的源码核对、用户流程草案、能力缺口与首片验收用例见 [Telegram 渠道开工检查](v3-channel-preparation.md)。该准备记录不锁定技术路线，不改变本计划已确认范围，也不表示渠道功能已实现。
 
-原生语义输入候选见 [ADR 0055](decisions/0055-v3-channel-native-protocol.md)，单私聊绑定、持久收件和交互边界见 [接入契约草案](v3-telegram-channel-contract.md)，目前均为 Proposed。P1 已修改本地 launcher 及启动配置，保留默认普通模式；旧数据库和 migration 未改变。P2 为确认 API 增加缺省 false 的交互授权；独立 receipt journal 当前新写 v4，读取 v1/v2/v3/v4 混合记录，旧读取器不兼容 v4 且不重写旧行。P1 增量事实见 [实验运行接入记录](validation/v3-channel-runtime-2026-10-09.md)，授权交互历史见[生产 callback 记录](validation/v3-channel-callbacks-2026-10-09.md)，本片事实及未验证项见[文字回答记录](validation/v3-channel-question-replies-2026-10-09.md)。
+原生语义输入候选见 [ADR 0055](decisions/0055-v3-channel-native-protocol.md)，单私聊绑定、持久收件和交互边界见 [接入契约草案](v3-telegram-channel-contract.md)，目前均为 Proposed。P1 已修改本地 launcher 及启动配置，保留默认普通模式；旧数据库和 migration 未改变。P2 为确认 API 增加缺省 false 的交互授权；独立 receipt journal 当前新写 v5，读取 v1/v2/v3/v4/v5 混合记录，旧读取器不兼容 v5 且不重写旧行。P1 增量事实见 [实验运行接入记录](validation/v3-channel-runtime-2026-10-09.md)，授权交互历史见[生产 callback 记录](validation/v3-channel-callbacks-2026-10-09.md)，文字回答事实见[文字回答记录](validation/v3-channel-question-replies-2026-10-09.md)，本片事实及未验证项见[排队取消记录](validation/v3-channel-queue-cancel-2026-10-09.md)。
 
 参考研究（包括 [cc-viewer 功能与实现](cc-viewer-function-and-implementation.md)）只能帮助理解候选机制，不能替代本项目需求、权限设计或运行时验收。当前本地实现选择不等于已完成用户验收，文档记录不算功能交付。
 

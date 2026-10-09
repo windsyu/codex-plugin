@@ -49,7 +49,7 @@ fn rejected_metadata_survives_restart_without_becoming_a_task() {
     assert!(!text.contains("user_id"));
     for line in text.lines() {
         let line: Line = serde_json::from_str(line).unwrap();
-        assert_eq!(line.record.version, 4);
+        assert_eq!(line.record.version, 5);
         // The previous reader's exact version gate rejects every new row.
         assert_ne!(line.record.version, 1);
     }
@@ -91,7 +91,7 @@ fn v1_receipts_remain_readable_but_cannot_claim_rejection_schema() {
     let mut store = Store::open(&path).unwrap();
     assert!(store.is_rejected(123, 3, Some(key(3))).unwrap());
     drop(store);
-    for version in [1, 5] {
+    for version in [1, 6] {
         fs::write(
             path.join(JOURNAL),
             fixture_line(Record {
@@ -180,6 +180,7 @@ fn receipts_survive_reopen_and_deduplicate_message_not_update() {
     );
 }
 const CRASH_TASK: Uuid = Uuid::from_u128(0xa11ce);
+const CRASH_CANCEL_TASK: Uuid = Uuid::from_u128(0xa11cf);
 const CRASH_CLIENT: Uuid = Uuid::from_u128(0xc11e17);
 const CRASH_EXIT: i32 = 73;
 
@@ -202,6 +203,8 @@ fn durable_submission_crash_child() {
     store
         .admit_question_reply(key(9), 25, CRASH_TASK, Uuid::from_u128(0xc411))
         .unwrap();
+    store.admit(key(10), 27, CRASH_CANCEL_TASK).unwrap();
+    store.cancel_queued(key(11), 28, CRASH_CANCEL_TASK).unwrap();
     // All APIs have fsynced. Exit immediately without unwinding or running
     // Store/File destructors, as opposed to merely dropping/reopening it.
     std::process::exit(CRASH_EXIT);
@@ -240,6 +243,14 @@ fn durable_submission_survives_abrupt_process_exit_without_replay() {
     let before = fs::read(root.join(JOURNAL)).unwrap();
     let mut store = Store::open(&root).unwrap();
     assert_eq!(
+        store.cancel_queued(key(11), 29, CRASH_CANCEL_TASK),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        store.mark_submitting(CRASH_CANCEL_TASK, Uuid::from_u128(33)),
+        Err(Failure::InvalidTransition)
+    );
+    assert_eq!(
         store.admit_question_reply(key(9), 26, CRASH_TASK, Uuid::from_u128(0xc411)),
         Ok(Admission::Duplicate)
     );
@@ -254,7 +265,10 @@ fn durable_submission_survives_abrupt_process_exit_without_replay() {
     );
     assert_eq!(
         store.recover().unwrap(),
-        vec![(CRASH_TASK, Status::Submitting)]
+        vec![
+            (CRASH_TASK, Status::Submitting),
+            (CRASH_CANCEL_TASK, Status::Closed)
+        ]
     );
     assert_eq!(
         store.admit(key(7), 20, Uuid::from_u128(0xa11cf)),
@@ -266,7 +280,10 @@ fn durable_submission_survives_abrupt_process_exit_without_replay() {
     );
     assert_eq!(
         store.recover().unwrap(),
-        vec![(CRASH_TASK, Status::Submitting)]
+        vec![
+            (CRASH_TASK, Status::Submitting),
+            (CRASH_CANCEL_TASK, Status::Closed)
+        ]
     );
     assert_eq!(fs::read(root.join(JOURNAL)).unwrap(), before);
 }
@@ -807,7 +824,7 @@ fn callback_requires_v3_and_mixed_journal_omits_query_body_action_native_id_and_
     .into_iter()
     .flat_map(fixture_line)
     .collect::<Vec<_>>();
-    for version in [1, 2, 3, 4, 5] {
+    for version in [1, 2, 3, 4, 5, 6] {
         let mut bytes = prefix.clone();
         bytes.extend(fixture_line(Record {
             version,
@@ -821,7 +838,7 @@ fn callback_requires_v3_and_mixed_journal_omits_query_body_action_native_id_and_
             },
         }));
         fs::write(path.join(JOURNAL), bytes).unwrap();
-        if matches!(version, 3 | 4) {
+        if matches!(version, 3..=5) {
             let mut store = Store::open(&path).unwrap();
             store.save_token("123:synthetic_only").unwrap();
             assert_eq!(
@@ -1112,7 +1129,7 @@ fn question_reply_cannot_reinterpret_any_prior_input_or_become_new_task_rejectio
 }
 
 #[test]
-fn question_reply_only_v4_with_mixed_legacy_records_and_no_payload_fields() {
+fn question_reply_requires_v4_or_later_with_mixed_legacy_records_and_no_payload_fields() {
     let (dir, store) = setup();
     drop(store);
     let path = dir.path().join("channel");
@@ -1151,7 +1168,7 @@ fn question_reply_only_v4_with_mixed_legacy_records_and_no_payload_fields() {
     .into_iter()
     .flat_map(fixture_line)
     .collect::<Vec<_>>();
-    for version in [1, 2, 3, 4, 5] {
+    for version in [1, 2, 3, 4, 5, 6] {
         let mut bytes = prefix.clone();
         bytes.extend(fixture_line(Record {
             version,
@@ -1164,7 +1181,7 @@ fn question_reply_only_v4_with_mixed_legacy_records_and_no_payload_fields() {
             },
         }));
         fs::write(path.join(JOURNAL), bytes).unwrap();
-        if version != 4 {
+        if !matches!(version, 4 | 5) {
             assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
             continue;
         }
@@ -1203,7 +1220,7 @@ fn question_reply_only_v4_with_mixed_legacy_records_and_no_payload_fields() {
             fields,
             HashSet::from(["kind", "key", "update_id", "task", "interaction"])
         );
-        assert_eq!(row["record"]["version"], 4);
+        assert_eq!(row["record"]["version"], 5);
     }
 }
 
@@ -1513,4 +1530,621 @@ fn question_reply_recovery_rejects_invalid_ownership_duplicates_and_payload_fiel
     };
     assert_eq!(failure, Failure::Corrupt);
     assert!(!format!("{failure:?} {failure}").contains("synthetic-private-answer"));
+}
+
+#[test]
+fn queued_cancel_is_one_atomic_row_with_no_payload_and_dedups_after_close_restart() {
+    let (dir, mut store) = setup();
+    let task = Uuid::from_u128(1);
+    store.admit(key(1), 1, task).unwrap();
+    let before = store.sequence;
+    assert_eq!(store.cancel_queued(key(10), 10, task), Ok(Admission::Fresh));
+    assert_eq!(store.sequence, before + 1);
+    assert_eq!(store.recover().unwrap(), vec![(task, Status::Closed)]);
+    assert_eq!(store.close(task), Err(Failure::InvalidTransition));
+    let bytes = store.bytes;
+    assert_eq!(
+        store.cancel_queued(key(10), 11, Uuid::from_u128(99)),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        store.cancel_queued(key(11), 10, task),
+        Ok(Admission::Duplicate)
+    );
+    // Neither conflicting secondary identity was learned from a duplicate.
+    let second = Uuid::from_u128(2);
+    store.admit(key(2), 2, second).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(11), 11, second),
+        Ok(Admission::Fresh)
+    );
+    assert!(store.bytes > bytes);
+    let path = dir.path().join("channel");
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(10), 12, task),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        store.cancel_queued(key(12), 10, task),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        store.mark_submitting(task, Uuid::from_u128(3)),
+        Err(Failure::InvalidTransition)
+    );
+    let text = fs::read_to_string(path.join(JOURNAL)).unwrap();
+    assert_eq!(text.lines().count(), 4);
+    for row in text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    {
+        assert_eq!(row["record"]["version"], 5);
+        let event = &row["record"]["event"];
+        assert_eq!(
+            event
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            HashSet::from(["kind", "key", "update_id", "task"])
+        );
+    }
+    assert!(!text.contains("\"kind\":\"closed\""));
+}
+
+#[test]
+fn queued_cancel_rejects_invalid_identity_ownership_and_nonqueued_targets_without_consuming_input()
+{
+    let (_dir, mut store) = setup();
+    let task = Uuid::from_u128(1);
+    store.admit(key(1), 1, task).unwrap();
+    for (input, update, target) in [
+        (
+            DeliveryKey {
+                bot_id: 0,
+                ..key(10)
+            },
+            10,
+            task,
+        ),
+        (
+            DeliveryKey {
+                chat_id: -1,
+                ..key(10)
+            },
+            10,
+            task,
+        ),
+        (key(0), 10, task),
+        (key(10), -1, task),
+        (key(10), 10, Uuid::nil()),
+    ] {
+        assert_eq!(
+            store.cancel_queued(input, update, target),
+            Err(Failure::InvalidInput)
+        );
+    }
+    for input in [
+        DeliveryKey {
+            bot_id: 124,
+            ..key(10)
+        },
+        DeliveryKey {
+            chat_id: 789,
+            ..key(10)
+        },
+    ] {
+        assert_eq!(
+            store.cancel_queued(input, 10, task),
+            Err(Failure::InvalidTransition)
+        );
+    }
+    assert_eq!(
+        store.cancel_queued(key(10), 10, Uuid::from_u128(99)),
+        Err(Failure::InvalidTransition)
+    );
+    store.mark_submitting(task, Uuid::from_u128(2)).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(10), 10, task),
+        Err(Failure::InvalidTransition)
+    );
+    store.close(task).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(10), 10, task),
+        Err(Failure::InvalidTransition)
+    );
+    let queued = Uuid::from_u128(3);
+    store.admit(key(3), 3, queued).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(10), 0, queued),
+        Ok(Admission::Fresh)
+    );
+}
+
+#[test]
+fn queued_cancel_shares_all_input_identities_without_reinterpretation_or_conflict_learning() {
+    let (_dir, mut store) = setup();
+    let (active, interaction) = submitting(&mut store);
+    let queued = Uuid::from_u128(9);
+    store.admit(key(9), 9, queued).unwrap();
+    store.reject(123, 20, Some(key(20))).unwrap();
+    store
+        .admit_callback(123, 30, "prior-query", active, interaction)
+        .unwrap();
+    store
+        .admit_question_reply(key(40), 40, active, interaction)
+        .unwrap();
+    for (message, update) in [
+        (9, 100),
+        (100, 9),
+        (20, 100),
+        (100, 20),
+        (100, 30),
+        (40, 100),
+        (100, 40),
+    ] {
+        assert_eq!(
+            store.cancel_queued(key(message), update, queued),
+            Ok(Admission::Duplicate)
+        );
+    }
+    assert_eq!(
+        store.cancel_queued(key(100), 100, queued),
+        Ok(Admission::Fresh)
+    );
+    let bytes = store.bytes;
+    for (message, update) in [(100, 101), (101, 100)] {
+        assert_eq!(
+            store.admit(key(message), update, Uuid::from_u128(101)),
+            Ok(Admission::Duplicate)
+        );
+        assert_eq!(
+            store.admit_question_reply(key(message), update, active, interaction),
+            Ok(Admission::Duplicate)
+        );
+        store.reject(123, update, Some(key(message))).unwrap();
+    }
+    store.reject(123, 100, None).unwrap();
+    assert_eq!(
+        store.admit_callback(123, 100, "new-query", active, interaction),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(store.bytes, bytes);
+    assert!(!store.is_rejected(123, 100, Some(key(100))).unwrap());
+    assert_eq!(
+        store.admit_callback(123, 101, "new-query", active, interaction),
+        Ok(Admission::Fresh)
+    );
+    assert_eq!(
+        store.admit_question_reply(key(101), 102, active, interaction),
+        Ok(Admission::Fresh)
+    );
+}
+
+#[test]
+fn queued_cancel_requires_v5_in_mixed_journal_and_rejects_invalid_replay() {
+    let (dir, store) = setup();
+    drop(store);
+    let path = dir.path().join("channel");
+    let task = Uuid::from_u128(1);
+    let active = Uuid::from_u128(2);
+    let interaction = Uuid::from_u128(3);
+    let records = [
+        Record {
+            version: 1,
+            sequence: 1,
+            event: Event::Received {
+                key: key(1),
+                update_id: 1,
+                task,
+            },
+        },
+        // Preserve the historically legal v1/v2 duplicate-update rows.
+        Record {
+            version: 2,
+            sequence: 2,
+            event: Event::Received {
+                key: key(2),
+                update_id: 1,
+                task: active,
+            },
+        },
+        Record {
+            version: 2,
+            sequence: 3,
+            event: Event::Rejected {
+                bot_id: 123,
+                update_id: 1,
+                message_key: None,
+            },
+        },
+        Record {
+            version: 2,
+            sequence: 4,
+            event: Event::Submitting {
+                task: active,
+                client_id: Uuid::from_u128(4),
+            },
+        },
+        Record {
+            version: 3,
+            sequence: 5,
+            event: Event::CallbackReceived {
+                bot_id: 123,
+                update_id: 5,
+                query_digest: "a".repeat(64),
+                task: active,
+                interaction,
+            },
+        },
+        Record {
+            version: 4,
+            sequence: 6,
+            event: Event::QuestionReplyReceived {
+                key: key(6),
+                update_id: 6,
+                task: active,
+                interaction,
+            },
+        },
+    ];
+    let prefix: Vec<_> = records.into_iter().flat_map(fixture_line).collect();
+    for version in 1..=6 {
+        let mut bytes = prefix.clone();
+        bytes.extend(fixture_line(Record {
+            version,
+            sequence: 7,
+            event: Event::QueuedCanceled {
+                key: key(7),
+                update_id: 7,
+                task,
+            },
+        }));
+        fs::write(path.join(JOURNAL), &bytes).unwrap();
+        if version != 5 {
+            assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
+            continue;
+        }
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.tasks.get(&task), Some(&Status::Closed));
+        assert_eq!(
+            store.cancel_queued(key(7), 8, task),
+            Ok(Admission::Duplicate)
+        );
+        drop(store);
+        for event in [
+            Event::Received {
+                key: key(8),
+                update_id: 7,
+                task: Uuid::from_u128(8),
+            },
+            Event::Rejected {
+                bot_id: 123,
+                update_id: 8,
+                message_key: Some(key(7)),
+            },
+            Event::CallbackReceived {
+                bot_id: 123,
+                update_id: 7,
+                query_digest: "b".repeat(64),
+                task: active,
+                interaction,
+            },
+            Event::QuestionReplyReceived {
+                key: key(7),
+                update_id: 8,
+                task: active,
+                interaction,
+            },
+            Event::QueuedCanceled {
+                key: key(8),
+                update_id: 8,
+                task,
+            },
+        ] {
+            let mut corrupted = bytes.clone();
+            corrupted.extend(fixture_line(Record {
+                version: 5,
+                sequence: 8,
+                event,
+            }));
+            fs::write(path.join(JOURNAL), corrupted).unwrap();
+            assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
+        }
+    }
+    for (input, target) in [
+        (
+            DeliveryKey {
+                bot_id: 124,
+                ..key(7)
+            },
+            task,
+        ),
+        (
+            DeliveryKey {
+                chat_id: 789,
+                ..key(7)
+            },
+            task,
+        ),
+        (key(7), active),
+        (key(7), Uuid::from_u128(99)),
+    ] {
+        let mut bytes = prefix.clone();
+        bytes.extend(fixture_line(Record {
+            version: 5,
+            sequence: 7,
+            event: Event::QueuedCanceled {
+                key: input,
+                update_id: 7,
+                task: target,
+            },
+        }));
+        fs::write(path.join(JOURNAL), bytes).unwrap();
+        assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
+    }
+}
+
+#[test]
+fn queued_cancel_fsync_failure_never_claims_success_and_surviving_row_recovers_atomically() {
+    let (dir, mut store) = setup();
+    let task = Uuid::from_u128(1);
+    store.admit(key(1), 1, task).unwrap();
+    let sequence = store.sequence;
+    store.fail_next_sync = true;
+    assert_eq!(
+        store.cancel_queued(key(10), 10, task),
+        Err(Failure::Unavailable)
+    );
+    assert_eq!(store.tasks.get(&task), Some(&Status::Received));
+    assert!(store.queued_cancel_updates.is_empty());
+    assert_eq!(store.sequence, sequence);
+    assert_eq!(
+        store.cancel_queued(key(10), 10, task),
+        Err(Failure::Poisoned)
+    );
+    drop(store);
+    let mut store = Store::open(&dir.path().join("channel")).unwrap();
+    assert_eq!(store.recover().unwrap(), vec![(task, Status::Closed)]);
+    assert_eq!(
+        store.cancel_queued(key(10), 11, task),
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        store.mark_submitting(task, Uuid::from_u128(2)),
+        Err(Failure::InvalidTransition)
+    );
+}
+
+#[test]
+fn queued_cancel_shares_identity_and_byte_capacity_without_eviction_or_partial_close() {
+    let (dir, store) = setup();
+    drop(store);
+    let path = dir.path().join("channel");
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    let active = Uuid::from_u128(3);
+    let closed = Uuid::from_u128(4);
+    let interaction = Uuid::from_u128(5);
+    let mut events = vec![
+        Event::Received {
+            key: key(1),
+            update_id: 1,
+            task: first,
+        },
+        Event::Received {
+            key: key(2),
+            update_id: 2,
+            task: second,
+        },
+        Event::Received {
+            key: key(3),
+            update_id: 3,
+            task: active,
+        },
+        Event::Received {
+            key: key(4),
+            update_id: 4,
+            task: closed,
+        },
+        Event::Submitting {
+            task: active,
+            client_id: Uuid::from_u128(6),
+        },
+        Event::Rejected {
+            bot_id: 123,
+            update_id: 5,
+            message_key: None,
+        },
+        Event::CallbackReceived {
+            bot_id: 123,
+            update_id: 6,
+            query_digest: "a".repeat(64),
+            task: active,
+            interaction,
+        },
+        Event::QuestionReplyReceived {
+            key: key(7),
+            update_id: 7,
+            task: active,
+            interaction,
+        },
+        Event::QueuedCanceled {
+            key: key(8),
+            update_id: 8,
+            task: closed,
+        },
+    ];
+    for index in 8..MAX_TASKS - 1 {
+        events.push(Event::Rejected {
+            bot_id: 123,
+            update_id: index as i64 + 1,
+            message_key: None,
+        });
+    }
+    let lines: Vec<_> = events
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| {
+            fixture_line(Record {
+                version: 5,
+                sequence: index as u64 + 1,
+                event,
+            })
+        })
+        .collect();
+    // Whitespace is valid JSON and is outside the canonical record digest.
+    // Exactly 4096 rows padded to 1024 bytes exercise the real 4 MiB boundary.
+    assert_eq!(lines.len(), MAX_TASKS);
+    let padded: Vec<_> = lines
+        .iter()
+        .flat_map(|line| {
+            let mut line = line[..line.len() - 1].to_vec();
+            line.resize(1023, b' ');
+            line.push(b'\n');
+            line
+        })
+        .collect();
+    assert_eq!(padded.len(), MAX_BYTES);
+    fs::write(path.join(JOURNAL), padded).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.receipt_count(), MAX_TASKS - 1);
+    assert_eq!(
+        store.cancel_queued(key(5000), 5000, first),
+        Err(Failure::Capacity)
+    );
+    assert_eq!(store.tasks.get(&first), Some(&Status::Received));
+    assert_eq!(
+        store.cancel_queued(key(8), 5000, closed),
+        Ok(Admission::Duplicate)
+    );
+    drop(store);
+    fs::write(path.join(JOURNAL), lines.concat()).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.cancel_queued(key(5000), 5000, first),
+        Ok(Admission::Fresh)
+    );
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.receipt_count(), MAX_TASKS);
+    assert_eq!(
+        store.cancel_queued(key(5001), 5001, second),
+        Err(Failure::Capacity)
+    );
+    assert_eq!(store.tasks.get(&second), Some(&Status::Received));
+    assert_eq!(
+        store.admit(key(5001), 5001, Uuid::from_u128(7)),
+        Err(Failure::Capacity)
+    );
+    assert_eq!(store.reject(123, 5001, None), Err(Failure::Capacity));
+    assert_eq!(
+        store.admit_callback(123, 5001, "extra", active, interaction),
+        Err(Failure::Capacity)
+    );
+    assert_eq!(
+        store.admit_question_reply(key(5001), 5001, active, interaction),
+        Err(Failure::Capacity)
+    );
+    assert_eq!(
+        store.cancel_queued(key(5000), 5001, first),
+        Ok(Admission::Duplicate)
+    );
+    let sequence = store.sequence + 1;
+    drop(store);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path.join(JOURNAL))
+        .unwrap()
+        .write_all(&fixture_line(Record {
+            version: 5,
+            sequence,
+            event: Event::QueuedCanceled {
+                key: key(5001),
+                update_id: 5001,
+                task: second,
+            },
+        }))
+        .unwrap();
+    assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
+}
+
+#[test]
+fn cancel_input_query_sees_every_event_without_learning_identities_or_writing() {
+    let (dir, mut store) = setup();
+    let (active, interaction) = submitting(&mut store);
+    let canceled = Uuid::from_u128(9);
+    store.admit(key(9), 9, canceled).unwrap();
+    store.reject(123, 20, Some(key(20))).unwrap();
+    store
+        .admit_callback(123, 30, "prior-query", active, interaction)
+        .unwrap();
+    store
+        .admit_question_reply(key(40), 40, active, interaction)
+        .unwrap();
+    store.cancel_queued(key(50), 50, canceled).unwrap();
+    let path = dir.path().join("channel");
+    let before = fs::read(path.join(JOURNAL)).unwrap();
+    for reopen in [false, true] {
+        if reopen {
+            drop(store);
+            store = Store::open(&path).unwrap();
+        }
+        for (message, update) in [
+            (1, 100),
+            (100, 1),
+            (20, 100),
+            (100, 20),
+            (100, 30),
+            (40, 100),
+            (100, 40),
+            (50, 100),
+            (100, 50),
+        ] {
+            assert_eq!(store.cancel_input_seen(key(message), update), Ok(true));
+        }
+        assert_eq!(store.cancel_input_seen(key(100), 100), Ok(false));
+        assert_eq!(
+            store.cancel_input_seen(
+                DeliveryKey {
+                    bot_id: 124,
+                    ..key(50)
+                },
+                50
+            ),
+            Ok(false)
+        );
+        for (input, update) in [
+            (key(0), 100),
+            (
+                DeliveryKey {
+                    bot_id: 0,
+                    ..key(100)
+                },
+                100,
+            ),
+            (
+                DeliveryKey {
+                    chat_id: -1,
+                    ..key(100)
+                },
+                100,
+            ),
+            (key(100), -1),
+        ] {
+            assert_eq!(
+                store.cancel_input_seen(input, update),
+                Err(Failure::InvalidInput)
+            );
+        }
+        assert_eq!(fs::read(path.join(JOURNAL)).unwrap(), before);
+    }
+    store.poisoned = true;
+    assert_eq!(
+        store.cancel_input_seen(key(100), 100),
+        Err(Failure::Poisoned)
+    );
 }

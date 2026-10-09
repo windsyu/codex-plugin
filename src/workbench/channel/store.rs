@@ -107,6 +107,11 @@ enum Event {
         task: Uuid,
         interaction: Uuid,
     },
+    QueuedCanceled {
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+    },
     Submitting {
         task: Uuid,
         client_id: Uuid,
@@ -139,6 +144,8 @@ pub struct Store {
     callback_queries: HashSet<(i64, String)>,
     question_reply_updates: HashSet<(i64, i64)>,
     question_reply_keys: HashSet<DeliveryKey>,
+    queued_cancel_updates: HashSet<(i64, i64)>,
+    queued_cancel_keys: HashSet<DeliveryKey>,
     clients: HashSet<Uuid>,
     sequence: u64,
     bytes: usize,
@@ -209,6 +216,8 @@ impl Store {
             callback_queries: HashSet::new(),
             question_reply_updates: HashSet::new(),
             question_reply_keys: HashSet::new(),
+            queued_cancel_updates: HashSet::new(),
+            queued_cancel_keys: HashSet::new(),
             clients: HashSet::new(),
             sequence: 0,
             bytes: 0,
@@ -250,12 +259,14 @@ impl Store {
             }
             let line: Line = serde_json::from_slice(line).map_err(|_| Failure::Corrupt)?;
             let encoded = serde_json::to_vec(&line.record).map_err(|_| Failure::Corrupt)?;
-            if !matches!(line.record.version, 1..=4)
+            if !matches!(line.record.version, 1..=5)
                 || (line.record.version == 1 && matches!(line.record.event, Event::Rejected { .. }))
                 || (line.record.version < 3
                     && matches!(line.record.event, Event::CallbackReceived { .. }))
                 || (line.record.version < 4
                     && matches!(line.record.event, Event::QuestionReplyReceived { .. }))
+                || (line.record.version < 5
+                    && matches!(line.record.event, Event::QueuedCanceled { .. }))
                 || line.record.sequence != store.sequence + 1
                 || line.digest != blake3::hash(&encoded).to_hex().as_str()
             {
@@ -287,6 +298,7 @@ impl Store {
         if self.keys.contains(&key)
             || self.callback_updates.contains(&(key.bot_id, update_id))
             || self.question_reply_seen(key.bot_id, update_id, Some(key))
+            || self.queued_cancel_seen(key.bot_id, update_id, Some(key))
             || self.rejected(key.bot_id, update_id, Some(key))
         {
             return Ok(Admission::Duplicate);
@@ -357,6 +369,43 @@ impl Store {
         })?;
         Ok(Admission::Fresh)
     }
+    /// Check all consumed input identities before reserving a volatile cancel
+    /// reference. The atomic writer still checks again; this query grants no
+    /// permission to submit or cancel a task.
+    pub fn cancel_input_seen(&mut self, key: DeliveryKey, update_id: i64) -> Result<bool, Failure> {
+        self.verify()?;
+        if !key.valid() || update_id < 0 {
+            return Err(Failure::InvalidInput);
+        }
+        Ok(self.reply_input_seen(key, update_id))
+    }
+    /// Atomically consume the cancel message and close its still-queued task.
+    /// Only identities are durable; no cancel reference or executable intent is
+    /// stored. Duplicate inputs never learn a conflicting second identity.
+    pub fn cancel_queued(
+        &mut self,
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+    ) -> Result<Admission, Failure> {
+        self.verify()?;
+        if !key.valid() || update_id < 0 || task.is_nil() {
+            return Err(Failure::InvalidInput);
+        }
+        if self.reply_input_seen(key, update_id) {
+            return Ok(Admission::Duplicate);
+        }
+        self.append(Event::QueuedCanceled {
+            key,
+            update_id,
+            task,
+        })?;
+        Ok(Admission::Fresh)
+    }
+    fn queued_cancel_seen(&self, bot: i64, update: i64, key: Option<DeliveryKey>) -> bool {
+        self.queued_cancel_updates.contains(&(bot, update))
+            || key.is_some_and(|key| self.queued_cancel_keys.contains(&key))
+    }
     fn question_reply_seen(&self, bot: i64, update: i64, key: Option<DeliveryKey>) -> bool {
         self.question_reply_updates.contains(&(bot, update))
             || key.is_some_and(|key| self.question_reply_keys.contains(&key))
@@ -366,12 +415,14 @@ impl Store {
             || self.received_updates.contains(&(bot, update))
             || self.callback_updates.contains(&(bot, update))
             || self.question_reply_updates.contains(&(bot, update))
+            || self.queued_cancel_updates.contains(&(bot, update))
     }
     fn reply_input_seen(&self, key: DeliveryKey, update_id: i64) -> bool {
         self.update_seen(key.bot_id, update_id)
             || self.keys.contains(&key)
             || self.rejected_keys.contains(&key)
             || self.question_reply_keys.contains(&key)
+            || self.queued_cancel_keys.contains(&key)
     }
     fn callback_seen(&self, bot_id: i64, update_id: i64, query_digest: &str) -> bool {
         self.update_seen(bot_id, update_id)
@@ -384,6 +435,7 @@ impl Store {
             + self.rejected_updates.len()
             + self.callback_updates.len()
             + self.question_reply_updates.len()
+            + self.queued_cancel_updates.len()
     }
     /// Exact rejection identities survive offset resets, reconfiguration and
     /// restart. No monotonic Telegram update-ID assumption is required.
@@ -411,6 +463,7 @@ impl Store {
         if self.rejected(bot_id, update_id, key)
             || self.callback_updates.contains(&(bot_id, update_id))
             || self.question_reply_seen(bot_id, update_id, key)
+            || self.queued_cancel_seen(bot_id, update_id, key)
         {
             return Ok(());
         }
@@ -525,6 +578,7 @@ impl Store {
                 if self.rejected(*bot_id, *update_id, *message_key)
                     || self.callback_updates.contains(&(*bot_id, *update_id))
                     || self.question_reply_seen(*bot_id, *update_id, *message_key)
+                    || self.queued_cancel_seen(*bot_id, *update_id, *message_key)
                 {
                     return Err(Failure::InvalidTransition);
                 }
@@ -543,6 +597,7 @@ impl Store {
                 if self.keys.contains(key)
                     || self.callback_updates.contains(&(key.bot_id, *update_id))
                     || self.question_reply_seen(key.bot_id, *update_id, Some(*key))
+                    || self.queued_cancel_seen(key.bot_id, *update_id, Some(*key))
                     || self.tasks.contains_key(task)
                     || self.rejected(key.bot_id, *update_id, Some(*key))
                 {
@@ -593,6 +648,26 @@ impl Store {
                 }
                 if self.reply_input_seen(*key, *update_id)
                     || self.tasks.get(task) != Some(&Status::Submitting)
+                    || self.task_keys.get(task).is_none_or(|original| {
+                        original.bot_id != key.bot_id || original.chat_id != key.chat_id
+                    })
+                {
+                    return Err(Failure::InvalidTransition);
+                }
+                if self.receipt_count() >= MAX_TASKS {
+                    return Err(Failure::Capacity);
+                }
+            }
+            Event::QueuedCanceled {
+                key,
+                update_id,
+                task,
+            } => {
+                if !key.valid() || *update_id < 0 || task.is_nil() {
+                    return Err(Failure::InvalidInput);
+                }
+                if self.reply_input_seen(*key, *update_id)
+                    || self.tasks.get(task) != Some(&Status::Received)
                     || self.task_keys.get(task).is_none_or(|original| {
                         original.bot_id != key.bot_id || original.chat_id != key.chat_id
                     })
@@ -659,6 +734,15 @@ impl Store {
                 self.question_reply_updates.insert((key.bot_id, update_id));
                 self.question_reply_keys.insert(key);
             }
+            Event::QueuedCanceled {
+                key,
+                update_id,
+                task,
+            } => {
+                self.queued_cancel_updates.insert((key.bot_id, update_id));
+                self.queued_cancel_keys.insert(key);
+                self.tasks.insert(task, Status::Closed);
+            }
             Event::Submitting { task, client_id } => {
                 self.clients.insert(client_id);
                 self.tasks.insert(task, Status::Submitting);
@@ -672,9 +756,9 @@ impl Store {
         self.verify()?;
         self.validate(&event)?;
         let record = Record {
-            // Older readers fail closed on new metadata. Existing v1/v2/v3
+            // Older readers fail closed on new metadata. Existing v1/v2/v3/v4
             // rows remain readable in a mixed, continuously sequenced journal.
-            version: 4,
+            version: 5,
             sequence: self.sequence + 1,
             event,
         };

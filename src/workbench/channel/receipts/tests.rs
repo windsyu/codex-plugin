@@ -474,3 +474,151 @@ async fn lost_question_reply_result_survives_restart_as_dedup_metadata_only() {
     assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
     shutdown(worker).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_cancel_lost_result_is_durable_closed_with_no_replay_on_worker_restart() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    handle.admit(key(1), 1, task).await.unwrap();
+    let (entered, waiting) = oneshot::channel();
+    let (resume, paused) = mpsc::channel();
+    let (reply, result) = oneshot::channel();
+    handle
+        .send(Operation::PauseAfterCancel {
+            task,
+            entered,
+            resume: paused,
+            reply,
+        })
+        .unwrap();
+    waiting.await.unwrap(); // actual cancel append and fsync already completed
+    drop(result);
+    resume.send(()).unwrap();
+    let expected = Counts {
+        received: 0,
+        submitting: 0,
+        closed: 1,
+    };
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    shutdown(worker).await;
+    let worker = Worker::start(path).unwrap();
+    let handle = worker.handle();
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    assert_eq!(
+        handle.cancel_queued(key(20), 21, task).await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle.cancel_queued(key(21), 20, task).await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle.mark_submitting(task, Uuid::from_u128(2)).await,
+        Err(Failure::Store(store::Failure::InvalidTransition))
+    );
+    assert_eq!(
+        handle.close(task).await,
+        Err(Failure::Store(store::Failure::InvalidTransition))
+    );
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    shutdown(worker).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_cancel_waits_off_executor_is_bounded_and_dropped_queue_entry_does_not_close() {
+    let root = root();
+    let worker = Worker::start(root.path().join("receipts")).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    handle.admit(key(1), 1, task).await.unwrap();
+    let resume = pause(&handle).await;
+    let mut replies = Vec::new();
+    for id in 0..QUEUE_LIMIT - 1 {
+        let (reply, result) = oneshot::channel();
+        handle
+            .send(Operation::CancelQueued {
+                key: key(id as i64 + 10),
+                update_id: id as i64 + 10,
+                task,
+                reply,
+            })
+            .unwrap();
+        replies.push(result);
+    }
+    let (barrier, drained) = oneshot::channel();
+    handle.send(Operation::Load(barrier)).unwrap();
+    assert_eq!(
+        handle.cancel_queued(key(50), 50, task).await,
+        Err(Failure::QueueFull)
+    );
+    let heartbeat = tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        7
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), heartbeat)
+            .await
+            .unwrap()
+            .unwrap(),
+        7
+    );
+    drop(replies);
+    resume.send(()).unwrap();
+    assert_eq!(
+        drained.await.unwrap().unwrap().recovered,
+        Counts {
+            received: 1,
+            submitting: 0,
+            closed: 0
+        }
+    );
+    assert_eq!(
+        handle.cancel_queued(key(10), 10, task).await,
+        Ok(Admission::Fresh)
+    );
+    assert_eq!(
+        handle.load().await.unwrap().recovered,
+        Counts {
+            received: 0,
+            submitting: 0,
+            closed: 1
+        }
+    );
+    shutdown(worker).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_input_query_roundtrips_consumed_and_fresh_identities_without_new_tasks() {
+    let root = root();
+    let worker = Worker::start(root.path().join("receipts")).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    handle.admit(key(1), 1, task).await.unwrap();
+    assert_eq!(handle.cancel_input_seen(key(1), 2).await, Ok(true));
+    assert_eq!(handle.cancel_input_seen(key(2), 1).await, Ok(true));
+    assert_eq!(handle.cancel_input_seen(key(2), 2).await, Ok(false));
+    assert_eq!(
+        handle.cancel_input_seen(key(0), 2).await,
+        Err(Failure::Store(store::Failure::InvalidInput))
+    );
+    handle.cancel_queued(key(2), 2, task).await.unwrap();
+    assert_eq!(handle.cancel_input_seen(key(3), 2).await, Ok(true));
+    assert_eq!(handle.cancel_input_seen(key(2), 3).await, Ok(true));
+    assert_eq!(handle.cancel_input_seen(key(3), 3).await, Ok(false));
+    assert_eq!(
+        handle.load().await.unwrap().recovered,
+        Counts {
+            received: 0,
+            submitting: 0,
+            closed: 1
+        }
+    );
+    shutdown(worker).await;
+    assert_eq!(
+        handle.cancel_input_seen(key(3), 3).await,
+        Err(Failure::Stopped)
+    );
+}
