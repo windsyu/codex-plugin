@@ -26,6 +26,7 @@ use crate::workbench::launch::Submission;
 const QUEUE_LIMIT: usize = 16;
 const TASK_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const OFFSET_LIFETIME: Duration = Duration::from_secs(6 * 24 * 60 * 60);
+mod interactions;
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +72,8 @@ struct Inner {
     configuring: bool,
     sessions: BTreeMap<Uuid, session::Handle>,
     queue: VecDeque<Job>,
+    interactions: BTreeMap<Uuid, interactions::Pending>,
+    active_interaction: Option<(Uuid, ActiveBinding, session::InteractionHandle)>,
     last_task: Option<TaskView>,
     recovered: Counts,
     failure: Option<&'static str>,
@@ -80,6 +83,8 @@ impl Inner {
     fn revoke(&mut self) {
         self.binding.revoke();
         self.queue.clear();
+        self.interactions.clear();
+        self.active_interaction = None;
     }
 }
 struct Core {
@@ -108,6 +113,8 @@ impl Service {
                     configuring: false,
                     sessions: BTreeMap::new(),
                     queue: VecDeque::new(),
+                    interactions: BTreeMap::new(),
+                    active_interaction: None,
                     last_task: None,
                     recovered: Counts {
                         received: 0,
@@ -301,6 +308,7 @@ impl Service {
         run: Uuid,
         thread: Uuid,
         revision: Uuid,
+        interactive_consent: bool,
     ) -> Result<Snapshot, &'static str> {
         let mut inner = self.core.inner.lock().unwrap();
         if inner.client.is_none() || inner.configuring {
@@ -315,7 +323,7 @@ impl Service {
             .map_err(|error| error.code())?;
         inner
             .binding
-            .confirm(candidate, target, Instant::now())
+            .confirm(candidate, target, interactive_consent, Instant::now())
             .map_err(|_| "channel_candidate_changed")?;
         inner.queue.clear();
         inner.failure = None;
@@ -397,6 +405,19 @@ impl Core {
                 .binding
                 .revalidate(active.generation, active.target)
                 .is_ok()
+    }
+    /// An uncertain old task must never revoke a subsequently confirmed binding.
+    fn revoke_job(&self, active: ActiveBinding) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .binding
+            .revalidate(active.generation, active.target)
+            .is_ok()
+        {
+            inner.revoke();
+            drop(inner);
+            self.changed.notify_waiters();
+        }
     }
     fn update(
         &self,
@@ -542,7 +563,7 @@ async fn poll(core: Arc<Core>) {
     }
 }
 async fn process_update(
-    core: &Core,
+    core: &Arc<Core>,
     client: &Arc<Client>,
     bot: i64,
     generation: Uuid,
@@ -564,10 +585,14 @@ async fn process_update(
             return Err(());
         }
     }
+    if update.get("callback_query").is_some() {
+        return interactions::callback(core, client, bot, generation, update, &writer).await;
+    }
     // Classify under the current authorization, then release the lock before
     // fsync. Pairing candidates are published only after their input is durably
     // non-executable, so a later binding cannot reinterpret the nonce message.
     let mut pairing = false;
+    let mut question_text = false;
     let executable = {
         let mut inner = core.inner.lock().unwrap();
         let current = inner.binding.snapshot(Instant::now());
@@ -589,7 +614,18 @@ async fn process_update(
             && !text.starts_with('/')
             && let Some(source) = inner.sessions.get(&active.target.run_epoch).cloned()
         {
-            Some((active, source, message_id, text))
+            if inner
+                .active_interaction
+                .as_ref()
+                .is_some_and(|(_, owner, handle)| {
+                    owner.generation == generation && handle.awaiting_question() != Ok(false)
+                })
+            {
+                question_text = true;
+                None
+            } else {
+                Some((active, source, message_id, text))
+            }
         } else {
             None
         }
@@ -609,6 +645,21 @@ async fn process_update(
                 && current.phase == Phase::Pairing
             {
                 let _ = inner.binding.pair(bot, update, Instant::now());
+            }
+        }
+        if question_text {
+            let chat = core
+                .inner
+                .lock()
+                .unwrap()
+                .binding
+                .snapshot(Instant::now())
+                .active
+                .filter(|a| a.generation == generation)
+                .map(|a| a.chat_id);
+            if let Some(chat) = chat {
+                let _ = client.send_text(chat,
+                    "This text was not queued as a new task. Use the pending numbered choices, or answer in local Codex.", &[]).await;
             }
         }
         return Ok(());
@@ -706,7 +757,7 @@ async fn execute(core: Arc<Core>) {
         }
     }
 }
-async fn execute_job(core: &Core, job: &Job) {
+async fn execute_job(core: &Arc<Core>, job: &Job) {
     core.update(job, "waiting", false, false, "pending", None);
     let client_id = Uuid::new_v4();
     let mut attempt = loop {
@@ -759,6 +810,11 @@ async fn execute_job(core: &Core, job: &Job) {
             }
         }
     };
+    // Register before receipt I/O and the native submit await: native questions
+    // can arrive while the turn/start acknowledgment is still outstanding.
+    let interactions = attempt.interactions();
+    let cleanup =
+        interactions::Cleanup::new(core.clone(), job.id, job.active, interactions.clone());
     let writer = match core.writer() {
         Ok(writer) => writer,
         Err(code) => {
@@ -785,6 +841,7 @@ async fn execute_job(core: &Core, job: &Job) {
     match attempt.submit(job.text.clone()).await {
         Submission::Accepted { .. } => core.update(job, "running", true, false, "pending", None),
         Submission::Unknown { .. } => {
+            core.revoke_job(job.active);
             core.update(
                 job,
                 "uncertain",
@@ -813,7 +870,13 @@ async fn execute_job(core: &Core, job: &Job) {
             result = &mut completion => break result,
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if !core.valid(job.active) || job.received.elapsed() >= TASK_LIFETIME {
+                    if interactions.awaiting_question() != Ok(false) {
+                        core.revoke_job(job.active);
+                    }
                     core.update(job, "abandoned", true, false, "withheld", Some("channel_binding_changed")); return;
+                }
+                if job.active.interactive_consent {
+                    interactions::offer(core, job, &interactions).await;
                 }
             }
         }
@@ -822,11 +885,17 @@ async fn execute_job(core: &Core, job: &Job) {
     let completed = match result {
         Ok(completed) => completed,
         Err(error) => {
+            if interactions.awaiting_question() != Ok(false) {
+                core.revoke_job(job.active);
+            }
             core.update(job, "withheld", true, false, "withheld", Some(error.code()));
             return;
         }
     };
     if completed.status != super::NativeStatus::Completed || completed.withheld.is_some() {
+        if interactions.awaiting_question() != Ok(false) {
+            core.revoke_job(job.active);
+        }
         core.update(
             job,
             "withheld",
@@ -837,6 +906,7 @@ async fn execute_job(core: &Core, job: &Job) {
         );
         return;
     }
+    drop(cleanup);
     let Some(reply) = completed.reply else {
         core.update(job, "completed", true, true, "noReply", None);
         return;

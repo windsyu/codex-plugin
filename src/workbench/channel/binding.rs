@@ -62,6 +62,7 @@ pub(crate) struct ActiveBinding {
     pub user_id: i64,
     pub chat_id: i64,
     pub target: QualifiedTarget,
+    pub interactive_consent: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +260,7 @@ impl Binding {
         &mut self,
         candidate: Candidate,
         target: QualifiedTarget,
+        interactive_consent: bool,
         now: Instant,
     ) -> Result<ActiveBinding, Failure> {
         self.expire(now);
@@ -281,6 +283,7 @@ impl Binding {
             user_id: candidate.user_id,
             chat_id: candidate.chat_id,
             target,
+            interactive_consent,
         };
         self.state = State::Active(active);
         Ok(active)

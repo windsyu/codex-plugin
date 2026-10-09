@@ -9,7 +9,7 @@ fn target() -> QualifiedTarget {
     )
     .unwrap()
 }
-fn attempt() -> PendingAttempt {
+pub(super) fn attempt() -> PendingAttempt {
     let target = target();
     let client = Uuid::from_u128(5);
     PendingAttempt {
@@ -24,6 +24,7 @@ fn attempt() -> PendingAttempt {
         completion: None,
         taken: false,
         failure: None,
+        interactions: interactions::Pending::default(),
     }
 }
 fn finish(a: &mut PendingAttempt) {

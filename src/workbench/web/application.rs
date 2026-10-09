@@ -734,6 +734,32 @@ struct TelegramConfirm {
     run_id: Uuid,
     thread_id: Uuid,
     source_revision: Uuid,
+    #[serde(default)]
+    interactive_consent: bool,
+}
+#[cfg(test)]
+#[test]
+fn telegram_confirmation_consent_defaults_to_false_and_accepts_explicit_boolean() {
+    let body = serde_json::json!({
+        "instanceId": Uuid::new_v4(),
+        "candidate": {"generation": Uuid::new_v4(), "botId": 101, "userId": 202, "chatId": 202},
+        "runId": Uuid::new_v4(), "threadId": Uuid::new_v4(), "sourceRevision": Uuid::new_v4()
+    });
+    assert!(
+        !serde_json::from_value::<TelegramConfirm>(body.clone())
+            .unwrap()
+            .interactive_consent
+    );
+    for consent in [false, true] {
+        let mut body = body.clone();
+        body["interactiveConsent"] = serde_json::json!(consent);
+        assert_eq!(
+            serde_json::from_value::<TelegramConfirm>(body)
+                .unwrap()
+                .interactive_consent,
+            consent
+        );
+    }
 }
 fn telegram_request<T: serde::de::DeserializeOwned>(
     headers: &HeaderMap,
@@ -801,6 +827,7 @@ async fn telegram_confirm(
             request.run_id,
             request.thread_id,
             request.source_revision,
+            request.interactive_consent,
         ),
     )
 }

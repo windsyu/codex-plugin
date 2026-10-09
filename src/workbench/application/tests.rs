@@ -478,6 +478,82 @@ async fn telegram_owner_controls_are_lazy_bounded_and_do_not_echo_credentials() 
     assert!(!fixture.home.exists());
 }
 
+#[tokio::test]
+async fn telegram_confirm_rejects_nonboolean_consent_and_preserves_owner_checks() {
+    let fixture = Fixture::new();
+    let app = fixture.app(Overrides::default());
+    let cookie = pair(&app).await;
+    let path = "/workbench/v1/application/telegram/confirm";
+    let body = json!({
+        "instanceId": app.instance_id,
+        "candidate": {"generation": Uuid::new_v4(), "botId": 101, "userId": 202, "chatId": 202},
+        "runId": Uuid::new_v4(), "threadId": Uuid::new_v4(), "sourceRevision": Uuid::new_v4()
+    });
+    for consent in [json!("true"), json!(1), json!(null), json!([]), json!({})] {
+        let mut invalid = body.clone();
+        invalid["interactiveConsent"] = consent;
+        let response = launch_post(&app, &cookie, path, invalid).await;
+        assert_eq!(response.status(), 400);
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("invalid_channel_request")
+        );
+    }
+    let mut unknown = body.clone();
+    unknown["interactiveConsent"] = json!(true);
+    unknown["unexpected"] = json!(true);
+    assert_eq!(
+        launch_post(&app, &cookie, path, unknown).await.status(),
+        400
+    );
+    // Accepted boolean/default forms reach the service; no configured bot is present.
+    for consent in [None, Some(false), Some(true)] {
+        let mut valid = body.clone();
+        if let Some(consent) = consent {
+            valid["interactiveConsent"] = json!(consent);
+        }
+        let response = launch_post(&app, &cookie, path, valid.clone()).await;
+        assert_eq!(response.status(), 503);
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("channel_bot_unconfigured")
+        );
+        valid["instanceId"] = json!(Uuid::new_v4());
+        assert_eq!(launch_post(&app, &cookie, path, valid).await.status(), 409);
+    }
+    let mut consenting = body;
+    consenting["interactiveConsent"] = json!(true);
+    for (authenticated, origin, expected) in [
+        (false, app.entry.address.as_str(), 401),
+        (true, "http://evil.invalid", 403),
+    ] {
+        let mut request = client()
+            .post(format!("{}{path}", app.entry.address))
+            .header("Origin", origin)
+            .header("Content-Type", "application/json");
+        if authenticated {
+            request = request.header("Cookie", &cookie);
+        }
+        assert_eq!(
+            request
+                .body(consenting.to_string())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    assert!(!fixture.paths.root.join("channel").exists());
+    assert!(!fixture.home.exists());
+}
+
 #[test]
 fn private_lock_stale_entry_and_replacement_are_identity_checked() {
     let fixture = Fixture::new();

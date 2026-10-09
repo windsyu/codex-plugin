@@ -4,7 +4,7 @@ import './TelegramPanel.css';
 type Candidate = { generation: string; botId: number; userId: number; chatId: number };
 type Target = { runEpoch: string; threadId: string; transportEpoch: string; subscriptionGeneration: string };
 type Channel = {
-  binding: { phase: 'unconfigured' | 'idle' | 'pairing' | 'awaitingConfirmation' | 'active' | 'expired'; generation: string; botId: number | null; candidate: Candidate | null; active: (Candidate & { target: Target }) | null };
+  binding: { phase: 'unconfigured' | 'idle' | 'pairing' | 'awaitingConfirmation' | 'active' | 'expired'; generation: string; botId: number | null; candidate: Candidate | null; active: (Candidate & { target: Target; interactiveConsent: boolean }) | null };
   configured: boolean; configuring: boolean; queued: number;
   recovered: { received: number; submitting: number; closed: number };
   lastTask: { id: string; phase: string; nativeConfirmed: boolean; nativeCompleted: boolean; delivery: string; reason: string | null } | null;
@@ -27,7 +27,7 @@ function channelShape(v: unknown): v is Channel {
   const b = v.binding; const r = v.recovered; const task = v.lastTask;
   return ['unconfigured', 'idle', 'pairing', 'awaitingConfirmation', 'active', 'expired'].includes(String(b.phase)) && uuid(b.generation)
     && (b.botId === null || positive(b.botId)) && (b.candidate === null || candidate(b.candidate))
-    && (b.active === null || (candidate(b.active) && target((b.active as Candidate & { target: unknown }).target)))
+    && (b.active === null || (candidate(b.active) && target((b.active as Candidate & { target: unknown }).target) && typeof (b.active as Candidate & { interactiveConsent: unknown }).interactiveConsent === 'boolean'))
     && (b.phase !== 'awaitingConfirmation' || candidate(b.candidate)) && (b.phase !== 'active' || b.active !== null)
     && typeof v.configured === 'boolean' && typeof v.configuring === 'boolean' && count(v.queued)
     && count(r.received) && count(r.submitting) && count(r.closed) && nullableText(v.failure)
@@ -42,11 +42,19 @@ class PanelError extends Error { constructor(readonly kind: 'unsupported' | 'sta
 const phaseText: Record<string, string> = { unconfigured: '未配置', idle: '未激活', pairing: '等待私聊配对命令', awaitingConfirmation: '等待本机确认', active: '已激活', expired: '配对已过期' };
 const deliveryText: Record<string, string> = { confirmed: '已投递', partialUnknown: '部分投递，后续结果未知，不自动补发', noReply: '无可发送的最终回复', none: '尚未投递', notSent: '未发送', pending: '等待投递', sending: '发送中', sent: '已投递', complete: '已投递', delivered: '已投递', unknown: '投递结果未知，不自动重发', partial: '部分投递，不自动补发', rejected: '投递被拒绝', failed: '投递失败', withheld: '未满足外发条件' };
 const taskText: Record<string, string> = { waiting: '等待原生会话可提交', abandoned: '任务已停止等待', uncertain: '原生提交结果未知，不自动重试，请在本机核对', rejected: '原生提交被拒绝或未发送', received: '已接收', queued: '排队中', submitting: '正在提交', running: '原生执行中', completed: '处理结束', closed: '记录已关闭', failed: '处理失败', withheld: '回复已保留在本机' };
+const interactionReasonText = new Map([
+  ['channel_interaction_send_unknown', '提示投递结果未知，按钮未激活，请回本机回答'],
+  ['channel_interaction_send_rejected', '提示未送达，请回本机回答'],
+  ['channel_interaction_written_unconfirmed', '答复已写入原生通道，采纳结果尚未确认'],
+  ['channel_interaction_withheld', '原生答复未发送，请回本机核对'],
+  ['channel_interaction_write_unknown', '原生答复结果未知，不自动重试，请回本机核对'],
+]);
 
 export function TelegramPanel({ instanceId, open = true }: { instanceId: string; open?: boolean }) {
   const [channel, setChannel] = useState<Channel | null>(null); const [runs, setRuns] = useState<Run[]>([]);
   const [token, setToken] = useState(''); const [command, setCommand] = useState<{ generation: string; value: string; seconds: number } | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null); const [consent, setConsent] = useState(false); const [consentIdentity, setConsentIdentity] = useState<string | null>(null);
+  const [interactiveConsent, setInteractiveConsent] = useState(false); const [interactiveConsentIdentity, setInteractiveConsentIdentity] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [blocked, setBlocked] = useState(false); const [message, setMessage] = useState('');
   const [unsupported, setUnsupported] = useState(false); const [stale, setStale] = useState(false);
   const live = useRef(true); const writing = useRef(false); const paused = useRef(false); const reading = useRef(false);
@@ -101,6 +109,7 @@ export function TelegramPanel({ instanceId, open = true }: { instanceId: string;
   }, [load, open]);
   async function mutate(action: string, extra: Record<string, unknown> = {}) {
     if (writing.current || paused.current || stale || unsupported) return;
+    setConsent(false); setConsentIdentity(null); setInteractiveConsent(false); setInteractiveConsentIdentity(null);
     writing.current = true; setBusy(true); setMessage(''); controller.current?.abort(); sequence.current++;
     const expected = instanceId; const abort = new AbortController(); const deadline = window.setTimeout(() => abort.abort(), 15000);
     try {
@@ -112,7 +121,7 @@ export function TelegramPanel({ instanceId, open = true }: { instanceId: string;
         setCommand({ generation: pair.generation, value: pair.command, seconds: pair.expiresInSeconds });
       } else {
         if (!channelShape(value.channel)) throw new PanelError('invalid');
-        setChannel(value.channel); setCommand(null); setConsent(false);
+        setChannel(value.channel); setCommand(null);
       }
       setMessage(action === 'revoke' ? '已撤销渠道授权。' : action === 'forget' ? '已移除保存的凭证并撤销授权。' : '请求已确认。');
     } catch (error) {
@@ -123,11 +132,16 @@ export function TelegramPanel({ instanceId, open = true }: { instanceId: string;
   const disabled = busy || blocked || stale || unsupported || !!channel?.configuring;
   const pending = channel?.binding.candidate;
   const candidateIdentity = pending ? JSON.stringify(pending) : null;
-  const confirmed = consent && consentIdentity === candidateIdentity;
+  const authorizationIdentity = pending && selection ? JSON.stringify({ instanceId, candidate: pending, selection }) : null;
+  useEffect(() => {
+    setConsent(false); setConsentIdentity(null); setInteractiveConsent(false); setInteractiveConsentIdentity(null);
+  }, [authorizationIdentity]);
+  const confirmed = !!authorizationIdentity && consent && consentIdentity === authorizationIdentity;
+  const interactionsConfirmed = !!authorizationIdentity && interactiveConsent && interactiveConsentIdentity === authorizationIdentity;
   return <section className="telegram-panel" aria-label="Telegram 私聊渠道">
     <h3>Telegram 私聊渠道 <small>实验功能</small></h3>
     <p>仅连接你在本机明确选择的已有会话。普通运行不支持：请启用渠道运行模式并新启动应用和运行，现有运行不会自动转换；目前不支持命名 Codex 启动配置。</p>
-    <p>当前支持私聊文本与最终回复。需要审批或补充输入时请回到本机 Codex；远端交互尚未完整支持。</p>
+    <p>私聊任务可接收最终回复。必要交互仅在本机另行授权后开放已支持的范围；其他请求请回到本机 Codex。</p>
     {message && <p role="status">{message}</p>}
     <button type="button" disabled={busy || stale} onClick={() => void load(true)}>刷新渠道状态</button>
     {!unsupported && <>
@@ -141,7 +155,7 @@ export function TelegramPanel({ instanceId, open = true }: { instanceId: string;
         <p>渠道状态：{phaseText[channel.binding.phase]}{channel.configuring ? ' · 正在验证凭证' : ''}{channel.binding.botId !== null ? ` · Bot ID ${channel.binding.botId}` : ''}</p>
         {channel.failure && <p role="alert">渠道遇到错误，当前状态需要本机核对。</p>}
         <div className="telegram-actions">
-          <button type="button" disabled={disabled || !channel.configured} onClick={() => { setConsent(false); setSelection(null); void mutate('pair'); }}>生成私聊配对命令</button>
+          <button type="button" disabled={disabled || !channel.configured} onClick={() => { setSelection(null); void mutate('pair'); }}>生成私聊配对命令</button>
           <button type="button" disabled={disabled || channel.binding.phase === 'unconfigured'} onClick={() => void mutate('revoke')}>撤销渠道授权</button>
           <button type="button" disabled={disabled} onClick={() => void mutate('forget')}>移除保存的 Bot 凭证</button>
         </div>
@@ -149,18 +163,19 @@ export function TelegramPanel({ instanceId, open = true }: { instanceId: string;
         {pending && channel.binding.phase === 'awaitingConfirmation' && <fieldset disabled={disabled}>
           <legend>本机确认私聊与会话</legend><p>用户 ID：{pending.userId} · 私聊 ID：{pending.chatId} · Bot ID：{pending.botId}</p>
           <label>目标会话<select aria-label="Telegram 目标会话" value={selection ? `${selection.runId}/${selection.threadId}` : ''} onChange={event => {
-            const chosen = available.find(t => `${t.runId}/${t.threadId}` === event.currentTarget.value); setSelection(chosen ? { runId: chosen.runId, threadId: chosen.threadId, sourceRevision: chosen.sourceRevision } : null); setConsent(false);
+            const chosen = available.find(t => `${t.runId}/${t.threadId}` === event.currentTarget.value); setSelection(chosen ? { runId: chosen.runId, threadId: chosen.threadId, sourceRevision: chosen.sourceRevision } : null);
           }}><option value="">请明确选择运行和会话</option>{available.map(t => <option key={`${t.runId}/${t.threadId}`} value={`${t.runId}/${t.threadId}`}>运行 {t.runId} · 会话 {t.threadId}{t.busy ? '（忙碌，将等待）' : '（空闲）'}</option>)}</select></label>
           {!available.length && <p>当前没有可绑定的已订阅会话。请在渠道运行模式的本机 Codex 中打开会话。</p>}
-          <label className="telegram-consent"><input type="checkbox" checked={confirmed} onChange={event => { setConsent(event.currentTarget.checked); setConsentIdentity(candidateIdentity); }} />我确认上述私聊身份与会话。回复使用同一会话上下文，可能引用本机历史内容。</label>
-          <button type="button" disabled={!selection || !confirmed} onClick={() => { if (selection && confirmed) void mutate('confirm', { candidate: pending, ...selection }); }}>确认并激活私聊</button>
+          <label className="telegram-consent"><input type="checkbox" disabled={!selection} checked={confirmed} onChange={event => { setConsent(event.currentTarget.checked); setConsentIdentity(authorizationIdentity); }} />我确认上述私聊身份与会话。回复使用同一会话上下文，可能引用本机历史内容。</label>
+          <label className="telegram-consent"><input type="checkbox" disabled={!selection} checked={interactionsConfirmed} onChange={event => { setInteractiveConsent(event.currentTarget.checked); setInteractiveConsentIdentity(authorizationIdentity); }} />可选：允许将我从 Telegram 发起的任务所需的普通命令摘要、文件路径及操作、非秘密问题和选项发送到该私聊，并允许我从私聊作出相应答复。不会授权发送全部历史、原始工具输出、diff 或当前工作目录；其他交互仍须回本机 Codex。</label>
+          <button type="button" disabled={!selection || !confirmed} onClick={() => { if (selection && confirmed) void mutate('confirm', { candidate: pending, ...selection, interactiveConsent: interactionsConfirmed }); }}>确认并激活私聊</button>
         </fieldset>}
-        {channel.binding.active && <p className="telegram-identity">已绑定用户 {channel.binding.active.userId} / 私聊 {channel.binding.active.chatId}<br />运行 {channel.binding.active.target.runEpoch}<br />会话 {channel.binding.active.target.threadId}</p>}
+        {channel.binding.active && <div className="telegram-identity"><p>已绑定用户 {channel.binding.active.userId} / 私聊 {channel.binding.active.chatId}<br />运行 {channel.binding.active.target.runEpoch}<br />会话 {channel.binding.active.target.threadId}</p><p>必要交互：{channel.binding.active.interactiveConsent ? '已授权。已支持的普通单次命令审批、单文件操作审批和非秘密选项问题可在私聊处理；其他请求请回本机 Codex。' : '未授权；审批和补充问题请回本机 Codex。'}</p></div>}
         <dl><dt>等待任务</dt><dd>{channel.queued}</dd><dt>恢复发现的记录（不会自动重放）</dt><dd>已接收 {channel.recovered.received} · 已尝试提交 {channel.recovered.submitting} · 已关闭 {channel.recovered.closed}</dd></dl>
         {channel.lastTask && <div aria-label="最近渠道任务"><p>{taskText[channel.lastTask.phase] || '任务状态暂无法识别'}</p><dl>
           <dt>原生提交确认</dt><dd>{channel.lastTask.nativeConfirmed ? '已确认' : '未确认'}</dd><dt>原生整轮完成</dt><dd>{channel.lastTask.nativeCompleted ? '已完成' : '未确认完成'}</dd>
           <dt>Telegram 投递</dt><dd>{deliveryText[channel.lastTask.delivery] || '投递状态暂无法识别'}</dd>
-        </dl>{channel.lastTask.reason && <p>任务需要本机核对；未自动重试。</p>}</div>}
+        </dl>{channel.lastTask.reason && <p>{interactionReasonText.get(channel.lastTask.reason) || '任务需要本机核对；未自动重试。'}</p>}</div>}
       </>}
     </>}
   </section>;
