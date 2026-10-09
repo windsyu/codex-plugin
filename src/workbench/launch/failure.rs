@@ -12,9 +12,11 @@ pub(crate) enum LaunchFailure {
     Terminal,
     Workspace,
     ConfigChanged,
+    ChannelProfileUnsupported,
+    ChannelTransport,
 }
 impl LaunchFailure {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Executable,
         Self::Version,
         Self::Config,
@@ -26,6 +28,8 @@ impl LaunchFailure {
         Self::Terminal,
         Self::Workspace,
         Self::ConfigChanged,
+        Self::ChannelProfileUnsupported,
+        Self::ChannelTransport,
     ];
     pub(crate) fn code(self) -> &'static str {
         match self {
@@ -40,6 +44,8 @@ impl LaunchFailure {
             Self::Terminal => "native_terminal_unavailable",
             Self::Workspace => "native_workspace_unavailable",
             Self::ConfigChanged => "native_config_changed",
+            Self::ChannelProfileUnsupported => "channel_profile_unsupported",
+            Self::ChannelTransport => "channel_transport_unavailable",
         }
     }
     pub(crate) fn wrap(self, error: impl Into<anyhow::Error>) -> anyhow::Error {

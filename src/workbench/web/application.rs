@@ -5,7 +5,7 @@ use crate::workbench::{
     application::{Connect, RunHandle, RunSummary},
     config::{Config, ConfigError, ConfigHandle, LIMIT},
 };
-use std::{path::PathBuf, sync::RwLock};
+use std::{collections::BTreeMap, path::PathBuf, sync::RwLock};
 use tower::ServiceExt;
 
 pub(crate) struct Owner {
@@ -26,6 +26,8 @@ struct StateData {
     devices: Arc<access::SharedAccess>,
     launch_error: RwLock<Option<&'static str>>,
     picker: crate::workbench::application::folder_picker::FolderPicker,
+    channels: RwLock<BTreeMap<Uuid, crate::workbench::channel::session::Session>>,
+    telegram: crate::workbench::channel::service::Service,
 }
 #[derive(Clone)]
 pub(crate) struct SurfaceHandle(Arc<StateData>);
@@ -56,10 +58,25 @@ impl SurfaceHandle {
         *self.0.launch_error.write().unwrap() = code;
     }
     pub fn clear(&self) {
+        for id in self.0.channels.read().unwrap().keys() {
+            self.0.telegram.unregister(*id);
+        }
+        self.0.channels.write().unwrap().clear();
         self.0.run.write().unwrap().clear();
     }
     pub fn remove(&self, id: Uuid) {
+        self.0.telegram.unregister(id);
+        self.0.channels.write().unwrap().remove(&id);
         self.0.run.write().unwrap().retain(|r| r.0.run_id != id);
+    }
+    pub fn attach_channel(&self, id: Uuid, attachment: crate::workbench::launch::NativeAttachment) {
+        let session = crate::workbench::channel::session::Session::start(id, attachment);
+        self.0.telegram.register(session.handle());
+        self.0.channels.write().unwrap().insert(id, session);
+    }
+    pub fn stop_channel(&self, id: Uuid) {
+        self.0.telegram.unregister(id);
+        self.0.channels.write().unwrap().remove(&id);
     }
 }
 pub struct ApplicationServer {
@@ -74,6 +91,7 @@ impl ApplicationServer {
         runs: RunHandle,
         sources: crate::history::library::LibraryHandle,
         native_home: PathBuf,
+        channel_root: PathBuf,
     ) -> Result<Self> {
         anyhow::ensure!(
             WorkbenchAssets::get("workbench.html").is_some(),
@@ -100,6 +118,8 @@ impl ApplicationServer {
             devices: access::SharedAccess::new(),
             launch_error: RwLock::new(None),
             picker: crate::workbench::application::folder_picker::FolderPicker::new(),
+            channels: RwLock::new(BTreeMap::new()),
+            telegram: crate::workbench::channel::service::Service::new(channel_root),
         });
         let app = Router::new()
             .route("/", get(home))
@@ -107,6 +127,28 @@ impl ApplicationServer {
             .route("/workbench/v1/pair", post(pair_owner))
             .route("/workbench/v1/application", get(application))
             .route("/workbench/v1/application/connect", post(connect))
+            .route("/workbench/v1/application/channel-runs", get(channel_runs))
+            .route("/workbench/v1/application/telegram", get(telegram_status))
+            .route(
+                "/workbench/v1/application/telegram/configure",
+                post(telegram_configure),
+            )
+            .route(
+                "/workbench/v1/application/telegram/pair",
+                post(telegram_pair),
+            )
+            .route(
+                "/workbench/v1/application/telegram/confirm",
+                post(telegram_confirm),
+            )
+            .route(
+                "/workbench/v1/application/telegram/revoke",
+                post(telegram_revoke),
+            )
+            .route(
+                "/workbench/v1/application/telegram/forget",
+                post(telegram_forget),
+            )
             .route("/workbench/v1/launch-targets", post(launch_target))
             .route(
                 "/workbench/v1/application/pick-directory",
@@ -139,7 +181,9 @@ impl ApplicationServer {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let background_state = state.clone();
         let thread = std::thread::Builder::new().name("application-web".into()).spawn(move || runtime.block_on(async move {
+            background_state.telegram.start();
             let mut stopped = stop_rx;
             tokio::select! { biased; _ = stopped.changed() => {}, _ = axum::serve(TcpListener::from_std(listener).expect("application listener"), app) => {} }
         }))?;
@@ -424,6 +468,17 @@ async fn source_status(State(state): State<Arc<StateData>>, headers: HeaderMap) 
     }
     library_result(state.sources.sources().await)
 }
+async fn channel_runs(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    let channels = state.channels.read().unwrap();
+    let runs: Vec<_> = state.run.read().unwrap().iter().map(|(run, _)| {
+        serde_json::json!({"runId":run.run_id,"supportsChannel":channels.contains_key(&run.run_id),"source":channels.get(&run.run_id).map(|session|session.snapshot())})
+    }).collect();
+    Json(serde_json::json!({"instanceId":state.id,"runs":runs,"telegramImplemented":true}))
+        .into_response()
+}
 async fn connect(State(state): State<Arc<StateData>>, headers: HeaderMap, body: Bytes) -> Response {
     if !origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
@@ -454,6 +509,9 @@ async fn connect(State(state): State<Arc<StateData>>, headers: HeaderMap, body: 
             .provider_profile
             .as_ref()
             .is_some_and(|v| v != &launch.provider_profile)
+        || request
+            .channel_ready
+            .is_some_and(|v| v != launch.channel_ready)
     {
         return error(StatusCode::CONFLICT, "launch_defaults_conflict");
     }
@@ -619,6 +677,156 @@ fn library_result(result: std::result::Result<serde_json::Value, &'static str>) 
             code,
         ),
     }
+}
+
+fn telegram_result(
+    state: &StateData,
+    result: std::result::Result<crate::workbench::channel::service::Snapshot, &'static str>,
+) -> Response {
+    match result {
+        Ok(channel) => {
+            Json(serde_json::json!({"instanceId":state.id,"channel":channel})).into_response()
+        }
+        Err(code) => error(
+            if matches!(
+                code,
+                "channel_configuration_busy"
+                    | "channel_configuration_changed"
+                    | "channel_candidate_changed"
+                    | "channel_source_changed"
+                    | "channel_capture_backlog"
+                    | "channel_unqualified"
+            ) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            code,
+        ),
+    }
+}
+async fn telegram_status(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    telegram_result(&state, Ok(state.telegram.snapshot()))
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramOwnerRequest {
+    instance_id: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramConfigure {
+    instance_id: Uuid,
+    token: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelegramConfirm {
+    instance_id: Uuid,
+    candidate: crate::workbench::channel::binding::Candidate,
+    run_id: Uuid,
+    thread_id: Uuid,
+    source_revision: Uuid,
+}
+fn telegram_request<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    state: &StateData,
+    body: &[u8],
+) -> std::result::Result<T, (StatusCode, &'static str)> {
+    launch_owner(headers, state)?;
+    if body.len() > 2048 {
+        return Err((StatusCode::BAD_REQUEST, "invalid_channel_request"));
+    }
+    serde_json::from_slice(body).map_err(|_| (StatusCode::BAD_REQUEST, "invalid_channel_request"))
+}
+fn telegram_instance(instance: Uuid, state: &StateData) -> Option<Response> {
+    (instance != state.id).then(|| error(StatusCode::CONFLICT, "stale_instance"))
+}
+async fn telegram_configure(
+    State(state): State<Arc<StateData>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request: TelegramConfigure = match telegram_request(&headers, &state, &body) {
+        Ok(request) => request,
+        Err((status, code)) => return error(status, code),
+    };
+    if let Some(response) = telegram_instance(request.instance_id, &state) {
+        return response;
+    }
+    telegram_result(&state, state.telegram.configure(request.token).await)
+}
+async fn telegram_pair(
+    State(state): State<Arc<StateData>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request: TelegramOwnerRequest = match telegram_request(&headers, &state, &body) {
+        Ok(request) => request,
+        Err((status, code)) => return error(status, code),
+    };
+    if let Some(response) = telegram_instance(request.instance_id, &state) {
+        return response;
+    }
+    match state.telegram.begin_pair() {
+        Ok(pairing) => {
+            Json(serde_json::json!({"instanceId":state.id,"pairing":pairing})).into_response()
+        }
+        Err(code) => telegram_result(&state, Err(code)),
+    }
+}
+async fn telegram_confirm(
+    State(state): State<Arc<StateData>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request: TelegramConfirm = match telegram_request(&headers, &state, &body) {
+        Ok(request) => request,
+        Err((status, code)) => return error(status, code),
+    };
+    if let Some(response) = telegram_instance(request.instance_id, &state) {
+        return response;
+    }
+    telegram_result(
+        &state,
+        state.telegram.confirm(
+            request.candidate,
+            request.run_id,
+            request.thread_id,
+            request.source_revision,
+        ),
+    )
+}
+async fn telegram_revoke(
+    State(state): State<Arc<StateData>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request: TelegramOwnerRequest = match telegram_request(&headers, &state, &body) {
+        Ok(request) => request,
+        Err((status, code)) => return error(status, code),
+    };
+    if let Some(response) = telegram_instance(request.instance_id, &state) {
+        return response;
+    }
+    telegram_result(&state, Ok(state.telegram.revoke()))
+}
+async fn telegram_forget(
+    State(state): State<Arc<StateData>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request: TelegramOwnerRequest = match telegram_request(&headers, &state, &body) {
+        Ok(request) => request,
+        Err((status, code)) => return error(status, code),
+    };
+    if let Some(response) = telegram_instance(request.instance_id, &state) {
+        return response;
+    }
+    telegram_result(&state, state.telegram.forget().await)
 }
 async fn library_projects(
     State(state): State<Arc<StateData>>,

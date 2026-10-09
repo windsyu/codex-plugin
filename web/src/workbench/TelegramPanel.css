@@ -1,0 +1,13 @@
+.telegram-panel { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border, #7775); }
+.telegram-panel h3 { margin: 0 0 .65rem; font-size: 1rem; }
+.telegram-panel h3 small { font-size: .75rem; font-weight: normal; }
+.telegram-panel p { line-height: 1.55; }
+.telegram-panel form, .telegram-panel fieldset { display: grid; gap: .65rem; margin: .8rem 0; min-width: 0; }
+.telegram-panel label { display: grid; gap: .35rem; }
+.telegram-panel input, .telegram-panel select { max-width: 100%; min-width: 0; }
+.telegram-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.telegram-command, .telegram-identity { overflow-wrap: anywhere; }
+.telegram-panel .telegram-consent { display: flex; align-items: flex-start; gap: .5rem; line-height: 1.5; }
+.telegram-consent input { flex-shrink: 0; margin-top: .2rem; }
+.telegram-panel dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .4rem; }
+.telegram-panel dd { margin: 0; overflow-wrap: anywhere; }

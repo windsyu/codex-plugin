@@ -2,6 +2,7 @@
   "schemaVersion": 2,
   "launch": {
     "openBrowser": true,
+    "channelReady": false,
     "codexBin": "codex",
     "profile": null,
     "providerProfile": "unmanaged-custom"

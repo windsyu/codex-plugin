@@ -94,6 +94,11 @@ async fn homepage_and_settings_need_no_cli_native_home_or_provider_and_reuse_is_
     assert_eq!(body["instanceId"], app.instance_id.to_string());
     assert!(!fixture.home.exists());
     assert!(!fixture.paths.history_dir().join("runs").exists());
+    let channels =
+        json_body(get(&app, &cookie, "/workbench/v1/application/channel-runs").await).await;
+    assert_eq!(channels["instanceId"], app.instance_id.to_string());
+    assert_eq!(channels["telegramImplemented"], true);
+    assert!(channels["runs"].as_array().unwrap().is_empty());
     for _ in 0..5 {
         assert_eq!(get(&app, &cookie, "/").await.status(), 200);
     }
@@ -146,6 +151,17 @@ async fn homepage_and_settings_need_no_cli_native_home_or_provider_and_reuse_is_
     assert!(connect(&entry, Connect::default()).await.unwrap().is_none());
     let conflicting = Connect {
         profile: Some("other".into()),
+        ..Default::default()
+    };
+    assert!(
+        connect(&entry, conflicting)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("launch_defaults_conflict")
+    );
+    let conflicting = Connect {
+        channel_ready: Some(true),
         ..Default::default()
     };
     assert!(
@@ -324,6 +340,8 @@ async fn owner_endpoints_reject_cross_origin_unknown_host_and_wrong_capability()
         "/workbench/v1/application",
         "/workbench/v1/library/sources",
         "/workbench/v1/application/settings",
+        "/workbench/v1/application/channel-runs",
+        "/workbench/v1/application/telegram",
     ] {
         assert_eq!(get(&app, "workbench_remote=fake", path).await.status(), 401);
         let r = client()
@@ -357,6 +375,106 @@ async fn owner_endpoints_reject_cross_origin_unknown_host_and_wrong_capability()
         .await
         .unwrap();
     assert_eq!(r.status(), 401);
+    assert!(!fixture.home.exists());
+}
+
+#[tokio::test]
+async fn telegram_owner_controls_are_lazy_bounded_and_do_not_echo_credentials() {
+    let fixture = Fixture::new();
+    let app = fixture.app(Overrides::default());
+    let cookie = pair(&app).await;
+    let root = fixture.paths.root.join("channel");
+    let status = json_body(get(&app, &cookie, "/workbench/v1/application/telegram").await).await;
+    assert_eq!(status["instanceId"], app.instance_id.to_string());
+    assert_eq!(status["channel"]["binding"]["phase"], "unconfigured");
+    assert_eq!(status["channel"]["configured"], false);
+    assert!(
+        !root.exists(),
+        "reading status must not create credential or receipt storage"
+    );
+    for operation in ["configure", "pair", "confirm", "revoke", "forget"] {
+        let path = format!(
+            "{}/workbench/v1/application/telegram/{operation}",
+            app.entry.address
+        );
+        let body = json!({"instanceId":app.instance_id});
+        let unauthorized = client()
+            .post(&path)
+            .header("Origin", &app.entry.address)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), 401);
+        let no_origin = client()
+            .post(&path)
+            .header("Cookie", &cookie)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_origin.status(), 403);
+        let cross_origin = client()
+            .post(&path)
+            .header("Cookie", &cookie)
+            .header("Origin", "http://evil.invalid")
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_origin.status(), 403);
+    }
+    let path = format!(
+        "{}/workbench/v1/application/telegram/configure",
+        app.entry.address
+    );
+    for (body, expected) in [
+        (json!({"instanceId":Uuid::new_v4(),"token":"PRIVATE_INVALID_TOKEN"}).to_string(), 409),
+        (format!("{{\"instanceId\":\"{}\",\"token\":\"PRIVATE_INVALID_TOKEN\",\"token\":\"OTHER_PRIVATE_TOKEN\"}}", app.instance_id), 400),
+        (json!({"instanceId":app.instance_id,"token":"PRIVATE_INVALID_TOKEN","extra":"PRIVATE_PAYLOAD"}).to_string(), 400),
+        (json!({"instanceId":app.instance_id,"token":"PRIVATE_PAYLOAD".repeat(200)}).to_string(), 400),
+    ] {
+        let response = client().post(&path).header("Cookie", &cookie)
+            .header("Origin", &app.entry.address).header("Content-Type", "application/json")
+            .body(body).send().await.unwrap();
+        assert_eq!(response.status(), expected);
+        assert!(!response.text().await.unwrap().contains("PRIVATE"));
+    }
+    assert!(
+        !root.exists(),
+        "rejected owner writes must not open storage"
+    );
+    let response = client()
+        .post(&path)
+        .header("Cookie", &cookie)
+        .header("Origin", &app.entry.address)
+        .header("Content-Type", "application/json")
+        .body(json!({"instanceId":app.instance_id,"token":"PRIVATE_INVALID_TOKEN"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    let response = response.text().await.unwrap();
+    assert!(response.contains("channel_token_invalid"));
+    assert!(!response.contains("PRIVATE"));
+    assert!(!root.join("telegram.token").exists());
+    let response = client()
+        .post(format!(
+            "{}/workbench/v1/application/telegram/revoke",
+            app.entry.address
+        ))
+        .header("Cookie", &cookie)
+        .header("Origin", &app.entry.address)
+        .header("Content-Type", "application/json")
+        .body(json!({"instanceId":app.instance_id}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(json_body(response).await["channel"]["configured"], false);
     assert!(!fixture.home.exists());
 }
 

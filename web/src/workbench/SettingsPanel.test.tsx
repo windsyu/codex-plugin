@@ -70,6 +70,22 @@ it('allows correcting a rejected field without discarding the draft', async () =
   expect(root.textContent).toContain('历史保存位置：填写的内容不符合要求');
   await type('历史保存位置', '/synthetic/new'); expect(button('保存').disabled).toBe(false);
 });
+it('requires an explicit saved channel-mode choice and keeps the current application mode', async () => {
+  const fetch = vi.fn().mockImplementation(async (_url, init) => {
+    if (!init.method) return ok();
+    const next = data(); next.saved = JSON.parse(init.body).config;
+    next.restartRequired = ['launch.channelReady']; return ok(next);
+  });
+  vi.stubGlobal('fetch', fetch); await show(); await click('设置');
+  expect(input('启用渠道运行模式').checked).toBe(false);
+  await toggle('启用渠道运行模式');
+  expect(fetch.mock.calls.every(([, init]) => !init.method)).toBe(true);
+  await submit();
+  const write = fetch.mock.calls.find(([, init]) => init.method === 'PUT')!;
+  expect(JSON.parse(write[1].body).config.launch.channelReady).toBe(true);
+  expect(root.textContent).toContain('待下次启动生效：启用渠道运行模式');
+  expect(root.textContent).toContain('现有运行不会自动转换');
+});
 it('saves cleanup policy without losing collapsed startup values and disables retention with cleanup', async () => {
   const server = data(); server.capabilities = { manualCleanup: true, retention: true };
   server.saved!.launch = { openBrowser: false, codexBin: '/synthetic/codex', profile: 'custom', providerProfile: 'unmanaged-custom' };

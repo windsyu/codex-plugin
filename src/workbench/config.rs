@@ -343,6 +343,9 @@ impl Prepared {
             if future.launch.open_browser != effective.launch.open_browser {
                 restart_required.push("launch.openBrowser");
             }
+            if future.launch.channel_ready != effective.launch.channel_ready {
+                restart_required.push("launch.channelReady");
+            }
             if future.launch.codex_bin != effective.launch.codex_bin {
                 restart_required.push("launch.codexBin");
             }

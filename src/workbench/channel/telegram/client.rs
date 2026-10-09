@@ -206,7 +206,7 @@ impl Client {
     }
 
     #[cfg(test)]
-    fn local(address: std::net::SocketAddr, timeout: Duration) -> Result<Self, Failure> {
+    pub(crate) fn local(address: std::net::SocketAddr, timeout: Duration) -> Result<Self, Failure> {
         if !address.ip().is_loopback() {
             return Err(Failure::InvalidRequest);
         }

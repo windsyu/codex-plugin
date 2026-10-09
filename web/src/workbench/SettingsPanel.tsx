@@ -2,11 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preac
 import { HistorySources, LibraryConfig, libraryDefaults } from './HistorySources';
 import { HistoryStorage, CleanupPreviewPanel } from './HistoryStorage';
 import { runApi } from './runApi';
+import { TelegramPanel } from './TelegramPanel';
 
 export interface WorkbenchConfig {
   schemaVersion: 1 | 2;
   access?: { port: number };
-  launch: { openBrowser: boolean; codexBin: string; profile: string | null; providerProfile: string };
+  launch: { openBrowser: boolean; channelReady?: boolean; codexBin: string; profile: string | null; providerProfile: string };
   storage: { dataDir: string | null };
   history: { library?: LibraryConfig; cleanup: { enabled: boolean; retention: { enabled: boolean; days: number } } };
 }
@@ -18,7 +19,7 @@ export interface Settings {
 }
 const fieldNames: Record<string, string> = {
   'access.port': '手机接入端口', 'launch.openBrowser': '启动时自动打开浏览器', 'launch.codexBin': 'Codex 程序位置', 'launch.profile': 'Codex 启动配置',
-  'launch.providerProfile': '模型连接方式', 'storage.dataDir': '历史保存位置', 'history.cleanup.enabled': '允许清理历史记录',
+  'launch.providerProfile': '模型连接方式', 'launch.channelReady': '启用渠道运行模式', 'storage.dataDir': '历史保存位置', 'history.cleanup.enabled': '允许清理历史记录',
   'history.library': '历史来源', 'history.cleanup.retention.enabled': '自动清理过期记录', 'history.cleanup.retention.days': '保留天数', '$': '配置文件', 'schemaVersion': '配置版本'
 };
 function errorText(code: string, field?: string) {
@@ -40,6 +41,7 @@ function configShape(value: unknown): value is WorkbenchConfig {
   const c = value as WorkbenchConfig | null;
   return (c?.schemaVersion === 1 || c?.schemaVersion === 2) && typeof c.launch?.openBrowser === 'boolean' && typeof c.launch?.codexBin === 'string'
     && (c.launch.profile === null || typeof c.launch.profile === 'string') && typeof c.launch.providerProfile === 'string'
+    && (c.launch.channelReady === undefined || typeof c.launch.channelReady === 'boolean')
     && !!c.storage && (c.storage.dataDir === null || typeof c.storage.dataDir === 'string')
     && typeof c.history?.cleanup?.enabled === 'boolean' && typeof c.history.cleanup.retention?.enabled === 'boolean'
     && Number.isInteger(c.history.cleanup.retention.days)
@@ -184,6 +186,8 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
           {draft.launch.openBrowser !== info.effective.launch.openBrowser && <p className="wb-subtle">本次启动：{info.effective.launch.openBrowser ? '自动打开浏览器' : '不自动打开浏览器'}。</p>}
           <details className="wb-settings-paths"><summary>高级启动设置</summary>
             <p className="wb-subtle">通常无需修改。模型、登录和权限仍在右侧 Codex 终端中设置。</p>
+            <label className="wb-settings-toggle">{label('launch.channelReady')}<input type="checkbox" aria-label="启用渠道运行模式" checked={draft.launch.channelReady ?? false} onChange={event => edit(c => { c.launch.channelReady = event.currentTarget.checked; })} /></label>
+            <p className="wb-settings-help">实验功能，为 Telegram 私聊准备原生连接。下次启动应用后新运行生效；现有运行不会自动转换。目前仅支持默认 Codex 配置，私聊需在下方单独配置并确认。</p>
             <label>{label('launch.codexBin')}<input aria-label="Codex 程序位置" value={draft.launch.codexBin} onInput={event => edit(c => { c.launch.codexBin = event.currentTarget.value; })} required placeholder="codex 或已安装程序的完整路径" /></label>
             <p className="wb-settings-help">用于选择已安装的 Codex 程序。本次使用：{info.effective.launch.codexBin}。</p>
             <label>{label('launch.profile')}<input aria-label="Codex 启动配置" value={draft.launch.profile || ''} maxLength={128} pattern={'[A-Za-z0-9_\\-]+'} placeholder="留空使用默认配置" onInput={event => edit(c => { c.launch.profile = event.currentTarget.value || null; })} /></label>
@@ -194,6 +198,7 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
         </fieldset>
         {!!info.restartRequired.length && <p className="wb-notice">已保存，待下次启动生效：{info.restartRequired.map(field => fieldNames[field] || field).join('、')}。</p>}
       </form>}
+      {instanceId && open && <TelegramPanel instanceId={instanceId} />}
       <button type="button" disabled={saving || loading} onClick={() => void load(true)}>{dirty ? '重新加载（放弃草稿）' : '重新加载'}</button>
     </div>
     {(message || (draft && info)) && <div className="wb-settings-footer">

@@ -83,6 +83,11 @@ struct Record {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Event {
+    Rejected {
+        bot_id: i64,
+        update_id: i64,
+        message_key: Option<DeliveryKey>,
+    },
     Received {
         key: DeliveryKey,
         update_id: i64,
@@ -111,6 +116,8 @@ pub struct Store {
     journal: File,
     journal_identity: Identity,
     keys: HashSet<DeliveryKey>,
+    rejected_updates: HashSet<(i64, i64)>,
+    rejected_keys: HashSet<DeliveryKey>,
     tasks: BTreeMap<Uuid, Status>,
     clients: HashSet<Uuid>,
     sequence: u64,
@@ -171,6 +178,8 @@ impl Store {
             journal,
             journal_identity,
             keys: HashSet::new(),
+            rejected_updates: HashSet::new(),
+            rejected_keys: HashSet::new(),
             tasks: BTreeMap::new(),
             clients: HashSet::new(),
             sequence: 0,
@@ -211,7 +220,8 @@ impl Store {
             }
             let line: Line = serde_json::from_slice(line).map_err(|_| Failure::Corrupt)?;
             let encoded = serde_json::to_vec(&line.record).map_err(|_| Failure::Corrupt)?;
-            if line.record.version != 1
+            if !matches!(line.record.version, 1 | 2)
+                || (line.record.version == 1 && matches!(line.record.event, Event::Rejected { .. }))
                 || line.record.sequence != store.sequence + 1
                 || line.digest != blake3::hash(&encoded).to_hex().as_str()
             {
@@ -240,7 +250,7 @@ impl Store {
             return Err(Failure::InvalidInput);
         }
         // Message identity survives update redelivery and binding generations.
-        if self.keys.contains(&key) {
+        if self.keys.contains(&key) || self.rejected(key.bot_id, update_id, Some(key)) {
             return Ok(Admission::Duplicate);
         }
         self.append(Event::Received {
@@ -249,6 +259,42 @@ impl Store {
             task,
         })?;
         Ok(Admission::Fresh)
+    }
+    /// Exact rejection identities survive offset resets, reconfiguration and
+    /// restart. No monotonic Telegram update-ID assumption is required.
+    pub fn is_rejected(
+        &mut self,
+        bot_id: i64,
+        update_id: i64,
+        key: Option<DeliveryKey>,
+    ) -> Result<bool, Failure> {
+        self.verify()?;
+        validate_rejection(bot_id, update_id, key)?;
+        Ok(self.rejected(bot_id, update_id, key))
+    }
+    /// Returns only after the rejection is durable; duplicates never append.
+    /// The caller may provide a key only for a validated positive private-chat
+    /// message identity. The journal contains no user identity or message body.
+    pub fn reject(
+        &mut self,
+        bot_id: i64,
+        update_id: i64,
+        key: Option<DeliveryKey>,
+    ) -> Result<(), Failure> {
+        self.verify()?;
+        validate_rejection(bot_id, update_id, key)?;
+        if self.rejected(bot_id, update_id, key) {
+            return Ok(());
+        }
+        self.append(Event::Rejected {
+            bot_id,
+            update_id,
+            message_key: key,
+        })
+    }
+    fn rejected(&self, bot_id: i64, update_id: i64, key: Option<DeliveryKey>) -> bool {
+        self.rejected_updates.contains(&(bot_id, update_id))
+            || key.is_some_and(|key| self.rejected_keys.contains(&key))
     }
     pub fn mark_submitting(&mut self, task: Uuid, client_id: Uuid) -> Result<(), Failure> {
         self.append(Event::Submitting { task, client_id })
@@ -342,6 +388,19 @@ impl Store {
     }
     fn validate(&self, event: &Event) -> Result<(), Failure> {
         match event {
+            Event::Rejected {
+                bot_id,
+                update_id,
+                message_key,
+            } => {
+                validate_rejection(*bot_id, *update_id, *message_key)?;
+                if self.rejected(*bot_id, *update_id, *message_key) {
+                    return Err(Failure::InvalidTransition);
+                }
+                if self.tasks.len() + self.rejected_updates.len() >= MAX_TASKS {
+                    return Err(Failure::Capacity);
+                }
+            }
             Event::Received {
                 key,
                 update_id,
@@ -350,10 +409,13 @@ impl Store {
                 if !key.valid() || *update_id < 0 || task.is_nil() {
                     return Err(Failure::InvalidInput);
                 }
-                if self.keys.contains(key) || self.tasks.contains_key(task) {
+                if self.keys.contains(key)
+                    || self.tasks.contains_key(task)
+                    || self.rejected(key.bot_id, *update_id, Some(*key))
+                {
                     return Err(Failure::InvalidTransition);
                 }
-                if self.tasks.len() >= MAX_TASKS {
+                if self.tasks.len() + self.rejected_updates.len() >= MAX_TASKS {
                     return Err(Failure::Capacity);
                 }
             }
@@ -380,6 +442,16 @@ impl Store {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Rejected {
+                bot_id,
+                update_id,
+                message_key,
+            } => {
+                self.rejected_updates.insert((bot_id, update_id));
+                if let Some(key) = message_key {
+                    self.rejected_keys.insert(key);
+                }
+            }
             Event::Received { key, task, .. } => {
                 self.keys.insert(key);
                 self.tasks.insert(task, Status::Received);
@@ -397,7 +469,9 @@ impl Store {
         self.verify()?;
         self.validate(&event)?;
         let record = Record {
-            version: 1,
+            // v1 readers deliberately fail closed rather than silently dropping
+            // rejection records. Existing v1 records remain readable above.
+            version: 2,
             sequence: self.sequence + 1,
             event,
         };
@@ -427,6 +501,18 @@ impl Store {
         self.sequence += 1;
         self.apply(line.record.event);
         self.poisoned = false;
+        Ok(())
+    }
+}
+
+fn validate_rejection(
+    bot_id: i64,
+    update_id: i64,
+    key: Option<DeliveryKey>,
+) -> Result<(), Failure> {
+    if bot_id <= 0 || update_id < 0 || key.is_some_and(|key| !key.valid() || key.bot_id != bot_id) {
+        Err(Failure::InvalidInput)
+    } else {
         Ok(())
     }
 }
@@ -476,6 +562,135 @@ mod tests {
     }
 
     #[test]
+    fn rejected_metadata_survives_restart_without_becoming_a_task() {
+        let (dir, mut store) = setup();
+        store.reject(123, 7, Some(key(9))).unwrap();
+        store.reject(123, 8, None).unwrap();
+        let bytes = store.bytes;
+        store.reject(123, 7, Some(key(9))).unwrap();
+        store.reject(123, 999, Some(key(9))).unwrap();
+        assert_eq!(store.bytes, bytes);
+        assert!(store.recover().unwrap().is_empty());
+        drop(store);
+        let mut store = Store::open(&dir.path().join("channel")).unwrap();
+        assert!(store.is_rejected(123, 7, None).unwrap());
+        assert!(store.is_rejected(123, 8, None).unwrap());
+        assert!(store.is_rejected(123, 999, Some(key(9))).unwrap());
+        assert!(!store.is_rejected(124, 7, None).unwrap());
+        assert_eq!(
+            store.admit(key(10), 8, Uuid::from_u128(1)),
+            Ok(Admission::Duplicate)
+        );
+        assert_eq!(
+            store.admit(key(9), 999, Uuid::from_u128(2)),
+            Ok(Admission::Duplicate)
+        );
+        assert!(store.recover().unwrap().is_empty());
+        let text = fs::read_to_string(dir.path().join("channel").join(JOURNAL)).unwrap();
+        assert!(!text.contains("task"));
+        assert!(!text.contains("user_id"));
+        for line in text.lines() {
+            let line: Line = serde_json::from_str(line).unwrap();
+            assert_eq!(line.record.version, 2);
+            // The previous reader's exact version gate rejects every new row.
+            assert_ne!(line.record.version, 1);
+        }
+    }
+
+    fn fixture_line(record: Record) -> Vec<u8> {
+        let digest = blake3::hash(&serde_json::to_vec(&record).unwrap())
+            .to_hex()
+            .to_string();
+        let mut bytes = serde_json::to_vec(&Line { record, digest }).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+    #[test]
+    fn v1_receipts_remain_readable_but_cannot_claim_rejection_schema() {
+        let (dir, store) = setup();
+        let path = dir.path().join("channel");
+        drop(store);
+        fs::write(
+            path.join(JOURNAL),
+            fixture_line(Record {
+                version: 1,
+                sequence: 1,
+                event: Event::Received {
+                    key: key(1),
+                    update_id: 1,
+                    task: Uuid::from_u128(1),
+                },
+            }),
+        )
+        .unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.admit(key(1), 2, Uuid::from_u128(2)),
+            Ok(Admission::Duplicate)
+        );
+        store.reject(123, 3, Some(key(3))).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.is_rejected(123, 3, Some(key(3))).unwrap());
+        drop(store);
+        for version in [1, 3] {
+            fs::write(
+                path.join(JOURNAL),
+                fixture_line(Record {
+                    version,
+                    sequence: 1,
+                    event: Event::Rejected {
+                        bot_id: 123,
+                        update_id: 1,
+                        message_key: Some(key(1)),
+                    },
+                }),
+            )
+            .unwrap();
+            assert!(matches!(Store::open(&path), Err(Failure::Corrupt)));
+        }
+    }
+
+    #[test]
+    fn rejected_identity_validation_and_combined_cap_fail_closed() {
+        let (_dir, mut store) = setup();
+        for (bot, update, key) in [
+            (0, 1, None),
+            (123, -1, None),
+            (124, 1, Some(key(1))),
+            (123, 1, Some(key(0))),
+        ] {
+            assert_eq!(store.reject(bot, update, key), Err(Failure::InvalidInput));
+            assert_eq!(
+                store.is_rejected(bot, update, key),
+                Err(Failure::InvalidInput)
+            );
+        }
+        // Exercise the actual combined boundary without thousands of redundant
+        // disk flushes; persistence/reopen is covered by the preceding test.
+        for id in 0..MAX_TASKS - 1 {
+            store.rejected_updates.insert((123, id as i64));
+        }
+        assert_eq!(
+            store.admit(key(1), MAX_TASKS as i64, Uuid::from_u128(1)),
+            Ok(Admission::Fresh)
+        );
+        assert_eq!(
+            store.reject(123, MAX_TASKS as i64 + 1, None),
+            Err(Failure::Capacity)
+        );
+        assert_eq!(
+            store.admit(key(2), MAX_TASKS as i64 + 2, Uuid::from_u128(2)),
+            Err(Failure::Capacity)
+        );
+        assert_eq!(store.reject(123, 0, None), Ok(()));
+        assert_eq!(
+            store.admit(key(2), 0, Uuid::from_u128(2)),
+            Ok(Admission::Duplicate)
+        );
+    }
+
+    #[test]
     fn receipts_survive_reopen_and_deduplicate_message_not_update() {
         let (dir, mut store) = setup();
         let task = Uuid::new_v4();
@@ -522,6 +737,7 @@ mod tests {
         let mut store = Store::open(Path::new(&root)).unwrap();
         assert_eq!(store.admit(key(7), 19, CRASH_TASK), Ok(Admission::Fresh));
         store.mark_submitting(CRASH_TASK, CRASH_CLIENT).unwrap();
+        store.reject(123, 21, Some(key(8))).unwrap();
         // Both APIs have fsynced. Exit immediately without unwinding or running
         // Store/File destructors, as opposed to merely dropping/reopening it.
         std::process::exit(CRASH_EXIT);
@@ -559,6 +775,11 @@ mod tests {
         assert_eq!(status.code(), Some(CRASH_EXIT));
         let before = fs::read(root.join(JOURNAL)).unwrap();
         let mut store = Store::open(&root).unwrap();
+        assert!(store.is_rejected(123, 21, Some(key(8))).unwrap());
+        assert_eq!(
+            store.admit(key(8), 22, Uuid::from_u128(0xa11d0)),
+            Ok(Admission::Duplicate)
+        );
         assert_eq!(
             store.recover().unwrap(),
             vec![(CRASH_TASK, Status::Submitting)]

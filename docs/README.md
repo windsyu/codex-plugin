@@ -19,8 +19,9 @@
 | --- | --- |
 | [V3 实施计划](v3-implementation-plan.md) | 先接入 Telegram 渠道，再独立设计跨会话管理；后端按需求补齐 |
 | [V3 Telegram 开工检查](v3-channel-preparation.md) | 当前代码能力核对、用户流程草案、首片验收和实施前待定契约；尚未实现 |
-| [V3 Telegram 接入契约草案](v3-telegram-channel-contract.md) | 单私聊绑定、来源、持久收件、必要交互和失效规则；Proposed，生产尚未实现 |
+| [V3 Telegram 接入契约草案](v3-telegram-channel-contract.md) | 单私聊绑定、来源、持久收件、必要交互和失效规则；Proposed，实验文本路径已接源码，整体未验收 |
 | [V3 来源隔离探针](validation/v3-channel-origin-2026-10-09.md) | 原版 CLI、同一 Thread、原生来源与完成证据；不代表生产 Telegram 已实现 |
+| [V3 实验运行接入记录](validation/v3-channel-runtime-2026-10-09.md) | 默认关闭的原生运行入口、本机绑定界面和文本收发验证；必要交互与真实 Telegram 尚未验收 |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
