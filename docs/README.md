@@ -31,6 +31,7 @@
 | [V3 已准入回答与 TUI 重叠专项](validation/v3-channel-tui-inflight-2026-10-10.md) | 独立渠道写背压与实际 PTY、准确工具/文件结果；不宣称双方在原生未决期间同时到达 |
 | [V3 输入身份与重新绑定](validation/v3-channel-input-rebind-2026-10-10.md) | 当前提示去重修复、并发与有界输入保留；同一原版 Thread 撤销后重新绑定，不代表重启恢复 |
 | [V3 Service 重建与本机处理提示](validation/v3-channel-service-restart-2026-10-10.md) | 合成 Service 完整销毁/重新配置后新任务闭环，不恢复旧授权；不支持交互的静态提示与归属/授权负例 |
+| [V3 原版宿主重启](validation/v3-channel-host-restart-2026-10-10.md) | 两个独立宿主、准确旧进程消失、本机显式恢复后重新绑定；旧输入不重放，不宣称崩溃或全部工具清理 |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |

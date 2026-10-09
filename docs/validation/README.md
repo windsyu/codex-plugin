@@ -11,6 +11,7 @@
 - [V3 P2 已准入渠道回答与实际 TUI 重叠（2026-10-10）](v3-channel-tui-inflight-2026-10-10.md)
 - [V3 P2 输入身份与同会话重新绑定（2026-10-10）](v3-channel-input-rebind-2026-10-10.md)
 - [V3 P2 Service 重建与本机处理提示（2026-10-10）](v3-channel-service-restart-2026-10-10.md)
+- [V3 P2 原版 CLI 宿主重启（2026-10-10）](v3-channel-host-restart-2026-10-10.md)
 
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)
