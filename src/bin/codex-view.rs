@@ -17,6 +17,9 @@ struct Args {
     /// Keep the browser closed; use the private entry with `codex-view open`.
     #[arg(long)]
     no_open: bool,
+    /// Explicitly enable the experimental native channel transport for new runs.
+    #[arg(long)]
+    channel_ready: bool,
     /// Explicitly start a new conversation in this existing project directory.
     #[arg(long)]
     project: Option<PathBuf>,
@@ -73,6 +76,7 @@ async fn run(args: Args) -> Result<()> {
         .join("config.json");
     let overrides = Overrides {
         open_browser: args.no_open.then_some(false),
+        channel_ready: args.channel_ready.then_some(true),
         codex_bin: args.codex_bin,
         profile: args.profile,
         provider_profile: args.provider_profile,
@@ -198,6 +202,15 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!("codex-view {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+    #[test]
+    fn channel_mode_requires_the_explicit_flag() {
+        assert!(!Args::try_parse_from(["codex-view"]).unwrap().channel_ready);
+        assert!(
+            Args::try_parse_from(["codex-view", "--channel-ready"])
+                .unwrap()
+                .channel_ready
         );
     }
 }

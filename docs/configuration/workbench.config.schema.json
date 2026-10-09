@@ -24,6 +24,12 @@
           "type": "boolean",
           "default": true
         },
+        "channelReady": {
+          "title": "启用渠道运行模式",
+          "description": "显式启用实验原生渠道传输；仅支持默认Codex配置，下次启动应用后新运行生效。私聊配置与收发尚未开放。",
+          "type": "boolean",
+          "default": false
+        },
         "codexBin": {
           "title": "Codex 程序位置",
           "description": "使用 codex，或填写已安装 Codex 程序的完整路径。",

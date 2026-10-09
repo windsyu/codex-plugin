@@ -82,12 +82,14 @@ pub struct Frame {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureState {
+    pub captured_sequence: u64,
     pub connection_epoch: Option<Uuid>,
     pub gap_generation: u64,
     pub closed: bool,
     pub reason: Option<SafeFailure>,
 }
 struct State {
+    captured_sequence: AtomicU64,
     epoch_version: AtomicU64,
     epoch_hi: AtomicU64,
     epoch_lo: AtomicU64,
@@ -101,6 +103,7 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
+            captured_sequence: AtomicU64::new(0),
             epoch_version: AtomicU64::new(0),
             epoch_hi: AtomicU64::new(0),
             epoch_lo: AtomicU64::new(0),
@@ -125,6 +128,7 @@ impl State {
             let hi = self.epoch_hi.load(Ordering::Acquire);
             let lo = self.epoch_lo.load(Ordering::Acquire);
             after_epoch_read();
+            let captured_sequence = self.captured_sequence.load(Ordering::Acquire);
             let gap_generation = self.gap.load(Ordering::Acquire);
             let closed = self.closed.load(Ordering::Acquire);
             let reason = match self.reason.load(Ordering::Acquire) {
@@ -146,6 +150,7 @@ impl State {
             }
             let stopped = self.stopped.load(Ordering::Acquire);
             return CaptureState {
+                captured_sequence,
                 connection_epoch: (before != 0).then(|| Uuid::from_u64_pair(hi, lo)),
                 gap_generation,
                 closed: stopped || closed,
@@ -167,6 +172,7 @@ impl State {
         let (hi, lo) = epoch.as_u64_pair();
         self.epoch_hi.store(hi, Ordering::Release);
         self.epoch_lo.store(lo, Ordering::Release);
+        self.captured_sequence.store(0, Ordering::Release);
         self.reason.store(0, Ordering::Release);
         self.closed.store(false, Ordering::Release);
         self.epoch_version.fetch_add(1, Ordering::Release);
@@ -182,6 +188,7 @@ impl State {
         self.changed();
     }
 }
+#[derive(Clone)]
 pub struct CaptureMonitor {
     state: Arc<State>,
     observed: u64,
@@ -232,6 +239,11 @@ impl Capture {
         self.state.gap(reason);
     }
     fn observe(&self, epoch: Uuid, sequence: u64, direction: Direction, message: &Message) {
+        // Publish before queue admission so a consumer cannot approve against
+        // a decoded view while an already observed frame is still pending.
+        self.state
+            .captured_sequence
+            .fetch_max(sequence, Ordering::AcqRel);
         let text = match message {
             Message::Text(text) => text,
             Message::Binary(_) => {
@@ -264,6 +276,41 @@ impl Capture {
         }
     }
 }
+/// Production pin established by the independent control connection. No RPC data.
+#[derive(Clone, Copy)]
+pub(crate) struct UpstreamIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub process_id: i32,
+    pub process_group: i32,
+}
+impl UpstreamIdentity {
+    fn path_matches(self, path: &Path) -> Result<(), SafeFailure> {
+        private_parent(path)?;
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| SafeFailure::UnsafePath)?;
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.dev() != self.device
+            || metadata.ino() != self.inode
+        {
+            return Err(SafeFailure::UnsafePath);
+        }
+        Ok(())
+    }
+    fn peer_matches(self, stream: &UnixStream) -> Result<(), SafeFailure> {
+        let peer = stream.peer_cred().map_err(|_| SafeFailure::UnsafePath)?;
+        if self.process_id <= 0
+            || self.process_group <= 0
+            || peer.pid() != Some(self.process_id)
+            || peer.uid() != unsafe { libc::geteuid() }
+            || unsafe { libc::getpgid(self.process_id) } != self.process_group
+        {
+            return Err(SafeFailure::UnsafePath);
+        }
+        Ok(())
+    }
+}
 pub struct Relay {
     path: PathBuf,
     dev: u64,
@@ -276,6 +323,23 @@ impl Relay {
         frontend: PathBuf,
         upstream: PathBuf,
         limits: RelayLimits,
+    ) -> Result<(Self, CaptureReceiver), SafeFailure> {
+        Self::bind_inner(frontend, upstream, limits, None).await
+    }
+    pub(crate) async fn bind_verified(
+        frontend: PathBuf,
+        upstream: PathBuf,
+        limits: RelayLimits,
+        identity: UpstreamIdentity,
+    ) -> Result<(Self, CaptureReceiver), SafeFailure> {
+        identity.path_matches(&upstream)?;
+        Self::bind_inner(frontend, upstream, limits, Some(identity)).await
+    }
+    async fn bind_inner(
+        frontend: PathBuf,
+        upstream: PathBuf,
+        limits: RelayLimits,
+        identity: Option<UpstreamIdentity>,
     ) -> Result<(Self, CaptureReceiver), SafeFailure> {
         if limits.capture_bytes == 0
             || limits.capture_bytes > u32::MAX as usize
@@ -317,7 +381,7 @@ impl Relay {
                         let Ok((stream,_))=result else {capture.gap(SafeFailure::Transport);break;};
                         if !active.is_empty(){drop(stream);continue;}
                         let epoch=Uuid::new_v4();capture.state.open(epoch);
-                        active.push(connection(stream,upstream.clone(),capture.clone(),epoch));
+                        active.push(connection(stream,upstream.clone(),capture.clone(),epoch,identity));
                     }
                     _=active.next(),if !active.is_empty()=>{}
                 }
@@ -338,6 +402,9 @@ impl Relay {
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 }
 impl Drop for Relay {
@@ -401,7 +468,13 @@ fn websocket_config() -> WebSocketConfig {
         .max_write_buffer_size(WS_LIMIT + 128 * 1024)
 }
 type Socket = WebSocketStream<HeaderLimited>;
-async fn connection(front: UnixStream, upstream: PathBuf, capture: Arc<Capture>, epoch: Uuid) {
+async fn connection(
+    front: UnixStream,
+    upstream: PathBuf,
+    capture: Arc<Capture>,
+    epoch: Uuid,
+    identity: Option<UpstreamIdentity>,
+) {
     let _guard = ConnectionGuard {
         capture: capture.clone(),
         epoch,
@@ -413,9 +486,16 @@ async fn connection(front: UnixStream, upstream: PathBuf, capture: Arc<Capture>,
         if !m.file_type().is_socket() || m.uid() != unsafe { libc::geteuid() } {
             return Err(SafeFailure::UnsafePath);
         }
-        let back = UnixStream::connect(upstream)
+        if let Some(identity) = identity {
+            identity.path_matches(&upstream)?;
+        }
+        let back = UnixStream::connect(&upstream)
             .await
             .map_err(|_| SafeFailure::Transport)?;
+        if let Some(identity) = identity {
+            identity.peer_matches(&back)?;
+            identity.path_matches(&upstream)?;
+        }
         let (mut back, _) = client_async_with_config(
             "ws://localhost/rpc",
             HeaderLimited::new(back),
@@ -688,6 +768,58 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap()
+    }
+    #[tokio::test]
+    async fn verified_relay_rejects_wrong_peer_group_pid_and_replaced_socket() {
+        for violation in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let parent = root.path().canonicalize().unwrap();
+            let upstream = parent.join("native.sock");
+            let _listener = UnixListener::bind(&upstream).unwrap();
+            std::fs::set_permissions(&upstream, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let metadata = std::fs::symlink_metadata(&upstream).unwrap();
+            let identity = UpstreamIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                process_id: std::process::id() as i32 + i32::from(violation == 1),
+                process_group: unsafe { libc::getpgrp() } + i32::from(violation == 0),
+            };
+            let (relay, capture) = Relay::bind_verified(
+                parent.join("front.sock"),
+                upstream.clone(),
+                RelayLimits::default(),
+                identity,
+            )
+            .await
+            .unwrap();
+            let _replacement = if violation == 2 {
+                std::fs::remove_file(&upstream).unwrap();
+                let listener = UnixListener::bind(&upstream).unwrap();
+                std::fs::set_permissions(&upstream, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                Some(listener)
+            } else {
+                None
+            };
+            let stream = UnixStream::connect(relay.path()).await.unwrap();
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    client_async("ws://localhost/rpc", stream)
+                )
+                .await
+                .unwrap()
+                .is_err()
+            );
+            assert!(capture.state().closed);
+            assert!(capture.state().gap_generation > 0);
+            drop(relay);
+            assert!(
+                upstream.exists(),
+                "relay does not own or remove upstream sockets"
+            );
+        }
     }
     #[tokio::test]
     async fn preserves_original_text_and_forwards_unknown_binary_with_gap() {
@@ -1174,5 +1306,52 @@ mod tests {
         .await
         .unwrap();
         drop(relay);
+    }
+}
+
+#[cfg(test)]
+mod watermark_tests {
+    use super::*;
+    #[tokio::test]
+    async fn watermark_precedes_decode_and_survives_capture_rejection() {
+        let state = Arc::new(State::new());
+        let epoch = Uuid::new_v4();
+        state.open(epoch);
+        let (sender, receiver) = mpsc::channel(1);
+        let capture = Capture {
+            sender,
+            budget: Arc::new(Semaphore::new(32)),
+            state: state.clone(),
+        };
+        let mut receiver = CaptureReceiver {
+            receiver,
+            state: state.clone(),
+        };
+        let monitor = receiver.subscribe_state();
+        let clone = monitor.clone();
+        capture.observe(epoch, 1, Direction::ToServer, &Message::Text("one".into()));
+        assert_eq!(monitor.state().captured_sequence, 1);
+        assert_eq!(clone.state().captured_sequence, 1);
+        capture.observe(epoch, 2, Direction::ToTui, &Message::Text("two".into()));
+        assert_eq!(clone.state().captured_sequence, 2);
+        assert!(clone.state().gap_generation > 0);
+        assert_eq!(receiver.recv().await.unwrap().sequence, 1);
+        state.open(Uuid::new_v4());
+        assert_eq!(monitor.state().captured_sequence, 0);
+    }
+    #[test]
+    fn sequence_cannot_regress_when_capture_producers_arrive_out_of_order() {
+        let state = Arc::new(State::new());
+        let epoch = Uuid::new_v4();
+        state.open(epoch);
+        let (sender, _receiver) = mpsc::channel(4);
+        let capture = Capture {
+            sender,
+            budget: Arc::new(Semaphore::new(32)),
+            state: state.clone(),
+        };
+        capture.observe(epoch, 2, Direction::ToTui, &Message::Text("two".into()));
+        capture.observe(epoch, 1, Direction::ToServer, &Message::Text("one".into()));
+        assert_eq!(state.snapshot().captured_sequence, 2);
     }
 }

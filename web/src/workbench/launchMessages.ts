@@ -24,6 +24,10 @@ const messages: Record<string, string> = {
   native_terminal_unavailable: '无法创建 Codex 终端，请检查本机终端环境和进程权限后重试。',
   native_workspace_unavailable: '无法初始化项目工作区，请检查项目目录的读取权限后重试。',
   native_config_changed: '原生 Codex 配置在检查后发生变化，请重新检查目录后启动。',
+  channel_profile_unsupported: '实验渠道模式目前仅支持默认 Codex 配置。请在启动偏好中关闭渠道模式，或清空 Codex 启动配置名称，保存后重新启动应用。',
+  channel_transport_unavailable: '实验渠道连接未能启动，请检查已安装 Codex CLI 是否支持该模式及本机进程权限。',
+  channel_shutdown_pending: '之前的渠道运行正在结束原生服务，请稍后重新检查目录。',
+  channel_shutdown_incomplete: '之前的渠道运行关闭结果尚不确定。请先在本机检查原生进程和工具，确认后再继续；应用不会自动启动同一原生目录。',
 };
 
 export function launchMessage(code: unknown): string {

@@ -36,6 +36,7 @@ pub struct Connect {
     pub codex_bin: Option<String>,
     pub profile: Option<String>,
     pub provider_profile: Option<String>,
+    pub channel_ready: Option<bool>,
     pub native_home: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -112,12 +113,30 @@ struct Runner {
     surface: SurfaceHandle,
     library: crate::history::library::LibraryHandle,
     active: Vec<(WorkbenchRuntime, super::web::RunSurface, RunSummary)>,
+    channel_shutdowns: std::collections::BTreeMap<
+        PathBuf,
+        std::collections::BTreeMap<Uuid, super::launch::ShutdownHandle>,
+    >,
 }
 // Bounded local concurrency, not a promise about all-machine performance. R6-G
 // measures the combined resource budget before offering user tuning.
 const MAX_RUNNING_RUNS: usize = 4;
 const MAX_STOPPED_RUNS: usize = 4;
 impl Runner {
+    fn collect_channel_shutdowns(&mut self) {
+        for (run, _, summary) in &mut self.active {
+            if run.terminal().exited() {
+                run.stop_channel();
+                if let Some(shutdown) = run.channel_shutdown() {
+                    self.channel_shutdowns
+                        .entry(summary.native_home.clone())
+                        .or_default()
+                        .entry(summary.run_id)
+                        .or_insert(shutdown);
+                }
+            }
+        }
+    }
     fn retire_stopped(&mut self) {
         while self
             .active
@@ -147,6 +166,25 @@ impl Runner {
         let native_directory =
             DirectoryGuard::open(&home).map_err(|_| "native_home_unavailable")?;
         let home = native_directory.path.clone();
+        self.collect_channel_shutdowns();
+        if let Some(shutdowns) = self.channel_shutdowns.get(&home) {
+            let mut pending = false;
+            // Read each monotonic outcome once. Two separate scans could miss
+            // a pending -> ForcedUnknown transition between the scans.
+            for shutdown in shutdowns.values() {
+                match shutdown.outcome() {
+                    Some(super::launch::ShutdownOutcome::ForcedUnknown) => {
+                        return Err("channel_shutdown_incomplete");
+                    }
+                    None => pending = true,
+                    Some(super::launch::ShutdownOutcome::NativeExited) => {}
+                }
+            }
+            if pending {
+                return Err("channel_shutdown_pending");
+            }
+            self.channel_shutdowns.remove(&home);
+        }
         let direct = if target.is_none() {
             resume
                 .map(|id| crate::history::library::launch::NativeResume::direct(&home, id, &cwd))
@@ -223,13 +261,14 @@ impl Runner {
         }
         let launch = settings.effective.launch;
         let mut validation_error = None;
-        let run = WorkbenchRuntime::start_checked(
+        let mut run = WorkbenchRuntime::start_checked(
             LaunchOptions {
                 cwd,
                 home: home.clone(),
                 workbench_paths: self.paths.clone(),
                 executable: launch.codex_bin.into(),
                 native_profile: launch.profile,
+                channel_ready: launch.channel_ready,
                 resume,
                 entry_file: None,
                 data_dir: Some(self.data.clone()),
@@ -282,6 +321,9 @@ impl Runner {
             keep
         });
         self.surface.publish(summary.clone(), run_surface.router());
+        if let Some(attachment) = run.take_channel() {
+            self.surface.attach_channel(run.epoch, attachment);
+        }
         self.active.push((run, run_surface, summary.clone()));
         self.retire_stopped();
         Ok((summary, false))
@@ -387,6 +429,16 @@ impl RunWorker {
                             let _ = runtime.block_on(run.terminal().stop());
                         }
                         if run.terminal().exited() && summary.state == "running" {
+                            run.stop_channel();
+                            if let Some(shutdown) = run.channel_shutdown() {
+                                runner
+                                    .channel_shutdowns
+                                    .entry(summary.native_home.clone())
+                                    .or_default()
+                                    .entry(summary.run_id)
+                                    .or_insert(shutdown);
+                            }
+                            runner.surface.stop_channel(run.epoch);
                             surface.disable_devices();
                             summary.state = "stopped".into();
                             runner.surface.summary(summary.clone());
@@ -394,7 +446,31 @@ impl RunWorker {
                     }
                     runner.retire_stopped();
                 }
+                // Host exit is a lifecycle barrier, not a forwarding path.
+                // Revoke observers first, then stop every TUI concurrently.
                 runner.surface.clear();
+                let terminals: Vec<_> = runner.active.iter().map(|(run, _, _)| run.terminal()).collect();
+                runtime.block_on(async {
+                    futures_util::future::join_all(terminals.into_iter().map(|terminal| async move {
+                        let _ = tokio::time::timeout(Duration::from_secs(2), terminal.stop()).await;
+                    })).await;
+                });
+                for (run, _, summary) in &mut runner.active {
+                    run.stop_channel();
+                    if let Some(shutdown) = run.channel_shutdown() {
+                        runner.channel_shutdowns.entry(summary.native_home.clone()).or_default().entry(summary.run_id).or_insert(shutdown);
+                    }
+                }
+                // Keep all Run proxies/resources alive while independent native
+                // reapers work. One shared deadline covers active and retired Runs.
+                let deadline = std::time::Instant::now() + Duration::from_secs(18);
+                while runner.channel_shutdowns.values().flat_map(|runs| runs.values()).any(|shutdown| !shutdown.is_finished())
+                    && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if runner.channel_shutdowns.values().flat_map(|runs| runs.values()).any(|shutdown| shutdown.outcome() != Some(super::launch::ShutdownOutcome::NativeExited)) {
+                    eprintln!("codex-view: native_shutdown_incomplete; detached tool cleanup is not confirmed");
+                }
                 drop(runner.active);
             })?;
         Ok(Self {
@@ -453,6 +529,7 @@ impl Application {
             },
             sources.handle(),
             home.clone(),
+            paths.root.join("channel"),
         )?;
         let runs = RunWorker::start(
             Runner {
@@ -463,6 +540,7 @@ impl Application {
                 surface: web.handle(),
                 library: sources.handle(),
                 active: Vec::new(),
+                channel_shutdowns: std::collections::BTreeMap::new(),
             },
             sender,
             receiver,
@@ -599,6 +677,7 @@ pub fn request(
             .map(|p| p.to_string_lossy().into_owned()),
         profile: overrides.profile.clone(),
         provider_profile: overrides.provider_profile.clone(),
+        channel_ready: overrides.channel_ready,
         native_home: Some(native_home),
         ..Default::default()
     }

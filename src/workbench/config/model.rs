@@ -36,6 +36,7 @@ pub struct Access {
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Launch {
     pub open_browser: bool,
+    pub channel_ready: bool,
     pub codex_bin: String,
     pub profile: Option<String>,
     pub provider_profile: String,
@@ -44,6 +45,7 @@ impl Default for Launch {
     fn default() -> Self {
         Self {
             open_browser: true,
+            channel_ready: false,
             codex_bin: "codex".into(),
             profile: None,
             provider_profile: "unmanaged-custom".into(),
@@ -98,6 +100,7 @@ impl Config {
                 "access.port",
                 "launch",
                 "launch.openBrowser",
+                "launch.channelReady",
                 "launch.codexBin",
                 "launch.profile",
                 "launch.providerProfile",
@@ -190,6 +193,7 @@ impl Config {
 #[derive(Clone, Default)]
 pub struct Overrides {
     pub open_browser: Option<bool>,
+    pub channel_ready: Option<bool>,
     pub codex_bin: Option<PathBuf>,
     pub profile: Option<String>,
     pub provider_profile: Option<String>,
@@ -200,6 +204,9 @@ impl Overrides {
         let mut c = config.clone();
         if let Some(v) = self.open_browser {
             c.launch.open_browser = v;
+        }
+        if let Some(v) = self.channel_ready {
+            c.launch.channel_ready = v;
         }
         if let Some(v) = &self.codex_bin {
             c.launch.codex_bin = v.to_string_lossy().into_owned();
@@ -218,6 +225,7 @@ impl Overrides {
     pub fn fields(&self) -> Vec<&'static str> {
         [
             (self.open_browser.is_some(), "launch.openBrowser"),
+            (self.channel_ready.is_some(), "launch.channelReady"),
             (self.codex_bin.is_some(), "launch.codexBin"),
             (self.profile.is_some(), "launch.profile"),
             (self.provider_profile.is_some(), "launch.providerProfile"),

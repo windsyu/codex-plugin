@@ -32,6 +32,7 @@ fn defaults_match_documented_json_and_partial_fields_keep_deletion_disabled() {
         assert!(!config.history.cleanup.enabled);
         assert!(!config.history.cleanup.retention.enabled);
         assert_eq!(config.history.cleanup.retention.days, 90);
+        assert!(!config.launch.channel_ready);
     }
 }
 #[test]
@@ -43,6 +44,8 @@ fn invalid_and_duplicate_fields_are_rejected_without_echoing_values() {
         r#"{"schemaVersion":1,"launch":{"profile":"SECRET","profile":"other"}}"#,
         r#"{"schemaVersion":1,"SECRET":true}"#,
         r#"{"schemaVersion":1,"launch":{"openBrowser":"SECRET"}}"#,
+        r#"{"schemaVersion":2,"launch":{"channelReady":"SECRET"}}"#,
+        r#"{"schemaVersion":2,"launch":{"channelReady":true,"channelReady":false}}"#,
         r#"{"schemaVersion":1,"history":{"cleanup":{"enabled":true,"enabled":false}}}"#,
         r#"{"schemaVersion":1,"launch":{"codexBin":"SECRET"}}"#,
         r#"{"schemaVersion":1,"launch":{"profile":"SECRET/../other"}}"#,
@@ -227,6 +230,39 @@ fn invocation_overrides_are_not_persisted_and_saved_changes_require_restart() {
     assert_eq!(saved.restart_required, vec!["storage.dataDir"]);
     assert_eq!(saved.effective_data_dir, prepared.paths.history_dir());
     assert!(!config.storage.data_dir.unwrap().exists());
+}
+#[test]
+fn channel_mode_is_explicit_and_saved_changes_only_affect_future_applications() {
+    let (_temp, prepared) = fixture();
+    let initial = prepared.snapshot();
+    assert!(!initial.effective.launch.channel_ready);
+    let mut config = initial.saved.unwrap();
+    config.launch.channel_ready = true;
+    let changed = prepared
+        .save(
+            initial.revision.as_deref().unwrap(),
+            &config,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert!(!changed.effective.launch.channel_ready);
+    assert!(changed.saved.unwrap().launch.channel_ready);
+    assert_eq!(changed.restart_required, vec!["launch.channelReady"]);
+    let next = Prepared::load(
+        &prepared.home,
+        &prepared.cwd,
+        &prepared.paths,
+        None,
+        Overrides {
+            channel_ready: Some(false),
+            ..Overrides::default()
+        },
+    )
+    .unwrap();
+    let settings = next.snapshot();
+    assert!(!settings.effective.launch.channel_ready);
+    assert!(settings.saved.unwrap().launch.channel_ready);
+    assert_eq!(settings.cli_overrides, vec!["launch.channelReady"]);
 }
 #[test]
 fn stale_revisions_and_backup_failures_do_not_overwrite_config() {

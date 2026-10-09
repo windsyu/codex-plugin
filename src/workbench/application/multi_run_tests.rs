@@ -714,6 +714,41 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
         (reqwest::Method::GET, "/workbench/v1/application", 401),
         (
             reqwest::Method::GET,
+            "/workbench/v1/application/telegram",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/telegram/configure",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/telegram/pair",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/telegram/confirm",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/telegram/revoke",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/telegram/forget",
+            401,
+        ),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/application/channel-runs",
+            401,
+        ),
+        (
+            reqwest::Method::GET,
             "/workbench/v1/application/settings",
             401,
         ),
@@ -755,5 +790,395 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
             .config_dir()
             .join("config.previous.json")
             .exists()
+    );
+}
+
+#[tokio::test]
+async fn same_home_shutdown_gate_checks_every_retired_run_before_real_launch() {
+    use crate::workbench::launch::{ShutdownHandle, ShutdownOutcome};
+    for (first, blocked) in [
+        (Some(ShutdownOutcome::NativeExited), None),
+        (
+            Some(ShutdownOutcome::NativeExited),
+            Some(ShutdownOutcome::ForcedUnknown),
+        ),
+        (
+            Some(ShutdownOutcome::NativeExited),
+            Some(ShutdownOutcome::NativeExited),
+        ),
+        (None, Some(ShutdownOutcome::ForcedUnknown)),
+    ] {
+        let fixture = Fixture::new();
+        let cli = fixture.cli();
+        let app = fixture.app(Overrides {
+            codex_bin: Some(cli),
+            ..Default::default()
+        });
+        let cookie = pair(&app).await;
+        let mut ids = Vec::new();
+        for index in 0..2 {
+            let cwd = fixture.dir.path().join(format!("former-run-{index}"));
+            std::fs::create_dir(&cwd).unwrap();
+            let target = target_for(&app, &cookie, &cwd).await;
+            let body = start_body(&app, &target);
+            launch_post(&app, &cookie, "/workbench/v1/runs", body.clone()).await;
+            let operation = operation_done(&app, &cookie, &body["operationId"]).await;
+            let id = Uuid::parse_str(operation["run"]["runId"].as_str().unwrap()).unwrap();
+            ids.push(id);
+            launch_post(
+                &app,
+                &cookie,
+                &format!("/workbench/v1/runs/{id}/stop"),
+                json!({"epoch":id}),
+            )
+            .await;
+            run_state(&app, &cookie, &id.to_string(), "stopped").await;
+        }
+        ids.sort();
+        let home = fixture.home.canonicalize().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        app._runs
+            .handle
+            .sender
+            .send(Request::Inspect(Box::new(move |runner| {
+                // Exercise the real Runner launch path with two retained native
+                // lifecycle receipts, independently of process-shutdown timing.
+                runner.channel_shutdowns.insert(
+                    home,
+                    std::collections::BTreeMap::from([
+                        (ids[0], ShutdownHandle::test_outcome(first)),
+                        (ids[1], ShutdownHandle::test_outcome(blocked)),
+                    ]),
+                );
+                sent.send(()).unwrap();
+            })))
+            .unwrap();
+        received.await.unwrap();
+        let before = std::fs::read_to_string(fixture.home.join("invocations"))
+            .unwrap()
+            .lines()
+            .count();
+        let target = target_for(&app, &cookie, &fixture.cwd).await;
+        let body = start_body(&app, &target);
+        launch_post(&app, &cookie, "/workbench/v1/runs", body.clone()).await;
+        let result = operation_done(&app, &cookie, &body["operationId"]).await;
+        match blocked {
+            None => assert_eq!(result["error"]["code"], "channel_shutdown_pending"),
+            Some(ShutdownOutcome::ForcedUnknown) => {
+                assert_eq!(result["error"]["code"], "channel_shutdown_incomplete")
+            }
+            Some(ShutdownOutcome::NativeExited) => assert_eq!(result["state"], "ready"),
+        }
+        let after = std::fs::read_to_string(fixture.home.join("invocations"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(
+            after - before,
+            if blocked == Some(ShutdownOutcome::NativeExited) {
+                2
+            } else {
+                0
+            }
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires explicit original CLI; isolated host-process exit regression"]
+async fn installed_cli_application_exit_waits_for_native_reaper() {
+    use std::os::unix::process::CommandExt;
+    const CHILD: &str = "CODEX_CHANNEL_EXIT_CHILD";
+    const TEST: &str =
+        "workbench::application::tests::installed_cli_application_exit_waits_for_native_reaper";
+    if std::env::var_os(CHILD).is_some() {
+        let user = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = PathBuf::from(std::env::var_os("CODEX_HOME").unwrap());
+        let root = user.parent().unwrap();
+        let cwd = root.join("project");
+        let paths = WorkbenchPaths::from_user_home(&user).unwrap();
+        let prepared = Prepared::load_application(
+            &home,
+            &cwd,
+            &paths,
+            None,
+            Overrides {
+                codex_bin: Some(PathBuf::from(
+                    std::env::var_os("CODEX_CHANNEL_TEST_BINARY").unwrap(),
+                )),
+                channel_ready: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let Acquisition::Owner(lock) =
+            InstanceLock::acquire(&paths, prepared.config_dir(), &prepared.data_dir).unwrap()
+        else {
+            panic!("isolated owner expected")
+        };
+        let app = Application::start(prepared, home, paths, lock, None).unwrap();
+        app._runs
+            .handle
+            .launch(Connect {
+                project: Some(cwd),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let cookie = pair(&app).await;
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let sources =
+                    json_body(get(&app, &cookie, "/workbench/v1/application/channel-runs").await)
+                        .await;
+                if sources["runs"].as_array().is_some_and(|runs| {
+                    runs.iter().any(|run| {
+                        run["source"]["targets"]
+                            .as_array()
+                            .is_some_and(|targets| !targets.is_empty())
+                    })
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("original TUI must establish a native subscription");
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !root.join("exit").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut pending = None;
+        if std::env::var("CODEX_CHANNEL_EXIT_FORCED").as_deref() == Ok("1") {
+            let (send, receive) = oneshot::channel();
+            app._runs
+                .handle
+                .sender
+                .send(Request::Inspect(Box::new(move |runner| {
+                    assert!(send.send(runner.active[0].0.terminal()).is_ok());
+                })))
+                .unwrap();
+            let terminal = receive.await.unwrap();
+            terminal.stop().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !terminal.exited() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let (send, receive) = oneshot::channel();
+            app._runs
+                .handle
+                .sender
+                .send(Request::Inspect(Box::new(move |runner| {
+                    runner.collect_channel_shutdowns();
+                    assert!(
+                        send.send(
+                            runner
+                                .channel_shutdowns
+                                .values()
+                                .flat_map(|runs| runs.values())
+                                .next()
+                                .unwrap()
+                                .clone(),
+                        )
+                        .is_ok()
+                    );
+                })))
+                .unwrap();
+            let handle = receive.await.unwrap();
+            assert!(
+                !handle.is_finished(),
+                "forced native cleanup must be pending at host exit"
+            );
+            pending = Some(handle);
+        }
+        std::fs::write(root.join("pending-witness"), b"ready").unwrap();
+        drop(app);
+        if pending.as_ref().is_none_or(|handle| handle.is_finished()) {
+            std::fs::write(root.join("reaped-before-exit"), b"ready").unwrap();
+        }
+        // Model a real binary returning from main: detached Rust threads cannot
+        // keep this host alive once the application lifecycle returns.
+        std::process::exit(0);
+    }
+    struct Identity {
+        pid: i32,
+        started: (u64, u64),
+        group: u32,
+    }
+    impl Identity {
+        fn read(pid: i32) -> Option<Self> {
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as i32;
+            let count = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    (&mut info as *mut libc::proc_bsdinfo).cast(),
+                    size,
+                )
+            };
+            (count == size && info.pbi_uid == unsafe { libc::geteuid() }).then_some(Self {
+                pid,
+                started: (info.pbi_start_tvsec, info.pbi_start_tvusec),
+                group: info.pbi_pgid,
+            })
+        }
+        fn same(&self) -> bool {
+            Self::read(self.pid)
+                .is_some_and(|other| other.started == self.started && other.group == self.group)
+        }
+        fn gone(&self) -> bool {
+            if let Some(other) = Self::read(self.pid) {
+                return other.started != self.started || other.group != self.group;
+            }
+            (unsafe { libc::kill(self.pid, 0) }) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        fn cleanup(&self) {
+            if self.same() {
+                unsafe {
+                    libc::kill(self.pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    struct IdentityGuard(Identity);
+    impl std::ops::Deref for IdentityGuard {
+        type Target = Identity;
+        fn deref(&self) -> &Identity {
+            &self.0
+        }
+    }
+    impl Drop for IdentityGuard {
+        fn drop(&mut self) {
+            self.0.cleanup();
+        }
+    }
+    let mut all_ok = true;
+    for forced in [false, true] {
+        let root = tempfile::Builder::new()
+            .prefix("cexit-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let user = root.path().join("user");
+        let home = root.path().join("native");
+        let runtime_dir = root.path().join("runtime");
+        let cwd = root.path().join("project");
+        for path in [&user, &home, &runtime_dir, &cwd] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::create_dir(home.join("app-server-daemon")).unwrap();
+        std::fs::write(
+            home.join("app-server-daemon/settings.json"),
+            r#"{"remoteControlEnabled":false,"updater":{"autoUpdateEnabled":false}}"#,
+        )
+        .unwrap();
+        std::fs::write(home.join("config.toml"),format!("model=\"synthetic-model\"\nmodel_provider=\"custom\"\ncheck_for_update_on_startup=false\n[features]\ndaemon_auto_start=false\n[model_providers.custom]\nname=\"Synthetic exit fixture\"\nbase_url=\"http://127.0.0.1:9/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nexperimental_bearer_token=\"synthetic-only\"\n[projects.{}]\ntrust_level=\"trusted\"\n",toml::Value::String(cwd.display().to_string()))).unwrap();
+        let mut sentinel = ChildGuard(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--ignored", "--nocapture"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &user)
+            .env("USERPROFILE", &user)
+            .env("CODEX_HOME", &home)
+            .env("TMPDIR", &runtime_dir)
+            .env(CHILD, "1")
+            .env("CODEX_CHANNEL_EXIT_FORCED", if forced { "1" } else { "" })
+            .env(
+                "CODEX_CHANNEL_TEST_BINARY",
+                std::env::var_os("CODEX_CHANNEL_TEST_BINARY").expect("select original CLI"),
+            )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !root.path().join("ready").exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "isolated host startup failed"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("isolated application must launch");
+        let alias = std::fs::read_dir(&runtime_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("app.sock"))
+            .find(|path| path.exists())
+            .expect("owned runtime alias");
+        let socket = tokio::net::UnixStream::connect(alias).await.unwrap();
+        let cred = socket.peer_cred().unwrap();
+        assert_eq!(cred.uid(), unsafe { libc::geteuid() });
+        let peer = IdentityGuard(Identity::read(cred.pid().unwrap()).unwrap());
+        let wrapper = IdentityGuard(Identity::read(peer.group as i32).unwrap());
+        assert_ne!(peer.group, unsafe { libc::getpgrp() } as u32);
+        if forced {
+            assert!(peer.same());
+            assert_eq!(unsafe { libc::kill(peer.pid, libc::SIGSTOP) }, 0);
+        }
+        drop(socket);
+        let began = std::time::Instant::now();
+        std::fs::write(root.path().join("exit"), b"exit").unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .expect("host shutdown bounded")
+            .unwrap();
+        let host_success = status.success();
+        let pending_witness = root.path().join("pending-witness").exists();
+        let reaped_before_exit = root.path().join("reaped-before-exit").exists();
+        let host_waited = !forced || began.elapsed() >= Duration::from_secs(14);
+        let ended = tokio::time::timeout(Duration::from_secs(2), async {
+            while !peer.gone() || !wrapper.gone() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let unrelated_alive = sentinel.0.try_wait().unwrap().is_none();
+        all_ok &= host_success
+            && pending_witness
+            && reaped_before_exit
+            && host_waited
+            && ended
+            && unrelated_alive;
+        peer.cleanup();
+        wrapper.cleanup();
+        let cleaned = tokio::time::timeout(Duration::from_secs(3), async {
+            while !peer.gone() || !wrapper.gone() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        println!(
+            "APPLICATION_EXIT forced={forced} host_success={host_success} pending_witness={pending_witness} reaped_before_exit={reaped_before_exit} host_waited={host_waited} owned_primary_exited={ended} unrelated_alive={unrelated_alive} exact_cleanup={cleaned}"
+        );
+        assert!(cleaned && unrelated_alive);
+    }
+    assert!(
+        all_ok,
+        "application host exited before its native reapers completed"
     );
 }

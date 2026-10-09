@@ -1,6 +1,7 @@
 # 验证报告索引
 
 - [V3 来源隔离与原生完成探针（2026-10-09）](v3-channel-origin-2026-10-09.md)
+- [V3 实验运行接入与订阅边界（2026-10-09）](v3-channel-runtime-2026-10-09.md)
 
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)

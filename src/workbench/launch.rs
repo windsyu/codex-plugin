@@ -18,9 +18,13 @@ use super::{
     terminal::TerminalHost,
     web::ReadingServer,
 };
+mod channel;
 pub(crate) mod entry;
 pub(crate) mod failure;
 mod profile;
+pub use channel::{
+    ControlFailure, ControlHandle, NativeAttachment, ShutdownHandle, ShutdownOutcome, Submission,
+};
 pub use entry::{BrowserEntry, read_entry};
 use failure::LaunchFailure;
 
@@ -29,6 +33,7 @@ use failure::LaunchFailure;
 const CHECKED_CLI_VERSIONS: &[&str] = &["0.154.0", "0.155.1", "0.156.1", "0.159.2"];
 
 pub struct LaunchOptions {
+    pub channel_ready: bool,
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub workbench_paths: WorkbenchPaths,
@@ -115,6 +120,9 @@ async fn version(path: &Path, home: &Path) -> Result<String> {
 /// One CLI and its independent data path. No application listener or credentials.
 pub struct WorkbenchRuntime {
     terminal: TerminalHost,
+    channel_owner: Option<channel::Owner>,
+    channel_attachment: Option<NativeAttachment>,
+    channel_shutdown: Option<ShutdownHandle>,
     proxy: ProxyServer,
     _observer: Observer,
     _users: RolloutReader,
@@ -131,8 +139,12 @@ impl WorkbenchRuntime {
     }
     pub(crate) async fn start_checked(
         options: LaunchOptions,
-        verify: impl FnOnce() -> Result<()>,
+        mut verify: impl FnMut() -> Result<()>,
     ) -> Result<Self> {
+        ensure!(
+            !options.channel_ready || options.native_profile.is_none(),
+            LaunchFailure::ChannelProfileUnsupported
+        );
         let cwd = options
             .cwd
             .canonicalize()
@@ -198,6 +210,24 @@ impl WorkbenchRuntime {
         )?;
         let users = RolloutReader::start(&home, hub.clone(), profile.policy.clone())
             .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        verify()?;
+        profile
+            .unchanged()
+            .map_err(|e| LaunchFailure::ConfigChanged.wrap(e))?;
+        let (channel_owner, channel_attachment) = if options.channel_ready {
+            let (owner, attachment) = channel::Owner::start(
+                &binary,
+                &home,
+                &cwd,
+                &profile.provider,
+                &proxy.child_base_url(),
+            )
+            .await
+            .map_err(|error| LaunchFailure::ChannelTransport.wrap(error))?;
+            (Some(owner), Some(attachment))
+        } else {
+            (None, None)
+        };
         let mut command = CommandBuilder::new(binary);
         command.cwd(&cwd);
         command.env("CODEX_HOME", &home);
@@ -215,9 +245,16 @@ impl WorkbenchRuntime {
             toml::Value::String(proxy.child_base_url())
         ));
         command.args(["-c", "tui.animations=false"]);
+        if let Some(owner) = &channel_owner {
+            command.args([
+                "--remote".to_owned(),
+                format!("unix://{}", owner.path().display()),
+            ]);
+        }
         if let Some(id) = options.resume {
             command.args(["resume".to_owned(), id.to_string()]);
         }
+        // Recheck after asynchronous native server startup before spawning the TUI.
         verify()?;
         profile
             .unchanged()
@@ -228,6 +265,9 @@ impl WorkbenchRuntime {
             super::workspace::Handle::start(&cwd).map_err(|e| LaunchFailure::Workspace.wrap(e))?;
         Ok(Self {
             terminal,
+            channel_owner,
+            channel_attachment,
+            channel_shutdown: None,
             proxy,
             _observer: observer,
             _users: users,
@@ -238,6 +278,18 @@ impl WorkbenchRuntime {
             cli_version,
             cwd,
         })
+    }
+    pub(crate) fn stop_channel(&mut self) {
+        self.channel_attachment.take();
+        if let Some(owner) = self.channel_owner.take() {
+            self.channel_shutdown = Some(owner.begin_shutdown());
+        }
+    }
+    pub(crate) fn channel_shutdown(&self) -> Option<ShutdownHandle> {
+        self.channel_shutdown.clone()
+    }
+    pub fn take_channel(&mut self) -> Option<NativeAttachment> {
+        self.channel_attachment.take()
     }
     #[cfg(test)]
     pub(crate) fn abort_proxy_for_test(&self) {
@@ -250,7 +302,12 @@ impl WorkbenchRuntime {
         self.terminal.handle()
     }
     pub fn healthy(&self) -> bool {
-        !self.proxy.is_finished() && !self.terminal.is_finished()
+        !self.proxy.is_finished()
+            && !self.terminal.is_finished()
+            && self
+                .channel_owner
+                .as_ref()
+                .is_none_or(channel::Owner::healthy)
     }
 }
 
