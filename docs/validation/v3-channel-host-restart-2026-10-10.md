@@ -39,3 +39,13 @@
 完整标准检查 `node scripts/dev.mjs check --offline` 实际退出 0；artifact `b0c14901-e040-4b3f-ad90-b391dbdbcf98` 为 success，完成时间存在、lease 释放，耗时 286.876 秒。固定 Node 22.23.2 / Rust 1.95.0；122 份文档、工具 80、Web 274、Rust all-targets 13 组汇总 732 passed / 0 failed / 67 ignored，fmt、Clippy（`-D warnings`）、类型检查与 Web 构建通过。ignored 不能计作执行，新增原版专项的实际结果单列在上一段。debug/release 两个 binary 构建通过，增量构建耗时分别 0.09 / 21.54 秒。主缓存提示 50,280,415,249 字节，仅提示，未清理。
 
 真实 Telegram、跨设备用户验收、精确已提交 Turn 取消与第二阶段管理仍未完成；只读 Tailscale 入口仍待准确地址/端口授权，自动续跑不解除此前自动审批拒绝。
+
+## 5. 本地提交与只读报告
+
+测试及契约提交为 `056506e78de3ee863d62ae8622b0458f9a3c2a21`，候选提交树 `5af6a0fc6ea74fa166324a63a9f58b46df63f9df`。提交前暂存区 9 个文件、提交树 728 个文件的二进制检查均为 0 errors，差异检查通过；此前标准检查中的空暂存区检查不替代这里的实际候选检查。测试以外的修改仅为计划、契约、验证索引/命令和 CHANGELOG。
+
+离线报告 artifact `3ce16443-2731-43c2-bc77-dca5767d7aed` 引用上述产品提交及补强后的原版专项，实际生成 HTML 后以系统 Chrome 核对桌面 1100×900 和手机 390×844。7 项证据、11 项待执行清单、8 项限制、当前计数及新旧 artifact 身份一致，无水平溢出或表单/脚本；首轮 DOM 计数脚本漏选行头 `th`，修正选择器后核对通过，报告内容未改。截图仅内联用于核对，不保存或加入 Git。
+
+浏览器核对完成后才将报告任务登记为 success，完成时间存在且 lease 释放。`report.json` 为 5,616 字节、`report.html` 为 7,623 字节，二者均 0600；均为本仓库 `target/artifacts/<UUID>` 下本机受管产物，不上传正文或日志。旧的六项原版专项保留历史 artifact，并未伪称本片重跑。
+
+本片未监听网络端口。交付核对时 `lsof -nP -iTCP:62639 -sTCP:LISTEN` 无输出、退出 1，准确 Tailscale `100.94.155.109:62639` 仍未开放；此前非 loopback 监听的自动审批拒绝仍须使用者明确授权才能解除。无配置、migration 或 journal 格式变化，未 push、merge 或发布。
