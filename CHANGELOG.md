@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- 修复工作区 Git diff 在 macOS 并发访问 `/dev/fd` 时偶发误显示删除：改用 0700 私有目录中的 0600 内容快照；同时修复固定 FD 覆盖进程启动错误管道的问题，增加脱敏诊断、原始异常与压力回归。正常查询清理私有快照，强制终止或清理失败可能遗留临时文件。
 - 恢复 README 的功能、运行条件和完整使用入口；旧 `~/.local` 快速安装需先卸载再安装到新默认目录，不自动迁移用户数据。
 - README 提供 macOS 用户级快速安装脚本，使用系统 curl 匿名下载/校验公开稳定 release，默认安装至 `~/.codex-view`，并配置 zsh/Bash 登录终端 PATH；提供按清单保护卸载的 `code-view-uninstall`，保留用户历史和原生数据。
 - Bash PATH 使用现有生效的登录配置文件，避免新建 `.bash_profile` 遮蔽 `.bash_login` / `.profile`。
