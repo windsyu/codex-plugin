@@ -430,6 +430,28 @@ impl Store {
                 .callback_queries
                 .contains(&(bot_id, query_digest.to_owned()))
     }
+    /// Read-only ingress preflight across every consumed identity domain. This
+    /// does not change historical journal validation or learn extra identities
+    /// from a conflicting duplicate. The caller must reserve concurrent ingress
+    /// before awaiting this lookup and revalidate authority before its action.
+    pub(crate) fn input_seen(
+        &mut self,
+        bot_id: i64,
+        update_id: i64,
+        key: Option<DeliveryKey>,
+        query_digest: Option<[u8; 32]>,
+    ) -> Result<bool, Failure> {
+        self.verify()?;
+        validate_rejection(bot_id, update_id, key)?;
+        Ok(self.update_seen(bot_id, update_id)
+            || key.is_some_and(|key| self.reply_input_seen(key, update_id))
+            || query_digest.is_some_and(|digest| {
+                self.callback_queries.contains(&(
+                    bot_id,
+                    blake3::Hash::from_bytes(digest).to_hex().to_string(),
+                ))
+            }))
+    }
     fn receipt_count(&self) -> usize {
         self.tasks.len()
             + self.rejected_updates.len()

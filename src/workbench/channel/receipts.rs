@@ -69,6 +69,14 @@ type Reply<T> = oneshot::Sender<Result<T, Failure>>;
 // No Debug: SaveToken contains a credential and callbacks contain raw query IDs.
 enum Operation {
     Load(Reply<Loaded>),
+    InputSeen {
+        bot: i64,
+        update: i64,
+        key: Option<DeliveryKey>,
+        query_digest: Option<[u8; 32]>,
+        reply: Reply<bool>,
+    },
+    #[cfg(test)]
     IsRejected {
         bot: i64,
         update: i64,
@@ -169,9 +177,11 @@ impl Operation {
     fn cancelled(&self) -> bool {
         match self {
             Self::Load(reply) => reply.is_closed(),
-            Self::IsRejected { reply, .. } | Self::CancelInputSeen { reply, .. } => {
+            Self::InputSeen { reply, .. } | Self::CancelInputSeen { reply, .. } => {
                 reply.is_closed()
             }
+            #[cfg(test)]
+            Self::IsRejected { reply, .. } => reply.is_closed(),
             Self::Reject { reply, .. } => reply.is_closed(),
             Self::Admit { reply, .. }
             | Self::AdmitCallback { reply, .. }
@@ -239,6 +249,23 @@ impl Handle {
     pub(crate) async fn load(&self) -> Result<Loaded, Failure> {
         self.call(Operation::Load).await
     }
+    pub(crate) async fn input_seen(
+        &self,
+        bot: i64,
+        update: i64,
+        key: Option<DeliveryKey>,
+        query_digest: Option<[u8; 32]>,
+    ) -> Result<bool, Failure> {
+        self.call(|reply| Operation::InputSeen {
+            bot,
+            update,
+            key,
+            query_digest,
+            reply,
+        })
+        .await
+    }
+    #[cfg(test)]
     pub(crate) async fn is_rejected(
         &self,
         bot: i64,
@@ -456,6 +483,20 @@ fn load(store: &mut Store) -> Result<Loaded, store::Failure> {
 }
 fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
     match operation {
+        Operation::InputSeen {
+            bot,
+            update,
+            key,
+            query_digest,
+            reply,
+        } => {
+            let _ = reply.send(ready(store).and_then(|store| {
+                store
+                    .input_seen(bot, update, key, query_digest)
+                    .map_err(Failure::Store)
+            }));
+        }
+        #[cfg(test)]
         Operation::IsRejected {
             bot,
             update,

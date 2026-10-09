@@ -622,3 +622,190 @@ async fn cancel_input_query_roundtrips_consumed_and_fresh_identities_without_new
         Err(Failure::Stopped)
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn input_seen_worker_roundtrips_all_domains_without_append_or_identity_learning() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let mut worker = Worker::start(path.clone()).unwrap();
+    assert_ne!(
+        worker.thread.as_ref().unwrap().thread().id(),
+        std::thread::current().id()
+    );
+    let mut handle = worker.handle();
+    let active = Uuid::from_u128(1);
+    let interaction = Uuid::from_u128(2);
+    let canceled = Uuid::from_u128(9);
+    handle.admit(key(1), 1, active).await.unwrap();
+    handle
+        .mark_submitting(active, Uuid::from_u128(3))
+        .await
+        .unwrap();
+    handle.admit(key(9), 9, canceled).await.unwrap();
+    handle.reject(101, 20, Some(key(20))).await.unwrap();
+    handle
+        .admit_callback(
+            101,
+            30,
+            "SYNTHETIC_INPUT_SEEN_QUERY".to_owned(),
+            active,
+            interaction,
+        )
+        .await
+        .unwrap();
+    handle
+        .admit_question_reply(key(40), 40, active, interaction)
+        .await
+        .unwrap();
+    handle.cancel_queued(key(50), 50, canceled).await.unwrap();
+    let digest = *blake3::hash(b"SYNTHETIC_INPUT_SEEN_QUERY").as_bytes();
+    let unknown_digest = *blake3::hash(b"SYNTHETIC_UNSEEN_QUERY").as_bytes();
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let expected = Counts {
+        received: 0,
+        submitting: 1,
+        closed: 1,
+    };
+    for reopen in [false, true] {
+        if reopen {
+            shutdown(worker).await;
+            worker = Worker::start(path.clone()).unwrap();
+            handle = worker.handle();
+        }
+        for update in [1, 9, 20, 30, 40, 50] {
+            assert_eq!(handle.input_seen(101, update, None, None).await, Ok(true));
+            assert_eq!(handle.input_seen(102, update, None, None).await, Ok(false));
+        }
+        for message in [1, 9, 20, 40, 50] {
+            assert_eq!(
+                handle.input_seen(101, 100, Some(key(message)), None).await,
+                Ok(true)
+            );
+            assert_eq!(
+                handle
+                    .input_seen(
+                        102,
+                        100,
+                        Some(DeliveryKey {
+                            bot_id: 102,
+                            ..key(message)
+                        }),
+                        None
+                    )
+                    .await,
+                Ok(false)
+            );
+        }
+        assert_eq!(
+            handle.input_seen(101, 100, None, Some(digest)).await,
+            Ok(true)
+        );
+        assert_eq!(
+            handle.input_seen(102, 100, None, Some(digest)).await,
+            Ok(false)
+        );
+        assert_eq!(
+            handle
+                .input_seen(101, 1, Some(key(100)), Some(unknown_digest))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            handle
+                .input_seen(101, 100, Some(key(1)), Some(unknown_digest))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            handle
+                .input_seen(101, 100, Some(key(100)), Some(digest))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            handle
+                .input_seen(101, 100, Some(key(100)), Some(unknown_digest))
+                .await,
+            Ok(false)
+        );
+        for (bot, update, input) in [
+            (0, 1, None),
+            (101, -1, None),
+            (102, 1, Some(key(1))),
+            (101, 1, Some(key(0))),
+            (
+                101,
+                1,
+                Some(DeliveryKey {
+                    chat_id: 0,
+                    ..key(1)
+                }),
+            ),
+        ] {
+            assert_eq!(
+                handle.input_seen(bot, update, input, Some(digest)).await,
+                Err(Failure::Store(store::Failure::InvalidInput))
+            );
+        }
+        assert_eq!(handle.load().await.unwrap().recovered, expected);
+        assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    }
+    shutdown(worker).await;
+    assert_eq!(
+        handle.input_seen(101, 100, None, None).await,
+        Err(Failure::Stopped)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn input_seen_queued_lookup_waits_off_executor_and_dropped_caller_cannot_append() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    assert_ne!(
+        worker.thread.as_ref().unwrap().thread().id(),
+        std::thread::current().id()
+    );
+    let handle = worker.handle();
+    handle.admit(key(1), 1, Uuid::from_u128(1)).await.unwrap();
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let resume = pause(&handle).await;
+    let digest = *blake3::hash(b"SYNTHETIC_DROPPED_INPUT_LOOKUP").as_bytes();
+    let mut lookup = Box::pin(handle.input_seen(101, 1, Some(key(100)), Some(digest)));
+    // Poll the actual public Handle future once, so the OS-thread request is
+    // queued before dropping its response receiver. A blocked worker cannot
+    // answer; the sole Tokio executor nevertheless continues to run.
+    let pending = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(lookup.as_mut(), cx).is_pending())
+    })
+    .await;
+    drop(lookup);
+    let heartbeat = tokio::spawn(async {
+        tokio::task::yield_now().await;
+        7
+    });
+    let heartbeat = tokio::time::timeout(Duration::from_secs(1), heartbeat).await;
+    // Release before assertions, so a failed assertion never strands the worker.
+    resume.send(()).unwrap();
+    assert!(pending, "input lookup must pass through the paused worker");
+    assert!(matches!(heartbeat, Ok(Ok(7))));
+    // This load is queued after the dropped request and serves as a drain
+    // barrier. Neither the dropped query nor later reads may learn its aliases.
+    assert_eq!(
+        handle.load().await.unwrap().recovered,
+        Counts {
+            received: 1,
+            submitting: 0,
+            closed: 0
+        }
+    );
+    assert_eq!(
+        handle
+            .input_seen(101, 100, Some(key(100)), Some(digest))
+            .await,
+        Ok(false)
+    );
+    assert_eq!(handle.input_seen(101, 1, None, None).await, Ok(true));
+    assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    shutdown(worker).await;
+}
