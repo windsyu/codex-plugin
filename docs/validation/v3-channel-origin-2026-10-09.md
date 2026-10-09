@@ -64,7 +64,7 @@ cargo run --locked --example v3-native-channel-probe -- --report <登记产物�
 
 可用 `WORKBENCH_TEST_CODEX` 显式选择自行安装的官方 CLI；不把维护者机器路径作为贡献者前提。专项不会升级 CLI。报告使用 `0600`、禁止覆盖，只写版本、研究 commit、七项布尔检查和未验范围，不写正文、会话 UUID、路径或凭证。
 
-[验收页](../../examples/v3-channel-acceptance.rs)严格读取该安全汇总，仅提供 `/` 和 `/api/report`，无输入或控制接口；正文 HTML 转义、禁止脚本、响应不缓存。默认监听 loopback，只有明确传入本机 Tailscale 地址才远程可达，不监听 `0.0.0.0` 或修改 Tailscale 设置。
+[验收页](../../examples/v3-channel-acceptance.rs)严格读取安全汇总，提供 `/` 和 `/api/report`，可选 `/api/boundaries`、`/api/attachment`；没有输入或控制接口。正文 HTML 转义、禁止脚本、响应不缓存。默认监听 loopback，只有明确传入本机 Tailscale 地址才远程可达，不监听 `0.0.0.0` 或修改 Tailscale 设置。
 
 ```sh
 cargo run --locked --example v3-channel-acceptance -- \
@@ -74,14 +74,72 @@ cargo run --locked --example v3-channel-acceptance -- \
 
 这份汇总不含私人资料，Tailnet 中允许连接该机器的设备可以阅读；不是带会话控制权的设备配对页面。用户手机的 Tailnet ACL、网络和实际可达性须单列验收，不能用本机 HTTP 成功代替。
 
-## 5. 未验与后续
+## 5. P0b 后续原生边界专项
 
-- 原生审批、追问和多客户端响应竞速。
-- 实际原生本机/渠道交错 steer、草稿、picker；当前负向来源门覆盖不替代原生交互实测。
-- ACK 丢失、提交不确定、旧操作、断线、崩溃与重启恢复。
+P0a 的 462 项 Rust 全回归及七项协议探针统计保持 §3 原记录；以下是**另一次定向运行**，不叠加进 462。受管任务 `target/artifacts/edb678e0-bb3e-48b3-bbcb-48b3094ca084` 的 `metadata.json` 记录 `result: success`，其 `report.json` 为 `schemaVersion: 1`、`kind: native-semantic-boundaries`，列出十项 `passed`。探针使用安装版 `codex-cli 0.156.1` 与合成模型；`sourceCommit` 为只读研究源码 `2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4`，不能证明安装版二进制对应这个提交。报告只含汇总检查，不含消息正文、会话 ID 或凭证。复现时另用新建的受管任务目录，报告路径必须尚不存在：
+
+```sh
+cargo run --locked --example v3-native-channel-probe -- \
+  --boundaries --boundaries-report <新登记产物目录>/report.json
+```
+
+| P0b 检查 | 实际证据及边界 |
+| --- | --- |
+| `commandApprovalAllow`、`commandApprovalDeny` | 两个订阅原生协议的客户端收到同一个命令审批请求；选定允许或拒绝后，原生命令执行结果分别符合决定。候选来源门仍能为允许和拒绝两轮确认来源 |
+| `resolvedStaleDenyCannotReverseAllow`、`resolvedStaleAllowCannotReverseDeny` | 另一客户端收到 `serverRequest/resolved` 后才提交相反的旧响应，未推翻已确认结果；此检查**不是**两个响应同时竞争的 race 测试 |
+| `planQuestionRoundTrip` | 原生 plan mode 的阻塞提问按准确 request ID 回答，解决事件发生在 Turn 完成前；不代表 Telegram 已可远程回答 |
+| `queueWaitsBehindOtherClientTurn` | 另一客户端的模型响应被合成上游暂留时，渠道候选输入留在原生队列；前一 Turn 完成后，自己的 UserMessage 生命周期才开始。这证明隔离候选的序列，不证明当前生产 `-c` 启动路径可安全附加已有 loaded Thread |
+| `otherClientSteerWithheld`、`lateSteerAfterFinalWithheld` | 另一客户端输入混入同一 Turn，来源门以 `MixedInput` 暂扣最终回复；后一项在模型 final item 完成后、原生 Turn 完成前插话，仍被暂扣 |
+| `unreadAckNoReplayAndGapWithheld` | 提交连接发出一次请求后**故意不读取其 ACK**并关闭；主观察连接持续运行，原生历史中仅有一条匹配 UserMessage。没有自动重发，人工标记的捕获缺口使回复暂扣。这不是实际网络丢包、服务崩溃或恢复试验 |
+| `semanticQueuePreservesNativeDraft` | 原生 TUI 的未发送文本草稿在语义队列任务完成后仍可见；该任务未向 PTY 注入任务文本。未验证 picker 状态或重启后的草稿 |
+
+新 [只读验收页](../../examples/v3-channel-acceptance.rs)可选加载此报告，在旧首片报告之外展示 P0b 当前证据；`/api/boundaries` 只在提供 `--boundaries-report` 时开放。本次 P0b 元数据和报告证明探针运行成功，尚不能代替用户手机跨设备查看或真实渠道验收。
+
+## 6. P0c 严格已有线程附加与基础模块
+
+最终源码的受管实测为 `target/artifacts/8eb25fcb-dd49-4a77-a897-0044d656eb5d`，退出 0、元数据 success，安全报告为 `kind: native-attachment-boundaries`、五项 passed。原版 `0.156.1` TUI 从启动时经过 [私有 relay](../../src/workbench/channel/native.rs)，独立控制连接只 initialize 和提交/回答请求，没有调用 resume 或增加原生队列。源流来自 TUI 自己已经建立的订阅，不依赖 loaded 列表或历史正文补建订阅。
+
+| P0c 检查 | 实际证据 |
+| --- | --- |
+| `originViaTuiSubscriptionWithoutControlResume` | TUI 流含准确 Turn started、UserMessage started/completed/client ID、final_answer 与 Turn completed；来源门正常释放合成最终文本 |
+| `approvalViaTuiSubscriptionWithoutControlResume` | 未订阅的控制连接按 TUI 捕获的原生命令请求回答；原生命令执行退出 0，输出含准确合成字面量，随后正常终态。不是文件审批或同时竞答证据 |
+| `questionViaTuiSubscriptionWithoutControlResume` | 未订阅的控制连接回答准确阻塞 Plan question；TUI 流见 resolved 与正常终态 |
+| `captureConsumerLossDoesNotBlockTuiAndInvalidatesProof` | 实际丢弃观察消费者产生缺口；原生任务继续完成，旧来源证明保持失效，没有借历史重建外发资格 |
+| `unloadedTurnStartRejectsWithoutColdLoadOrQueue` | TUI 断开、目标实际卸载后，turn/start 返回 thread-not-found；loaded 仍无目标，原生队列仍空 |
+
+relay 的 14 项回归覆盖原文、二进制转发并标缺口、字节预算释放、慢/失效消费者、独占 TUI 与新连接 epoch、退出清理、负向路径、心跳、关闭握手、双向大帧背压、epoch 快照交错及关闭后迟到 final。独立复核发现的公开 watch 锁、重复 Pong、过早取消关闭握手、串行双向写等待、epoch 混读和关闭资格窗口均修正。旧单循环在确定背压用例中超时，最终双向驱动通过；不能把默认缓冲下未复现的早期用例说成已复现。
+
+观察状态的 closed 表示资格立即撤销，底层握手可能继续有界收尾；它不是“新 TUI 已可接入”的 ACK。消费者在 await 后及外发前重新检查 closed/gap/epoch，不能只检查等待开始时状态。
+
+[Telegram HTTP client](../../src/workbench/channel/telegram/client.rs)十项合成测试覆盖不重定向/不自动 retry、未读确认、超时/5xx/错 chat 的 unknown、1 MiB 响应限制、纯文本、Unicode、webhook 拒绝接管及 callback ACK。[收件存储](../../src/workbench/channel/store.rs)十四项测试包含独立子进程在实际 fsync 后退出 73、不执行析构，再开存储仍为 Submitting、重复消息不提交、日志不重放；也覆盖损坏、身份变化、权限、并发锁、容量和追加失败。测试数包含一个普通执行时惰性的子进程 helper。Closed 仅表示收件处理关闭，不代表原生完成或 Telegram 送达。未验证断电耐久性或同 UID 离线恶意完整记录截尾。
+
+| 最终集成检查 | 结果 |
+| --- | --- |
+| `node scripts/dev.mjs check --ci` | `target/artifacts/a5388850-2136-4a2b-a4e8-da632b0e82b5` success；工具 80、前端 234、Rust 505 通过，0 失败；Rust 56 ignored 未计作通过 |
+| fmt、Clippy all-targets、类型与构建 | 通过；两个 binary debug/release，Web 先构建；无新增依赖或锁文件变化 |
+| 最终 relay / client / store / 验收页测试 | 14 / 10 / 14 / 7，已经计入 Rust 505，不额外叠加 |
+| P0c 安装版最终复跑 | 最终关闭资格与消费端复查修正后五项通过；未使用真实模型或 Telegram |
+| 最终只读远程页面 | 本机读取 `/api/attachment` 为 200、no-store，POST 为 405；Chrome 390×844 视口显示 22 项通过、0 失败、scrollWidth 390，无水平溢出。未把本机和模拟视口当作用户手机实际验收 |
+
+复现与三份汇总一起展示：
+
+```sh
+cargo run --locked --example v3-native-channel-probe -- \
+  --attachment-boundaries --attachment-report <新登记产物目录>/report.json
+cargo run --locked --example v3-channel-acceptance -- \
+  --report <P0a报告> --boundaries-report <P0b报告> \
+  --attachment-report <P0c报告> --listen <本机 Tailscale IPv4> --port 0
+```
+
+基础存储有自己的 receipt 格式版本，但尚未接入生产配置；旧数据库、配置 schema、默认启动、`/v1` 和 migration 不变。
+
+## 7. 未验与后续
+
+- 审批两个客户端同时响应的 race、真实 Telegram 审批/追问，以及未支持交互的用户提示。
+- 真正的网络 ACK 丢失、提交不确定性恢复、旧操作、断线、崩溃与重启；picker 状态和重启后草稿。
 - 生产 Run 的启动/退出、认证与 profile、设备配对、绑定撤销、异步发送及持久化。
 - 真实 Telegram 和模型、其他 CLI 版本以及 Linux/Windows。
 
 渠道沿用同一 Thread 的上下文；模型为渠道生成的回复可能引用本机历史。来源门阻止自动转发本机发起的 Turn，不能承诺模型回答不会引用共享历史。
 
-首片自动化结果不代表完整第一阶段通过。下一片先完成剩余原生边界及 P1 生产契约，按明确支持矩阵交付真实文本闭环和必要交互；跨会话管理继续独立确认。
+P0a/P0b/P0c 的自动化结果不代表完整第一阶段通过。P0b 的 queue/resume 不是生产附加方法；P0c 的 relay/turn-start 候选已有实际证据，但目前生产仍只以普通 CLI 的 `-c` 覆盖启动。下一步交付 P1 的显式运行方式、本机配置绑定撤销、持久收件和异步文本闭环，再补齐 P2 的生产必要交互与故障矩阵；跨会话管理继续独立确认。

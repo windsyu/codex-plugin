@@ -306,6 +306,29 @@ impl Directory {
         }
         Ok(bytes)
     }
+    /// Open an existing private file for append without creating or truncating it.
+    /// The caller pins its identity and owns the single-writer protocol.
+    pub(crate) fn append(&self, entry: &str) -> io::Result<File> {
+        self.verify_location()?;
+        let c = name(entry)?;
+        let fd = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                c.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_APPEND
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        owned(&file, false)?;
+        Ok(file)
+    }
     pub fn atomic(&self, entry: &str, bytes: &[u8]) -> io::Result<()> {
         self.atomic_when(entry, bytes, || true)
     }
