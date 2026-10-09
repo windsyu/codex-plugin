@@ -102,6 +102,17 @@ enum Operation {
         interaction: Uuid,
         reply: Reply<Admission>,
     },
+    CancelInputSeen {
+        key: DeliveryKey,
+        update_id: i64,
+        reply: Reply<bool>,
+    },
+    CancelQueued {
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+        reply: Reply<Admission>,
+    },
     Submitting {
         task: Uuid,
         client: Uuid,
@@ -139,6 +150,13 @@ enum Operation {
         reply: Reply<Admission>,
     },
     #[cfg(test)]
+    PauseAfterCancel {
+        task: Uuid,
+        entered: oneshot::Sender<()>,
+        resume: Receiver<()>,
+        reply: Reply<Admission>,
+    },
+    #[cfg(test)]
     PauseAfterIntent {
         task: Uuid,
         client: Uuid,
@@ -151,11 +169,14 @@ impl Operation {
     fn cancelled(&self) -> bool {
         match self {
             Self::Load(reply) => reply.is_closed(),
-            Self::IsRejected { reply, .. } => reply.is_closed(),
+            Self::IsRejected { reply, .. } | Self::CancelInputSeen { reply, .. } => {
+                reply.is_closed()
+            }
             Self::Reject { reply, .. } => reply.is_closed(),
             Self::Admit { reply, .. }
             | Self::AdmitCallback { reply, .. }
-            | Self::AdmitQuestionReply { reply, .. } => reply.is_closed(),
+            | Self::AdmitQuestionReply { reply, .. }
+            | Self::CancelQueued { reply, .. } => reply.is_closed(),
             Self::Submitting { reply, .. }
             | Self::Close { reply, .. }
             | Self::SaveToken { reply, .. }
@@ -169,6 +190,8 @@ impl Operation {
             Self::PauseAfterCallback { reply, .. } => reply.is_closed(),
             #[cfg(test)]
             Self::PauseAfterQuestionReply { reply, .. } => reply.is_closed(),
+            #[cfg(test)]
+            Self::PauseAfterCancel { reply, .. } => reply.is_closed(),
         }
     }
 }
@@ -292,6 +315,32 @@ impl Handle {
             update_id,
             task,
             interaction,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn cancel_input_seen(
+        &self,
+        key: DeliveryKey,
+        update_id: i64,
+    ) -> Result<bool, Failure> {
+        self.call(|reply| Operation::CancelInputSeen {
+            key,
+            update_id,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn cancel_queued(
+        &self,
+        key: DeliveryKey,
+        update_id: i64,
+        task: Uuid,
+    ) -> Result<Admission, Failure> {
+        self.call(|reply| Operation::CancelQueued {
+            key,
+            update_id,
+            task,
             reply,
         })
         .await
@@ -470,6 +519,29 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
                     .map_err(Failure::Store)
             }));
         }
+        Operation::CancelInputSeen {
+            key,
+            update_id,
+            reply,
+        } => {
+            let _ = reply.send(ready(store).and_then(|store| {
+                store
+                    .cancel_input_seen(key, update_id)
+                    .map_err(Failure::Store)
+            }));
+        }
+        Operation::CancelQueued {
+            key,
+            update_id,
+            task,
+            reply,
+        } => {
+            let _ = reply.send(ready(store).and_then(|store| {
+                store
+                    .cancel_queued(key, update_id, task)
+                    .map_err(Failure::Store)
+            }));
+        }
         Operation::Submitting {
             task,
             client,
@@ -535,6 +607,30 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
                         20,
                         task,
                         interaction,
+                    )
+                    .map_err(Failure::Store)
+            });
+            let _ = entered.send(());
+            let _ = resume.recv();
+            let _ = reply.send(result);
+        }
+        #[cfg(test)]
+        Operation::PauseAfterCancel {
+            task,
+            entered,
+            resume,
+            reply,
+        } => {
+            let result = ready(store).and_then(|store| {
+                store
+                    .cancel_queued(
+                        DeliveryKey {
+                            bot_id: 101,
+                            chat_id: 202,
+                            message_id: 20,
+                        },
+                        20,
+                        task,
                     )
                     .map_err(Failure::Store)
             });

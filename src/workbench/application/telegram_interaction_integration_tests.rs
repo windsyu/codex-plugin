@@ -48,7 +48,7 @@ fn interaction_receipts(wire: &InteractionWire) -> Vec<Value> {
                 blake3::hash(record.as_bytes()).to_hex().to_string()
             );
             if row["record"]["event"]["kind"] == "question_reply_received" {
-                assert_eq!(row["record"]["version"], 4);
+                assert_eq!(row["record"]["version"], 5);
             }
             row["record"]["event"].clone()
         })

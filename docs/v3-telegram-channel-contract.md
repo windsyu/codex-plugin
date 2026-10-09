@@ -72,7 +72,7 @@ actor 自己串行处理有界任务队列，等待目标可提交条件。忙�
 
 渠道收件独立于原生 durable history。最小收件存储仅保留 `bot ID + chat ID + message ID`、update ID、随机 task/client ID、阶段和格式版本；不保留输入正文、reasoning、工具结果或 token。Telegram 的重复 update 或同一消息不产生第二次实际提交，不依靠文本相同或 wall clock 去重。
 
-receipt journal 新写版本为 v4，读取器接受有序的 v1/v2/v3/v4 混合行；v1 不接受 Rejected，v1/v2 不接受 CallbackReceived，v1/v2/v3 不接受 QuestionReplyReceived。旧读取器不兼容 v4；历史合法收件不因新增交互索引被拒绝，不重写旧文件。接收可执行消息时，先保存收件并实际 fsync，再允许进入渠道队列；原生写入之前保存提交意图并 fsync。拒绝、未激活、旧授权窗口、非任务或未支持 callback 的 update 也须先持久保存拒绝记录并 fsync，才能推进 polling offset。拒绝记录包含 bot/update 身份及能够安全提取时的 message key，参与去重；任何旧窗口消息都不能在随后绑定变化时重新解释为可执行任务。旧请求返回的 batch 按发起 polling 时的授权窗口核对，不借用返回时的新绑定。
+receipt journal 新写版本为 v5，读取器接受有序的 v1/v2/v3/v4/v5 混合行；v1 不接受 Rejected，v1/v2 不接受 CallbackReceived，v1/v2/v3 不接受 QuestionReplyReceived，v1–v4 不接受 QueuedCanceled。旧读取器不兼容 v5；历史合法收件不因新增交互索引被拒绝，不重写旧文件。接收可执行消息时，先保存收件并实际 fsync，再允许进入渠道队列；原生写入之前保存提交意图并 fsync。拒绝、未激活、旧授权窗口、非任务或未支持 callback 的 update 也须先持久保存拒绝记录并 fsync，才能推进 polling offset。拒绝记录包含 bot/update 身份及能够安全提取时的 message key，参与去重；任何旧窗口消息都不能在随后绑定变化时重新解释为可执行任务。旧请求返回的 batch 按发起 polling 时的授权窗口核对，不借用返回时的新绑定。
 
 有效 callback 保存 `bot ID + update ID + query ID 的 BLAKE3 摘要 + task UUID + interaction UUID`，在实际 fsync 之后才允许更新问题选择或尝试原生回答。原始 query ID、按钮 reference、动作、问题/命令/路径正文及原生 RPC ID 不入 journal。bot/update 与 bot/query 摘要分别去重，不把提示消息 ID 当作原始任务 message key。任务须仍处于同 bot 的 Submitting；callback 收件不代表 native answer 已写入或被采纳。重启仅保留去重与任务阶段计数，不恢复按钮、问题选择或回答。
 
@@ -85,16 +85,17 @@ receipt journal 新写版本为 v4，读取器接受有序的 v1/v2/v3/v4 混合
 | Submitting | 已持久登记提交意图，原生可能已收到 | 保留不确定，禁止自动重发 |
 | CallbackReceived（v3） | 已持久接收该 callback 身份 | 不重放原生回答，不恢复交互授权 |
 | QuestionReplyReceived（v4） | 已持久接收文字回答的消息身份 | 不保存正文，不重放回答或恢复问题授权 |
+| QueuedCanceled（v5） | 取消输入身份已保存，目标 Received 在同一行原子关闭 | 不保存取消引用，不重放命令，不恢复取消资格 |
 | Closed | 收件处理已关闭，包括放弃尚未提交的消息 | 不代表原生成功或 Telegram 送达，不再重放 |
 | 原生确认 / 完成 | 由当前连续流取得来源与原生终态证据 | 缺口后不能用历史补齐旧外发资格 |
 | Telegram confirmed | bot API 接受某条发送，返回目标 chat/message ID | 不代表已读，也不代表原生整轮完成 |
 | Telegram unknown | 请求可能已送达，但无法确认 | 不自动重发；明确显示不确定 |
 
-恢复读取只用于去重和展示已有收件状态，不是 native 命令恢复器。journal 有格式、连续 sequence、摘要和 4 MiB 上限；Received task、Rejected update、CallbackReceived 和 QuestionReplyReceived 身份共享总数 4096 的容量，不以独立计数绕过上限。损坏、尾部不完整、身份变化、写入/fsync 失败或达到上限时停止渠道提交，不能清空去重集合来继续。原生 CLI、模型和 PTY 转发继续运行。旧数据库不迁移，不把新收件意图扩展为旧 Session Kernel、ThreadOwner 或 command ledger/CAS。
+恢复读取只用于去重和展示已有收件状态，不是 native 命令恢复器。journal 有格式、连续 sequence、摘要和 4 MiB 上限；Received task、Rejected update、CallbackReceived、QuestionReplyReceived 和 QueuedCanceled 身份共享总数 4096 的容量，不以独立计数绕过上限。损坏、尾部不完整、身份变化、写入/fsync 失败或达到上限时停止渠道提交，不能清空去重集合来继续。原生 CLI、模型和 PTY 转发继续运行。旧数据库不迁移，不把新收件意图扩展为旧 Session Kernel、ThreadOwner 或 command ledger/CAS。
 
 ## 5. 输出与必要交互
 
-P1 只发送自己的最终文本；P2 本地源码已接入显式授权后的普通命令审批、有完整范围的文件审批及有界非秘密选项/文字问题，整体未验收。下表列明已接入边界和剩余证明；独立排队取消、精确整轮取消与真实 Telegram 验收未完成。不外发 reasoning、工具输出、命令 stdout/stderr、diff、历史快照、cwd、终端或全部本机消息。正文按纯文本发送，不设置 `parse_mode`，关闭链接预览；拆分按 UTF-16 限界，不截断代理对，超限/部分发送须明确表达。
+P1 只发送自己的最终文本；P2 本地源码已接入显式授权后的普通命令审批、有完整范围的文件审批及有界非秘密选项/文字问题，整体未验收。下表列明已接入边界和剩余证明；独立排队取消已接入本地源码，精确整轮取消与真实 Telegram 验收未完成。不外发 reasoning、工具输出、命令 stdout/stderr、diff、历史快照、cwd、终端或全部本机消息。正文按纯文本发送，不设置 `parse_mode`，关闭链接预览；拆分按 UTF-16 限界，不截断代理对，超限/部分发送须明确表达。
 
 发送之前再次检查 binding/Run/transport generation 和任务来源资格。bot API client 禁止 redirect 和自动 retry，响应限制为 1 MiB。明确 API 拒绝可表达 retry-after；5xx、超时、丢 ACK、畸形成功响应或错误目标 chat 视为 unknown，不自动重复发送。接收、原生完成和渠道发送确认分别表达。
 
@@ -104,7 +105,7 @@ P1 只发送自己的最终文本；P2 本地源码已接入显式授权后的�
 | 本次渠道任务的 file approval | 展示完整有界路径与操作，明确允许/拒绝；安装版单文件 Add 允许/拒绝/竞争探针及生产拒绝链路通过 | 多文件、删除、更新和 rename 的生产操作链与真实 Telegram |
 | 支持 schema 的 `requestUserInput` | 有界非秘密问题、单题提示、选项及显式 Reply 文字回答；先逐题收件再一次写完整答案，合成过期/重复/本机退休负例通过 | 原版 CLI 生产多题/Other 路径的本片专项结果见新增记录；真实 Telegram 与人的同时输入、无选项问题的实际原生生产来源仍须验证 |
 | 未支持 approval、MCP 或原生设置/picker | 明确提示回本机完成；不自动默许 | 不外发无关请求正文，不代答客户端独占流程 |
-| 取消 | 本机撤销清除渠道排队；独立排队取消未接入，已提交任务的整轮取消尚无可证明安全的公共原生路径 | 精确 native Turn ID 的前置检查不足以避免原生处理中的 Turn 切换；此能力保持未完成，不以撤销输出冒充已取消 |
+| 取消 | 已确认等待提示中的 `/cancel <reference>` 只取消尚未取得提交权的准确任务；本机撤销清除渠道排队 | 提交权已取得时拒绝取消；已提交任务的精确整轮取消保持未完成，不以撤销输出冒充已取消 |
 
 callback 数据只携带有界 opaque reference。actor 必须核对绑定身份、bot、原始私聊消息、generation、task、native request、期限和一次性消费；callback ACK 只停止 Telegram spinner，不等于执行授权成功。原生 `serverRequest/resolved` 使旧按钮失效。P0c 已验证独立连接回答命令审批和阻塞 Plan 问题；[P2 原生探针](validation/v3-channel-interactions-2026-10-09.md)补证单文件 Add 允许/拒绝/竞争及问题负例。[生产接入记录](validation/v3-channel-callbacks-2026-10-09.md)补证命令允许与单文件 Add 拒绝；[文字回答记录](validation/v3-channel-question-replies-2026-10-09.md)补证原版 CLI 的混合多题操作链及其工具配置/声明限制。以上使用合成 Bot/model；真实 Telegram、其他文件范围与真实模型仍须实测，不能因观察到请求便宣称所有请求可回答。
 
@@ -140,7 +141,19 @@ P2 本机激活时另行明确确认 `interactiveConsent`，默认 false，不�
 
 控制 actor 先等待 WebSocket 就绪，再同步复验授权、原子捕获水位和请求状态，随即 `start_send`，两者之间没有 await。`start_send` 接纳是不可撤回的尝试边界；它可能只把字节放入传输缓冲区。该边界之前的撤销或本机回答阻止新 envelope，之后无法保证已接纳的字节不会在撤销后 flush。超时或传输失败归为 Unknown，不自动重发；不能宣称撤销能够收回在途原生回答。
 
-### 5.4 已提交 Turn 的取消缺口
+### 5.4 独立排队取消
+
+目标忙碌或前面还有渠道任务时，后台发送静态等待提示及随机 32 位小写十六进制引用。前一任务已原生完成、但执行器仍等待最终发送确认或收件收尾时，新任务也属于等待范围；内存占用标记保留到该执行器收尾，撤销不会清除尚未结束的占用，也不因此恢复旧授权。仅 bot API 确认准确私聊消息后才激活引用。绑定使用者在原私聊直接发送准确 `/cancel <reference>`；转发、编辑、via-bot、Reply、外部引用、错误身份、旧 generation、超期或未确认引用不能授权取消。Reply 仍按当前问题处理，文字中的命令不改变答案含义。取消不要求远程审批授权，不读取或回传任务正文。
+
+取消与提交在同一内存锁中竞争：这两条路径只能从 Open 取得 CancelReserved 或 SubmitClaimed，普通结束另有 Finished 状态。提交先取得权时，在提交意图 fsync 之前就关闭引用；取消先取得权时，移除排队正文，已弹出的等待 actor 也不得提交。准确 task 的 QueuedCanceled 将输入去重与 Received→Closed 合并为一次 append+实际 fsync，成功后才发送静态取消确认。未知、失败或丢失返回都不恢复 Open，不谎称取消成功；取消路径自己拥有关闭权，执行器不得另写 Closed。执行器按每个任务的明确收件结果决定是否关闭，不用全局最近任务状态判断不确定性。
+
+持久去重查询只用于防止已消费输入夺走另一个引用；查询之后重新验证完整资格，再在锁内保留当前输入身份。最多 17 个在途身份；撤销清除权限和待发内容，但在途去重身份保留到结果返回，丢失调用者的身份保守保留至服务结束。引用与提示/确认 outbox 各最多 17 项，由一个受管发送 worker 处理，最多一个 HTTP 在途请求；polling 和 native actor 不等待该发送。确定未尝试的提示可在短暂观察积压解除后重新提供，已尝试但未知的发送不自动重试。提示失效及服务重启不恢复取消权。
+
+QueuedCanceled 仅保存取消输入的 bot/chat/message/update 身份和准确 task UUID；目标仍须属于相同 bot/chat 的 Received。与全部其他收件类型共用去重及容量；恢复只统计 Closed 和去重，不恢复正文或引用。此路径不发送原生 interrupt，不取消已提交的 Turn。安装版与并发验证见[排队取消记录](validation/v3-channel-queue-cancel-2026-10-09.md)，真实 Telegram 仍待验收。
+
+<a id="54-已提交-turn-的取消缺口"></a>
+
+### 5.5 已提交 Turn 的取消缺口
 
 固定源码的 [turn/interrupt handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/request_processors/turn_processor.rs#L1610)先检查 Turn ID，再异步记录请求并提交不带 Turn ID 的 Interrupt。检查之后发生本机 Turn 切换时，不能证明不会中断新任务。approval 的 `cancel` 也不是安全替代：[approval response](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/bespoke_event_handling.rs#L1926)经异步路径转换为 Abort，[core handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/session/handlers.rs#L200)中断当前任务，未用该审批的 Turn ID 限定目标。
 

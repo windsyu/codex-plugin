@@ -26,6 +26,7 @@ use crate::workbench::launch::Submission;
 const QUEUE_LIMIT: usize = 16;
 const TASK_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const OFFSET_LIFETIME: Duration = Duration::from_secs(6 * 24 * 60 * 60);
+mod cancellations;
 mod interactions;
 
 #[derive(Clone, Copy, Serialize)]
@@ -64,6 +65,7 @@ struct Job {
     client: Arc<Client>,
     text: String,
     received: Instant,
+    dispatch: Arc<cancellations::Dispatch>,
 }
 struct Inner {
     binding: Binding,
@@ -72,6 +74,10 @@ struct Inner {
     configuring: bool,
     sessions: BTreeMap<Uuid, session::Handle>,
     queue: VecDeque<Job>,
+    executing: Option<Uuid>,
+    cancel_offers: BTreeMap<Uuid, Arc<cancellations::Offer>>,
+    cancel_outbox: VecDeque<cancellations::Outbound>,
+    cancel_pending: BTreeMap<Uuid, (DeliveryKey, i64)>,
     interactions: BTreeMap<Uuid, interactions::Pending>,
     active_interaction: Option<(Uuid, ActiveBinding, session::InteractionHandle)>,
     last_task: Option<TaskView>,
@@ -80,9 +86,16 @@ struct Inner {
     stopped: bool,
 }
 impl Inner {
+    fn clear_queue(&mut self) {
+        self.queue.clear();
+        self.cancel_offers.clear();
+        self.cancel_outbox.clear();
+        // In-flight dedup reservations survive revocation; they grant no
+        // authority and remain bounded until their durable result is known.
+    }
     fn revoke(&mut self) {
         self.binding.revoke();
-        self.queue.clear();
+        self.clear_queue();
         self.interactions.clear();
         self.active_interaction = None;
     }
@@ -92,6 +105,7 @@ struct Core {
     worker: Mutex<Option<Worker>>,
     root: PathBuf,
     changed: Notify,
+    cancel_changed: Notify,
     configuring: tokio::sync::Mutex<()>,
     #[cfg(all(test, target_os = "macos"))]
     test_api: Mutex<Option<std::net::SocketAddr>>,
@@ -113,6 +127,10 @@ impl Service {
                     configuring: false,
                     sessions: BTreeMap::new(),
                     queue: VecDeque::new(),
+                    executing: None,
+                    cancel_offers: BTreeMap::new(),
+                    cancel_outbox: VecDeque::new(),
+                    cancel_pending: BTreeMap::new(),
                     interactions: BTreeMap::new(),
                     active_interaction: None,
                     last_task: None,
@@ -127,6 +145,7 @@ impl Service {
                 worker: Mutex::new(None),
                 root,
                 changed: Notify::new(),
+                cancel_changed: Notify::new(),
                 configuring: tokio::sync::Mutex::new(()),
                 #[cfg(all(test, target_os = "macos"))]
                 test_api: Mutex::new(None),
@@ -145,6 +164,7 @@ impl Service {
         if tasks.is_empty() {
             tasks.push(tokio::spawn(poll(self.core.clone())));
             tasks.push(tokio::spawn(execute(self.core.clone())));
+            tasks.push(tokio::spawn(cancellations::send_loop(self.core.clone())));
         }
     }
     pub(crate) fn register(&self, session: session::Handle) {
@@ -165,7 +185,7 @@ impl Service {
             inner
                 .binding
                 .invalidate(active.generation, Some(active.target));
-            inner.queue.clear();
+            inner.clear_queue();
             inner.failure = Some("channel_target_stopped");
         }
         drop(inner);
@@ -187,7 +207,7 @@ impl Service {
                 inner
                     .binding
                     .invalidate(active.generation, Some(active.target));
-                inner.queue.clear();
+                inner.clear_queue();
                 inner.failure = Some("channel_target_unavailable");
                 self.core.changed.notify_waiters();
             }
@@ -288,7 +308,7 @@ impl Service {
             .bot_id
             .filter(|_| inner.client.is_some() && !inner.configuring)
             .ok_or("channel_bot_unconfigured")?;
-        inner.queue.clear();
+        inner.clear_queue();
         let code = inner
             .binding
             .begin_pair(BotIdentity { id: bot_id }, Instant::now())
@@ -325,7 +345,7 @@ impl Service {
             .binding
             .confirm(candidate, target, interactive_consent, Instant::now())
             .map_err(|_| "channel_candidate_changed")?;
-        inner.queue.clear();
+        inner.clear_queue();
         inner.failure = None;
         drop(inner);
         self.core.changed.notify_waiters();
@@ -429,6 +449,9 @@ impl Core {
         reason: Option<&'static str>,
     ) {
         let mut inner = self.inner.lock().unwrap();
+        if !job.dispatch.actor_updates() {
+            return;
+        }
         inner.last_task = Some(TaskView {
             id: job.id,
             phase,
@@ -574,6 +597,9 @@ async fn process_update(
         return Err(());
     };
     let key = private_message_key(bot, update);
+    if cancellations::pending(core, bot, update) {
+        return Ok(());
+    }
     let writer = core.writer().map_err(|code| {
         core.failed(code);
     })?;
@@ -584,6 +610,9 @@ async fn process_update(
             core.failed(error.code());
             return Err(());
         }
+    }
+    if cancellations::pending(core, bot, update) {
+        return Ok(());
     }
     if update.get("callback_query").is_some() {
         return interactions::callback(core, client, bot, generation, update, &writer).await;
@@ -596,6 +625,12 @@ async fn process_update(
         // Replies are never reinterpreted as new tasks, even after the original
         // interaction has retired or the metadata fails authorization.
         return interactions::question_reply(core, client, bot, generation, update, &writer).await;
+    }
+    if update["message"]["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with("/cancel"))
+    {
+        return cancellations::cancel(core, bot, generation, update, &writer).await;
     }
     // Classify under the current authorization, then release the lock before
     // fsync. Pairing candidates are published only after their input is durably
@@ -701,19 +736,28 @@ async fn process_update(
             inner.failure = Some("channel_queue_full");
             false
         } else {
-            inner.queue.push_back(Job {
+            let job = Job {
                 id: task,
                 active,
                 session: source,
                 client: client.clone(),
                 text,
                 received: Instant::now(),
-            });
+                dispatch: cancellations::Dispatch::new(),
+            };
+            if inner.executing.is_some()
+                || !inner.queue.is_empty()
+                || job.session.ready(active.target) != Ok(true)
+            {
+                cancellations::request_locked(&mut inner, &job);
+            }
+            inner.queue.push_back(job);
             true
         }
     };
     if queued {
         core.changed.notify_waiters();
+        core.cancel_changed.notify_waiters();
     } else if let Err(error) = writer.close(task).await {
         core.failed(error.code());
         return Err(());
@@ -744,32 +788,42 @@ async fn execute(core: Arc<Core>) {
             if inner.stopped {
                 return;
             }
-            inner.queue.pop_front()
+            let job = inner.queue.pop_front();
+            inner.executing = job.as_ref().map(|job| job.id);
+            job
         };
         let Some(job) = job else {
             notified.await;
             continue;
         };
-        execute_job(&core, &job).await;
-        // Closing a receipt is not proof of native execution or delivery.
-        let uncertain = core
-            .inner
-            .lock()
-            .unwrap()
-            .last_task
-            .is_some_and(|task| task.id == job.id && task.phase == "uncertain");
-        if !uncertain
+        let end = execute_job(&core, &job).await;
+        // Receipt ownership follows this job, never the global last-task view.
+        if end == cancellations::ReceiptEnd::Close
             && let Ok(writer) = core.writer()
             && let Err(error) = writer.close(job.id).await
         {
             core.failed(error.code());
         }
+        let mut inner = core.inner.lock().unwrap();
+        if inner.executing == Some(job.id) {
+            inner.executing = None;
+        }
     }
 }
-async fn execute_job(core: &Arc<Core>, job: &Job) {
+async fn execute_job(core: &Arc<Core>, job: &Job) -> cancellations::ReceiptEnd {
+    run_job(core, job).await;
+    cancellations::finish(core, job)
+}
+async fn run_job(core: &Arc<Core>, job: &Job) {
+    if !job.dispatch.open() {
+        return;
+    }
     core.update(job, "waiting", false, false, "pending", None);
     let client_id = Uuid::new_v4();
     let mut attempt = loop {
+        if !job.dispatch.open() {
+            return;
+        }
         if !core.valid(job.active) || job.received.elapsed() >= TASK_LIFETIME {
             core.update(
                 job,
@@ -783,6 +837,7 @@ async fn execute_job(core: &Arc<Core>, job: &Job) {
         }
         match job.session.ready(job.active.target) {
             Ok(false) | Err(session::Failure::Backlog) => {
+                cancellations::request(core, job);
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
@@ -805,7 +860,10 @@ async fn execute_job(core: &Arc<Core>, job: &Job) {
                 session::Failure::Busy
                 | session::Failure::Backlog
                 | session::Failure::AttemptActive,
-            ) => tokio::time::sleep(Duration::from_millis(50)).await,
+            ) => {
+                cancellations::request(core, job);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             Err(error) => {
                 core.update(
                     job,
@@ -819,6 +877,9 @@ async fn execute_job(core: &Arc<Core>, job: &Job) {
             }
         }
     };
+    if !cancellations::claim(core, job) {
+        return;
+    }
     // Register before receipt I/O and the native submit await: native questions
     // can arrive while the turn/start acknowledgment is still outstanding.
     let interactions = attempt.interactions();
@@ -827,11 +888,13 @@ async fn execute_job(core: &Arc<Core>, job: &Job) {
     let writer = match core.writer() {
         Ok(writer) => writer,
         Err(code) => {
+            cancellations::uncertain(core, job);
             core.failed(code);
             return;
         }
     };
     if let Err(error) = writer.mark_submitting(job.id, client_id).await {
+        cancellations::uncertain(core, job);
         core.failed(error.code());
         return;
     }
@@ -850,6 +913,7 @@ async fn execute_job(core: &Arc<Core>, job: &Job) {
     match attempt.submit(job.text.clone()).await {
         Submission::Accepted { .. } => core.update(job, "running", true, false, "pending", None),
         Submission::Unknown { .. } => {
+            cancellations::uncertain(core, job);
             core.revoke_job(job.active);
             core.update(
                 job,

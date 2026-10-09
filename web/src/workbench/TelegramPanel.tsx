@@ -40,9 +40,10 @@ function runsShape(v: unknown): v is Run[] {
 }
 class PanelError extends Error { constructor(readonly kind: 'unsupported' | 'stale' | 'invalid' | 'rejected') { super(kind); } }
 const phaseText: Record<string, string> = { unconfigured: '未配置', idle: '未激活', pairing: '等待私聊配对命令', awaitingConfirmation: '等待本机确认', active: '已激活', expired: '配对已过期' };
-const deliveryText: Record<string, string> = { confirmed: '已投递', partialUnknown: '部分投递，后续结果未知，不自动补发', noReply: '无可发送的最终回复', none: '尚未投递', notSent: '未发送', pending: '等待投递', sending: '发送中', sent: '已投递', complete: '已投递', delivered: '已投递', unknown: '投递结果未知，不自动重发', partial: '部分投递，不自动补发', rejected: '投递被拒绝', failed: '投递失败', withheld: '未满足外发条件' };
-const taskText: Record<string, string> = { waiting: '等待原生会话可提交', abandoned: '任务已停止等待', uncertain: '原生提交结果未知，不自动重试，请在本机核对', rejected: '原生提交被拒绝或未发送', received: '已接收', queued: '排队中', submitting: '正在提交', running: '原生执行中', completed: '处理结束', closed: '记录已关闭', failed: '处理失败', withheld: '回复已保留在本机' };
+const deliveryText: Record<string, string> = { confirmed: '已投递', partialUnknown: '部分投递，后续结果未知，不自动补发', noReply: '无可发送的最终回复', none: '尚未投递', notSent: '未发送', notSubmitted: '未提交到原生', pending: '等待投递', sending: '发送中', sent: '已投递', complete: '已投递', delivered: '已投递', unknown: '投递结果未知，不自动重发', partial: '部分投递，不自动补发', rejected: '投递被拒绝', failed: '投递失败', withheld: '未满足外发条件' };
+const taskText: Record<string, string> = { waiting: '等待原生会话可提交', abandoned: '任务已停止等待', uncertain: '原生提交结果未知，不自动重试，请在本机核对', rejected: '原生提交被拒绝或未发送', received: '已接收', queued: '排队中', canceled: '排队任务已取消，未提交到原生', submitting: '正在提交', running: '原生执行中', completed: '处理结束', closed: '记录已关闭', failed: '处理失败', withheld: '回复已保留在本机' };
 const interactionReasonText = new Map([
+  ['channel_queue_canceled', '排队任务已取消，未提交到原生'],
   ['channel_interaction_send_unknown', '提示投递结果未知，按钮未激活，请回本机回答'],
   ['channel_interaction_send_rejected', '提示未送达，请回本机回答'],
   ['channel_interaction_written_unconfirmed', '答复已写入原生通道，采纳结果尚未确认'],

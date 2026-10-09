@@ -125,6 +125,18 @@ it('uses the generic fallback for an unknown interaction reason without renderin
   expect(task.textContent).not.toContain('secret');
   expect(task.querySelector('img')).toBeNull();
 });
+it.each(['notSubmitted', 'confirmed'])('shows canceled queue task with %s delivery without implying native execution', async delivery => {
+  const data = status('active');
+  data.channel.lastTask = { id: id(8), phase: 'canceled', nativeConfirmed: false, nativeCompleted: false, delivery, reason: 'channel_queue_canceled' };
+  mock(data); await show();
+  const task = root.querySelector('[aria-label="最近渠道任务"]')!;
+  expect(task.textContent).toContain('排队任务已取消，未提交到原生');
+  expect(task.textContent).toContain(delivery === 'confirmed' ? '已投递' : '未提交到原生');
+  expect(task.textContent).toContain('原生提交确认未确认');
+  expect(task.textContent).toContain('原生整轮完成未确认完成');
+  expect(task.textContent).not.toContain('原生执行中');
+  expect(task.textContent).not.toContain('channel_queue_canceled');
+});
 it('invalidates selection when source revision changes instead of silently updating consent', async () => {
   vi.useFakeTimers(); let source = runs(); const fetch = vi.fn(async (url: string) => ok(url.endsWith('channel-runs') ? source : status('awaitingConfirmation')));
   vi.stubGlobal('fetch', fetch); await show();
@@ -206,6 +218,7 @@ it.each([
   ['waiting', 'pending', '等待原生会话可提交', '等待投递'],
   ['submitting', 'pending', '正在提交', '等待投递'],
   ['running', 'pending', '原生执行中', '等待投递'],
+  ['canceled', 'notSubmitted', '排队任务已取消，未提交到原生', '未提交到原生'],
   ['abandoned', 'withheld', '任务已停止等待', '未满足外发条件'],
   ['uncertain', 'withheld', '原生提交结果未知，不自动重试，请在本机核对', '未满足外发条件'],
   ['rejected', 'withheld', '原生提交被拒绝或未发送', '未满足外发条件'],

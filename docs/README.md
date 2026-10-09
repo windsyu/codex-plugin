@@ -25,6 +25,7 @@
 | [V3 必要交互边界](validation/v3-channel-interactions-2026-10-09.md) | 九个安装版原生用例与实时来源门；后续生产接入另列，精确整轮取消未解决 |
 | [V3 授权交互与 callback](validation/v3-channel-callbacks-2026-10-09.md) | 默认关闭的交互授权、typed answer、一次性 callback 和 receipt v3；原版 CLI 加合成操作链及剩余边界 |
 | [V3 单题文字回答](validation/v3-channel-question-replies-2026-10-09.md) | 显式 Reply/Other、完整多题回答与无正文 receipt v4；本片专项及剩余验收 |
+| [V3 独立排队取消](validation/v3-channel-queue-cancel-2026-10-09.md) | 提交与取消竞争、确认引用、原子 receipt v5 与慢发送隔离；精确整轮取消未完成 |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
