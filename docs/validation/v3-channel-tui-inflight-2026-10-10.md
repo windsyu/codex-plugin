@@ -33,6 +33,12 @@ TUI raw 捕获在 relay 转发之前，单独只能证明原版生成了答案�
 
 标准全检 `node scripts/dev.mjs check --offline` 的受管 artifact `d37839f6-d131-427d-9f8f-5afa65a0582b` 为实际 success，完成时间和 lease 已核对。固定 Node 22.23.2/Rust 1.95.0，119 份文档、工具 80 项、Web 274 项及 typecheck/构建、fmt、Clippy 通过；Rust all-targets 的 13 组共 719 passed / 0 failed / 65 ignored，两个 binary 的 debug（0.09 秒）与 release（21.67 秒）构建通过。65 项 ignored 不计通过，本片两个原版专项的显式结果以上述 artifact 为准。约 46.1 GB 主缓存仅提示，未清理。
 
+本片专项提交为 `91b84d827caa47300ffa740012fb4d01e8dfdfa0`。最终文档 119 份、差异、14 文件暂存区与 719 文件候选提交树的二进制检查均通过，没有新增许可依赖或私人 fixture。
+
+离线报告实际登记在受管 artifact `7e92141f-68b6-4fac-baee-80f84a59302b`，result 为 success、完成时间存在且 lease 已释放。报告固定该受测产品提交，JSON（4785 字节）与 HTML（6790 字节）均为新建 0600 文件；准备器核对各引用的实际 metadata 和专项日志。扩展文件项采用本片有序回归与 in-flight 原版结果，其他历史原版专项保持各自 artifact，未冒充本片重跑。
+
+系统 Chrome 的 1100 px 桌面、390 px 窄屏 DOM 与原生内联截图复核通过：7 项证据、9 步待验清单、719/0/65 等准确计数、正确提交身份、P2/P3 待验状态，无横向溢出、输入/控制/脚本。窄屏另检查实际 viewport 截图；没有保存 PNG、启动监听或上传页面。Codex 文件面板请求返回 queued，不称为已打开。交接文档提交不改变报告的受测产品身份。
+
 ## 4. 交接与未证明范围
 
 该用例只验证已经准入、尚未写出的渠道回答，与实际 TUI 执行重叠时的具体交错；不证明双方均在原生未决期间到达、无控制的同时输入、公平性、全部交错或 in-flight 回答可撤回。真实 Telegram/模型、精确已提交 Turn 取消、第一阶段整体验收与跨会话管理仍未完成。
