@@ -1828,3 +1828,5 @@ include!("cancel_tests.rs");
 include!("invalidation_tests.rs");
 
 include!("interaction_dedup_tests.rs");
+include!("restart_tests.rs");
+include!("unsupported_notice_tests.rs");

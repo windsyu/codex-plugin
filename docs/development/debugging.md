@@ -95,6 +95,14 @@ cargo test --locked --offline --lib \
 interaction_duplicate_identity_ -- --test-threads=4
 
 cargo test --locked --offline --lib \
+workbench::channel::service::tests::restart_seam::service_restart_requires_fresh_configuration_pairing_and_input_before_normal_execution \
+-- --exact --nocapture
+
+cargo test --locked --offline --lib \
+workbench::channel::service::tests::interaction_unsupported_notice_is_once_owned_consented_and_body_free \
+-- --exact --nocapture
+
+cargo test --locked --offline --lib \
 workbench::channel::service::tests::p2_invalidation_ -- --test-threads=1
 ```
 
@@ -105,6 +113,8 @@ workbench::channel::service::tests::p2_invalidation_ -- --test-threads=1
 [已准入回答专项](../validation/v3-channel-tui-inflight-2026-10-10.md)只在测试中阻塞独立渠道连接的实际字节写入，验证 Telegram Deny 已准入后，真实 PTY 允许先完成工具，再放行迟到 Decline。它不阻塞原版 relay，也不证明两份回答都在原生未决时到达。
 
 [输入身份与重绑专项](../validation/v3-channel-input-rebind-2026-10-10.md)先复现当前提示被冲突身份消费，再检验生产入口的并发保留及只读全域查询。原版重绑测试在旧审批未决时撤销、重新确认同一 Thread，证明新排队对话随后自动完成；不覆盖进程/Service 重启、传输重连或旧清理竞态。
+
+[Service 重建专项](../validation/v3-channel-service-restart-2026-10-10.md)使用真实 Service、写者和受控 Bot polling；销毁旧 Service 后，新 Service 复用同一合成 Session，重新配置、配对确认并完成新任务，旧授权和队列不恢复。静态提示回归分别检查当前归属、外来、撤销及未授权。不使用安装版 CLI，不计作原版宿主重启专项。
 
 `v3-channel-runtime-acceptance` 只呈现经过检查的汇总 JSON，不执行测试、不读取仓库或会话文件、不提供工作台控制。报告 schema 与校验以[示例源码](../../examples/v3-channel-runtime-acceptance.rs)为准：产品提交与安装版 CLI 分开记录，固定七项证据包含状态及受管 artifact UUID，另列常规 passed/failed/ignored、限制和待用户执行的清单。内容须来自实际证据，不复制原始日志或私人正文。
 
