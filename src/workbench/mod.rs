@@ -3,6 +3,7 @@
 #[cfg(unix)]
 pub mod application;
 pub mod capture;
+pub mod channel;
 #[cfg(unix)]
 pub mod config;
 pub mod config_sources;

@@ -20,3 +20,4 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0052：连续滚动的只读文件阅读](0052-continuous-file-reading.md)
 - [ADR 0053：历史首页、按项目启动与旧历史只读整合](0053-history-first-workbench.md)
 - [ADR 0054：保留显式 provider bearer 与原生 API Key 认证](0054-native-custom-bearer-auth.md)
+- [ADR 0055：V3 单会话渠道的原生语义输入候选](0055-v3-channel-native-protocol.md)（Proposed，隔离探针通过，尚未改变生产入口）
