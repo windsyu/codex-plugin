@@ -35,6 +35,7 @@ enum RpcId {
 }
 struct Pending {
     expected: Option<Uuid>,
+    ordinary_purpose: bool,
     // Only events observed after this request; never infer subscription from them.
     statuses: HashMap<Uuid, Result<Option<bool>, Failure>>,
 }
@@ -78,10 +79,15 @@ impl Tracker {
             let Some(method) = method else {
                 return Ok(change);
             };
-            if let Some(id) = value.get("id").and_then(|v| rpc_id(v).ok())
-                && self.used.contains(&id)
-            {
-                return Err(Failure::ReusedId);
+            if let Some(value) = value.get("id") {
+                let id = rpc_id(value)?;
+                if self.used.contains(&id) {
+                    return Err(Failure::ReusedId);
+                }
+                if self.used.len() >= MAX_IDS {
+                    return Err(Failure::Capacity);
+                }
+                self.used.insert(id);
             }
             if method == "thread/unsubscribe" {
                 let thread = thread_id(&value["params"]["threadId"])?;
@@ -109,14 +115,14 @@ impl Tracker {
                     None
                 }
             };
-            if self.pending.len() >= MAX_PENDING || self.used.len() >= MAX_IDS {
+            if self.pending.len() >= MAX_PENDING {
                 return Err(Failure::Capacity);
             }
-            self.used.insert(id.clone());
             self.pending.insert(
                 id,
                 Pending {
                     expected,
+                    ordinary_purpose: ordinary_purpose(&value["params"]),
                     statuses: HashMap::new(),
                 },
             );
@@ -197,10 +203,16 @@ impl Tracker {
         }
         // Public SessionSource schema: known ordinary sources are strings;
         // subAgent/custom are tagged objects. Absent/unknown sources never grant.
-        if !matches!(
-            thread.get("source").and_then(Value::as_str),
-            Some("cli" | "vscode" | "exec" | "appServer")
-        ) {
+        if !pending.ordinary_purpose
+            || !ordinary_purpose(thread)
+            || !matches!(
+                thread.get("source").and_then(Value::as_str),
+                Some("cli" | "vscode" | "exec" | "appServer")
+            )
+        {
+            // This ACK supersedes earlier subscription evidence. Keep used IDs
+            // tombstoned so a delayed ordinary ACK cannot restore authority.
+            self.pending.clear();
             if self.targets.remove(&id).is_some() {
                 change.removed.push(id);
             }
@@ -229,6 +241,18 @@ impl Tracker {
         self.targets.insert(id, busy);
         Ok(change)
     }
+}
+// Ordinary client provenance alone is insufficient: that client can also
+// subscribe to temporary/background threads. Missing fields remain compatible
+// with older public protocol versions; explicit unknown/malformed values do not.
+fn ordinary_purpose(value: &Value) -> bool {
+    let durable = matches!(
+        value.get("ephemeral"),
+        None | Some(Value::Null | Value::Bool(false))
+    );
+    let user = matches!(value.get("threadSource"), None | Some(Value::Null))
+        || value.get("threadSource").and_then(Value::as_str) == Some("user");
+    durable && user
 }
 fn rpc_id(value: &Value) -> Result<RpcId, Failure> {
     match value {
@@ -569,5 +593,277 @@ mod pending_status_tests {
             notify(&mut t, Uuid::from_u128(n as u128), "idle");
         }
         assert_eq!(t.observe(Direction::ToTui,&json!({"method":"thread/status/changed","params":{"threadId":Uuid::from_u128(999),"status":{"type":"idle"}}})),Err(Failure::Capacity));
+    }
+}
+
+#[cfg(test)]
+mod thread_purpose_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn exchange(tracker: &mut Tracker, request: u64, params: Value, metadata: Value) -> Change {
+        tracker
+            .observe(
+                Direction::ToServer,
+                &json!({"id":request,"method":"thread/start","params":params}),
+            )
+            .unwrap();
+        let mut thread =
+            json!({"id":Uuid::from_u128(42),"source":"vscode","status":{"type":"idle"}});
+        for (key, value) in metadata.as_object().unwrap() {
+            thread[key] = value.clone();
+        }
+        tracker
+            .observe(
+                Direction::ToTui,
+                &json!({"id":request,"result":{"thread":thread}}),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn request_temporary_or_feature_purpose_cannot_grant_when_ack_omits_flags() {
+        for params in [
+            json!({"ephemeral":true}),
+            json!({"threadSource":"thread_title"}),
+            json!({"threadSource":"subagent"}),
+            json!({"threadSource":"guardian_review"}),
+            json!({"threadSource":"mem_consolidation"}),
+            json!({"threadSource":"feature"}),
+            json!({"ephemeral":true,"threadSource":"user"}),
+        ] {
+            let mut tracker = Tracker::new();
+            exchange(&mut tracker, 1, params, json!({}));
+            assert!(tracker.targets().is_empty());
+        }
+    }
+
+    #[test]
+    fn response_temporary_or_non_user_purpose_overrides_ordinary_client_source() {
+        for metadata in [
+            json!({"ephemeral":true}),
+            json!({"threadSource":"thread_title"}),
+            json!({"threadSource":"subagent"}),
+            json!({"threadSource":"guardian_review"}),
+            json!({"threadSource":"mem_consolidation"}),
+            json!({"threadSource":"feature"}),
+            json!({"threadSource":"future_non_user_source"}),
+        ] {
+            let mut tracker = Tracker::new();
+            exchange(
+                &mut tracker,
+                1,
+                json!({"ephemeral":false,"threadSource":"user"}),
+                metadata,
+            );
+            assert!(tracker.targets().is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_missing_null_false_and_user_purpose_remain_compatible() {
+        let ordinary = [
+            json!({}),
+            json!({"ephemeral":null,"threadSource":null}),
+            json!({"ephemeral":false}),
+            json!({"threadSource":"user"}),
+            json!({"ephemeral":false,"threadSource":"user"}),
+        ];
+        for params in &ordinary {
+            for metadata in &ordinary {
+                let mut tracker = Tracker::new();
+                exchange(&mut tracker, 1, params.clone(), metadata.clone());
+                assert_eq!(
+                    tracker.targets(),
+                    vec![Target {
+                        thread_id: Uuid::from_u128(42),
+                        busy: false,
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_temporary_or_feature_ack_revokes_existing_target() {
+        for (params, metadata) in [
+            (json!({"ephemeral":true}), json!({})),
+            (json!({"threadSource":"thread_title"}), json!({})),
+            (json!({}), json!({"ephemeral":true})),
+            (json!({}), json!({"threadSource":"feature"})),
+        ] {
+            let mut tracker = Tracker::new();
+            exchange(&mut tracker, 1, json!({}), json!({}));
+            assert_eq!(tracker.targets().len(), 1);
+            let change = exchange(&mut tracker, 2, params, metadata);
+            assert!(tracker.targets().is_empty());
+            // Session uses this explicit removal to retire its binding generation.
+            assert_eq!(change.removed, vec![Uuid::from_u128(42)]);
+        }
+    }
+
+    #[test]
+    fn excluded_subscription_requests_still_reserve_rpc_ids_and_pending_capacity() {
+        let mut tracker = Tracker::new();
+        exchange(&mut tracker, 1, json!({"ephemeral":true}), json!({}));
+        assert_eq!(
+            tracker.observe(
+                Direction::ToServer,
+                &json!({"id":1,"method":"thread/start","params":{}}),
+            ),
+            Err(Failure::ReusedId)
+        );
+        let mut tracker = Tracker::new();
+        for id in 0..MAX_PENDING {
+            tracker
+                .observe(
+                    Direction::ToServer,
+                    &json!({"id":id,"method":"thread/start","params":{"threadSource":"thread_title"}}),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            tracker.observe(
+                Direction::ToServer,
+                &json!({"id":MAX_PENDING,"method":"thread/start","params":{"ephemeral":true}}),
+            ),
+            Err(Failure::Capacity)
+        );
+    }
+    #[test]
+    fn malformed_purpose_values_never_grant_in_request_or_response() {
+        for metadata in [
+            json!({"ephemeral":"false"}),
+            json!({"ephemeral":0}),
+            json!({"ephemeral":{}}),
+            json!({"ephemeral":[]}),
+            json!({"threadSource":false}),
+            json!({"threadSource":0}),
+            json!({"threadSource":{}}),
+            json!({"threadSource":[]}),
+            json!({"threadSource":""}),
+        ] {
+            for request_side in [false, true] {
+                let mut tracker = Tracker::new();
+                let (params, response) = if request_side {
+                    (metadata.clone(), json!({}))
+                } else {
+                    (json!({}), metadata.clone())
+                };
+                exchange(&mut tracker, 1, params, response);
+                assert!(tracker.targets().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn resume_and_fork_purpose_exclusion_preserves_expected_uuid_validation() {
+        for method in ["thread/resume", "thread/fork"] {
+            for request_side in [false, true] {
+                let mut tracker = Tracker::new();
+                tracker.observe(Direction::ToServer,&json!({"id":1,"method":method,"params":{"threadId":Uuid::from_u128(42),"ephemeral":request_side}})).unwrap();
+                tracker.observe(Direction::ToTui,&json!({"id":1,"result":{"thread":{"id":Uuid::from_u128(42),"source":"vscode","threadSource":if request_side {"user"}else{"thread_title"},"status":{"type":"idle"}}}})).unwrap();
+                assert!(tracker.targets().is_empty());
+            }
+        }
+        let mut tracker = Tracker::new();
+        tracker.observe(Direction::ToServer,&json!({"id":1,"method":"thread/resume","params":{"threadId":Uuid::from_u128(42),"ephemeral":true}})).unwrap();
+        assert_eq!(tracker.observe(Direction::ToTui,&json!({"id":1,"result":{"thread":{"id":Uuid::from_u128(43),"source":"vscode","status":{"type":"idle"}}}})),Err(Failure::Malformed));
+    }
+
+    #[test]
+    fn excluded_ack_prevents_earlier_ordinary_ack_from_regranting() {
+        for metadata in [
+            json!({"ephemeral":true}),
+            json!({"threadSource":"thread_title"}),
+            json!({"source":{"subAgent":"other"}}),
+        ] {
+            let mut tracker = Tracker::new();
+            exchange(&mut tracker, 1, json!({}), json!({}));
+            tracker
+                .observe(
+                    Direction::ToServer,
+                    &json!({"id":2,"method":"thread/start","params":{}}),
+                )
+                .unwrap();
+            let removed = exchange(&mut tracker, 3, json!({}), metadata);
+            assert_eq!(removed.removed, vec![Uuid::from_u128(42)]);
+            tracker.observe(Direction::ToTui,&json!({"id":2,"result":{"thread":{"id":Uuid::from_u128(42),"source":"vscode","status":{"type":"idle"}}}})).unwrap();
+            assert!(tracker.targets().is_empty());
+            // A genuinely later request can establish a fresh generation.
+            exchange(&mut tracker, 4, json!({}), json!({}));
+            assert_eq!(tracker.targets().len(), 1);
+        }
+    }
+    #[test]
+    fn ordinary_request_ids_cannot_be_reused_for_subscription_matching() {
+        for method in ["thread/read", "thread/unsubscribe", "future/method"] {
+            let mut tracker = Tracker::new();
+            tracker
+                .observe(
+                    Direction::ToServer,
+                    &json!({"id":1,"method":method,"params":{"threadId":Uuid::from_u128(42)}}),
+                )
+                .unwrap();
+            assert_eq!(
+                tracker.observe(
+                    Direction::ToServer,
+                    &json!({"id":1,"method":"thread/start","params":{}})
+                ),
+                Err(Failure::ReusedId)
+            );
+            assert!(tracker.targets().is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_request_id_validation_and_capacity_are_fail_closed() {
+        for id in [
+            json!(null),
+            json!(false),
+            json!({}),
+            json!([]),
+            json!(""),
+            json!("x".repeat(MAX_ID_BYTES + 1)),
+            json!(0.5),
+        ] {
+            let mut tracker = Tracker::new();
+            assert_eq!(
+                tracker.observe(
+                    Direction::ToServer,
+                    &json!({"id":id,"method":"thread/read","params":{}})
+                ),
+                Err(Failure::Malformed)
+            );
+        }
+        let mut tracker = Tracker::new();
+        for id in 0..MAX_IDS {
+            tracker
+                .observe(
+                    Direction::ToServer,
+                    &json!({"id":id,"method":"thread/read","params":{}}),
+                )
+                .unwrap();
+        }
+        // Notifications and client responses to server requests reserve no IDs.
+        tracker
+            .observe(Direction::ToServer, &json!({"method":"initialized"}))
+            .unwrap();
+        tracker
+            .observe(Direction::ToServer, &json!({"id":999,"result":{}}))
+            .unwrap();
+        assert_eq!(
+            tracker.observe(
+                Direction::ToServer,
+                &json!({"id":MAX_IDS,"method":"thread/read","params":{}})
+            ),
+            Err(Failure::Capacity)
+        );
+        let mut tracker = Tracker::new();
+        tracker
+            .observe(Direction::ToServer, &json!({"id":1,"result":{}}))
+            .unwrap();
+        exchange(&mut tracker, 1, json!({}), json!({}));
+        assert_eq!(tracker.targets().len(), 1);
     }
 }

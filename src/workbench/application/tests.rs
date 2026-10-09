@@ -838,3 +838,4 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
 include!("launching_tests.rs");
 include!("surface_lifecycle_tests.rs");
 include!("multi_run_tests.rs");
+include!("telegram_integration_tests.rs");

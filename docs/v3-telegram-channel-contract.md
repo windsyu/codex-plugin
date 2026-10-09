@@ -31,6 +31,10 @@ relay 保持数据消息原文；WebSocket 心跳和关闭由两端各自正确�
 
 本机绑定资格包含 `Run epoch + transport epoch + 精确 Thread ID + subscription generation + binding generation`，并有本次 TUI 原生订阅证据。退订后同 UUID 再次订阅会得到新 subscription generation，旧绑定不复活。`thread/read`、loaded 列表、网页用户气泡、ANSI 和 cwd 不能代替订阅证据。独立连接的 `turn/start` 只向已加载线程提交；不通过 `thread/resume` 或原生队列取得资格，避免卸载后恢复或留下冷线程未来任务。
 
+普通 `source` 仍不足以证明用户用途：订阅请求及成功响应中的 `ephemeral` 仅允许缺省、null 或 false，`threadSource` 仅允许缺省、null 或 `user`；显式临时、后台 feature/subagent 等用途或畸形类型不授予候选。缺省兼容旧公共协议，不按请求 ID 前缀猜测用途。排除 ACK 撤销同 UUID 的既有资格，并清空 pending 订阅，迟到旧 ACK 不能恢复；同时进行的普通订阅也可能被保守取消，须由后续新请求及 ACK 重新建立资格。
+
+全部 TUI 客户端带 ID 请求共用累计 256 项、永不驱逐的 RPC 身份预算，包括普通 read/turn 请求；无 ID 通知和无 method 的客户端响应不计入。重复、畸形 ID 或容量耗尽关闭该 Run 渠道资格，原始转发继续。此实验上限可能限制长 Run，不通过清除身份记录或重用旧绑定继续运行。
+
 actor 自己串行处理有界任务队列，等待目标可提交条件。忙闲检查不是原子排他：本机输入仍可能抢先进入相同 Turn，届时来源门暂扣自动回复，不能承诺渠道独占。每次真实提交有独立 UUID `clientUserMessageId`，它只用于来源关联，不是原生幂等键。
 
 原生证据按同一连续订阅流处理。要求准确 Thread、Turn 开始、同一个 UserMessage 的 started/completed 及自己的 client ID；任何其他用户 item、生命周期缺失、身份冲突、未知终态或顺序矛盾均关闭该次外发资格。`turn/completed.items` 是摘要，不证明没有本机输入。只有明确 `final_answer` 且成功的原生 `turn/completed` 才释放最终文本；模型响应完成、assistant item 完成和工具结束不代替整轮完成。

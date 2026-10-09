@@ -14,9 +14,9 @@
 
 ## 2. 原生订阅资格与只读 API
 
-订阅资格来自同一 relay 捕获的 TUI `thread/start/resume/fork` 请求及匹配成功响应；必须区分字符串和数字 RPC ID，确认精确 Thread UUID 与已知普通来源。全局 `thread/started`、loaded 列表、历史正文及网页的最后用户气泡均不能授予资格，不猜测 TUI 焦点。
+订阅资格来自同一 relay 捕获的 TUI `thread/start/resume/fork` 请求及匹配成功响应；必须区分字符串和数字 RPC ID，确认精确 Thread UUID 与已知普通来源，并检查请求与响应用途：ephemeral 缺省/null/false、threadSource 缺省/null/user 才允许；显式非用户、临时或畸形用途排除。全局 `thread/started`、loaded 列表、历史正文及网页的最后用户气泡均不能授予资格，不猜测 TUI 焦点。
 
-`unsubscribe`、关闭、notLoaded/systemError、解析或捕获缺口使资格失效。每个 pending 请求保存有界、请求之后观察到的状态证据；迟到 ACK 不能覆盖终态、错误或更新状态，也不继承另一个请求的旧状态。pending 64、候选 32、已用订阅请求 ID 256；不驱逐去重记录来继续，达到上限关闭渠道资格。
+`unsubscribe`、关闭、notLoaded/systemError、解析或捕获缺口使资格失效。每个 pending 请求保存有界、请求之后观察到的状态证据；迟到 ACK 不能覆盖终态、错误或更新状态，也不继承另一个请求的旧状态。pending 64、候选 32、全部 TUI 客户端请求 ID 累计 256（包含普通 read/turn 请求）；无 ID 通知与无 method 的客户端响应不计。重复、畸形 ID 或超过预算关闭渠道资格，不驱逐身份记录来继续，原始转发保持运行。用途/来源排除的 ACK 清空 pending，防止旧 ACK 恢复已撤资格；可能保守取消并发普通订阅，后续新请求/ACK 才可重建。
 
 本机 owner 的 `GET /workbench/v1/application/channel-runs` 当前返回 `instanceId`、`runs` 和 `telegramImplemented: true`；true 只表示代码入口可用，不代表 P1/P2/P3 已验收。各项包含 `runId`、`supportsChannel` 和可选 `source`；source 仅返回 revision、transport epoch、phase、候选 Thread UUID/busy 和静态 failure。普通 Run 的 source 为 null。该只读接口没有正文或凭证；六个本机 Telegram 管理 API 另见[接入契约](../v3-telegram-channel-contract.md#3-本机绑定与凭证)，设备权限不能代替 owner。
 
@@ -83,6 +83,20 @@ P0 的 Tailscale 页面继续只提供当时已验证的合成聚合结果，不
 
 `ae54fe86-3cd2-4b43-9d69-36c94560a9bc/ui-probe.log` 使用 Node 22.23.2 与系统 Chrome，在 1440 和 390 像素宽度检查当时最新 binary 的首页设置及 Telegram 未配置面板；页面错误数为 0。GET 状态没有创建 channel 目录或原生 HOME，没有启动 CLI 或调用 Bot API。面板截图已由主执行者查看。此检查证明未配置界面的实际渲染与只读惰性行为，不覆盖真实凭证、配对、投递或宿主退出修复。
 
+### 5.3 用户线程用途与完整生产操作链
+
+用途回归先在 `e498a709-de08-446e-b5c2-2e48cd9c1029` 实际运行：5 项中 3 项失败、2 项通过，证明请求/响应的临时用途可以被普通客户端来源掩盖，且已有候选未撤销。修复后的 `d1cbab66-b3f8-410a-80f1-848b9729c472` 中 10 项通过，追加畸形用途、resume/fork、旧 ACK 反序、普通 RPC 先占 ID 再复用的负向检查。该结果不替代后续全量检查。
+
+`e91a4e8f-811c-4f73-bd34-c41f7da4373f` 的 ignored 原版 CLI 完整生产链专项实际 1 项通过（3.62 秒）：Application 启动实验 Run → owner cookie/Origin/instance 接口配置 → 合成 getMe/webhook 检查 → nonce 配对候选 → 本机确认精确 Thread/revision → Service 收件与原生提交 → 回复至绑定 private chat。隔离 HOME/USERPROFILE/CODEX_HOME/TMPDIR，子测试清除继承环境，仅使用合成 token、loopback Bot API 和模型；生产 binary 没有 Bot API endpoint override，测试注入仅在 macOS test 构建存在。
+
+该专项的断言包括：两轮沿同一 Thread，第二轮 HTTP 完整输入含前轮用户文本及最终回复；显式启用无副作用 update_plan 并验证成功输出后，模型响应 completed 仍不释放 Telegram 回复；只有原生整轮完成才发送 exact final 文本。原版 TUI 的后台标题结构化请求单独应答，实际触达且不增加候选。合法递增 update ID 下同 message key 去重、错误 user 拒绝、本机 PTY 草稿显示后 Enter 提交的独立 Turn 不外发、撤销后不提交、不重复发送；旧 update 顺序单独触发明确 failclosed。宿主退出前 kernel 固定身份的 peer/wrapper 必须消失。未覆盖本机与渠道同时混合输入，也未证明取得测试 NativeGuard 之前启动超时的回收。
+
+夹具修正前的失败保留为诊断：`92adbdc1-0440-4bd1-9634-268e72c6d955`、`02764b76-6423-4a5c-abd5-74118fe8b9c5`、`372c634b-e637-417d-8151-22cb69f965b4`、`78ddad69-db4f-4ca9-8552-4e0307fc8b39` 按全局模型调用序号分配回复，被原版 TUI 的额外标题请求打乱；后改按公共输出 schema、最新实际 user input 和匹配工具 call_id 识别。`99b7610b-32c3-455e-9990-b5d86743ce1c` 与 `7debec36-3e13-4e1a-b140-be9c07df837c` 因默认未启用 plan 工具而未过首轮，`2b124247-7f05-4265-b97d-1c0ea3880fcc` 已证明两轮上下文但本机输入未实际提交，整体仍失败。最后显式启用工具、断言成功输出并分开 PTY 粘贴与 Enter 后取得上述通过，不将失败尝试计作成功。
+
+最终冻结复验 `3bfa2360-7ed3-4a7d-a071-6513e7a767ac` 为 success：Node 22.23.2 / Rust 1.95.0，fmt、Clippy、Rust all-targets **585 项通过、0 失败、60 项 ignored**，debug/release 两个 binary 构建通过。单列 ignored 的生产链专项 1 项通过（3.57 秒），宿主退出专项 1 项含 normal/forced 两场景通过（16.29 秒，pending/reaped/host_waited 见证均在断言内且为 true），Owner 专项 1 项通过；60 项 ignored 不整体计作通过。前次 `6ae5135b-e222-49fa-afd5-125b3905eb60` 在 fmt 通过后因新测试两处 collapsible_if 告警停于 Clippy，按建议修正后才取得最终结果，未降低警告门槛。Web 源与 dist、维护工具未改，沿用 §5.1 已通过的 262 项 Web、类型/构建和 80 项工具检查，不重复加总。
+
+本轮文档检查 112 份通过，暂存区内容二进制检查 10 项、禁止项 0，差异 whitespace 检查通过。没有修改锁文件、生产配置 schema 或数据库 migration；新 loopback 注入仅存在 test 构建。阶段验收仍需用户，未据此推送、合并或发布。
+
 ## 6. 当前实现契约与未验收项
 
 Service、Application owner API 和设置页已接通文本路径；六个 Telegram API 的 Host/Origin/cookie/instance 边界、lazy 显式凭证加载、一次 nonce 候选与本机确认按接入契约实现。启动或 GET 状态不会因此读取 token 或调用 bot API。撤销授权不回滚已开始的 token 保存，forget 是单独操作。必要审批和问题目前回本机处理，P2 未完成。提交前允许等待短暂捕获积压；发送分块前有积压则保守暂扣或记录部分投递，不自动补发，发送前有界等待与重验尚未纳入本片。
@@ -91,4 +105,4 @@ Service、Application owner API 和设置页已接通文本路径；六个 Teleg
 
 `NativeExited` 仅确认 native peer 消失、拥有的 wrapper 正常退出并回收，且未使用强制 fallback；不是所有工具终止证明。`ForcedUnknown` 和关闭进行中的状态保留本机同 HOME 启动门。源码研究基线 `2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4` 显示：连接关闭允许已启动 handler 继续，[对应测试](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/connection_rpc_gate.rs#L122)；全局线程关闭超时只[记录 warning](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/src/request_processors/thread_processor.rs#L1286)；统一工具清理调用[非等待终止路径](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/unified_exec/process.rs#L219)。因此不把 loaded 空列表、固定等待、请求 ACK 或 exit 0 提升为完整清理证明。
 
-分段标准全量检查和最终退出修复复验已完成；完整本机生产操作链、真实 Telegram 上下文延续与本机来源隔离、P2 必要交互和 P3 用户验收仍未完成。安装版 `0.156.1` 不是已证实来自上述源码 commit；不扩大为其他 CLI 版本、Linux 或 Windows 支持。
+分段标准全量检查和最终退出修复复验已完成；完整本机生产操作链已有上述原版 CLI 加合成 Bot/model 自动化证据；真实 Telegram 上下文延续与本机来源隔离、P2 必要交互和 P3 用户验收仍未完成。安装版 `0.156.1` 不是已证实来自上述源码 commit；不扩大为其他 CLI 版本、Linux 或 Windows 支持。
