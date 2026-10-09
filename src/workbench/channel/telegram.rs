@@ -4,6 +4,23 @@
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod client;
+
+pub(super) const TOKEN_LIMIT: usize = 256;
+
+pub(super) fn valid_token(token: &str) -> bool {
+    token.len() <= TOKEN_LIMIT
+        && token.split_once(':').is_some_and(|(id, secret)| {
+            !id.is_empty()
+                && id.bytes().all(|byte| byte.is_ascii_digit())
+                && id.parse::<i64>().is_ok_and(|id| id > 0)
+                && !secret.is_empty()
+                && secret
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+}
+
 pub struct TelegramBinding {
     pub bot_id: i64,
     pub user_id: i64,
