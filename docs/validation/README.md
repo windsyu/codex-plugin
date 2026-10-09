@@ -6,6 +6,7 @@
 - [V3 P2 授权交互与 callback 接入（2026-10-09）](v3-channel-callbacks-2026-10-09.md)
 - [V3 P2 独立排队取消（2026-10-09）](v3-channel-queue-cancel-2026-10-09.md)
 - [V3 P2 单题文字回答（2026-10-09）](v3-channel-question-replies-2026-10-09.md)
+- [V3 P2 文件范围、失效与离线报告（2026-10-10）](v3-channel-p2-acceptance-2026-10-10.md)
 
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)

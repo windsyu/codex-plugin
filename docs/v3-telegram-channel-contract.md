@@ -131,7 +131,7 @@ P2 本机激活时另行明确确认 `interactiveConsent`，默认 false，不�
 
 文本分流门在原生 submit 之前登记，ACK 或完整渠道用户来源证明未齐时拒绝文本入队，不先发送交互。提交 Unknown 或未决/不确定交互退出时，仅使该任务准确 generation/target 的旧绑定失效，清除其排队与引用，保留 uncertain 收件；不能撤销已替换的新绑定。继续需在本机核对并重新确认可用目标，失效渠道不阻断原生 TUI。
 
-文件顺序有固定源码、schema 和测试依据：[apply_patch handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/handlers/apply_patch.rs#L531)先发完整 begin，再进入审批 orchestrator；[tool events](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/events.rs#L242)将其发为完整 FileChange item；[App Server 测试](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/tests/suite/v2/turn_start.rs#L3866)核对 item 在 approval 前且身份相同。`patchUpdated` 可以是流式解析预览，不能单独替代完整 started。安装版单文件 Add 已补证该顺序，生产绑定的拒绝链路已有本地证据；其他范围仍须独立实测。
+文件顺序有固定源码、schema 和测试依据：[apply_patch handler](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/handlers/apply_patch.rs#L531)先发完整 begin，再进入审批 orchestrator；[tool events](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/core/src/tools/events.rs#L242)将其发为完整 FileChange item；[App Server 测试](https://github.com/openai/codex/blob/2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4/codex-rs/app-server/tests/suite/v2/turn_start.rs#L3866)核对 item 在 approval 前且身份相同。`patchUpdated` 可以是流式解析预览，不能单独替代完整 started。安装版单文件 Add 已补证该顺序；原版 CLI 加生产 Application 的混合 Add/Update/Delete/Move 拒绝与允许、准确文件结果已有[增量专项](validation/v3-channel-p2-acceptance-2026-10-10.md)证据。更广 grantRoot、其他范围和真实 Telegram 仍须独立实测，不能从该专项推断全部审批已验收。
 
 ### 5.3 callback 与响应结果
 
@@ -172,3 +172,5 @@ QueuedCanceled 仅保存取消输入的 bot/chat/message/update 身份和准确 
 Run 退出、目标卸载/退订、TUI 协议断线、连接 epoch 变化、解析缺口、捕获溢出、绑定撤销或目标更换都使旧任务和待外发内容失效。TUI 焦点是原生客户端内部状态，本方案不承诺探测每次焦点切换，也不将焦点切换当作自动换绑命令。
 
 P1 应交付可操作的本机配置/绑定/撤销与同一 Thread 文本闭环；P2 补齐上述明确支持交互及失效矩阵。合成 bot API 证明身份负例、重复消息、发送不确定、慢发送、慢存储和存储故障；安装版原生 CLI 证明严格已加载输入、来源连续性和不阻塞转发。最后由使用者配置自己的凭证，完成真实 Telegram 上下文、本机来源隔离和必要交互验收。合成结果和只读报告页不代替生产或跨设备验收。
+
+Run 移除、关闭/退订请求和畸形 JSON 的 Service 增量回归见[验收记录](validation/v3-channel-p2-acceptance-2026-10-10.md#3-service-失效入口)。退订请求发出即保守失效，不能以迟到响应重新授予旧资格；解析失败保留转发字节并暂扣旧渠道 final。各层证据按该记录的边界组合，不宣称完整故障或实际同时响应矩阵已通过。

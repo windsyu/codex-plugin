@@ -66,6 +66,34 @@ cargo test --locked --offline --lib workbench::web::tests:: -- --ignored --nocap
 
 新诊断应按[受管产物流程](README.md#构建产物生命周期)登记。`WORKBENCH_TEST_SCREENSHOT` 使用对应任务目录中的截图前缀；测试不会下载 Chrome。非空 `history_base` 的 fork 恢复按当前契约拒绝，测试分别验证实时 fork、拒绝后历史可读及原会话显式恢复，不能把这项负向通过描述为支持继承链恢复。
 
+## V3 渠道专项与离线验收报告
+
+V3 实验入口及阶段状态见 [V3 计划](../v3-implementation-plan.md)；普通 V2 入口不因此改变。先运行 `node scripts/dev.mjs build --offline`。以下专项使用本机已安装的原版 CLI、loopback 合成 Bot/model；子进程显式隔离 HOME、USERPROFILE、CODEX_HOME 和 TMPDIR，不使用真实凭证或模型。CLI 路径由执行者提供，目前受测专项固定为 0.156.1，不自动升级：
+
+```sh
+CODEX_CHANNEL_TEST_BINARY=/absolute/path/to/codex \
+cargo test --locked --offline --lib \
+workbench::application::tests::telegram_native_integration::installed_cli_production_telegram_file_scope_path \
+-- --exact --ignored --nocapture
+
+cargo test --locked --offline --lib \
+workbench::channel::service::tests::p2_invalidation_ -- --test-threads=1
+```
+
+文件专项通过真实 Application、原生审批和 callback 检查四种文件操作的拒绝/允许；失效专项检查 Run 移除、关闭/退订请求和真实 observe 消费解析缺口后的旧权限。准确断言、已执行结果和未证明范围见[增量验收记录](../validation/v3-channel-p2-acceptance-2026-10-10.md)。原版专项通常 ignored，不能从常规测试通过推断已执行。
+
+`v3-channel-runtime-acceptance` 只呈现经过检查的汇总 JSON，不执行测试、不读取仓库或会话文件、不提供工作台控制。报告 schema 与校验以[示例源码](../../examples/v3-channel-runtime-acceptance.rs)为准：产品提交与安装版 CLI 分开记录，固定七项证据包含状态及受管 artifact UUID，另列常规 passed/failed/ignored、限制和待用户执行的清单。内容须来自实际证据，不复制原始日志或私人正文。
+
+```sh
+cargo run --locked --offline --example v3-channel-runtime-acceptance -- \
+--report /absolute/path/to/checked-aggregate.json \
+--output-html /absolute/path/to/new-private-report.html
+```
+
+离线输出为新建的 0600 文件，不覆盖现有文件；`--output-html` 与任何显式 `--listen` / `--port` 冲突，并在监听创建前退出。不指定输出时，示例提供只读 GET/HEAD `/` 和 `/api/report`，默认 loopback、随机端口；显式地址只接受 loopback 或 CGNAT IPv4，地址范围校验不能证明该地址属于当前机器或已取得网络开放授权。未知路径不读取静态文件，POST 等写方法拒绝；报告页不代表 P2/P3 或真实 Telegram 已验收。旧 `v3-channel-acceptance` 仍只表达 P0 历史探针，不复用其 attachment 槽或已有入口。
+
+## 旧库只读专项
+
 实际旧库只读抽查独立于合成矩阵，必须由执行者显式选择已经存在的来源和预期 schema；下面路径只是占位示例：
 
 ```sh
