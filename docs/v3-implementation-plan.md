@@ -79,6 +79,8 @@ P2 于 2026-10-10 补充原版 CLI 的混合 Add/Update/Delete/Move 允许与拒
 
 同日补充[原版 TUI 有序审批专项](validation/v3-channel-tui-order-2026-10-10.md)：实际 PTY 本机允许后旧渠道 Deny 被拒绝，渠道先 Deny 后准确文件不变、当前菜单退场。首轮屏幕等待失败和事件/观察修正单列，不掩盖失败；有序结果不代替真正同时响应、真实 Telegram 或内部审批状态证明，P2/P3 状态保持不变。
 
+随后[已准入渠道回答与实际 TUI 重叠专项](validation/v3-channel-tui-inflight-2026-10-10.md)通过：仅在测试中对独立控制连接施加真实字节背压，渠道 Deny 已准入而零写出时，原版 PTY 允许完成准确四操作；释放迟到 Decline 后结果不反转，收件与最终回复仍各一次。该确定交错不证明两份回答都在原生未决期间到达，也不补齐真实 Telegram、全部同时交错或精确整轮取消；上表阶段状态不变。
+
 已补齐第一阶段的用户流程草案和接入契约，并完成 P0a/P0b/P0c 隔离探针。P0b 的 queue/resume 只在候选原生协议进程中证明顺序和来源；P0c 改用透明 TUI relay 与 loaded-only `turn/start`，没有采用可能重新加载目标的附加操作。普通工作台继续以 `-c` 覆盖启动；本地源码新增默认关闭的 `--channel-ready` / `launch.channelReady` 实验入口，普通已有 Run 仍无热附加入口。当前实验模式仅支持默认原生配置，named profile 明确拒绝。绑定、授权、持久收件与发送 actor 已取得定向及分段标准检查证据，未配置页面完成本机 Chrome 检查；具体数量和两次检查修复见[验证记录](validation/v3-channel-runtime-2026-10-09.md#51-集成标准检查分段执行及修复边界)。正常宿主退出的并行回收等待和未发布 Owner 取消清理已落源码；真实宿主 normal/forced 增量回归已有结果，增强同一 handle witness 断言后的最终 Rust 575 项、单列原生宿主退出/Owner 专项与 debug/release 构建已通过。统一 18 秒是 reaper 等待策略，不是总 Drop 硬上限，也不证明所有工具或多个真实 Run 并发退出。本轮分段标准检查与最终退出修复复验已完成；完整本机操作链已在原版 CLI 加合成 Bot/model 专项中通过，用途修复后最终 Rust 585 项、单列三项原生专项及 debug/release 构建通过；具体断言与夹具修复见[新增证据](validation/v3-channel-runtime-2026-10-09.md#53-用户线程用途与完整生产操作链)。独立排队取消已接入，本片验证单列；下一步安排真实 Telegram 用户验收并核对剩余失效矩阵，精确整轮取消保持已知缺口，P2/P3 仍未完成。用户结果仍须映射到具体证据，不能将原生运行部分算作生产 Telegram 交付。
 
 2026-10-09 的源码核对、用户流程草案、能力缺口与首片验收用例见 [Telegram 渠道开工检查](v3-channel-preparation.md)。该准备记录不锁定技术路线，不改变本计划已确认范围，也不表示渠道功能已实现。

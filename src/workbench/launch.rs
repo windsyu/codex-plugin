@@ -22,6 +22,8 @@ mod channel;
 pub(crate) mod entry;
 pub(crate) mod failure;
 mod profile;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use channel::AnswerWriteProbe;
 pub(crate) use channel::ResponseWrite;
 pub use channel::{
     ControlFailure, ControlHandle, NativeAttachment, ShutdownHandle, ShutdownOutcome, Submission,

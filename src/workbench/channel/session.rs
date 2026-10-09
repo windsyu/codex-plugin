@@ -318,6 +318,12 @@ impl Session {
     pub(crate) fn snapshot(&self) -> Snapshot {
         self.handle.snapshot()
     }
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn answer_write_probe_for_test(
+        &self,
+    ) -> Option<crate::workbench::launch::AnswerWriteProbe> {
+        self.handle.control.answer_write_probe_for_test()
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -518,6 +524,8 @@ fn invalid(capture: CaptureState, expected: Option<Uuid>) -> Option<&'static str
     }
 }
 async fn observe(mut capture: CaptureReceiver, control: ControlHandle, shared: Arc<Shared>) {
+    #[cfg(all(test, target_os = "macos"))]
+    let answer_write_probe = control.answer_write_probe_for_test();
     let mut monitor = capture.subscribe_state();
     let mut tracker = Tracker::new();
     let mut epoch = None;
@@ -570,6 +578,10 @@ async fn observe(mut capture: CaptureReceiver, control: ControlHandle, shared: A
             state.fail("channel_subscription_invalid");
             shared.notify.notify_waiters();
             continue;
+        }
+        #[cfg(all(test, target_os = "macos"))]
+        if let Some(probe) = &answer_write_probe {
+            probe.observe(frame.direction, &value);
         }
         if let Some(attempt) = &mut state.attempt {
             attempt

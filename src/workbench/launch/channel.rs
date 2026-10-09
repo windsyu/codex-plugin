@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::UnixStream,
     sync::{Notify, mpsc, oneshot},
     task::JoinHandle,
@@ -27,6 +28,11 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 use uuid::Uuid;
+
+#[cfg(all(test, target_os = "macos"))]
+mod test_probe;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use test_probe::AnswerWriteProbe;
 
 const DEADLINE: Duration = Duration::from_secs(20);
 const MESSAGE_LIMIT: usize = 1024 * 1024;
@@ -77,12 +83,16 @@ pub(crate) enum ResponseWrite {
     Unknown { reason: ControlFailure },
 }
 struct State {
+    #[cfg(all(test, target_os = "macos"))]
+    probe: Option<AnswerWriteProbe>,
     failure: AtomicU8,
     notify: Notify,
 }
 impl State {
-    fn new() -> Self {
+    fn new(#[cfg(all(test, target_os = "macos"))] probe: Option<AnswerWriteProbe>) -> Self {
         Self {
+            #[cfg(all(test, target_os = "macos"))]
+            probe,
             failure: AtomicU8::new(0),
             notify: Notify::new(),
         }
@@ -100,6 +110,10 @@ impl State {
         let _ =
             self.failure
                 .compare_exchange(0, failure as u8, Ordering::AcqRel, Ordering::Acquire);
+        #[cfg(all(test, target_os = "macos"))]
+        if let Some(probe) = &self.probe {
+            probe.close();
+        }
         self.notify.notify_waiters();
     }
     async fn stopped(&self) {
@@ -153,6 +167,10 @@ pub struct ControlHandle {
     state: Arc<State>,
 }
 impl ControlHandle {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn answer_write_probe_for_test(&self) -> Option<AnswerWriteProbe> {
+        self.state.probe.clone()
+    }
     #[cfg(test)]
     pub(crate) fn test_socket(socket: WebSocketStream<UnixStream>) -> (Self, JoinHandle<()>) {
         control(socket, Duration::from_secs(2))
@@ -550,6 +568,8 @@ impl Owner {
         // Verify kernel peer and alias identity before any handshake or protocol write.
         physical.verify_connected(&stream, group, &upstream, &parent)?;
         let owned_socket = OwnedSocket(physical);
+        #[cfg(all(test, target_os = "macos"))]
+        let stream = test_probe::ProbeStream::new(stream);
         let socket = tokio::time::timeout(Duration::from_secs(10), initialize(stream))
             .await
             .map_err(|_| ControlFailure::Timeout)??;
@@ -575,6 +595,9 @@ impl Owner {
         )
         .await
         .map_err(|_| ControlFailure::StartupRelay)?;
+        #[cfg(all(test, target_os = "macos"))]
+        let (control, control_task) = control_probed(socket, DEADLINE);
+        #[cfg(not(all(test, target_os = "macos")))]
         let (control, control_task) = control(socket, DEADLINE);
         let attachment = NativeAttachment {
             capture,
@@ -800,7 +823,9 @@ async fn shutdown_native(resources: &Resources) -> Result<(), ControlFailure> {
     Ok(())
 }
 type Socket = WebSocketStream<UnixStream>;
-async fn initialize(stream: UnixStream) -> Result<Socket, ControlFailure> {
+async fn initialize<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+) -> Result<WebSocketStream<S>, ControlFailure> {
     let (mut socket, _) = client_async_with_config(
         "ws://localhost/rpc",
         stream,
@@ -825,14 +850,41 @@ async fn initialize(stream: UnixStream) -> Result<Socket, ControlFailure> {
         .map_err(|_| ControlFailure::Transport)?;
     Ok(socket)
 }
-fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle<()>) {
+fn control(socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle<()>) {
+    control_inner(
+        socket,
+        deadline,
+        #[cfg(all(test, target_os = "macos"))]
+        None,
+    )
+}
+#[cfg(all(test, target_os = "macos"))]
+fn control_probed(
+    socket: WebSocketStream<test_probe::ProbeStream>,
+    deadline: Duration,
+) -> (ControlHandle, JoinHandle<()>) {
+    let probe = socket.get_ref().probe.clone();
+    control_inner(socket, deadline, Some(probe))
+}
+fn control_inner<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    mut socket: WebSocketStream<S>,
+    deadline: Duration,
+    #[cfg(all(test, target_os = "macos"))] probe: Option<AnswerWriteProbe>,
+) -> (ControlHandle, JoinHandle<()>) {
     let (sender, mut receiver) = mpsc::channel::<Request>(1);
-    let state = Arc::new(State::new());
+    let state = Arc::new(State::new(
+        #[cfg(all(test, target_os = "macos"))]
+        probe,
+    ));
     let handle = ControlHandle {
         sender,
         state: state.clone(),
     };
+    #[cfg(all(test, target_os = "macos"))]
+    let probe_lifetime = test_probe::CloseOnDrop(state.probe.clone());
     let task = tokio::spawn(async move {
+        #[cfg(all(test, target_os = "macos"))]
+        let _probe_lifetime = probe_lifetime;
         let mut id = 0u64;
         loop {
             let request = tokio::select! {
@@ -901,6 +953,8 @@ fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle
                     validate,
                     reply,
                 } => {
+                    #[cfg(all(test, target_os = "macos"))]
+                    let probe = state.probe.as_ref().filter(|probe| probe.begin());
                     let body = Message::Text(response.envelope(&id).to_string().into());
                     let mut write_attempted = false;
                     let attempt = async {
@@ -920,14 +974,26 @@ fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle
                                 reason: ControlFailure::InvalidInput,
                             });
                         }
+                        #[cfg(all(test, target_os = "macos"))]
+                        if let Some(probe) = probe {
+                            probe.activate(&id);
+                        }
                         write_attempted = true;
                         std::pin::Pin::new(&mut socket)
                             .start_send(body)
                             .map_err(|_| ControlFailure::Transport)?;
+                        #[cfg(all(test, target_os = "macos"))]
+                        if let Some(probe) = probe {
+                            probe.admitted();
+                        }
                         socket
                             .flush()
                             .await
                             .map_err(|_| ControlFailure::Transport)?;
+                        #[cfg(all(test, target_os = "macos"))]
+                        if let Some(probe) = probe {
+                            probe.flushed();
+                        }
                         // A result envelope has no response ACK. Flush success
                         // cannot prove native adoption or tool execution.
                         Ok(ResponseWrite::WrittenUnconfirmed)
@@ -939,6 +1005,10 @@ fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle
                     };
                     match outcome {
                         Ok(outcome) => {
+                            #[cfg(all(test, target_os = "macos"))]
+                            if let Some(probe) = probe {
+                                probe.finish(outcome);
+                            }
                             let _ = reply.send(outcome);
                         }
                         Err(reason) => {
@@ -948,6 +1018,10 @@ fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle
                             } else {
                                 ResponseWrite::NotSent { reason }
                             };
+                            #[cfg(all(test, target_os = "macos"))]
+                            if let Some(probe) = probe {
+                                probe.finish(outcome);
+                            }
                             let _ = reply.send(outcome);
                             break;
                         }
@@ -983,7 +1057,10 @@ fn classify(value: Value) -> Result<Submission, ControlFailure> {
         _ => Err(ControlFailure::Protocol),
     }
 }
-async fn response(socket: &mut Socket, id: u64) -> Result<Value, ControlFailure> {
+async fn response<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    id: u64,
+) -> Result<Value, ControlFailure> {
     loop {
         let value = read(socket).await?;
         if value.get("id") == Some(&Value::from(id)) && value.get("method").is_none() {
@@ -994,7 +1071,9 @@ async fn response(socket: &mut Socket, id: u64) -> Result<Value, ControlFailure>
         }
     }
 }
-async fn read(socket: &mut Socket) -> Result<Value, ControlFailure> {
+async fn read<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Result<Value, ControlFailure> {
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(text))) => {

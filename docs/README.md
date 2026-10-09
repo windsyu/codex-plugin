@@ -28,6 +28,7 @@
 | [V3 独立排队取消](validation/v3-channel-queue-cancel-2026-10-09.md) | 提交与取消竞争、确认引用、原子 receipt v5 与慢发送隔离；精确整轮取消未完成 |
 | [V3 P2 增量验收](validation/v3-channel-p2-acceptance-2026-10-10.md) | 四种文件操作、Service 失效入口与离线只读汇总；真实 Telegram 和阶段验收仍待完成 |
 | [V3 TUI 有序审批专项](validation/v3-channel-tui-order-2026-10-10.md) | 实际 PTY 本机允许与渠道拒绝的两个顺序；区分菜单 Cancel、单项 Deny 与同时竞态 |
+| [V3 已准入回答与 TUI 重叠专项](validation/v3-channel-tui-inflight-2026-10-10.md) | 独立渠道写背压与实际 PTY、准确工具/文件结果；不宣称双方在原生未决期间同时到达 |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
