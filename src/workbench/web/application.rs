@@ -36,6 +36,18 @@ impl SurfaceHandle {
     pub(crate) fn telegram_api_for_test(&self, address: std::net::SocketAddr) {
         self.0.telegram.api_for_test(address);
     }
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn answer_write_probe_for_test(
+        &self,
+        run: Uuid,
+    ) -> Option<crate::workbench::launch::AnswerWriteProbe> {
+        self.0
+            .channels
+            .read()
+            .unwrap()
+            .get(&run)
+            .and_then(crate::workbench::channel::session::Session::answer_write_probe_for_test)
+    }
     pub fn attach(
         &self,
         run: &crate::workbench::launch::WorkbenchRuntime,
