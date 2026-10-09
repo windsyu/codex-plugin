@@ -14,12 +14,21 @@ use codex_local_observer::workbench::{
     proxy::{ProxyServer, Upstream},
     terminal::{TerminalEvent, TerminalHost},
 };
+#[path = "v3_probe/interaction.rs"]
+mod interaction;
+
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 #[derive(Parser)]
 struct Args {
+    /// Candidate-only concurrent approval/input consumption probe.
+    #[arg(long, conflicts_with_all = ["report", "boundaries", "attachment_boundaries"])]
+    interaction_races: bool,
+    /// New aggregate file; includes partial results if the probe fails.
+    #[arg(long, requires = "interaction_races")]
+    interaction_report: Option<PathBuf>,
     /// New safe aggregate report file; never overwritten.
     #[arg(long)]
     report: Option<PathBuf>,
@@ -177,6 +186,9 @@ fn tui(
     command.env("HOME", home);
     command.env("USERPROFILE", home);
     command.env("CODEX_HOME", home);
+    let temporary = home.join("tmp");
+    std::fs::create_dir_all(&temporary)?;
+    command.env("TMPDIR", &temporary);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.cwd(workspace);
@@ -345,6 +357,9 @@ fn native_evidence(event: &Value) -> Result<Option<Evidence<'_>>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.interaction_races {
+        return interaction::run(args.interaction_report.as_deref()).await;
+    }
     let binary = std::env::var_os("WORKBENCH_TEST_CODEX").unwrap_or_else(|| "codex".into());
     // Keep UDS under its path limit even on macOS's long default TMPDIR.
     let directory = tempfile::Builder::new()

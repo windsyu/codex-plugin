@@ -334,3 +334,112 @@ fn final_item_replays_do_not_replace_newer_answer_or_hide_identity_conflict() {
         }
     }
 }
+
+#[test]
+fn live_owned_turn_requires_ack_start_and_complete_exact_input() {
+    for ack_first in [false, true] {
+        let client = Uuid::new_v4();
+        let mut proof = OriginProof::new(THREAD, client).unwrap();
+        assert!(proof.live_owned_turn().is_none());
+        if ack_first {
+            proof.observe(Evidence::SubmissionTurn(TURN));
+        }
+        assert!(proof.live_owned_turn().is_none());
+        proof.observe(Evidence::TurnStarted {
+            thread: THREAD,
+            turn: TURN,
+        });
+        assert!(proof.live_owned_turn().is_none());
+        proof.observe(Evidence::UserStarted {
+            thread: THREAD,
+            turn: TURN,
+            item: "user",
+            client: Some(&client.to_string()),
+        });
+        assert!(proof.live_owned_turn().is_none());
+        proof.observe(Evidence::UserCompleted {
+            thread: THREAD,
+            turn: TURN,
+            item: "user",
+            client: Some(&client.to_string()),
+        });
+        if !ack_first {
+            assert!(proof.live_owned_turn().is_none());
+            proof.observe(Evidence::SubmissionTurn(TURN));
+        }
+        assert_eq!(proof.live_owned_turn(), Some(TURN));
+        answer(&mut proof);
+        assert_eq!(proof.live_owned_turn(), Some(TURN));
+        finish(&mut proof, NativeStatus::Completed);
+        assert!(proof.live_owned_turn().is_none());
+    }
+}
+
+#[test]
+fn live_owned_turn_never_authorizes_incomplete_mixed_or_conflicting_input() {
+    for case in 0..5 {
+        let client = Uuid::new_v4();
+        let mut proof = OriginProof::new(THREAD, client).unwrap();
+        proof.observe(Evidence::SubmissionTurn(TURN));
+        if case == 0 {
+            proof.observe(Evidence::TurnStarted {
+                thread: THREAD,
+                turn: TURN,
+            });
+            proof.observe(Evidence::UserCompleted {
+                thread: THREAD,
+                turn: TURN,
+                item: "user",
+                client: Some(&client.to_string()),
+            });
+        } else {
+            start(&mut proof, &client.to_string());
+            assert_eq!(proof.live_owned_turn(), Some(TURN));
+            match case {
+                1 => {
+                    proof.observe(Evidence::UserStarted {
+                        thread: THREAD,
+                        turn: TURN,
+                        item: "local",
+                        client: None,
+                    });
+                }
+                2 => {
+                    proof.observe(Evidence::UserStarted {
+                        thread: THREAD,
+                        turn: TURN,
+                        item: "different-item",
+                        client: Some(&client.to_string()),
+                    });
+                }
+                3 => {
+                    proof.observe(Evidence::SubmissionTurn("different-turn"));
+                }
+                _ => {
+                    proof.observe(Evidence::Gap);
+                }
+            }
+        }
+        assert!(proof.live_owned_turn().is_none());
+    }
+}
+
+#[test]
+fn live_owned_turn_expires_on_every_native_terminal_status() {
+    for status in [
+        NativeStatus::Completed,
+        NativeStatus::Failed,
+        NativeStatus::Interrupted,
+        NativeStatus::Unknown,
+    ] {
+        let client = Uuid::new_v4();
+        let mut proof = OriginProof::new(THREAD, client).unwrap();
+        start(&mut proof, &client.to_string());
+        proof.observe(Evidence::SubmissionTurn(TURN));
+        assert_eq!(proof.live_owned_turn(), Some(TURN));
+        finish(&mut proof, status);
+        assert!(proof.live_owned_turn().is_none());
+        start(&mut proof, &client.to_string());
+        assert!(proof.live_owned_turn().is_none());
+    }
+}

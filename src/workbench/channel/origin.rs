@@ -234,6 +234,24 @@ impl OriginProof {
         None
     }
 
+    /// Current channel-owned Turn, only after both its Accepted submission ID and
+    /// the exact user item's complete native lifecycle have been observed.
+    /// This is an origin predicate, not permission to answer an arbitrary RPC:
+    /// callers must also pin the request, source/binding generation and watermark.
+    /// Mixed input, an unknown order, or native completion immediately removes it.
+    pub fn live_owned_turn(&self) -> Option<&str> {
+        if self.finished || self.poison.is_some() {
+            return None;
+        }
+        let turn = self.turn.as_ref()?;
+        (turn.channel
+            && turn.user_completed
+            && turn.taint.is_none()
+            && self.channel_turn.as_deref() == Some(turn.id.as_str())
+            && self.acknowledged_turn.as_deref() == Some(turn.id.as_str()))
+        .then_some(turn.id.as_str())
+    }
+
     /// Callers also consult this after late events; previously delivered content cannot be recalled.
     pub fn invalidated(&self) -> Option<Withheld> {
         self.poison
