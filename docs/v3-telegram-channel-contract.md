@@ -184,3 +184,5 @@ P1 应交付可操作的本机配置/绑定/撤销与同一 Thread 文本闭环�
 Run 移除、关闭/退订请求和畸形 JSON 的 Service 增量回归见[验收记录](validation/v3-channel-p2-acceptance-2026-10-10.md#3-service-失效入口)。退订请求发出即保守失效，不能以迟到响应重新授予旧资格；解析失败保留转发字节并暂扣旧渠道 final。各层证据按该记录的边界组合，不宣称完整故障或实际同时响应矩阵已通过。
 
 [输入身份与重新绑定专项](validation/v3-channel-input-rebind-2026-10-10.md)覆盖重复身份不消费当前提示，以及同一原版 Thread 的撤销后恢复：旧原生审批仍可由本机完成，新绑定任务等待后继续同一上下文，旧输入和旧 final 不外发。它没有进程/Service 重启、传输重连或旧 actor 清理与确认竞争，不替代完整故障矩阵和真实 Telegram 验收。
+
+[Service 重建专项](validation/v3-channel-service-restart-2026-10-10.md)补充真实 Service Drop、独立写者锁释放、显式加载保存凭证、重新配对授权和正常新任务；Session/transport 为连续合成来源，不是安装版 CLI/宿主进程重启。另一个生产 offer 回归检查不支持交互的静态提示：当前归属且明确授权时最多一次，外来/撤销/未授权均不发送，也不写答案或收件。

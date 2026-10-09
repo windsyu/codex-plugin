@@ -548,7 +548,7 @@ async fn interaction_duplicate_identity_abandoned_input_reservations_are_bounded
     let writer = core.writer().unwrap();
     let before = f.journal();
     // Drain each canceled read separately so this tests the retained identity
-    // budget (17), independently of the receipt worker's queue capacity (16).
+    // budget (17), independently of the receipt worker's queue capacity (32).
     for id in 100..117 {
         let resume = bounded(writer.pause_for_test()).await.unwrap();
         let value = update(id, id, "SYNTHETIC_ABANDONED_INPUT");
