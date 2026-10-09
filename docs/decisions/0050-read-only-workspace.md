@@ -19,9 +19,11 @@ Launcher 将 canonical cwd 的只读目录描述符交给独立 WorkspaceReader 
 
 Git 使用固定 cwd/argv 和清理后的环境，禁用 pager、外部 Diff、textconv、fsmonitor、hooks、可选锁、子模块递归、签名展示、对象替换及延迟抓取，禁止传输协议。status 使用 porcelain `-z`，仅处理当前 cwd pathspec，并按 Git prefix 再过滤一次；log 按当前目录过滤且每页 20 条，游标绑定 HEAD 与 prefix，不要求配置 upstream。缺少 Git/rg 分别报告能力不可用。
 
-选中文件的 Diff 是文件内容对比：已暂存为 `HEAD → index`，未暂存为 `index → 安全读取的当前文件`。Git `ls-tree/ls-files -z` 定位 blob，`cat-file` 按验证过的 object ID 取内容；Git 的 `--no-index --no-ext-diff --no-textconv` 仅对比匿名文件描述符。这样不会让 Git 重新打开可能被替换的工作区路径。文件模式与 rename 仍在 status 展示，内容 Diff 不冒充完整可应用的 Git patch；未解决冲突、链接、二进制和超大文件明确不可预览。
+选中文件的 Diff 是文件内容对比：已暂存为 `HEAD → index`，未暂存为 `index → 安全读取的当前文件`。Git `ls-tree/ls-files -z` 定位 blob，`cat-file` 按验证过的 object ID 取内容；Git 的 `--no-index --no-ext-diff --no-textconv` 仅对比请求自有的私有快照。这样不会让 Git 重新打开可能被替换的工作区路径。文件模式与 rename 仍在 status 展示，内容 Diff 不冒充完整可应用的 Git patch；未解决冲突、链接、二进制和超大文件明确不可预览。
 
-子进程输出有界（stdout 1 MiB / stderr 丢弃最多 64 KiB），独立进程组在取消/超时/超限时结束并回收。stderr 不返回正文、路径或环境。匿名临时文件在关闭时消失，不形成新的历史/归档目录，也不写原生 Codex 数据。
+子进程输出有界（stdout 1 MiB / stderr 最多 64 KiB），独立进程组在取消/超时/超限时结束并回收。stderr 默认仅计数并丢弃；显式诊断时在内存中保留有界副本用于静态错误类别匹配，不返回或记录原文、路径或环境。rg 的匿名临时文件在关闭时消失；Git 的命名快照在请求作用域退出时清理，不形成工作台历史/归档目录，也不写原生 Codex 数据。
+
+2026-10-09 的 [Issue #9 调查](../validation/workspace-fd-issue-9-2026-10-09.md)分别证实固定 FD 覆盖 Rust 启动错误管道，以及 macOS 同号 `/dev/fd` 并发 stat 足以触发 Git 原始假删除。前者以提前持有实际 CLOEXEC FD、子进程只清除标记替代固定 dup2；后者不能仅靠动态编号解决跨独立父进程重号。因此 Git 改用随机 0700 目录中的 0600 before/after 文件（create_new，拒绝覆盖/末端 symlink），仍只重开自有快照。正常结束、错误、取消后由作用域清理；SIGKILL/崩溃或清理失败可能遗留私有临时正文，此取舍替代原 Git 匿名文件保证。不新增不安全的全局临时目录清理，也不将成功检查描述为内核缺陷被修复。补丁只从行首 hunk 开始，不能把含 `@@ ` 的 TMPDIR 路径返回前端。
 
 左侧文件树/搜索/Git 与中央阅读分别维护选择。文件树按需展开，仅最后选中的目录自动刷新；其他展开目录保留读取结果。当前可见目录、Git 面板与中央文件每次完成后至少等待 5 秒再刷新，隐藏页面暂停，切换取消未完成请求。外部变化和已确认工具完成由下一次有界刷新反映，不把通知或工具完成当作 Git 状态凭证；首版不增加递归 watcher。点文件/搜索命中/结构化工具路径打开中央只读文件，关闭返回此前对话或历史。窄屏在选文件后收起左侧浮层。TerminalPanel 始终挂载，阅读动作不提交对话或重放终端输入；原生开启焦点报告时 xterm 继续发送焦点控制序列。
 
@@ -29,7 +31,7 @@ Git 使用固定 cwd/argv 和清理后的环境，禁用 pager、外部 Diff、t
 
 - 直接将浏览器路径交给 rg/Git：更短，但重新打开存在替换竞态，并使外部 Diff/配置扩展成为执行入口。
 - 自行实现正则和 Diff：增加两套语义与依赖维护，偏离使用已安装工具的最小范围。
-- 复制整个项目或递归 watcher：增加数据副本、清理与高扇出刷新成本。本片只生成有界、短期、匿名正文快照。
+- 复制整个项目或递归 watcher：增加数据副本、清理与高扇出刷新成本。本片只生成有界、短期的受控正文快照。
 - 允许安全根内 symlink：需要更复杂的解析与竞态策略，当前先明确拒绝。
 
 ## Consequences
