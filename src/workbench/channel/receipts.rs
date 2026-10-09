@@ -66,7 +66,7 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 type Reply<T> = oneshot::Sender<Result<T, Failure>>;
-// No Debug: SaveToken contains a credential. Other operations contain IDs only.
+// No Debug: SaveToken contains a credential and callbacks contain raw query IDs.
 enum Operation {
     Load(Reply<Loaded>),
     IsRejected {
@@ -85,6 +85,14 @@ enum Operation {
         key: DeliveryKey,
         update_id: i64,
         task: Uuid,
+        reply: Reply<Admission>,
+    },
+    AdmitCallback {
+        bot_id: i64,
+        update_id: i64,
+        query_id: String,
+        task: Uuid,
+        interaction: Uuid,
         reply: Reply<Admission>,
     },
     Submitting {
@@ -108,6 +116,14 @@ enum Operation {
         resume: Receiver<()>,
     },
     #[cfg(test)]
+    PauseAfterCallback {
+        task: Uuid,
+        interaction: Uuid,
+        entered: oneshot::Sender<()>,
+        resume: Receiver<()>,
+        reply: Reply<Admission>,
+    },
+    #[cfg(test)]
     PauseAfterIntent {
         task: Uuid,
         client: Uuid,
@@ -122,7 +138,7 @@ impl Operation {
             Self::Load(reply) => reply.is_closed(),
             Self::IsRejected { reply, .. } => reply.is_closed(),
             Self::Reject { reply, .. } => reply.is_closed(),
-            Self::Admit { reply, .. } => reply.is_closed(),
+            Self::Admit { reply, .. } | Self::AdmitCallback { reply, .. } => reply.is_closed(),
             Self::Submitting { reply, .. }
             | Self::Close { reply, .. }
             | Self::SaveToken { reply, .. }
@@ -132,6 +148,8 @@ impl Operation {
             Self::Pause { .. } => false,
             #[cfg(test)]
             Self::PauseAfterIntent { reply, .. } => reply.is_closed(),
+            #[cfg(test)]
+            Self::PauseAfterCallback { reply, .. } => reply.is_closed(),
         }
     }
 }
@@ -204,6 +222,28 @@ impl Handle {
             key,
             update_id,
             task,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn admit_callback(
+        &self,
+        bot_id: i64,
+        update_id: i64,
+        query_id: String,
+        task: Uuid,
+        interaction: Uuid,
+    ) -> Result<Admission, Failure> {
+        // Bound raw query bytes before they enter the bounded worker queue.
+        if !store::valid_query_id(&query_id) {
+            return Err(Failure::Store(store::Failure::InvalidInput));
+        }
+        self.call(|reply| Operation::AdmitCallback {
+            bot_id,
+            update_id,
+            query_id,
+            task,
+            interaction,
             reply,
         })
         .await
@@ -355,6 +395,20 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
                     .and_then(|store| store.admit(key, update_id, task).map_err(Failure::Store)),
             );
         }
+        Operation::AdmitCallback {
+            bot_id,
+            update_id,
+            query_id,
+            task,
+            interaction,
+            reply,
+        } => {
+            let _ = reply.send(ready(store).and_then(|store| {
+                store
+                    .admit_callback(bot_id, update_id, &query_id, task, interaction)
+                    .map_err(Failure::Store)
+            }));
+        }
         Operation::Submitting {
             task,
             client,
@@ -383,6 +437,23 @@ fn execute(operation: Operation, store: &mut Result<Store, store::Failure>) {
         Operation::Pause { entered, resume } => {
             let _ = entered.send(());
             let _ = resume.recv();
+        }
+        #[cfg(test)]
+        Operation::PauseAfterCallback {
+            task,
+            interaction,
+            entered,
+            resume,
+            reply,
+        } => {
+            let result = ready(store).and_then(|store| {
+                store
+                    .admit_callback(101, 20, "synthetic-query", task, interaction)
+                    .map_err(Failure::Store)
+            });
+            let _ = entered.send(());
+            let _ = resume.recv();
+            let _ = reply.send(result);
         }
         #[cfg(test)]
         Operation::PauseAfterIntent {

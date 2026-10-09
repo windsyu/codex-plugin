@@ -586,7 +586,11 @@ mod telegram_native_integration {
         let source = sources(&app, &cookie).await;
         let run = &source["runs"][0];
         stage(root, "confirm");
-        owner(&app,&cookie,"confirm",json!({"candidate":candidate,"runId":run["runId"],"threadId":thread,"sourceRevision":run["source"]["revision"]})).await;
+        let confirmed = owner(&app,&cookie,"confirm",json!({"candidate":candidate,"runId":run["runId"],"threadId":thread,"sourceRevision":run["source"]["revision"]})).await;
+        assert_eq!(
+            confirmed["channel"]["binding"]["active"]["interactiveConsent"],
+            false
+        );
         fresh_poll(&wire).await;
         fresh_poll(&wire).await;
         for turn in 1..=2usize {
@@ -854,4 +858,6 @@ mod telegram_native_integration {
         stage(root, "passed");
         std::fs::write(root.join("passed"), b"passed").unwrap();
     }
+
+    include!("telegram_interaction_integration_tests.rs");
 }

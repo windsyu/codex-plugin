@@ -1,7 +1,8 @@
 //! Channel-specific boundaries, independent of PTY forwarding and durable history.
-//! The isolated protocol example is the first consumer; production attachment is not enabled.
+//! Production consumers require the explicit experimental channel-ready mode.
 
 pub(crate) mod binding;
+pub(crate) mod interaction;
 #[cfg(unix)]
 pub mod native;
 mod origin;

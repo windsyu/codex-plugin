@@ -108,7 +108,7 @@ impl Client {
     pub async fn send_text(&self, chat_id: i64, text: &str, buttons: &[Button]) -> SendOutcome {
         if chat_id <= 0
             || !valid_text(text, 4096)
-            || buttons.len() > 3
+            || buttons.len() > 4
             || buttons
                 .iter()
                 .any(|button| !valid_text(&button.label, 64) || !valid_reference(&button.reference))

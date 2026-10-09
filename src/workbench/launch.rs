@@ -22,6 +22,7 @@ mod channel;
 pub(crate) mod entry;
 pub(crate) mod failure;
 mod profile;
+pub(crate) use channel::ResponseWrite;
 pub use channel::{
     ControlFailure, ControlHandle, NativeAttachment, ShutdownHandle, ShutdownOutcome, Submission,
 };

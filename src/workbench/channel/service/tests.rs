@@ -96,7 +96,15 @@ impl Bot {
                 if unknown {
                     continue;
                 }
-                let body = json!({"ok":true,"result":{"message_id":77,"chat":{"id":CHAT,"type":"private"}}}).to_string();
+                let callback_ack = String::from_utf8_lossy(&bytes[..end])
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.contains("/answerCallbackQuery "));
+                let body = if callback_ack {
+                    json!({"ok":true,"result":true})
+                } else {
+                    json!({"ok":true,"result":{"message_id":77,"chat":{"id":CHAT,"type":"private"}}})
+                }.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -229,7 +237,7 @@ impl Fixture {
         let candidate = self.service.snapshot().binding.candidate.unwrap();
         let source = self.session.snapshot();
         self.service
-            .confirm(candidate, source.run_id, thread(), source.revision)
+            .confirm(candidate, source.run_id, thread(), source.revision, false)
             .unwrap();
     }
     async fn admit(&self, update_id: i64, message_id: i64) {
@@ -620,8 +628,13 @@ async fn local_confirmation_requires_the_same_revision_as_atomic_target_qualific
         Err(session::Failure::SourceChanged)
     );
     assert!(matches!(
-        f.service
-            .confirm(candidate, old_source.run_id, thread(), old_source.revision),
+        f.service.confirm(
+            candidate,
+            old_source.run_id,
+            thread(),
+            old_source.revision,
+            false,
+        ),
         Err("channel_source_changed")
     ));
     let waiting = f.service.snapshot();
@@ -629,7 +642,7 @@ async fn local_confirmation_requires_the_same_revision_as_atomic_target_qualific
     assert!(waiting.binding.active.is_none());
     let confirmed = f
         .service
-        .confirm(candidate, current.run_id, thread(), current.revision)
+        .confirm(candidate, current.run_id, thread(), current.revision, false)
         .unwrap();
     let active = confirmed.binding.active.unwrap();
     assert_eq!(active.target, old_target);
@@ -708,7 +721,7 @@ async fn pairing_and_confirmation_cancel_old_poll_without_losing_first_new_messa
     let candidate = f.service.snapshot().binding.candidate.unwrap();
     let source = f.session.snapshot();
     f.service
-        .confirm(candidate, source.run_id, thread(), source.revision)
+        .confirm(candidate, source.run_id, thread(), source.revision, false)
         .unwrap();
     let (request, active) = bounded(received.recv()).await.unwrap();
     assert_eq!(request["offset"], 11);
@@ -730,4 +743,734 @@ async fn pairing_and_confirmation_cancel_old_poll_without_losing_first_new_messa
         1
     );
     drop(pending);
+}
+
+// P2 fixtures explicitly opt in; existing text-only tests keep consent false.
+impl Fixture {
+    async fn bind_with_consent(&mut self) {
+        let code = self.service.begin_pair().unwrap();
+        self.next_pair += 1;
+        process_update(
+            &self.service.core,
+            &self.bot.client,
+            BOT,
+            code.generation,
+            &update(self.next_pair, self.next_pair, &code.command),
+        )
+        .await
+        .unwrap();
+        let candidate = self.service.snapshot().binding.candidate.unwrap();
+        let source = self.session.snapshot();
+        self.service
+            .confirm(candidate, source.run_id, thread(), source.revision, true)
+            .unwrap();
+    }
+
+    async fn owned_interaction_job(&mut self) -> (Job, session::Attempt, interactions::Cleanup) {
+        self.admit(20, 20).await;
+        let job = self.pop();
+        let client = Uuid::new_v4();
+        let mut attempt = job.session.arm(job.active.target, client).unwrap();
+        self.service
+            .core
+            .writer()
+            .unwrap()
+            .mark_submitting(job.id, client)
+            .await
+            .unwrap();
+        let wire = async {
+            let request = read(&mut self.control).await;
+            assert_eq!(request["method"], "turn/start");
+            assert_eq!(request["params"]["clientUserMessageId"], client.to_string());
+            send(
+                &mut self.control,
+                json!({"id":request["id"],"result":{"turn":{"id":interaction_turn()}}}),
+            )
+            .await;
+            for value in [
+                json!({"method":"turn/started","params":{"threadId":thread(),"turn":{"id":interaction_turn(),"status":"inProgress"}}}),
+                json!({"method":"item/started","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+                json!({"method":"item/completed","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+            ] {
+                send(&mut self.native, value.clone()).await;
+                assert_eq!(read(&mut self.tui).await, value);
+            }
+        };
+        let (result, ()) = bounded(async { tokio::join!(attempt.submit(BODY.into()), wire) }).await;
+        assert_eq!(
+            result,
+            Submission::Accepted {
+                turn_id: interaction_turn()
+            }
+        );
+        bounded(async {
+            while attempt.revalidate().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        self.service
+            .core
+            .update(&job, "running", true, false, "pending", None);
+        let cleanup = interactions::Cleanup::new(
+            self.service.core.clone(),
+            job.id,
+            job.active,
+            attempt.interactions(),
+        );
+        (job, attempt, cleanup)
+    }
+
+    async fn native_interaction(&mut self, attempt: &session::Attempt, value: Value) {
+        send(&mut self.native, value.clone()).await;
+        assert_eq!(read(&mut self.tui).await, value);
+        bounded(async {
+            while attempt.revalidate().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+    }
+
+    async fn offer_interaction(&self, job: &Job, attempt: &session::Attempt) {
+        bounded(interactions::offer(
+            &self.service.core,
+            job,
+            &attempt.interactions(),
+        ))
+        .await;
+    }
+
+    async fn process_callback(&self, value: &Value) {
+        let generation = self.service.snapshot().binding.generation;
+        bounded(process_update(
+            &self.service.core,
+            &self.bot.client,
+            BOT,
+            generation,
+            value,
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn no_native_answer(&mut self) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), self.control.next())
+                .await
+                .is_err()
+        );
+    }
+
+    fn prompt(&self, index: usize) -> Value {
+        self.bot
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.get("reply_markup").is_some())
+            .nth(index)
+            .unwrap()
+            .clone()
+    }
+
+    fn journal(&self) -> String {
+        fs::read_to_string(self.root.path().join("receipts/receipts.jsonl")).unwrap()
+    }
+}
+
+fn interaction_turn() -> Uuid {
+    Uuid::from_u128(30)
+}
+fn command_interaction(id: Value) -> Value {
+    json!({"id":id,"method":"item/commandExecution/requestApproval","params":{
+        "threadId":thread(),"turnId":interaction_turn(),"itemId":"synthetic-command-item",
+        "command":"printf SYNTHETIC_APPROVAL_BODY","reason":"Synthetic permission reason",
+        "cwd":"/private/SYNTHETIC_CWD","availableDecisions":["accept","decline"]
+    }})
+}
+fn button_reference(prompt: &Value, label: &str) -> String {
+    prompt["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap())
+        .find(|button| button["text"] == label)
+        .unwrap()["callback_data"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn callback_update(update: i64, query: &str, reference: &str) -> Value {
+    json!({"update_id":update,"callback_query":{"id":query,
+        "from":{"id":CHAT,"is_bot":false},"data":reference,
+        "message":{"message_id":77,"date":1,"from":{"id":BOT,"is_bot":true},"chat":{"id":CHAT,"type":"private"}}}})
+}
+fn callback_receipts(journal: &str) -> usize {
+    journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|line| line["record"]["event"]["kind"] == "callback_received")
+        .count()
+}
+
+#[tokio::test]
+async fn interaction_confirmed_prompt_callback_is_durable_once_and_preserves_rpc_id() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, command_interaction(json!("73")))
+        .await;
+    f.offer_interaction(&job, &attempt).await;
+    let prompt = f.prompt(0);
+    assert!(
+        prompt["text"]
+            .as_str()
+            .unwrap()
+            .contains("SYNTHETIC_APPROVAL_BODY")
+    );
+    assert!(!prompt.to_string().contains("SYNTHETIC_CWD"));
+    assert_eq!(prompt["chat_id"], CHAT);
+    assert!(prompt.get("parse_mode").is_none());
+    let reference = button_reference(&prompt, "Allow once");
+    let deny = button_reference(&prompt, "Deny");
+    assert_eq!(reference.len(), 32);
+    assert_eq!(f.service.core.inner.lock().unwrap().interactions.len(), 1);
+    let callback = callback_update(21, "SYNTHETIC_QUERY_PRIVATE", &reference);
+    f.process_callback(&callback).await;
+    // Native reading happens after callback receipt fsync and the write attempt.
+    let journal = f.journal();
+    assert_eq!(callback_receipts(&journal), 1);
+    assert_eq!(
+        read(&mut f.control).await,
+        json!({"id":"73","result":{"decision":"accept"}})
+    );
+    assert_eq!(
+        f.service.snapshot().last_task.unwrap().reason,
+        Some("channel_interaction_written_unconfirmed")
+    );
+    f.process_callback(&callback).await;
+    f.process_callback(&callback_update(22, "SYNTHETIC_SIBLING_QUERY", &deny))
+        .await;
+    f.no_native_answer().await;
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+    assert_eq!(callback_receipts(&f.journal()), 1);
+    assert_eq!(
+        f.bot
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.get("callback_query_id").is_some())
+            .count(),
+        1
+    );
+    for private in [
+        BODY,
+        "SYNTHETIC_APPROVAL_BODY",
+        "SYNTHETIC_CWD",
+        "SYNTHETIC_QUERY_PRIVATE",
+        &reference,
+        &deny,
+    ] {
+        assert!(!f.journal().contains(private));
+    }
+}
+
+#[tokio::test]
+async fn interaction_local_answer_resolved_and_revoke_withhold_old_callbacks() {
+    for invalidation in ["local", "resolved", "revoke"] {
+        let mut f = Fixture::new(false).await;
+        f.bind_with_consent().await;
+        let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+        f.native_interaction(&attempt, command_interaction(json!(73)))
+            .await;
+        f.offer_interaction(&job, &attempt).await;
+        let reference = button_reference(&f.prompt(0), "Allow once");
+        let id = *f
+            .service
+            .core
+            .inner
+            .lock()
+            .unwrap()
+            .interactions
+            .keys()
+            .next()
+            .unwrap();
+        match invalidation {
+            "local" => {
+                let answer = json!({"id":73,"result":{"decision":"decline"}});
+                send(&mut f.tui, answer.clone()).await;
+                assert_eq!(read(&mut f.native).await, answer);
+            }
+            "resolved" => {
+                f.native_interaction(&attempt, json!({"method":"serverRequest/resolved","params":{"threadId":thread(),"requestId":73}})).await;
+            }
+            _ => {
+                f.service.revoke();
+            }
+        }
+        if invalidation != "revoke" {
+            bounded(async {
+                while attempt.interactions().current(id).is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        }
+        f.process_callback(&callback_update(21, "SYNTHETIC_LATE_QUERY", &reference))
+            .await;
+        f.no_native_answer().await;
+        assert_eq!(callback_receipts(&f.journal()), 0);
+        assert_eq!(f.bot.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn interaction_questions_collect_all_choices_before_one_typed_native_answer() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, json!({"id":"questions-rpc","method":"item/tool/requestUserInput","params":{
+        "threadId":thread(),"turnId":interaction_turn(),"itemId":"question-item","isBlocking":true,
+        "questions":[
+            {"id":"first-original","header":"First","question":"SYNTHETIC_QUESTION_ONE","isOther":false,"isSecret":false,
+             "options":[{"label":"First A","description":"A"},{"label":"First B","description":"B"}]},
+            {"id":"second-original","header":"Second","question":"SYNTHETIC_QUESTION_TWO","isOther":false,"isSecret":false,
+             "options":[{"label":"Second A","description":"A"},{"label":"Second B","description":"B"}]}
+        ]}})).await;
+    f.offer_interaction(&job, &attempt).await;
+    let first = button_reference(&f.prompt(0), "1.2");
+    f.process_callback(&callback_update(21, "SYNTHETIC_QUESTION_QUERY_1", &first))
+        .await;
+    f.no_native_answer().await;
+    let generation = f.service.snapshot().binding.generation;
+    let text = update(22, 22, "SYNTHETIC_FREE_TEXT_MUST_NOT_QUEUE");
+    process_update(&f.service.core, &f.bot.client, BOT, generation, &text)
+        .await
+        .unwrap();
+    assert_eq!(f.service.snapshot().queued, 0);
+    assert!(
+        f.service
+            .core
+            .writer()
+            .unwrap()
+            .is_rejected(
+                BOT,
+                22,
+                Some(DeliveryKey {
+                    bot_id: BOT,
+                    chat_id: CHAT,
+                    message_id: 22,
+                })
+            )
+            .await
+            .unwrap()
+    );
+    f.no_native_answer().await;
+    assert!(f.bot.requests.lock().unwrap().iter().any(|request| {
+        request["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("not queued as a new task"))
+    }));
+    assert!(!f.journal().contains("SYNTHETIC_FREE_TEXT_MUST_NOT_QUEUE"));
+    let second_prompt = f.prompt(1);
+    assert!(
+        second_prompt["text"]
+            .as_str()
+            .unwrap()
+            .contains("Earlier choices recorded")
+    );
+    let second = button_reference(&second_prompt, "2.1");
+    assert_ne!(first, second);
+    f.process_callback(&callback_update(23, "SYNTHETIC_QUESTION_QUERY_2", &second))
+        .await;
+    assert_eq!(
+        read(&mut f.control).await,
+        json!({"id":"questions-rpc","result":{"answers":{
+            "first-original":{"answers":["First B"]},"second-original":{"answers":["Second A"]}
+        }}})
+    );
+    f.no_native_answer().await;
+    assert_eq!(callback_receipts(&f.journal()), 2);
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+    for private in [
+        "SYNTHETIC_QUESTION_ONE",
+        "SYNTHETIC_QUESTION_TWO",
+        "SYNTHETIC_QUESTION_QUERY_1",
+        "First B",
+        "Second A",
+        &first,
+        &second,
+    ] {
+        assert!(!f.journal().contains(private));
+    }
+}
+
+#[tokio::test]
+async fn interaction_expired_question_rejects_text_until_exact_native_retirement() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(
+        &attempt,
+        json!({"id":"expired-question-rpc","method":"item/tool/requestUserInput","params":{
+        "threadId":thread(),"turnId":interaction_turn(),"itemId":"question-item",
+        "questions":[{"id":"choice","header":"Choice","question":"SYNTHETIC_EXPIRED_QUESTION",
+            "isOther":false,"isSecret":false,"options":[{"label":"Yes","description":"Continue"},
+            {"label":"No","description":"Stop"}]}]}}),
+    )
+    .await;
+    f.offer_interaction(&job, &attempt).await;
+    let id = *f
+        .service
+        .core
+        .inner
+        .lock()
+        .unwrap()
+        .interactions
+        .keys()
+        .next()
+        .unwrap();
+    let handle = attempt.interactions();
+    handle.expire_for_test(id);
+    assert!(handle.current(id).is_err());
+    assert_eq!(handle.awaiting_question(), Ok(true));
+    f.process_callback(&callback_update(
+        21,
+        "SYNTHETIC_EXPIRED_QUERY",
+        &button_reference(&f.prompt(0), "1.1"),
+    ))
+    .await;
+    assert_eq!(callback_receipts(&f.journal()), 0);
+    let generation = f.service.snapshot().binding.generation;
+    process_update(
+        &f.service.core,
+        &f.bot.client,
+        BOT,
+        generation,
+        &update(22, 22, "SYNTHETIC_EXPIRED_QUESTION_TEXT"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.service.snapshot().queued, 0);
+    assert!(
+        f.service
+            .core
+            .writer()
+            .unwrap()
+            .is_rejected(
+                BOT,
+                22,
+                Some(DeliveryKey {
+                    bot_id: BOT,
+                    chat_id: CHAT,
+                    message_id: 22,
+                })
+            )
+            .await
+            .unwrap()
+    );
+    assert!(!f.journal().contains("SYNTHETIC_EXPIRED_QUESTION_TEXT"));
+    f.no_native_answer().await;
+    f.native_interaction(
+        &attempt,
+        json!({"method":"serverRequest/resolved","params":{
+        "threadId":thread(),"requestId":"unrelated-rpc"}}),
+    )
+    .await;
+    assert_eq!(handle.awaiting_question(), Ok(true));
+    f.native_interaction(
+        &attempt,
+        json!({"method":"serverRequest/resolved","params":{
+        "threadId":thread(),"requestId":"expired-question-rpc"}}),
+    )
+    .await;
+    assert_eq!(handle.awaiting_question(), Ok(false));
+    process_update(
+        &f.service.core,
+        &f.bot.client,
+        BOT,
+        generation,
+        &update(23, 23, "SYNTHETIC_NEXT_TASK_AFTER_RETIREMENT"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.service.snapshot().queued, 1);
+}
+
+#[tokio::test]
+async fn interaction_without_separate_consent_exports_no_request_content() {
+    let mut f = Fixture::new(false).await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, command_interaction(json!(73)))
+        .await;
+    f.offer_interaction(&job, &attempt).await;
+    assert!(f.bot.requests.lock().unwrap().is_empty());
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+    f.no_native_answer().await;
+    assert!(!f.journal().contains("SYNTHETIC_APPROVAL_BODY"));
+}
+
+#[tokio::test]
+async fn interaction_unknown_prompt_delivery_never_activates_references_or_retries() {
+    let mut f = Fixture::new(true).await;
+    f.bind_with_consent().await;
+    let (job, attempt, _cleanup) = f.owned_interaction_job().await;
+    f.native_interaction(&attempt, command_interaction(json!(73)))
+        .await;
+    f.offer_interaction(&job, &attempt).await;
+    let reference = button_reference(&f.prompt(0), "Allow once");
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+    f.process_callback(&callback_update(21, "SYNTHETIC_UNKNOWN_QUERY", &reference))
+        .await;
+    f.offer_interaction(&job, &attempt).await;
+    f.no_native_answer().await;
+    assert_eq!(f.bot.requests.lock().unwrap().len(), 1);
+    assert_eq!(callback_receipts(&f.journal()), 0);
+    assert!(!f.journal().contains(&reference));
+    assert_eq!(
+        f.service.snapshot().last_task.unwrap().reason,
+        Some("channel_interaction_send_unknown")
+    );
+}
+
+#[tokio::test]
+async fn interaction_uncertain_old_job_cannot_revoke_a_replacement_binding() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    f.admit(20, 20).await;
+    let old = f.pop().active;
+    f.service.revoke();
+    f.bind_with_consent().await;
+    f.admit(21, 21).await;
+    let replacement = f.service.snapshot().binding.active.unwrap();
+    assert_ne!(old.generation, replacement.generation);
+    f.service.core.revoke_job(old);
+    let mut wrong_target = replacement;
+    wrong_target.target.thread_id = Uuid::from_u128(999);
+    f.service.core.revoke_job(wrong_target);
+    assert!(f.service.core.valid(replacement));
+    assert_eq!(f.service.snapshot().queued, 1);
+    f.service.core.revoke_job(replacement);
+    assert!(f.service.snapshot().binding.active.is_none());
+    assert_eq!(f.service.snapshot().queued, 0);
+}
+
+#[tokio::test]
+async fn interaction_pre_ack_text_and_unknown_submission_never_queue_as_new_tasks() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    f.admit(20, 20).await;
+    let job = f.pop();
+    let task = job.id;
+    let generation = job.active.generation;
+    let core = f.service.core.clone();
+    let executor = tokio::spawn(async move { execute_job(&core, &job).await });
+    let start = read(&mut f.control).await;
+    assert_eq!(start["method"], "turn/start");
+    assert!(
+        f.service
+            .core
+            .inner
+            .lock()
+            .unwrap()
+            .active_interaction
+            .is_some()
+    );
+    process_update(
+        &f.service.core,
+        &f.bot.client,
+        BOT,
+        generation,
+        &update(21, 21, "SYNTHETIC_PRE_ACK_TEXT"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.service.snapshot().queued, 0);
+    let client = start["params"]["clientUserMessageId"].clone();
+    for value in [
+        json!({"method":"turn/started","params":{"threadId":thread(),"turn":{"id":interaction_turn(),"status":"inProgress"}}}),
+        json!({"method":"item/started","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+        json!({"method":"item/completed","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+        json!({"id":"pre-ack-question","method":"item/tool/requestUserInput","params":{
+            "threadId":thread(),"turnId":interaction_turn(),"itemId":"question-item","questions":[{
+                "id":"choice","header":"Choice","question":"SYNTHETIC_PRE_ACK_QUESTION",
+                "isOther":false,"isSecret":false,"options":[{"label":"Yes","description":"Continue"},
+                {"label":"No","description":"Stop"}]}]}}),
+    ] {
+        send(&mut f.native, value.clone()).await;
+        assert_eq!(read(&mut f.tui).await, value);
+    }
+    process_update(
+        &f.service.core,
+        &f.bot.client,
+        BOT,
+        generation,
+        &update(22, 22, "SYNTHETIC_PRE_ACK_QUESTION_TEXT"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.service.snapshot().queued, 0);
+    assert!(f.service.core.inner.lock().unwrap().interactions.is_empty());
+    assert!(
+        f.bot
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("reply_markup").is_none())
+    );
+    // The unacknowledged submission may already have taken effect. Closing its
+    // independent control transport cannot be treated as permission for new text.
+    f.control.close(None).await.unwrap();
+    bounded(executor).await.unwrap();
+    let view = f.service.snapshot().last_task.unwrap();
+    assert_eq!(view.id, task);
+    assert_eq!(view.phase, "uncertain");
+    assert!(!view.native_confirmed);
+    assert!(
+        f.service
+            .core
+            .inner
+            .lock()
+            .unwrap()
+            .binding
+            .snapshot(Instant::now())
+            .active
+            .is_none()
+    );
+    process_update(
+        &f.service.core,
+        &f.bot.client,
+        BOT,
+        generation,
+        &update(23, 23, "SYNTHETIC_UNKNOWN_SUBMISSION_TEXT"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.service.snapshot().queued, 0);
+    for id in [21, 22, 23] {
+        assert!(
+            f.service
+                .core
+                .writer()
+                .unwrap()
+                .is_rejected(
+                    BOT,
+                    id,
+                    Some(DeliveryKey {
+                        bot_id: BOT,
+                        chat_id: CHAT,
+                        message_id: id,
+                    })
+                )
+                .await
+                .unwrap()
+        );
+    }
+    let journal = f.journal();
+    assert!(journal.contains("submitting"));
+    assert!(!journal.contains("SYNTHETIC_PRE_ACK"));
+    assert!(!journal.contains("SYNTHETIC_UNKNOWN_SUBMISSION_TEXT"));
+    let value = json!({"method":"synthetic/forwardingStillLive","params":{"synthetic":true}});
+    send(&mut f.native, value.clone()).await;
+    assert_eq!(read(&mut f.tui).await, value);
+}
+
+#[tokio::test]
+async fn interaction_execute_job_loop_prompts_answers_completes_and_cleans_up() {
+    let mut f = Fixture::new(false).await;
+    f.bind_with_consent().await;
+    f.admit(20, 20).await;
+    let job = f.pop();
+    let core = f.service.core.clone();
+    let executor = tokio::spawn(async move { execute_job(&core, &job).await });
+    let start = read(&mut f.control).await;
+    assert_eq!(start["method"], "turn/start");
+    assert_eq!(start["params"]["input"][0]["text"], BODY);
+    let client = start["params"]["clientUserMessageId"].clone();
+    send(
+        &mut f.control,
+        json!({"id":start["id"],"result":{"turn":{"id":interaction_turn()}}}),
+    )
+    .await;
+    for value in [
+        json!({"method":"turn/started","params":{"threadId":thread(),"turn":{"id":interaction_turn(),"status":"inProgress"}}}),
+        json!({"method":"item/started","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+        json!({"method":"item/completed","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"userMessage","id":"owned-user","clientId":client,"content":[]}}}),
+        command_interaction(json!(73)),
+    ] {
+        send(&mut f.native, value.clone()).await;
+        assert_eq!(read(&mut f.tui).await, value);
+    }
+    // Only the production execute_job loop offers this request.
+    bounded(async {
+        loop {
+            if f.service.core.inner.lock().unwrap().interactions.len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let reference = button_reference(&f.prompt(0), "Allow once");
+    f.process_callback(&callback_update(21, "SYNTHETIC_EXECUTOR_QUERY", &reference))
+        .await;
+    assert_eq!(callback_receipts(&f.journal()), 1);
+    assert_eq!(
+        read(&mut f.control).await,
+        json!({"id":73,"result":{"decision":"accept"}})
+    );
+    for value in [
+        json!({"method":"serverRequest/resolved","params":{"threadId":thread(),"requestId":73}}),
+        json!({"method":"item/completed","params":{"threadId":thread(),"turnId":interaction_turn(),"item":{"type":"agentMessage","id":"final","phase":"final_answer","text":FINAL}}}),
+        json!({"method":"turn/completed","params":{"threadId":thread(),"turn":{"id":interaction_turn(),"status":"completed"}}}),
+    ] {
+        send(&mut f.native, value.clone()).await;
+        assert_eq!(read(&mut f.tui).await, value);
+    }
+    bounded(executor).await.unwrap();
+    let view = f.service.snapshot().last_task.unwrap();
+    assert!(view.native_confirmed && view.native_completed);
+    assert_eq!(view.delivery, "confirmed");
+    {
+        let inner = f.service.core.inner.lock().unwrap();
+        assert!(inner.interactions.is_empty());
+        assert!(inner.active_interaction.is_none());
+    }
+    {
+        let requests = f.bot.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.get("reply_markup").is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["text"] == FINAL)
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.get("callback_query_id").is_some())
+                .count(),
+            1
+        );
+    }
+    f.process_callback(&callback_update(
+        22,
+        "SYNTHETIC_EXECUTOR_LATE_QUERY",
+        &reference,
+    ))
+    .await;
+    f.no_native_answer().await;
+    assert_eq!(callback_receipts(&f.journal()), 1);
+    assert!(!f.journal().contains("SYNTHETIC_EXECUTOR_QUERY"));
+    assert!(!f.journal().contains(&reference));
 }

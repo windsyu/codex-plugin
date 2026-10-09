@@ -26,7 +26,7 @@ fn pair(binding: &mut Binding, now: Instant) -> (PairingCode, Candidate) {
 }
 fn activate(binding: &mut Binding, now: Instant) -> ActiveBinding {
     let (_, candidate) = pair(binding, now);
-    binding.confirm(candidate, target(), now).unwrap()
+    binding.confirm(candidate, target(), false, now).unwrap()
 }
 fn assert_inactive(binding: &Binding, generation: Uuid) {
     assert!(
@@ -59,7 +59,7 @@ fn nonce_only_nominates_and_exact_local_confirmation_activates() {
     let public = serde_json::to_string(&snapshot).unwrap();
     assert!(!public.contains(&code.nonce));
     assert!(!format!("{snapshot:?}").contains(&code.nonce));
-    let active = binding.confirm(candidate, target(), now).unwrap();
+    let active = binding.confirm(candidate, target(), false, now).unwrap();
     assert_ne!(active.generation, code.generation);
     assert_eq!(binding.snapshot(now).phase, Phase::Active);
     assert!(matches!(
@@ -68,7 +68,7 @@ fn nonce_only_nominates_and_exact_local_confirmation_activates() {
     ));
     assert_eq!(binding.revalidate(active.generation, target()), Ok(active));
     assert_eq!(
-        binding.confirm(candidate, target(), now),
+        binding.confirm(candidate, target(), false, now),
         Err(Failure::CandidateMismatch)
     );
 }
@@ -98,6 +98,46 @@ fn nonce_is_single_use_and_start_never_grants_access() {
 }
 
 #[test]
+fn interactive_consent_is_explicit_and_never_inherited_by_a_new_generation() {
+    let now = Instant::now();
+    let mut binding = Binding::new();
+    let (_, candidate) = pair(&mut binding, now);
+    let consenting = binding.confirm(candidate, target(), true, now).unwrap();
+    assert!(consenting.interactive_consent);
+    assert_ne!(consenting.generation, candidate.generation);
+    assert_eq!(
+        serde_json::to_value(binding.snapshot(now)).unwrap()["active"]["interactiveConsent"],
+        true
+    );
+    // A consumed candidate cannot change consent in place.
+    assert_eq!(
+        binding.confirm(candidate, target(), false, now),
+        Err(Failure::CandidateMismatch)
+    );
+    assert_eq!(binding.snapshot(now).active, Some(consenting));
+    let (_, next_candidate) = pair(&mut binding, now);
+    assert!(binding.snapshot(now).active.is_none());
+    let text_only = binding
+        .confirm(next_candidate, target(), false, now)
+        .unwrap();
+    assert!(!text_only.interactive_consent);
+    assert_ne!(text_only.generation, consenting.generation);
+    assert_ne!(text_only.generation, next_candidate.generation);
+    assert_eq!(
+        binding.revalidate(consenting.generation, target()),
+        Err(Failure::StaleGeneration)
+    );
+    assert_eq!(
+        serde_json::to_value(binding.snapshot(now)).unwrap()["active"]["interactiveConsent"],
+        false
+    );
+    binding.revoke();
+    assert!(binding.snapshot(now).active.is_none());
+    assert!(!activate(&mut binding, now).interactive_consent);
+    assert!(Binding::new().snapshot(now).active.is_none());
+}
+
+#[test]
 fn original_deadline_applies_to_nonce_and_local_confirmation() {
     let now = Instant::now();
     for candidate_first in [false, true] {
@@ -109,7 +149,7 @@ fn original_deadline_applies_to_nonce_and_local_confirmation() {
                 .pair(99, &command, now + PAIR_LIFETIME - Duration::from_secs(1))
                 .unwrap();
             assert_eq!(
-                binding.confirm(candidate, target(), now + PAIR_LIFETIME),
+                binding.confirm(candidate, target(), false, now + PAIR_LIFETIME),
                 Err(Failure::Expired)
             );
         } else {
@@ -231,7 +271,7 @@ fn confirmation_requires_every_candidate_field_and_valid_explicit_target() {
         },
     ] {
         assert_eq!(
-            binding.confirm(altered, target(), now),
+            binding.confirm(altered, target(), false, now),
             Err(Failure::CandidateMismatch)
         );
     }
@@ -263,11 +303,11 @@ fn confirmation_requires_every_candidate_field_and_valid_explicit_target() {
             Err(Failure::InvalidIdentity)
         );
         assert_eq!(
-            binding.confirm(candidate, bad, now),
+            binding.confirm(candidate, bad, false, now),
             Err(Failure::InvalidIdentity)
         );
     }
-    assert!(binding.confirm(candidate, target(), now).is_ok());
+    assert!(binding.confirm(candidate, target(), false, now).is_ok());
 }
 
 #[test]
@@ -346,7 +386,7 @@ fn revoke_bot_replacement_and_restart_never_restore_old_authorization() {
         Err(Failure::NotPairing)
     );
     assert_eq!(
-        binding.confirm(candidate, target(), now),
+        binding.confirm(candidate, target(), false, now),
         Err(Failure::CandidateMismatch)
     );
     for id in [0, -1] {

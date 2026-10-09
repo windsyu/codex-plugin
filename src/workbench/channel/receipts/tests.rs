@@ -255,3 +255,106 @@ async fn cancelled_queued_work_is_not_written_and_bad_open_is_async_static_failu
     assert_eq!(error.code(), "channel_receipts_unavailable");
     shutdown(worker).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn lost_callback_result_retains_only_dedup_metadata_across_worker_restart() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    let interaction = Uuid::from_u128(2);
+    handle.admit(key(1), 1, task).await.unwrap();
+    handle
+        .mark_submitting(task, Uuid::from_u128(3))
+        .await
+        .unwrap();
+    let (entered, waiting) = oneshot::channel();
+    let (resume, pause) = mpsc::channel();
+    let (reply, result) = oneshot::channel();
+    handle
+        .send(Operation::PauseAfterCallback {
+            task,
+            interaction,
+            entered,
+            resume: pause,
+            reply,
+        })
+        .unwrap();
+    waiting.await.unwrap(); // actual callback append and fsync completed
+    drop(result);
+    resume.send(()).unwrap();
+    let expected = Counts {
+        received: 0,
+        submitting: 1,
+        closed: 0,
+    };
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    shutdown(worker).await;
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    assert_eq!(handle.load().await.unwrap().recovered, expected);
+    assert_eq!(
+        handle
+            .admit_callback(101, 21, "synthetic-query".into(), task, interaction)
+            .await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(
+        handle
+            .admit_callback(101, 20, "different-query".into(), task, interaction)
+            .await,
+        Ok(Admission::Duplicate)
+    );
+    assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    shutdown(worker).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_queued_callback_is_not_written_and_query_bytes_are_bounded_before_queueing() {
+    let root = root();
+    let path = root.path().join("receipts");
+    let worker = Worker::start(path.clone()).unwrap();
+    let handle = worker.handle();
+    let task = Uuid::from_u128(1);
+    let interaction = Uuid::from_u128(2);
+    handle.admit(key(1), 1, task).await.unwrap();
+    handle
+        .mark_submitting(task, Uuid::from_u128(3))
+        .await
+        .unwrap();
+    let before = fs::read(path.join("receipts.jsonl")).unwrap();
+    let resume = pause(&handle).await;
+    let (reply, result) = oneshot::channel();
+    handle
+        .send(Operation::AdmitCallback {
+            bot_id: 101,
+            update_id: 20,
+            query_id: "cancelled-query".into(),
+            task,
+            interaction,
+            reply,
+        })
+        .unwrap();
+    drop(result);
+    for query in ["".to_owned(), "q\n".into(), "q".repeat(1025)] {
+        // Completes while the worker is paused: validation precedes queueing.
+        assert_eq!(
+            handle
+                .admit_callback(101, 20, query, task, interaction)
+                .await,
+            Err(Failure::Store(store::Failure::InvalidInput))
+        );
+    }
+    resume.send(()).unwrap();
+    handle.load().await.unwrap();
+    assert_eq!(fs::read(path.join("receipts.jsonl")).unwrap(), before);
+    assert_eq!(
+        handle
+            .admit_callback(101, 20, "cancelled-query".into(), task, interaction)
+            .await,
+        Ok(Admission::Fresh)
+    );
+    shutdown(worker).await;
+}

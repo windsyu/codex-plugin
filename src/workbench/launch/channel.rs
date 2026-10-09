@@ -1,6 +1,7 @@
 //! Explicit native channel launch. No thread creation, resume, queue or subscription RPC.
 use super::super::channel::native::{CaptureReceiver, Relay, UpstreamIdentity};
-use futures_util::{SinkExt, StreamExt};
+use crate::workbench::channel::interaction::{NativeResponse, RpcId};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     fmt,
@@ -68,6 +69,13 @@ pub enum Submission {
         reason: ControlFailure,
     },
 }
+/// Native answers have no application-level acknowledgment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResponseWrite {
+    NotSent { reason: ControlFailure },
+    WrittenUnconfirmed,
+    Unknown { reason: ControlFailure },
+}
 struct State {
     failure: AtomicU8,
     notify: Notify,
@@ -106,11 +114,37 @@ impl State {
         }
     }
 }
-struct Request {
-    thread: Uuid,
-    text: String,
-    client: Uuid,
-    reply: oneshot::Sender<Submission>,
+enum Request {
+    Start {
+        thread: Uuid,
+        text: String,
+        client: Uuid,
+        reply: oneshot::Sender<Submission>,
+    },
+    Answer {
+        id: RpcId,
+        response: NativeResponse,
+        validate: Box<dyn FnOnce() -> bool + Send>,
+        reply: oneshot::Sender<ResponseWrite>,
+    },
+}
+impl Request {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Start { reply, .. } => reply.is_closed(),
+            Self::Answer { reply, .. } => reply.is_closed(),
+        }
+    }
+    fn not_sent(self, reason: ControlFailure) {
+        match self {
+            Self::Start { reply, .. } => {
+                let _ = reply.send(Submission::NotSent { reason });
+            }
+            Self::Answer { reply, .. } => {
+                let _ = reply.send(ResponseWrite::NotSent { reason });
+            }
+        }
+    }
 }
 /// Cloneable submission endpoint, deliberately without Debug or generic RPC access.
 #[derive(Clone)]
@@ -143,7 +177,7 @@ impl ControlHandle {
             return Submission::NotSent { reason };
         }
         let (reply, receiver) = oneshot::channel();
-        match self.sender.try_send(Request {
+        match self.sender.try_send(Request::Start {
             thread,
             text,
             client,
@@ -164,6 +198,46 @@ impl ControlHandle {
         // Cancellation after enqueue is deliberately not a retry signal. The caller's
         // durable submission intent must remain uncertain until native evidence settles it.
         receiver.await.unwrap_or(Submission::Unknown {
+            reason: self.failure().unwrap_or(ControlFailure::Stopped),
+        })
+    }
+    /// Write only a schema-checked native answer, with a fresh authorization gate.
+    pub(crate) async fn respond(
+        &self,
+        id: RpcId,
+        response: NativeResponse,
+        validate: Box<dyn FnOnce() -> bool + Send>,
+    ) -> ResponseWrite {
+        if RpcId::parse(&id.to_value()).is_err()
+            || response.envelope(&id).to_string().len() > MESSAGE_LIMIT
+        {
+            return ResponseWrite::NotSent {
+                reason: ControlFailure::InvalidInput,
+            };
+        }
+        if let Some(reason) = self.failure() {
+            return ResponseWrite::NotSent { reason };
+        }
+        let (reply, receiver) = oneshot::channel();
+        match self.sender.try_send(Request::Answer {
+            id,
+            response,
+            validate,
+            reply,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return ResponseWrite::NotSent {
+                    reason: ControlFailure::Busy,
+                };
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return ResponseWrite::NotSent {
+                    reason: self.failure().unwrap_or(ControlFailure::Stopped),
+                };
+            }
+        }
+        receiver.await.unwrap_or(ResponseWrite::Unknown {
             reason: self.failure().unwrap_or(ControlFailure::Stopped),
         })
     }
@@ -774,52 +848,117 @@ fn control(mut socket: Socket, deadline: Duration) -> (ControlHandle, JoinHandle
                     break;
                 }
             };
-            if request.reply.is_closed() {
+            if request.is_closed() {
                 continue;
             }
             if let Some(reason) = state.failure() {
-                let _ = request.reply.send(Submission::NotSent { reason });
+                request.not_sent(reason);
                 break;
             }
-            id += 1;
-            let request_body = json!({"id":id,"method":"turn/start","params":{"threadId":request.thread.to_string(),"clientUserMessageId":request.client.to_string(),"input":[{"type":"text","text":request.text,"text_elements":[]}]}});
-            let mut write_attempted = false;
-            let attempt = async {
-                write_attempted = true;
-                socket
-                    .send(Message::Text(request_body.to_string().into()))
-                    .await
-                    .map_err(|_| ControlFailure::Transport)?;
-                let value = response(&mut socket, id).await?;
-                classify(value)
-            };
-            let outcome = tokio::select! {
-                biased;
-                _=state.stopped()=>Err(state.failure().unwrap_or(ControlFailure::Stopped)),
-                result=tokio::time::timeout(deadline, attempt)=>result.unwrap_or(Err(ControlFailure::Timeout)),
-            };
-            match outcome {
-                Ok(submission) => {
-                    let _ = request.reply.send(submission);
-                }
-                Err(reason) => {
-                    state.stop(reason);
-                    let outcome = if write_attempted {
-                        Submission::Unknown { reason }
-                    } else {
-                        Submission::NotSent { reason }
+            match request {
+                Request::Start {
+                    thread,
+                    text,
+                    client,
+                    reply,
+                } => {
+                    id += 1;
+                    let request_body = json!({"id":id,"method":"turn/start","params":{"threadId":thread.to_string(),"clientUserMessageId":client.to_string(),"input":[{"type":"text","text":text,"text_elements":[]}]}});
+                    let mut write_attempted = false;
+                    let attempt = async {
+                        write_attempted = true;
+                        socket
+                            .send(Message::Text(request_body.to_string().into()))
+                            .await
+                            .map_err(|_| ControlFailure::Transport)?;
+                        let value = response(&mut socket, id).await?;
+                        classify(value)
                     };
-                    let _ = request.reply.send(outcome);
-                    break;
+                    let outcome = tokio::select! {
+                        biased;
+                        _=state.stopped()=>Err(state.failure().unwrap_or(ControlFailure::Stopped)),
+                        result=tokio::time::timeout(deadline, attempt)=>result.unwrap_or(Err(ControlFailure::Timeout)),
+                    };
+                    match outcome {
+                        Ok(submission) => {
+                            let _ = reply.send(submission);
+                        }
+                        Err(reason) => {
+                            state.stop(reason);
+                            let outcome = if write_attempted {
+                                Submission::Unknown { reason }
+                            } else {
+                                Submission::NotSent { reason }
+                            };
+                            let _ = reply.send(outcome);
+                            break;
+                        }
+                    }
+                }
+                Request::Answer {
+                    id,
+                    response,
+                    validate,
+                    reply,
+                } => {
+                    let body = Message::Text(response.envelope(&id).to_string().into());
+                    let mut write_attempted = false;
+                    let attempt = async {
+                        // Wait for prior buffered writes before admitting this
+                        // envelope. There is no await between the fresh gate and
+                        // start_send; after admission bytes may be in flight.
+                        std::future::poll_fn(|cx| std::pin::Pin::new(&mut socket).poll_ready(cx))
+                            .await
+                            .map_err(|_| ControlFailure::Transport)?;
+                        if reply.is_closed() {
+                            return Ok(ResponseWrite::NotSent {
+                                reason: ControlFailure::Stopped,
+                            });
+                        }
+                        if !validate() {
+                            return Ok(ResponseWrite::NotSent {
+                                reason: ControlFailure::InvalidInput,
+                            });
+                        }
+                        write_attempted = true;
+                        std::pin::Pin::new(&mut socket)
+                            .start_send(body)
+                            .map_err(|_| ControlFailure::Transport)?;
+                        socket
+                            .flush()
+                            .await
+                            .map_err(|_| ControlFailure::Transport)?;
+                        // A result envelope has no response ACK. Flush success
+                        // cannot prove native adoption or tool execution.
+                        Ok(ResponseWrite::WrittenUnconfirmed)
+                    };
+                    let outcome = tokio::select! {
+                        biased;
+                        _=state.stopped()=>Err(state.failure().unwrap_or(ControlFailure::Stopped)),
+                        result=tokio::time::timeout(deadline, attempt)=>result.unwrap_or(Err(ControlFailure::Timeout)),
+                    };
+                    match outcome {
+                        Ok(outcome) => {
+                            let _ = reply.send(outcome);
+                        }
+                        Err(reason) => {
+                            state.stop(reason);
+                            let outcome = if write_attempted {
+                                ResponseWrite::Unknown { reason }
+                            } else {
+                                ResponseWrite::NotSent { reason }
+                            };
+                            let _ = reply.send(outcome);
+                            break;
+                        }
+                    }
                 }
             }
         }
         state.stop(ControlFailure::Stopped);
         receiver.close();
         while let Some(request) = receiver.recv().await {
-            let _ = request.reply.send(Submission::NotSent {
-                reason: state.failure().unwrap_or(ControlFailure::Stopped),
-            });
+            request.not_sent(state.failure().unwrap_or(ControlFailure::Stopped));
         }
     });
     (handle, task)
@@ -1167,7 +1306,7 @@ mod tests {
         assert!(
             handle
                 .sender
-                .try_send(Request {
+                .try_send(Request::Start {
                     thread: Uuid::new_v4(),
                     text: "synthetic".into(),
                     client: Uuid::new_v4(),
@@ -1199,6 +1338,274 @@ mod tests {
         assert_eq!(handle.closed().await, ControlFailure::Stopped);
         task.await.unwrap();
     }
+    fn approval() -> NativeResponse {
+        NativeResponse::Approval(crate::workbench::channel::interaction::Decision::Decline)
+    }
+
+    #[tokio::test]
+    async fn typed_answers_preserve_id_types_and_do_not_wait_for_ack() {
+        let (socket, mut server) = pair().await;
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        for id in [RpcId::Number(7), RpcId::String("7".into())] {
+            let expected = id.to_value();
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    handle.respond(id, approval(), Box::new(|| true)),
+                )
+                .await
+                .unwrap(),
+                ResponseWrite::WrittenUnconfirmed,
+            );
+            assert_eq!(
+                read(&mut server).await.unwrap(),
+                json!({"id":expected,"result":{"decision":"decline"}}),
+            );
+        }
+        assert!(!handle.is_closed());
+        handle.state.stop(ControlFailure::Stopped);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_answer_guard_writes_zero_bytes_then_valid_answer_succeeds() {
+        let (socket, mut server) = pair().await;
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called = calls.clone();
+        assert_eq!(
+            handle
+                .respond(
+                    RpcId::Number(7),
+                    approval(),
+                    Box::new(move || {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        false
+                    })
+                )
+                .await,
+            ResponseWrite::NotSent {
+                reason: ControlFailure::InvalidInput
+            },
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.next())
+                .await
+                .is_err()
+        );
+        assert!(!handle.is_closed());
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(8), approval(), Box::new(|| true))
+                .await,
+            ResponseWrite::WrittenUnconfirmed,
+        );
+        assert_eq!(read(&mut server).await.unwrap()["id"], 8);
+        handle.state.stop(ControlFailure::Stopped);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_answer_receiver_skips_guard_and_write() {
+        let (socket, mut server) = pair().await;
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        let (reply, receiver) = oneshot::channel();
+        assert!(
+            handle
+                .sender
+                .try_send(Request::Answer {
+                    id: RpcId::Number(7),
+                    response: approval(),
+                    validate: Box::new(|| panic!("dropped receiver must skip validation")),
+                    reply,
+                })
+                .is_ok()
+        );
+        drop(receiver);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(8), approval(), Box::new(|| true))
+                .await,
+            ResponseWrite::WrittenUnconfirmed,
+        );
+        assert_eq!(read(&mut server).await.unwrap()["id"], 8);
+        handle.state.stop(ControlFailure::Stopped);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn answers_share_bounded_queue_and_shutdown_drains_typed_results() {
+        let (socket, mut server) = pair().await;
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move {
+            first_handle
+                .turn_start(Uuid::new_v4(), "synthetic".into(), Uuid::new_v4())
+                .await
+        });
+        assert_eq!(read(&mut server).await.unwrap()["method"], "turn/start");
+        let (reply, receiver) = oneshot::channel();
+        assert!(
+            handle
+                .sender
+                .try_send(Request::Answer {
+                    id: RpcId::Number(7),
+                    response: approval(),
+                    validate: Box::new(|| panic!("queued answer must not pass shutdown")),
+                    reply,
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(8), approval(), Box::new(|| true))
+                .await,
+            ResponseWrite::NotSent {
+                reason: ControlFailure::Busy
+            },
+        );
+        handle.state.stop(ControlFailure::Stopped);
+        assert_eq!(
+            first.await.unwrap(),
+            Submission::Unknown {
+                reason: ControlFailure::Stopped
+            }
+        );
+        assert_eq!(
+            receiver.await.unwrap(),
+            ResponseWrite::NotSent {
+                reason: ControlFailure::Stopped
+            }
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn answer_guard_rechecks_fresh_state_after_queue_wait() {
+        let (socket, mut server) = pair().await;
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move {
+            first_handle
+                .turn_start(Uuid::new_v4(), "synthetic".into(), Uuid::new_v4())
+                .await
+        });
+        let start = read(&mut server).await.unwrap();
+        let valid = Arc::new(AtomicBool::new(true));
+        let guard = valid.clone();
+        let (reply, receiver) = oneshot::channel();
+        assert!(
+            handle
+                .sender
+                .try_send(Request::Answer {
+                    id: RpcId::Number(7),
+                    response: approval(),
+                    validate: Box::new(move || guard.load(Ordering::SeqCst)),
+                    reply,
+                })
+                .is_ok()
+        );
+        valid.store(false, Ordering::SeqCst);
+        server
+            .send(Message::Text(
+                json!({"id":start["id"],"error":{"code":-32600}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.await.unwrap(), Submission::Rejected { code: -32600 });
+        assert_eq!(
+            receiver.await.unwrap(),
+            ResponseWrite::NotSent {
+                reason: ControlFailure::InvalidInput
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.next())
+                .await
+                .is_err()
+        );
+        assert!(!handle.is_closed());
+        handle.state.stop(ControlFailure::Stopped);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn answer_write_failure_is_unknown_and_stops_control() {
+        use std::os::fd::AsRawFd;
+        let (socket, _server) = pair().await;
+        assert_eq!(
+            unsafe { libc::shutdown(socket.get_ref().as_raw_fd(), libc::SHUT_WR) },
+            0
+        );
+        let (handle, task) = control(socket, Duration::from_secs(1));
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(7), approval(), Box::new(|| true))
+                .await,
+            ResponseWrite::Unknown {
+                reason: ControlFailure::Transport
+            },
+        );
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(8), approval(), Box::new(|| panic!("stopped")))
+                .await,
+            ResponseWrite::NotSent {
+                reason: ControlFailure::Transport
+            },
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn answer_write_timeout_is_unknown_without_replay() {
+        // Fill the transport before wrapping it: a small typed answer must then
+        // wait for writable capacity. The peer deliberately never reads.
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        stream.writable().await.unwrap();
+        loop {
+            match stream.try_write(&[0; 8192]) {
+                Ok(0) => panic!("unexpected zero-byte write"),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("synthetic socket fill failed: {error}"),
+            }
+        }
+        let socket = WebSocketStream::from_raw_socket(
+            stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let (handle, task) = control(socket, Duration::from_millis(30));
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(7), approval(), Box::new(|| true))
+                .await,
+            ResponseWrite::Unknown {
+                reason: ControlFailure::Timeout
+            },
+        );
+        assert_eq!(handle.failure(), Some(ControlFailure::Timeout));
+        assert_eq!(
+            handle
+                .respond(RpcId::Number(8), approval(), Box::new(|| panic!("stopped")))
+                .await,
+            ResponseWrite::NotSent {
+                reason: ControlFailure::Timeout
+            },
+        );
+        task.await.unwrap();
+    }
+
     #[test]
     fn malformed_and_ambiguous_ack_cannot_be_accepted() {
         for value in [

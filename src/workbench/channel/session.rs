@@ -15,6 +15,8 @@ use std::{
 use tokio::{sync::Notify, task::JoinHandle};
 use uuid::Uuid;
 mod evidence;
+mod interactions;
+pub(crate) use interactions::InteractionHandle;
 const FRAME_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub(crate) enum Failure {
     InvalidEvidence,
     Submission,
     CompletionTaken,
+    InteractionUnavailable,
 }
 impl Failure {
     pub(crate) fn code(self) -> &'static str {
@@ -43,6 +46,7 @@ impl Failure {
             Self::InvalidEvidence => "channel_evidence_invalid",
             Self::Submission => "channel_submission_failed",
             Self::CompletionTaken => "channel_completion_taken",
+            Self::InteractionUnavailable => "channel_interaction_unavailable",
         }
     }
 }
@@ -74,11 +78,13 @@ struct PendingAttempt {
     completion: Option<Completion>,
     taken: bool,
     failure: Option<Failure>,
+    interactions: interactions::Pending,
 }
 impl PendingAttempt {
     fn fail(&mut self, failure: Failure) {
         self.failure.get_or_insert(failure);
         self.completion = None;
+        self.interactions.invalidate();
     }
     fn begin_submit(&mut self, eligible: bool) -> bool {
         if !eligible || self.submitted || self.failure.is_some() {
@@ -100,6 +106,7 @@ impl PendingAttempt {
         }
         if let Evidence::TurnCompleted { turn, status, .. } = event {
             self.terminal = Some((turn.to_owned(), status));
+            self.interactions.invalidate();
         }
         if let Some(completion) = self.proof.observe(event) {
             self.completion = Some(completion)
@@ -207,6 +214,7 @@ impl State {
             completion: None,
             taken: false,
             failure: None,
+            interactions: interactions::Pending::default(),
         });
         Ok(id)
     }
@@ -399,6 +407,9 @@ pub(crate) struct Attempt {
     client: Uuid,
 }
 impl Attempt {
+    pub(crate) fn interactions(&self) -> InteractionHandle {
+        InteractionHandle::new(self.handle.clone(), self.id, self.target)
+    }
     pub(crate) async fn submit(&mut self, text: String) -> Submission {
         let allowed = {
             let mut state = self.handle.shared.state.lock().unwrap();
@@ -561,6 +572,9 @@ async fn observe(mut capture: CaptureReceiver, control: ControlHandle, shared: A
             continue;
         }
         if let Some(attempt) = &mut state.attempt {
+            attempt
+                .interactions
+                .observe(frame.direction, &value, attempt.target.thread_id);
             if frame.direction == Direction::ToServer {
                 if evidence::local_input(&value, attempt.target.thread_id) {
                     attempt.fail(Failure::InvalidEvidence)
