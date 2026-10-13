@@ -20,3 +20,5 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0052：连续滚动的只读文件阅读](0052-continuous-file-reading.md)
 - [ADR 0053：历史首页、按项目启动与旧历史只读整合](0053-history-first-workbench.md)
 - [ADR 0054：保留显式 provider bearer 与原生 API Key 认证](0054-native-custom-bearer-auth.md)
+- [ADR 0056：可信公网中转与账号归属路由](0056-public-workbench-relay.md)（Accepted；实现与公网手机验收另列）
+- [ADR 0057：独立端口的单工作台 IP 测试](0057-single-workbench-ip-trial.md)（Accepted；共享主机 Cookie 信任边界，单独验收）

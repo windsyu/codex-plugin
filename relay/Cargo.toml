@@ -1,0 +1,31 @@
+[package]
+name = "codex-relayd"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Trusted account and stream relay for the Codex native workbench"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+codex-relay-protocol = { path = "../crates/relay-protocol" }
+futures-util = "0.3"
+libc = "0.2"
+rand = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tempfile = "3"
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }

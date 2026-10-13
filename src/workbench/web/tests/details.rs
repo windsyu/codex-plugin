@@ -199,14 +199,14 @@ async fn details_responses_share_bounded_reading_slots_until_body_drop_and_pages
     let request = || {
         details_api::read(
             State(server.state.clone()),
-            headers.clone(),
+            headers.clone().into(),
             Path(id.to_string()),
             Query::try_from_uri(&format!("/?epoch={}", hub.epoch()).parse().unwrap()),
         )
     };
     let first = request().await;
     assert_eq!(first.status(), StatusCode::OK);
-    let second = snapshot(State(server.state.clone()), headers.clone()).await;
+    let second = snapshot(State(server.state.clone()), headers.clone().into()).await;
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(request().await.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = axum::body::to_bytes(first.into_body(), 128 * 1024)

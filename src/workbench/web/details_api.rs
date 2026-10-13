@@ -11,7 +11,7 @@ pub(super) struct DetailsQuery {
 
 pub(super) async fn read(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(request_id): Path<String>,
     query: Result<Query<DetailsQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {

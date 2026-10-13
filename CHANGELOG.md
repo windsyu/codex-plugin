@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- 新增默认关闭的可信公网接入：邀请制密码账号、工作台归属路由、独立 RemoteOwner、出站 WSS、本机绑定面板与 Linux 中转服务；账号数据库独立于工作台历史。单工作台 IP 模式已有受限 Linux 部署、公网 TLS 与 Chrome 手机视口链路证据；域名模式及真实手机完整功能验收另列，见[公网接入契约](docs/codex-public-workbench-relay.md)与[部署验证](docs/validation/public-relay-ip-trial-2026-10-13.md)。
 - 恢复 README 的功能、运行条件和完整使用入口；旧 `~/.local` 快速安装需先卸载再安装到新默认目录，不自动迁移用户数据。
 - README 提供 macOS 用户级快速安装脚本，使用系统 curl 匿名下载/校验公开稳定 release，默认安装至 `~/.codex-view`，并配置 zsh/Bash 登录终端 PATH；提供按清单保护卸载的 `code-view-uninstall`，保留用户历史和原生数据。
 - Bash PATH 使用现有生效的登录配置文件，避免新建 `.bash_profile` 遮蔽 `.bash_login` / `.profile`。

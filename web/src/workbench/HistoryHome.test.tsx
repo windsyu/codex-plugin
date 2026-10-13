@@ -21,6 +21,18 @@ it('opens existing runs without a launch mutation and isolates failure from home
   expect(root.textContent).toContain('Codex 未能启动'); expect(root.textContent).toContain('全部历史');
 });
 
+it('hides local relay binding from a remote owner and uses path input when folder picking is unavailable', async () => {
+  const info = { ...initial, remoteOwner: true, launchAvailable: true, directoryPickerAvailable: false };
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => info, text: async () => JSON.stringify({revision:'r',records:[],nextCursor:null,coverage:{state:'complete_for_source',reasons:[]}}) });
+  vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryHome initial={info} />, root));
+  expect(root.textContent).not.toContain('公网接入');
+  const open = [...root.querySelectorAll('button')].find(button => button.textContent === '打开其他目录')!;
+  await act(async () => open.click());
+  expect(root.querySelector('input[aria-label="项目目录"]')).not.toBeNull();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes('pick-directory'))).toBe(false);
+});
+
 it.each([
   ['native_cli_not_found', '未找到可运行的 Codex CLI'],
   ['native_auth_unverified', '当前认证方式尚未通过工作台验证'],

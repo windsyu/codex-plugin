@@ -107,19 +107,19 @@ async fn snapshot_work_is_bounded_until_the_response_body_is_consumed_or_dropped
         header::COOKIE,
         cookie(&client(), &server).await.parse().unwrap(),
     );
-    let first = snapshot(State(server.state.clone()), headers.clone()).await;
-    let second = snapshot(State(server.state.clone()), headers.clone()).await;
+    let first = snapshot(State(server.state.clone()), headers.clone().into()).await;
+    let second = snapshot(State(server.state.clone()), headers.clone().into()).await;
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(
-        snapshot(State(server.state.clone()), headers.clone())
+        snapshot(State(server.state.clone()), headers.clone().into())
             .await
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     drop(first);
     assert_eq!(
-        snapshot(State(server.state.clone()), headers)
+        snapshot(State(server.state.clone()), headers.into())
             .await
             .status(),
         StatusCode::OK

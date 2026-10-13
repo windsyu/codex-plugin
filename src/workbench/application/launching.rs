@@ -338,6 +338,56 @@ mod tests {
         }
     }
     #[test]
+    fn remote_launch_rechecks_revocation_after_waiting_for_admission_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut book = Book::default();
+        let t = target(tmp.path());
+        let req = request(&t);
+        let operation_id = req.operation_id;
+        book.add(t, None, false).unwrap();
+        let book = Arc::new(Mutex::new(book));
+        let (sender, queue) = mpsc::sync_channel(4);
+        let handle = RunHandle {
+            sender,
+            book: book.clone(),
+        };
+        let permission = crate::workbench::permission::Permission::leased(Duration::from_secs(30));
+        let remote = permission.clone();
+        let pending = handle.clone();
+        let locked = book.lock().unwrap();
+        let (entered, wait) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            // Simulates successful HTTP authorization before JSON/admission.
+            assert!(remote.active());
+            entered.send(()).unwrap();
+            pending.begin_authorized(req, remote)
+        });
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        permission.revoke();
+        drop(locked);
+        assert_eq!(worker.join().unwrap().unwrap_err(), "access_revoked");
+        assert!(queue.try_recv().is_err());
+        assert_eq!(
+            handle.operation(operation_id).unwrap_err(),
+            "operation_unavailable"
+        );
+
+        // Revocation after admission leaves the accepted operation queryable.
+        let t = target(tmp.path());
+        let req = request(&t);
+        book.lock().unwrap().add(t, None, false).unwrap();
+        let permission = crate::workbench::permission::Permission::leased(Duration::from_secs(30));
+        handle
+            .begin_authorized(req.clone(), permission.clone())
+            .unwrap();
+        permission.revoke();
+        assert!(matches!(queue.recv().unwrap(), Request::Start(id) if id == req.operation_id));
+        assert_eq!(
+            handle.operation(req.operation_id).unwrap()["state"],
+            "starting"
+        );
+    }
+    #[test]
     fn targets_expire_but_accepted_operation_is_queryable_and_never_queued_twice() {
         let tmp = tempfile::tempdir().unwrap();
         let mut book = Book::default();

@@ -14,7 +14,7 @@
 | --- | --- |
 | `doctor` | 检查工具与环境 |
 | `bootstrap` | 按锁文件安装前端依赖 |
-| `build` / `build --release` | 先构建 Web，再构建两个 Rust binary |
+| `build` / `build --release` | 先构建 Web，再构建工作台两个 binary 和独立中转 binary |
 | `package` / `package --offline` | 构建并生成当前受测 macOS arm64 安装包、许可与校验和，见[发布指南](releasing.md) |
 | `check` | 文档、待提交二进制、维护工具、前端和 Rust 常规质量检查 |
 | `check --ci` | CI 检查提交树，不把空暂存区当成完成二进制检查 |
@@ -41,6 +41,7 @@
 | `history` | 原生/工作台/旧库历史目录和只读 reader，不启动 Observer writer 或 migration |
 | 旧 binary 的 `domain`、`store`、`http`、`ingest` 等 | V1 导入与只读兼容服务；不得重新成为新运行热路径依赖 |
 | `web` | Preact/Vite 工作台与兼容页面，内嵌资源随 Rust 产物交付 |
+| `relay` / `crates/relay-protocol` | 独立 Linux 中转服务与共享有界传输协议；按 [ADR 0056](../decisions/0056-public-workbench-relay.md) 增加 workspace，工作台原 package 和两个 binary 保留 |
 
 当前需要改善的是依赖边界：`workbench::application` / `config` 使用 `history::library`，而 `history::library` 使用工作台配置、记录目录、读取与脱敏能力；两者形成模块级双向引用。`workbench/mod.rs` 广泛暴露 `pub mod`；`history` 通过 `#[path]` 复用 `domain/redact.rs`、`domain/classify.rs`，工作台复用 `terminal/mod.rs`。它们在当前 package 内可编译，但增加了未来拆分和接口收敛成本。
 
@@ -51,7 +52,7 @@
 - 转发、观察、持久化分离；新运行时不依赖旧 Observer 写入、迁移或控制账本。文件大小仅作为审阅信号，按职责、变更耦合和测试边界拆分，不设机械行数门槛。
 - workspace 只在独立复用、平台隔离或实测构建收益成立后考虑；先解决依赖环并写 ADR，不把机械拆 crate 当成质量提升。
 
-本次只固化规范，以上模块收敛是后续独立重构，不宣称已经完成，也不改变 R6 验收状态。
+以上历史模块收敛仍是独立重构，不宣称已完成；公网中继按 ADR 0056 增加独立部署 package，共享远程许可和私有 ingress 归属 `workbench::remote_access`，连接器与 Web 共同使用它，避免新增双向依赖。不改变 R6 验收状态。
 
 ## 构建产物生命周期
 
@@ -81,7 +82,7 @@
 
 ## 测试与交付
 
-常规检查包含前端 TypeScript、单元测试和构建，以及 Rust fmt、Clippy、常规测试和两个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
+常规检查包含前端 TypeScript、单元测试和构建，以及整个 workspace 的 Rust fmt、Clippy、常规测试和三个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
 
 真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，[验证索引](../validation/README.md)保存当时范围和限制。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
 
