@@ -1,6 +1,7 @@
 import './library.css';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { SettingsPanel } from './SettingsPanel';
+import { RelayPanel } from './RelayPanel';
 import { LaunchPanel } from './LaunchPanel';
 import { useLaunch } from './useLaunch';
 import { launchMessage } from './launchMessages';
@@ -12,12 +13,14 @@ export interface ApplicationInfo {
   launchError: string | null;
   launchAvailable?: boolean;
   directoryPickerAvailable?: boolean;
+  remoteOwner?: boolean;
 }
 export function HistoryHome({ initial }: { initial: ApplicationInfo }) {
   const [info, setInfo] = useState(initial);
   const launch = useLaunch(initial.instanceId, id => { location.assign(`/?run=${encodeURIComponent(id)}`); });
   const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
+  const [relayOpen, setRelayOpen] = useState(false);
   const stopping = useRef(new Set<string>());
   const [stoppingIds, setStoppingIds] = useState<string[]>([]);
   const [stopError, setStopError] = useState('');
@@ -58,7 +61,7 @@ export function HistoryHome({ initial }: { initial: ApplicationInfo }) {
     return () => { controller.abort(); clearTimeout(timer); };
   }, [initial.instanceId]);
   return <div className="wb-home">
-    <header className="wb-header"><span className="wb-brand">›_</span><strong>Codex 工作台</strong><div className="wb-header-actions">{info.launchAvailable && <><button disabled={launch.picking} onClick={() => { if (launch.operationActive || !info.directoryPickerAvailable) launch.choose({ path: '' }, false); else void launch.pickDirectory(); }} aria-expanded={launch.open}>{launch.operationActive ? '启动进度' : launch.picking ? '正在选择文件夹…' : '打开其他目录'}</button>{info.directoryPickerAvailable && !launch.operationActive && <button disabled={launch.picking} onClick={() => launch.choose({ path: '' }, false)}>输入路径</button>}</>}<button id="wb-settings-button" ref={button} aria-expanded={open} aria-controls="wb-settings-panel" onClick={() => setOpen(!open)}>设置{dirty ? ' · 未保存' : ''}</button></div></header>
+    <header className="wb-header"><span className="wb-brand">›_</span><strong>Codex 工作台</strong><div className="wb-header-actions">{info.launchAvailable && <><button disabled={launch.picking} onClick={() => { if (launch.operationActive || !info.directoryPickerAvailable) launch.choose({ path: '' }, false); else void launch.pickDirectory(); }} aria-expanded={launch.open}>{launch.operationActive ? '启动进度' : launch.picking ? '正在选择文件夹…' : '打开其他目录'}</button>{info.directoryPickerAvailable && !launch.operationActive && <button disabled={launch.picking} onClick={() => launch.choose({ path: '' }, false)}>输入路径</button>}</>}{!info.remoteOwner && <button type="button" aria-expanded={relayOpen} onClick={() => { setOpen(false); setRelayOpen(!relayOpen); }}>公网接入</button>}<button id="wb-settings-button" ref={button} aria-expanded={open} aria-controls="wb-settings-panel" onClick={() => { setRelayOpen(false); setOpen(!open); }}>设置{dirty ? ' · 未保存' : ''}</button></div></header>
     {error && <p className="wb-notice" role="alert">{error}</p>}
     {stopError && <p className="wb-notice" role="alert">{stopError}</p>}
     {info.launchError && <p className="wb-notice" role="alert">{launchMessage(info.launchError)}首页仍可使用。</p>}
@@ -79,5 +82,6 @@ export function HistoryHome({ initial }: { initial: ApplicationInfo }) {
     {launch.open && <LaunchPanel {...launch.panel} onPick={info.directoryPickerAvailable ? launch.panel.onPick : undefined} />}
     <HistoryLibraryPanel sources={info.sources} onProjectLaunch={info.launchAvailable ? launch.openProject : undefined} onResume={info.launchAvailable ? launch.openResume : undefined} runs={info.runs} />
     <SettingsPanel epoch={info.instanceId} instanceId={info.instanceId} open={open} onClose={restore => { setOpen(false); if (restore) button.current?.focus(); }} onDirtyChange={setDirty} />
+    {!info.remoteOwner && <RelayPanel instanceId={info.instanceId} open={relayOpen} onClose={() => setRelayOpen(false)} />}
   </div>;
 }

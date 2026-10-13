@@ -6,6 +6,8 @@
 
 - [安装与快速启动](guides/installation.md)：发布包校验、本地安装及 `code-view` 项目入口。
 - [使用指南](guides/usage.md)：启动、终端、手机接入、历史、配置和旧 Observer。
+- [公网中继部署与运维](guides/public-relay-deployment.md)：Linux、域名 TLS、账号与备份恢复；域名模式及完整手机验收另列。
+- [单工作台 IP 测试](guides/public-relay-ip-trial.md)：复用已有受信任 IP 证书，使用独立端口及资源限额；同 IP Cookie 信任边界另列。
 - [支持范围与限制](codex-native-cli-workbench-support.md)：可试用环境、兼容基线与资源边界。
 - [开发与维护](development/README.md)：模块、检查、构建产物生命周期、Git 文件规则和发布。
 - [Release 包装与发布](development/releasing.md)：许可收集、来源与校验和、正式发布门槛。
@@ -23,6 +25,7 @@
 | [历史首页与项目启动](codex-native-cli-workbench-history-home.md) | Application/Run、跨来源历史、新建与恢复 |
 | [历史管理与配置](codex-native-cli-workbench-history-settings.md) | 用户历史保留和同页 JSON 设置 |
 | [设备接入](codex-native-cli-workbench-device-access.md) | 显式监听、配对、撤销和设备作用域 |
+| [公网工作台中继契约](codex-public-workbench-relay.md) | 可信服务、账号归属、RemoteOwner、流路由与安全边界；验收状态以 V2 计划为准 |
 | [ADR 索引](decisions/README.md) | 已记录架构决定及历史背景 |
 | [验证报告索引](validation/README.md) | 每次实测的环境、证据、限制与图片 |
 | [原型说明](prototypes/README.md) | 合成交互与视觉参考，不是运行时验收 |

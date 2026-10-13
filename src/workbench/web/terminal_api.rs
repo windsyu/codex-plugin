@@ -19,7 +19,7 @@ pub(super) struct Epoch {
 
 pub(super) async fn upgrade(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(epoch): Query<Epoch>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -252,7 +252,7 @@ async fn dispatch(terminal: &TerminalHandle, connection: Uuid, frame: ClientFram
 
 pub(super) async fn stop_run(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if !authorised(&headers, &state) {

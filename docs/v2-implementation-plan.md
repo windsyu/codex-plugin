@@ -37,6 +37,7 @@
 | R5 完整验收与退役 | 实际模型/设备矩阵、性能与故障门槛、旧控制代码退役 | R4 | Passed | 2026-09-21 用户授权继续；[桌面阶段证据](validation/native-cli-r5-desktop-2026-09-21.md)已验证正式产物真实模型/图片、取消状态修复、当前界面性能、schema 20 只读副本及顺序回退。[退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)补齐 SIGHUP 清理及测试 Chrome 进程组回收；[终端工具独立化](validation/native-cli-r5-terminal-extraction-2026-09-21.md)移除新工作台对旧 Session 目录的引用并补漏早期调试入口。用户已确认电脑端右侧终端中文输入正常；[LAN/MagicDNS 接入](codex-native-cli-workbench-device-access.md)的 A–B 已实现并通过[自动化与 Chrome 验证](validation/native-cli-device-access-2026-09-21.md)，用户已确认手机接入及输入成功，其他手机体验按用户要求留待后续优化；锁屏/双网络等未逐项确认；2026-09-21 用户明确授权拆除旧 Session/App Server 内核，旧内核已移除，341 项 Rust、150 项前端、10 项历史 Chrome 及 5 项原生/上下文/设备回归通过，见[退役验证](validation/native-cli-r5-kernel-retirement-2026-09-21.md)。[2026-09-22 收尾验收](validation/native-cli-r5-acceptance-2026-09-22.md)统一 RQ01–RQ12 / P01–P14 的证据与范围，修复调用记录/手机接入面板的即时 Esc 焦点问题；156 项前端、341 项 Rust、10 项安装版 CLI/Chrome、10 项旧历史 Chrome 通过，release 产物另通过 3 项正式入口回归。按已确认 macOS/custom 接入范围交付，其他平台/provider 和暂缓手机优化保持未验证；本阶段完成后暂停供用户试用 |
 | R6 历史首页与按项目启动 | codex-view 默认全部历史、三类来源、旧库 20/25 只读、显式新建/恢复、多项目标签与隔离 | R5 | Passed | A–F.1 已通过分片验证与用户试用；[G1 资源与缓存边界](validation/native-cli-r6-g1-resources-2026-09-30.md)、[G2 压力/容量隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)、[G3 兼容与实际旧库限定只读抽查](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 交付/CLI 0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)已通过。2026-09-30 用户明确确认本次交付试用通过；按现有 macOS/custom 接入范围收尾，不扩大未验证平台/provider/手机组合 |
 | Release 包装 | 0.3.0 安装包、code-view 当前项目/指定路径、许可与校验、隔离安装验证 | R6 | Passed | [包装验证](validation/v2-release-packaging-2026-10-02.md)：445 项 Rust、234 项 Web、45 项维护工具及格式/Clippy/类型/debug/release 通过；实际归档解压安装、中文/空格 cwd、实例复用、历史入口、资源与 SIGINT 回收通过。显式 Cargo target 回归通过；限 macOS / Apple Silicon；本条证据为本地包装验证，正式发行资产以 GitHub Release 记录为准 |
+| 公网工作台中继 | 邀请账号、每账号自有完整 V2 工作台、出站连接、Linux 中继与手机 HTTPS 入口 | R6；[ADR 0056](decisions/0056-public-workbench-relay.md)、[ADR 0057](decisions/0057-single-workbench-ip-trial.md) | In progress | 独立服务、账号归属、本机连接器与完整 V2 owner 路由已实现；两账号真实链路、撤销和系统 Chrome 手机视口通过，见[本地验证](validation/public-workbench-relay-2026-10-10.md)。[IP 测试部署](validation/public-relay-ip-trial-2026-10-13.md)的 Linux 资源隔离、公网 HTTPS/WSS、Chrome 手机视口页面/SSE/合成终端与原服务连续性通过；域名/TLS wildcard、真实手机完整 V2/重启/备份恢复待验收；不能继承既有 LAN 验收 |
 
 状态只在本表维护：`Pending`、`In progress`、`Blocked`、`Passed`。`Passed` 必须链接本项目的版本、操作、断言、结果和限制；设计文本、源码阅读及 cc-viewer 试用均不能充当通过记录。出现阻塞须写明具体失败与下一项实验，不能只写“兼容性待确认”。
 
@@ -62,8 +63,9 @@ R5 的 Passed 限于当时明确验证的范围。随后发现实际旧库 schem
 | RQ14 | 用户确认首页优先与项目入口 | 默认无 CLI 的全部历史；已有项目/指定现有路径明确开始；默认新对话、指定会话显式恢复，重复启动复用实例；无项目归类不抹去原 cwd 或可靠恢复资格 | R6-B/D/E/F.1/G / P16 |
 | RQ15 | 用户确认另项目新标签、原项目继续 | 独立 Run/PTY/代理/目录/保存，手机授权与清理仍按 Run/项目限制，停止与退出不串线、不恢复旧控制 | R6-E/F/G / P17、P07/P08 |
 | RQ16 | 用户 2026-10-02 要求最终 release 包装与快速启动 | 0.3.0 macOS arm64 安装包、code-view 当前目录/指定路径、独立历史入口、许可/校验与隔离安装验证；不扩展原运行边界 | §10 Release 包装 |
+| RQ17 | 用户 2026-10-10 明确要求可信公网中继和邀请制账号；2026-10-13 选择有限资源服务器、直接 IP 并复用既有 Caddy 证书试用，源码分支与 V3 分离 | Linux 独立服务、账户归属、各工作台完整 V2、出站 WSS、独立 HTTPS origin、可撤销凭据；无项目共享或 V3 IM；真实手机/公网与本机隔离必须分别验证。IP 试用另限单工作台并明确共享主机 Cookie 信任，不替代域名模式验收 | 公网工作台中继；[Issue #14](https://github.com/windsyu/codex-plugin/issues/14)、[契约](codex-public-workbench-relay.md)、[ADR 0056](decisions/0056-public-workbench-relay.md)、[ADR 0057](decisions/0057-single-workbench-ip-trial.md) |
 
-F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；多用户远程控制、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入本轮交付。RQ12 只扩展同一使用者的设备入口，不引入远程多用户或公网服务。
+F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；项目共享、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入当前交付。RQ12 的既有 LAN 手机入口不包含公网；用户 2026-10-10 新授权的公网账号归属范围单列为 RQ17，不追溯到 R5/R6 的 Passed 证据。
 
 <a id="prototype-acceptance"></a>
 

@@ -180,7 +180,7 @@ fn failure(state: &WebState, status: StatusCode, code: &'static str) -> Response
     )
         .into_response()
 }
-fn admin(state: &WebState, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+fn admin(state: &WebState, headers: &Auth) -> Result<(), (StatusCode, &'static str)> {
     if !owner_authorised(headers, state) {
         return Err((StatusCode::FORBIDDEN, "local_management_required"));
     }
@@ -193,7 +193,7 @@ pub(super) struct RunRequest {
 }
 fn revision(
     state: &WebState,
-    headers: &HeaderMap,
+    headers: &Auth,
     epoch: Uuid,
     d: &Data,
 ) -> Result<(), (StatusCode, &'static str)> {
@@ -213,7 +213,7 @@ fn revision(
     }
     Ok(())
 }
-pub(super) async fn status(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+pub(super) async fn status(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if let Err((status, code)) = admin(&state, &headers) {
         return failure(&state, status, code);
     }
@@ -221,7 +221,7 @@ pub(super) async fn status(State(state): State<Arc<WebState>>, headers: HeaderMa
 }
 pub(super) async fn enable(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     let Ok(request) = serde_json::from_slice::<RunRequest>(&body) else {
@@ -337,7 +337,7 @@ async fn serve_devices(state: Arc<WebState>, generation: u64, mut stop: watch::R
     };
     state.access.finish(generation, result.err());
 }
-pub(super) async fn pairing(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+pub(super) async fn pairing(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if let Err((status, code)) = admin(&state, &headers) {
         return failure(&state, status, code);
     }
@@ -435,7 +435,7 @@ async fn terminal_barrier(state: &WebState) -> bool {
 }
 pub(super) async fn disable(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     let Ok(request) = serde_json::from_slice::<RunRequest>(&body) else {
@@ -470,7 +470,7 @@ pub(super) async fn disable(
 }
 pub(super) async fn revoke(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
     Query(request): Query<RunRequest>,
 ) -> Response {

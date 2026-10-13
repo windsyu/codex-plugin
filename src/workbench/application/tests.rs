@@ -4,6 +4,8 @@ use crate::workbench::{config::Config, launch::read_entry};
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+mod relay;
+
 struct Fixture {
     dir: tempfile::TempDir,
     home: PathBuf,

@@ -23,6 +23,8 @@
 
 已有 CLI `0.154.0`、`0.155.1`、`0.156.1`、`0.159.2` 的受测记录；未知版本提示后继续检查配置，不自动升级、降级或修改 CLI。Intel macOS、Linux、Windows 完整运行尚未验收。具体能力与验证边界见[支持范围](docs/codex-native-cli-workbench-support.md)。
 
+源码新增默认关闭的可信公网中转：本机首页绑定并开启后，通过账号门户访问自己的工作台，服务器独立部署。单工作台 IP 测试已有 Linux 资源隔离、公网 HTTPS/WSS 和系统 Chrome 手机视口证据；域名模式及真实手机完整功能验收另列，见[部署指南](docs/guides/public-relay-deployment.md)、[IP 测试指南](docs/guides/public-relay-ip-trial.md)与[阶段状态](docs/v2-implementation-plan.md)。现有 `0.3.0` 发布包不包含这项源码增量。
+
 ## macOS 快速安装与卸载
 
 复制执行以下命令：先下载脚本，再用 Bash 执行，成功后让当前终端立即找到命令。稳定发布包见 [GitHub Releases](https://github.com/windsyu/codex-plugin/releases/latest)。
@@ -108,7 +110,7 @@ node scripts/dev.mjs build
 <repository>/target/debug/codex-view --project .
 ```
 
-标准构建先生成 Web 资源，再编译两个 Rust 入口，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`，安装包使用 `node scripts/dev.mjs package`，常规检查使用 `node scripts/dev.mjs check`。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令；旧历史读取方式见使用指南。
+标准构建先生成 Web 资源，再编译工作台两个 Rust 入口和独立中转服务，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`，安装包使用 `node scripts/dev.mjs package`，常规检查使用 `node scripts/dev.mjs check`。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令；旧历史读取方式见使用指南。
 
 ## 文档与参与
 

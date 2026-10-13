@@ -31,12 +31,14 @@ mod details_api;
 mod history_api;
 #[cfg(unix)]
 mod management_api;
+use super::remote_access as remote;
 #[cfg(unix)]
 mod settings_api;
 #[cfg(unix)]
 mod terminal_api;
 #[cfg(unix)]
 mod workspace_api;
+use remote::{Auth, matches_secret, secret};
 
 #[derive(Default)]
 struct RuntimeOptions {
@@ -346,27 +348,13 @@ fn router(state: Arc<WebState>) -> Router {
         .with_state(state.clone())
 }
 
-fn secret() -> String {
-    rand::random::<[u8; 32]>()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-fn matches_secret(value: &str, expected: &str) -> bool {
-    value.len() == expected.len()
-        && value
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-            == 0
-}
-fn authorised(headers: &HeaderMap, state: &WebState) -> bool {
+fn authorised(headers: &Auth, state: &WebState) -> bool {
     owner_authorised(headers, state) || remote_permission(headers, state).is_some()
 }
-fn remote_permission(
-    headers: &HeaderMap,
-    state: &WebState,
-) -> Option<super::permission::Permission> {
+fn remote_permission(headers: &Auth, state: &WebState) -> Option<super::permission::Permission> {
+    if let Some(owner) = &headers.remote {
+        return owner.active().then(|| owner.permission());
+    }
     #[cfg(unix)]
     if headers
         .get(header::HOST)
@@ -377,7 +365,10 @@ fn remote_permission(
     }
     None
 }
-fn same_origin(headers: &HeaderMap, state: &WebState) -> bool {
+fn same_origin(headers: &Auth, state: &WebState) -> bool {
+    if headers.remote.is_some() {
+        return headers.remote_origin();
+    }
     if headers.get_all(header::HOST).iter().count() != 1
         || headers.get_all(header::ORIGIN).iter().count() != 1
     {
@@ -393,7 +384,10 @@ fn same_origin(headers: &HeaderMap, state: &WebState) -> bool {
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
             == Some(format!("http://{host}").as_str())
 }
-fn owner_authorised(headers: &HeaderMap, state: &WebState) -> bool {
+fn owner_authorised(headers: &Auth, state: &WebState) -> bool {
+    if let Some(owner) = &headers.remote {
+        return owner.active();
+    }
     if headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(state.authority.as_str()) {
         return false;
     }
@@ -418,21 +412,25 @@ async fn boundary(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let headers = request.headers();
+    let headers = Auth::from_request(&request);
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     #[cfg(unix)]
-    let valid_host = match request.extensions().get::<access::Ingress>() {
-        Some(ingress) => state.access.valid_ingress(ingress.0, host),
-        None => host == state.authority,
+    let valid_host = if let Some(owner) = &headers.remote {
+        owner.active()
+    } else {
+        match request.extensions().get::<access::Ingress>() {
+            Some(ingress) => state.access.valid_ingress(ingress.0, host),
+            None => host == state.authority,
+        }
     };
     #[cfg(not(unix))]
     let valid_host = host == state.authority;
     let valid_host = valid_host && headers.get_all(header::HOST).iter().count() == 1;
-    let valid_origin = !headers.contains_key(header::ORIGIN) || same_origin(headers, &state);
-    let permission = remote_permission(headers, &state);
+    let valid_origin = !headers.contains_key(header::ORIGIN) || same_origin(&headers, &state);
+    let permission = remote_permission(&headers, &state);
     let valid_site = headers
         .get("sec-fetch-site")
         .is_none_or(|site| matches!(site.to_str(), Ok("same-origin" | "none")));
@@ -488,7 +486,7 @@ async fn boundary(
 struct Pair {
     token: String,
 }
-async fn pair(State(state): State<Arc<WebState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn pair(State(state): State<Arc<WebState>>, headers: Auth, body: Bytes) -> Response {
     if !same_origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
     }
@@ -513,7 +511,7 @@ async fn pair(State(state): State<Arc<WebState>>, headers: HeaderMap, body: Byte
     );
     response
 }
-async fn run(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+async fn run(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -582,7 +580,7 @@ async fn asset(Path(path): Path<String>) -> Response {
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-async fn snapshot(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+async fn snapshot(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -604,7 +602,7 @@ struct Cursor {
 }
 async fn events(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(cursor): Query<Cursor>,
 ) -> Response {
     if !authorised(&headers, &state) {

@@ -9,7 +9,7 @@ const help = `Usage: node scripts/dev.mjs <command>
 
   doctor                              Inspect tools without changing files
   bootstrap [--offline]               Install locked web dependencies (npm ci)
-  build [--release] [--offline]        Build web, then both Rust binaries
+  build [--release] [--offline]        Build web, then workbench and relay binaries
   package [--offline]                  Build and package tested macOS arm64 release
   check [--ci] [--offline]             Docs, binary policy, tool/web/Rust checks
   test-tools                          Test maintenance tools with synthetic data

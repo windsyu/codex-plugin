@@ -84,6 +84,20 @@ impl RunHandle {
     pub fn begin(&self, request: StartRequest) -> LaunchResult<serde_json::Value> {
         self.book.lock().unwrap().begin(request, &self.sender)
     }
+    pub fn begin_authorized(
+        &self,
+        request: StartRequest,
+        permission: super::permission::Permission,
+    ) -> LaunchResult<serde_json::Value> {
+        let mut book = self.book.lock().unwrap();
+        // Admission linearizes here, under the launch book lock. A request
+        // revoked while waiting for that lock cannot become an operation.
+        // Once admitted, the existing operation/query contract owns its result.
+        if !permission.active() {
+            return Err("access_revoked");
+        }
+        book.begin(request, &self.sender)
+    }
     pub fn operation(&self, id: Uuid) -> LaunchResult<serde_json::Value> {
         self.book.lock().unwrap().get(id)
     }
@@ -435,6 +449,7 @@ impl Application {
         custom: Option<&Path>,
     ) -> Result<Self> {
         let data = prepared.data_dir.clone();
+        let relay_root = prepared.config_dir().to_path_buf();
         let settings = ConfigService::start(prepared)?;
         let id = Uuid::new_v4();
         let (sender, receiver) = mpsc::sync_channel(4);
@@ -453,6 +468,7 @@ impl Application {
             },
             sources.handle(),
             home.clone(),
+            relay_root,
         )?;
         let runs = RunWorker::start(
             Runner {

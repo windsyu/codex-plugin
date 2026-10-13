@@ -6,6 +6,11 @@ license = "MIT"
 description = "Native Codex CLI workbench with read-only Observer history compatibility"
 default-run = "codex-view"
 
+[workspace]
+members = ["crates/relay-protocol", "relay"]
+default-members = [".", "relay", "crates/relay-protocol"]
+resolver = "3"
+
 [[bin]]
 name = "codex-observerd"
 path = "src/main.rs"
@@ -37,7 +42,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 toml = "0.9"
 tempfile = "3"
 tower-http = { version = "0.6", features = ["catch-panic", "request-id", "set-header", "trace"] }
@@ -48,6 +53,10 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 vt100 = "0.16"
 walkdir = "2"
 zstd = "0.13"
+codex-relay-protocol = { path = "crates/relay-protocol" }
+
+[dev-dependencies]
+codex-relayd = { path = "relay" }
 
 # 0.16.2 with the reviewed wide-cell resize fix; see vendor/vt100/PATCH.md.
 [patch.crates-io]

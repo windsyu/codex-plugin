@@ -1,5 +1,10 @@
 # 验证报告索引
 
+公网工作台中继已有本地两账号、撤销、Linux 单工作台 IP 资源隔离、公网 HTTPS/WSS 与系统 Chrome 手机视口证据；域名模式 TLS/wildcard DNS、真实手机完整 V2、重启/断网与备份恢复尚未验收。阶段状态见 [V2 实施计划](../v2-implementation-plan.md)，不得以合成或桌面手机视口测试替代真机验收。
+
+- [公网工作台中转本地集成验证（2026-10-10）](public-workbench-relay-2026-10-10.md)
+- [单工作台 IP 测试部署（2026-10-13）](public-relay-ip-trial-2026-10-13.md)：Linux 隔离部署、公网 TLS 与 Chrome 手机视口的 WSS/页面/SSE/合成终端链路通过，真实手机验收另列。
+
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)
 - [V2 0.3.0 Release 包装、安装与快速启动（2026-10-02）](v2-release-packaging-2026-10-02.md)
