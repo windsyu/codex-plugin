@@ -1,12 +1,12 @@
-.wb-relay-panel { position:fixed; z-index:21; top:54px; right:12px; width:min(440px,calc(100vw - 24px)); max-height:calc(100dvh - 66px); display:flex; flex-direction:column; background:#1b1b1b; border:1px solid #454545; border-radius:6px; box-shadow:0 6px 30px #0009; color:#ddd; font-size:12px; }
-.wb-relay-heading { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid #333; }
+.wb-relay-panel { position:fixed; z-index:21; top:54px; right:12px; width:min(440px,calc(100vw - 24px)); max-height:calc(100dvh - 66px); display:flex; flex-direction:column; background:var(--ui-surface-2); border:1px solid var(--ui-line-strong); border-radius:var(--ui-radius-md); box-shadow:var(--ui-shadow-2); color:var(--ui-text); font-size:12px; }
+.wb-relay-heading { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--ui-line); }
 .wb-relay-heading button { font-size:20px; line-height:1; }
 .wb-relay-body { padding:14px; overflow:auto; overflow-wrap:anywhere; }
 .wb-relay-body p { margin:0 0 12px; line-height:1.6; }
 .wb-relay-body label { display:block; margin:12px 0; }
-.wb-relay-body input { box-sizing:border-box; width:100%; margin-top:6px; padding:8px; color:#ddd; background:#111; border:1px solid #464646; border-radius:4px; }
+.wb-relay-body input { box-sizing:border-box; width:100%; margin-top:6px; padding:8px; color:var(--ui-text); background:var(--ui-surface-1); border:1px solid var(--ui-line-strong); border-radius:var(--ui-radius-sm); }
 .wb-relay-body button { margin:4px 8px 4px 0; }
-.wb-relay-body a { color:#9dc5fa; }
-.wb-relay-binding { padding:12px; margin-bottom:12px; border:1px solid #41658a; border-radius:5px; background:#172231; }
+.wb-relay-body a { color:var(--ui-accent); }
+.wb-relay-binding { padding:12px; margin-bottom:12px; border:1px solid var(--ui-accent-line); border-radius:var(--ui-radius-sm); background:var(--ui-accent-soft); }
 .wb-relay-binding strong { display:block; margin:8px 0; font:600 22px/1.4 monospace; letter-spacing:.12em; user-select:all; }
-.wb-relay-hint { color:#9aa6b4; }
+.wb-relay-hint { color:var(--ui-text-2); }
