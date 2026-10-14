@@ -92,6 +92,52 @@ test('notices preserve nested upstream attribution and exclude unshipped web too
   assert.equal(fs.readFileSync(path.join(f.output, 'licenses/cargo/crate@1.2.3/native/NOTICE'), 'utf8'), 'native attribution\n');
   assert.equal(JSON.stringify(index).includes(f.root), false);
 });
+function runtimeNotice(f, overrides = {}) {
+  const directory = path.join(f.root, 'runtime-source');
+  fs.mkdirSync(path.join(directory, 'licenses'), { recursive: true });
+  fs.writeFileSync(path.join(directory, 'COPYRIGHT-library.html'), 'synthetic runtime attribution\n');
+  fs.writeFileSync(path.join(directory, 'licenses/MIT.txt'), 'synthetic runtime permission\n');
+  return { name: 'rust-library', version: '1.95.0', declaredLicense: 'MIT OR Apache-2.0', directory,
+    noticeFiles: ['COPYRIGHT-library.html', 'licenses/MIT.txt'], ...overrides };
+}
+test('explicit static runtime notices are indexed verbatim with no local source paths', t => {
+  const f = fixture(t);
+  const runtime = runtimeNotice(f);
+  assert.equal(writeLicenses(f.root, f.metadata, f.output, { runtimeLicenses: [runtime] }), 3);
+  const index = JSON.parse(fs.readFileSync(path.join(f.output, 'licenses/INDEX.json')));
+  const entry = index.find(item => item.ecosystem === 'toolchain-runtime');
+  assert.equal(entry.name, 'rust-library');
+  assert.equal(entry.version, '1.95.0');
+  assert.equal(JSON.stringify(index).includes(f.root), false);
+  assert.equal(entry.licenseFiles.length, 2);
+  for (const file of runtime.noticeFiles) {
+    const output = `licenses/toolchain-runtime/rust-library@1.95.0/${file}`;
+    assert.ok(entry.licenseFiles.includes(output));
+    assert.deepEqual(fs.readFileSync(path.join(f.output, output)), fs.readFileSync(path.join(runtime.directory, file)));
+  }
+  writeChecksums(f.output);
+  assert.match(fs.readFileSync(path.join(f.output, 'CHECKSUMS.sha256'), 'utf8'), /toolchain-runtime\/rust-library@1\.95\.0\/COPYRIGHT-library\.html/);
+});
+test('explicit runtime inputs reject missing notices, output traversal and source links', t => {
+  for (const overrides of [{ noticeFiles: [] }, { noticeFiles: ['../outside'] }, { noticeFiles: ['licenses/missing.txt'] }, { name: '../escape' }, { version: '../escape' }, { declaredLicense: '' }]) {
+    const f = fixture(t);
+    assert.throws(() => writeLicenses(f.root, f.metadata, f.output, { runtimeLicenses: [runtimeNotice(f, overrides)] }));
+  }
+  const f = fixture(t);
+  const runtime = runtimeNotice(f);
+  fs.symlinkSync(f.npm, path.join(runtime.directory, 'linked'));
+  runtime.noticeFiles = ['linked/LICENSE'];
+  assert.throws(() => writeLicenses(f.root, f.metadata, f.output, { runtimeLicenses: [runtime] }), /Symlink/);
+});
+test('explicit runtime notices reject binary content and duplicate sources', t => {
+  const f = fixture(t);
+  const runtime = runtimeNotice(f);
+  fs.writeFileSync(path.join(runtime.directory, 'COPYRIGHT-library.html'), Buffer.from([65, 0, 66]));
+  assert.throws(() => writeLicenses(f.root, f.metadata, f.output, { runtimeLicenses: [runtime] }), /Non-text license/);
+  const other = fixture(t);
+  const duplicate = runtimeNotice(other, { noticeFiles: ['COPYRIGHT-library.html', 'COPYRIGHT-library.html'] });
+  assert.throws(() => writeLicenses(other.root, other.metadata, other.output, { runtimeLicenses: [duplicate] }), /Duplicate/);
+});
 test('missing notice or mismatched installed dependency fails packaging', t => {
   const f = fixture(t);
   fs.unlinkSync(path.join(f.npm, 'LICENSE'));

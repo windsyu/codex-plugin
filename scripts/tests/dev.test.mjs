@@ -19,3 +19,17 @@ test('binary check cannot silently mix scopes or accept a Git option as ref', ()
   assert.equal(parseArgs(['binaries']).ref, undefined);
   assert.equal(parseArgs(['binaries', '--tree', 'HEAD']).ref, 'HEAD');
 });
+
+test('component selection is explicit, validated and backwards compatible', () => {
+  for (const command of ['build', 'check']) {
+    assert.equal(parseArgs([command]).component, 'all');
+    for (const component of ['workbench', 'relay', 'all']) assert.equal(parseArgs([command, '--component', component]).component, component);
+  }
+  assert.equal(parseArgs(['package']).component, 'workbench');
+  assert.equal(parseArgs(['package', '--component', 'workbench']).component, 'workbench');
+  for (const args of [
+    ['build', '--component'], ['build', '--component', '--release'], ['build', '--component', '../relay'],
+    ['check', '--component', 'Relay'], ['build', '--component', 'relay', '--component', 'all'],
+    ['doctor', '--component', 'relay'], ['package', '--component', 'relay'], ['package', '--component', 'all'],
+  ]) assert.throws(() => parseArgs(args));
+});

@@ -1,4 +1,6 @@
 //! Default-off, outbound-only connector to the trusted public workbench relay.
+#[cfg(test)]
+mod login_tests;
 mod storage;
 mod transport;
 
@@ -23,6 +25,8 @@ pub(crate) struct Snapshot {
     pub server_url: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_id: Option<Uuid>,
@@ -43,10 +47,22 @@ pub(crate) struct BindingStatus {
 impl Snapshot {
     fn from_saved(saved: &Saved) -> Self {
         Self {
-            state: if saved.enabled { "offline" } else { "disabled" }.into(),
+            state: if saved.authentication_required {
+                "authenticationRequired"
+            } else if saved.enabled {
+                "offline"
+            } else {
+                "disabled"
+            }
+            .into(),
             enabled: saved.enabled,
             server_url: saved.server_url.clone(),
             name: saved.name.clone(),
+            username: saved
+                .bound
+                .as_ref()
+                .map(|b| b.username.clone())
+                .filter(|v| !v.is_empty()),
             account_id: saved.bound.as_ref().map(|b| b.account_id),
             gateway_id: saved.bound.as_ref().map(|b| b.gateway_id),
             gateway_origin: saved.bound.as_ref().map(|b| b.gateway_origin.clone()),
@@ -164,6 +180,7 @@ fn validate_saved(saved: &Saved) -> Result<()> {
 }
 enum Completed {
     Bound(Bound),
+    AuthenticationRequired,
     Failed,
 }
 async fn worker(
@@ -193,18 +210,17 @@ async fn worker(
                             let url = transport::server_url(&url,insecure)?.to_string();
                             if name.trim().is_empty() || name.len() > 120 { bail!("workbench name must contain 1 to 120 bytes"); }
                             if candidate.bound.is_some() && candidate.server_url != url { bail!("forget the existing binding before changing servers"); }
-                            if binding && candidate.bound.is_some() { bail!("workbench is already bound"); }
-                            candidate.server_url=url; candidate.name=name; candidate.allow_insecure_loopback=insecure;
+                            candidate.server_url=url; candidate.name=name; candidate.allow_insecure_loopback=insecure; candidate.enabled=false;
                         }
-                        Action::Enable => { if candidate.bound.is_none() { bail!("bind the workbench before enabling relay"); } candidate.enabled=true; }
+                        Action::Enable => { if candidate.bound.is_none() || candidate.authentication_required { bail!("log in before enabling relay"); } candidate.enabled=true; }
                         Action::Disable => candidate.enabled=false,
-                        Action::Forget => { candidate.enabled=false; candidate.bound=None; }
+                        Action::Forget => { candidate.enabled=false; candidate.bound=None; candidate.authentication_required=false; }
                     }
                     store.save(&candidate)?; saved=candidate; Ok(())
                 })();
                 if result.is_err() && stop_requested {
                     saved.enabled=false;
-                    if forget_requested { saved.bound=None; }
+                    if forget_requested { saved.bound=None; saved.authentication_required=false; }
                 }
                 *snapshot.lock().unwrap() = Snapshot::from_saved(&saved);
                 if result.is_err() && stop_requested { snapshot.lock().unwrap().error=Some("private_state_save_failed".into()); }
@@ -228,9 +244,18 @@ async fn worker(
             completed = async { match task.as_mut() { Some(task)=>Some(task.await),None=>std::future::pending().await } } => {
                 task=None; ingress.disconnect();
                 if let Some(Ok(Completed::Bound(bound)))=completed {
-                    let mut next=saved.clone(); next.bound=Some(bound); next.enabled=false;
+                    let mut next=saved.clone(); next.bound=Some(bound); next.enabled=true; next.authentication_required=false;
                     if store.save(&next).is_ok() { saved=next; *snapshot.lock().unwrap()=Snapshot::from_saved(&saved); task=launch(&saved,instance,&ingress,&snapshot); }
-                    else { let mut state=snapshot.lock().unwrap(); state.state="error".into(); state.binding=None; state.error=Some("credential_save_failed".into()); }
+                    else {
+                        // Never enable a credential that has not been durably stored.
+                        let _=tokio::time::timeout(Duration::from_secs(8),revoke_server(&next)).await;
+                        let mut state=snapshot.lock().unwrap(); state.state="error".into(); state.binding=None; state.error=Some("credential_save_failed".into());
+                    }
+                } else if let Some(Ok(Completed::AuthenticationRequired))=completed {
+                    saved.enabled=false; saved.authentication_required=true;
+                    let stored=store.save(&saved).is_ok();
+                    *snapshot.lock().unwrap()=Snapshot::from_saved(&saved);
+                    if !stored { snapshot.lock().unwrap().error=Some("private_state_save_failed".into()); }
                 }
             }
         }
@@ -247,15 +272,18 @@ fn launch(
     ingress: &IngressHandle,
     snapshot: &Shared,
 ) -> Option<tokio::task::JoinHandle<Completed>> {
-    if !saved.enabled || saved.bound.is_none() {
+    if !saved.enabled || saved.bound.is_none() || saved.authentication_required {
         return None;
     }
     let saved = saved.clone();
     let ingress = ingress.clone();
     let snapshot = snapshot.clone();
     Some(tokio::spawn(async move {
-        transport::run(saved, instance, ingress, snapshot).await;
-        Completed::Failed
+        if transport::run(saved, instance, ingress, snapshot).await {
+            Completed::AuthenticationRequired
+        } else {
+            Completed::Failed
+        }
     }))
 }
 async fn revoke_server(saved: &Saved) -> Result<()> {
@@ -283,6 +311,8 @@ async fn bind(saved: &Saved, snapshot: &Shared) -> Result<Bound> {
         &format!("{}relay/v1/bindings", saved.server_url),
         &BindingStart {
             name: saved.name.clone(),
+            resume_gateway_id: saved.bound.as_ref().map(|b| b.gateway_id),
+            resume_credential: saved.bound.as_ref().map(|b| b.credential.clone()),
         },
     )
     .await?;
@@ -328,6 +358,11 @@ async fn bind(saved: &Saved, snapshot: &Shared) -> Result<Bound> {
             continue;
         }
         let bound: Bound = decode(response).await?;
+        if saved.bound.as_ref().is_some_and(|previous| {
+            previous.account_id != bound.account_id || previous.gateway_id != bound.gateway_id
+        }) {
+            bail!("relay reauthentication identity mismatch");
+        }
         let mut check = saved.clone();
         check.bound = Some(bound.clone());
         validate_saved(&check)?;
@@ -370,6 +405,7 @@ mod tests {
     fn status_cannot_disclose_credentials() {
         let saved = Saved {
             bound: Some(Bound {
+                username: "synthetic".into(),
                 account_id: Uuid::new_v4(),
                 gateway_id: Uuid::new_v4(),
                 credential: "do-not-disclose-synthetic".into(),
@@ -401,7 +437,9 @@ mod lifecycle_tests {
             name: "Offline synthetic".into(),
             allow_insecure_loopback: true,
             enabled: true,
+            authentication_required: false,
             bound: Some(Bound {
+                username: "synthetic".into(),
                 account_id: Uuid::new_v4(),
                 gateway_id: Uuid::new_v4(),
                 credential: "private-synthetic-offline".into(),
@@ -510,7 +548,9 @@ mod revoke_tests {
             name: "Synthetic".into(),
             allow_insecure_loopback: true,
             enabled: false,
+            authentication_required: false,
             bound: Some(Bound {
+                username: "synthetic".into(),
                 account_id: Uuid::new_v4(),
                 gateway_id: Uuid::new_v4(),
                 credential: "synthetic-revoke-credential".into(),
@@ -572,6 +612,7 @@ mod revoke_tests {
             allow_insecure_loopback: true,
             name: "Synthetic".into(),
             bound: Some(Bound {
+                username: "synthetic".into(),
                 account_id: Uuid::new_v4(),
                 gateway_id: Uuid::new_v4(),
                 credential: "synthetic-save-failure".into(),

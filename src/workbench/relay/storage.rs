@@ -16,6 +16,8 @@ pub(super) struct Saved {
     pub name: String,
     pub allow_insecure_loopback: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub authentication_required: bool,
     pub bound: Option<Bound>,
 }
 
@@ -132,6 +134,7 @@ mod tests {
             server_url: "https://relay.example".into(),
             enabled: true,
             bound: Some(Bound {
+                username: "synthetic".into(),
                 account_id: Uuid::new_v4(),
                 gateway_id: Uuid::new_v4(),
                 credential: "synthetic-private-credential".into(),

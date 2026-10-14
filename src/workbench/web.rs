@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use super::live::{LiveHub, SubscribeError};
@@ -57,9 +58,7 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; conn
 // xterm positions its canvas/rows through inline styles. Scripts remain self-only.
 const WORKBENCH_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "web/dist"]
-struct WorkbenchAssets;
+use codex_workbench_assets::WorkbenchAssets;
 
 impl WebState {
     fn has_terminal(&self) -> bool {
@@ -251,8 +250,16 @@ impl Drop for ReadingServer {
     }
 }
 fn router(state: Arc<WebState>) -> Router {
+    routes()
+        .fallback(scoped_api)
+        .layer(middleware::from_fn_with_state(state.clone(), boundary))
+        .with_state(state)
+}
+
+fn routes() -> Router<Arc<WebState>> {
     let app = Router::new()
         .route("/", get(index))
+        .route("/runs/{run}/{page}", get(document))
         .route("/assets/{*path}", get(asset))
         .route(
             "/workbench.js",
@@ -344,8 +351,39 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/workbench/v1/stop", post(terminal_api::stop_run))
         .route("/workbench/v1/run/stop", post(terminal_api::stop_run));
     app.layer(DefaultBodyLimit::max(1024))
-        .layer(middleware::from_fn_with_state(state.clone(), boundary))
-        .with_state(state.clone())
+}
+
+async fn scoped_api(
+    State(state): State<Arc<WebState>>,
+    mut request: axum::extract::Request,
+) -> Response {
+    let Some((id, tail)) = request
+        .uri()
+        .path()
+        .strip_prefix("/workbench/v1/runs/")
+        .and_then(|tail| tail.split_once('/'))
+    else {
+        return error(StatusCode::NOT_FOUND, "run_unavailable");
+    };
+    if id != state.hub.epoch().to_string() {
+        return error(StatusCode::NOT_FOUND, "run_unavailable");
+    }
+    let uri = format!(
+        "/workbench/v1/{tail}{}",
+        request
+            .uri()
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    let Ok(uri) = uri.parse() else {
+        return error(StatusCode::BAD_REQUEST, "invalid_run_path");
+    };
+    // The outer boundary has checked the original URI and ingress. Preserve
+    // method, body, headers and permission/upgrade extensions, and dispatch only
+    // through exact routes without this fallback (unknown tails cannot recurse).
+    *request.uri_mut() = uri;
+    routes().with_state(state).oneshot(request).await.unwrap()
 }
 
 fn authorised(headers: &Auth, state: &WebState) -> bool {
@@ -541,6 +579,19 @@ async fn run(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     #[cfg(not(unix))]
     let workspace_root: Option<&str> = None;
     Json(serde_json::json!({"workspaceRoot":workspace_root,"runEpoch":state.hub.epoch(),"mode":if terminal { "native-workbench" } else { "r0-reading" },"scope":"typed-conversation-items","readingSchemaVersion":super::live::VIEW_SCHEMA_VERSION,"recorder":state.hub.recorder_status().state,"historyAvailable":state.hub.history().is_some(),"historyManagementAvailable":history_management_available,"settingsAvailable":settings_available,"accessAvailable":terminal && owner_authorised(&headers,&state),"terminalAvailable":terminal,"projectName":project_name,"processId":process_id})).into_response()
+}
+
+async fn document(State(state): State<Arc<WebState>>, request: axum::extract::Request) -> Response {
+    let path = request.uri().path();
+    let selected = path
+        .strip_prefix("/runs/")
+        .and_then(|tail| tail.split_once('/'));
+    if !codex_relay_protocol::document_path(path)
+        || selected.is_none_or(|(id, _)| id != state.hub.epoch().to_string())
+    {
+        return error(StatusCode::NOT_FOUND, "page_unavailable");
+    }
+    index(State(state)).await
 }
 
 async fn index(State(state): State<Arc<WebState>>) -> Response {

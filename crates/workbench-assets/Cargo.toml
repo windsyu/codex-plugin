@@ -1,0 +1,9 @@
+[package]
+name = "codex-workbench-assets"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Trusted compiled workbench assets shared by local and relay servers"
+
+[dependencies]
+rust-embed = { version = "8", features = ["debug-embed"] }

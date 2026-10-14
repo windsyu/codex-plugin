@@ -36,7 +36,43 @@ function files(directory, prefix = '') {
 export function collectLicenseFiles(directory) {
   return files(directory).filter(file => licenseName.test(path.basename(file)));
 }
-export function writeLicenses(repo, metadata, destination) {
+function runtimeNotices(entry) {
+  if (!entry || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(entry.name) || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(entry.version) ||
+      typeof entry.declaredLicense !== 'string' || !entry.declaredLicense.trim() || !Array.isArray(entry.noticeFiles) || !entry.noticeFiles.length) {
+    throw new Error('Missing or invalid static runtime license inputs');
+  }
+  const directory = path.resolve(entry.directory);
+  const directoryStat = fs.lstatSync(directory);
+  if (directoryStat.isSymbolicLink()) throw new Error(`Symlink in runtime inputs: ${entry.name}`);
+  if (!directoryStat.isDirectory()) throw new Error(`Not a runtime source directory: ${entry.name}`);
+  const seen = new Set();
+  for (const file of entry.noticeFiles) {
+    if (typeof file !== 'string' || !/^[A-Za-z0-9_@+.,/-]+$/.test(file) || path.isAbsolute(file) || file.split('/').some(part => !part || part === '.' || part === '..')) {
+      throw new Error(`License path escapes ${entry.name}`);
+    }
+    if (seen.has(file)) throw new Error(`Duplicate runtime notice: ${entry.name}`);
+    seen.add(file);
+    let source = directory;
+    const parts = file.split('/');
+    for (let index = 0; index < parts.length; index++) {
+      source = path.join(source, parts[index]);
+      const stat = fs.lstatSync(source);
+      if (stat.isSymbolicLink()) throw new Error(`Symlink in runtime inputs: ${entry.name}`);
+      if (!(index === parts.length - 1 ? stat.isFile() : stat.isDirectory())) throw new Error(`Not a regular runtime notice: ${entry.name}`);
+    }
+    if (fs.readFileSync(source).includes(0)) throw new Error(`Non-text license for ${entry.name}: ${file}`);
+  }
+  return { ...entry, directory, noticeFiles: [...seen].sort() };
+}
+export function writeLicenses(repo, metadata, destination, { runtimeLicenses = [] } = {}) {
+  if (!Array.isArray(runtimeLicenses)) throw new Error('Invalid static runtime license list');
+  const runtimes = runtimeLicenses.map(runtimeNotices);
+  const identities = new Set();
+  for (const runtime of runtimes) {
+    const identity = `${runtime.name}@${runtime.version}`;
+    if (identities.has(identity)) throw new Error(`Duplicate runtime license: ${identity}`);
+    identities.add(identity);
+  }
   const entries = [];
   const write = (ecosystem, name, version, declaredLicense, directory, explicitFile) => {
     const notices = collectLicenseFiles(directory);
@@ -68,6 +104,17 @@ export function writeLicenses(repo, metadata, destination) {
     const installed = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
     if (installed.version !== pkg.version) throw new Error(`Web lock mismatch: ${location}`);
     write('npm', installed.name, installed.version, pkg.license || installed.license, directory);
+  }
+  // Static system/toolchain runtimes are not represented in Cargo/npm metadata.
+  // The target-specific packager must supply actual upstream notices explicitly.
+  for (const runtime of runtimes) {
+    const output = path.join('licenses', 'toolchain-runtime', `${runtime.name}@${runtime.version}`);
+    const licenseFiles = runtime.noticeFiles.map(file => {
+      const relative = path.join(output, file);
+      copy(path.join(runtime.directory, file), path.join(destination, relative));
+      return relative;
+    });
+    entries.push({ ecosystem: 'toolchain-runtime', name: runtime.name, version: runtime.version, declaredLicense: runtime.declaredLicense, licenseFiles });
   }
   fs.mkdirSync(path.join(destination, 'licenses'), { recursive: true });
   fs.writeFileSync(path.join(destination, 'licenses/INDEX.json'), `${JSON.stringify(entries, null, 2)}\n`);

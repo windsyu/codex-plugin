@@ -1,5 +1,7 @@
+mod admin;
 mod auth;
 mod portal;
+mod routing;
 mod store;
 mod tunnel;
 
@@ -29,6 +31,7 @@ pub struct Config {
     pub workbench_domain: String,
     pub workbench_origin: Option<String>,
     pub fixed_gateway_id: Option<Uuid>,
+    pub single_origin: bool,
     pub password_workers: usize,
     pub allow_insecure_loopback: bool,
     /// Explicit header overwritten by a trusted loopback TLS proxy. Never enable for arbitrary upstreams.
@@ -58,6 +61,22 @@ impl Config {
                 || h.ends_with(".localhost")
                 || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
         };
+        if self.single_origin {
+            anyhow::ensure!(
+                self.workbench_origin.is_none()
+                    && self.fixed_gateway_id.is_none()
+                    && self.workbench_domain.is_empty(),
+                "single-origin conflicts with other workbench routing modes"
+            );
+            anyhow::ensure!(
+                u.scheme() == "https"
+                    || (self.allow_insecure_loopback
+                        && u.scheme() == "http"
+                        && loopback(u.host_str().unwrap_or(""))),
+                "HTTPS is required except explicit isolated loopback testing"
+            );
+            return Ok(());
+        }
         if let Some(origin) = &self.workbench_origin {
             anyhow::ensure!(
                 self.workbench_domain.is_empty(),
@@ -128,6 +147,9 @@ impl Config {
         Ok(())
     }
     pub fn gateway_origin(&self, id: Uuid) -> Option<String> {
+        if self.single_origin {
+            return Some(self.portal_origin.clone());
+        }
         if let Some(origin) = &self.workbench_origin {
             return (self.fixed_gateway_id == Some(id)).then(|| origin.clone());
         }
@@ -145,6 +167,9 @@ impl Config {
         let portal = url::Url::parse(&self.portal_origin).ok()?;
         if format!("{}://{}", portal.scheme(), host) == self.portal_origin {
             return Some((self.portal_origin.clone(), None));
+        }
+        if self.single_origin {
+            return None;
         }
         if let Some(origin) = &self.workbench_origin {
             return (format!("{}://{}", portal.scheme(), host) == *origin)
@@ -176,6 +201,8 @@ pub(crate) struct Inner {
     streams: Mutex<HashMap<Uuid, tunnel::Stream>>,
     #[cfg(test)]
     admission_gate: Mutex<Option<tunnel::AdmissionGate>>,
+    #[cfg(test)]
+    forget_gate: Mutex<Option<portal::ForgetGate>>,
 }
 pub fn app(config: Config) -> anyhow::Result<Router> {
     config.validate()?;
@@ -207,14 +234,37 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
         streams: Mutex::new(HashMap::new()),
         #[cfg(test)]
         admission_gate: Mutex::new(None),
+        #[cfg(test)]
+        forget_gate: Mutex::new(None),
     }));
     Ok(Router::new()
         .route("/", get(portal::index))
+        .route("/login", get(portal::index))
+        .route("/computers", get(portal::index))
+        .route("/authorize", get(portal::index))
+        .route("/account/security", get(portal::index))
+        .route("/admin/users", get(portal::index))
         .route("/relay.js", get(portal::script))
+        .route("/relay.css", get(portal::style))
         .route("/relay/v1/account", get(auth::account))
+        .route(
+            "/relay/v1/admin/users",
+            get(admin::list_users).post(admin::create_user),
+        )
+        .route(
+            "/relay/v1/admin/users/{id}/password",
+            post(admin::reset_password),
+        )
+        .route("/relay/v1/admin/users/{id}", delete(admin::delete_user))
+        .route(
+            "/relay/v1/admin/users/{id}/disable",
+            post(admin::disable_user),
+        )
+        .route(
+            "/relay/v1/admin/users/{id}/enable",
+            post(admin::enable_user),
+        )
         .route("/relay/v1/login", post(auth::login))
-        .route("/relay/v1/register", post(auth::redeem))
-        .route("/relay/v1/reset", post(auth::redeem))
         .route("/relay/v1/password", post(auth::change_password))
         .route("/relay/v1/logout", post(auth::logout))
         .route("/relay/v1/bindings", post(portal::binding_start))
@@ -230,6 +280,12 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
         .route("/relay/v1/session/exchange", post(portal::exchange))
         .route("/relay/v1/tunnel", get(tunnel::connect))
         .route("/relay/v1/tunnel/streams/{id}", get(tunnel::attach))
+        .route("/g/{id}/", get(routing::page))
+        .route("/g/{id}/history", get(routing::page))
+        .route("/g/{id}/launch", get(routing::page))
+        .route("/g/{id}/settings", get(routing::page))
+        .route("/g/{id}/runs/{run}/{page}", get(routing::page))
+        .route("/assets/{*path}", get(routing::asset))
         .fallback(tunnel::forward)
         .layer(axum::extract::DefaultBodyLimit::max(
             codex_relay_protocol::MAX_HTTP_BODY,
@@ -305,7 +361,7 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Response {
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if gateway.is_some()
+    if (gateway.is_some() || (s.0.config.single_origin && path.starts_with("/g/")))
         && req.headers().keys().any(|n| {
             n.as_str() == "authorization"
                 || (n.as_str().starts_with("x-relay-")
@@ -346,10 +402,11 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Response {
         .insert("x-content-type-options", "nosniff".parse().unwrap());
     r.headers_mut()
         .insert("x-frame-options", "DENY".parse().unwrap());
-    r.headers_mut().entry("content-security-policy").or_insert("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
+    r.headers_mut().insert("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".parse().unwrap());
     r
 }
 pub(crate) type Result<T> = std::result::Result<T, Failure>;
+#[derive(Debug)]
 pub(crate) struct Failure(pub StatusCode);
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
@@ -414,6 +471,13 @@ impl App {
             .session(&cookie(h, "__Host-relay_session").ok_or_else(denied)?, None)
             .ok_or_else(denied)
     }
+    pub(crate) fn authorized_portal_session(&self, h: &HeaderMap) -> Result<store::Session> {
+        let session = self.portal_session(h)?;
+        if session.must_change_password {
+            return Err(denied());
+        }
+        Ok(session)
+    }
     pub(crate) fn rate(&self, key: String, max: u32) -> Result<()> {
         let mut limits = self.0.limits.lock().unwrap();
         limits.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(60));
@@ -442,6 +506,19 @@ impl App {
         });
         drop(streams);
         let mut tunnels = self.0.tunnels.lock().unwrap();
+        tunnels.retain(|gateway, c| {
+            if self
+                .0
+                .store
+                .gateway_auth(&c.credential)
+                .is_none_or(|(id, _)| id != *gateway)
+            {
+                c.cancel.send_replace(true);
+                false
+            } else {
+                true
+            }
+        });
         for (gateway, c) in tunnels.iter_mut() {
             c.sessions.retain(|session| {
                 if !self.0.store.active(*session) {

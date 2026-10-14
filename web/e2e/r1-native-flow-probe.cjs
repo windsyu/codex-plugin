@@ -50,36 +50,40 @@ async function screenshot(suffix) {
   await owned();
   await expect.poll(() => connections).toBe(1);
   stage = 'keyboard-navigation';
-  const toggle = page.getByRole('button',{name:'终端',exact:true});
+  const toggle = page.getByRole('button',{name:'并排终端',exact:true});
   const terminalElement = await page.locator('.xterm-helper-textarea').elementHandle();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: '← 全部历史', exact: true })).toBeFocused();
-  // Follow the shipped header order, including settings and device access.
-  for (const name of ['手机接入', '设置', '终端']) {
-    stage = `keyboard-navigation-${name}`;
-    await page.keyboard.press('Tab');
-    await expect(page.getByRole('button', { name, exact: true })).toBeFocused();
-  }
+  await expect(page.getByRole('link', { name: '← 项目概览', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab'); await expect(toggle).toBeFocused();
   stage = 'keyboard-navigation-terminal';
   assert.equal(await toggle.evaluate(element=>getComputedStyle(element).outlineStyle),'solid');
   await page.keyboard.press('Space'); await expect(page.locator('.wb-terminal-container')).toBeHidden();
   await page.keyboard.press('Enter'); await expect(page.locator('.wb-terminal-container')).toBeVisible();
   assert.equal(await terminalElement.evaluate(element=>element===document.querySelector('.xterm-helper-textarea')),true);
-  await page.keyboard.press('Tab'); await expect(page.getByRole('button',{name:'实时对话',exact:true})).toBeFocused();
-  await page.keyboard.press('Tab'); await expect(page.getByRole('button',{name:'历史记录',exact:true})).toBeFocused();
-  for (const name of ['文件', '搜索代码', 'Git', '用量与状态']) {
+  const nav=page.getByRole('navigation',{name:'工作台页面',exact:true});
+  for (const name of ['实时对话', '原生终端', '文件', '搜索', 'Git', '运行历史', '用量与状态', '设置', '本地局域网接入']) {
     stage = `keyboard-navigation-${name}`;
     await page.keyboard.press('Tab');
-    await expect(page.getByRole('button', { name, exact: true })).toBeFocused();
+    await expect(nav.getByRole('link', { name, exact: true })).toBeFocused();
   }
+  stage='keyboard-navigation-access';
+  await nav.getByRole('link',{name:'本地局域网接入',exact:true}).press('Enter');
+  await expect(page.locator('#wb-access-panel')).toBeVisible();
+  await nav.getByRole('link',{name:'设置',exact:true}).focus();
+  await nav.getByRole('link',{name:'设置',exact:true}).press('Enter');
+  await expect(page.locator('#wb-settings-panel')).toBeVisible();
+  await page.locator('#wb-settings-panel').press('Escape');
+  await expect(page.locator('.wb-message-list')).toBeVisible();
+  assert.equal(await terminalElement.evaluate(element=>element===document.querySelector('.xterm-helper-textarea')),true);
   stage = 'keyboard-navigation-overview';
-  await page.keyboard.press('Space'); await expect(page.getByRole('region',{name:'用量与状态'})).toBeVisible();
+  await nav.getByRole('link',{name:'用量与状态',exact:true}).press('Enter'); await expect(page.getByRole('region',{name:'用量与状态'})).toBeVisible();
   stage = 'keyboard-navigation-open-calls';
   await page.getByRole('button',{name:'查看调用记录',exact:true}).press('Enter');
   await expect(page.getByRole('region',{name:'调用记录',exact:true})).toBeVisible();
   stage = 'keyboard-navigation-close-calls';
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button',{name:'用量与状态',exact:true})).toBeFocused();
+  await expect(page.getByRole('button',{name:'查看调用记录',exact:true})).toBeFocused();
+  await nav.getByRole('link',{name:'实时对话',exact:true}).press('Enter');
   await expect(page.locator('.wb-message-list')).toBeVisible();
   stage = 'keyboard-navigation-no-input';
   assert.equal(terminalInputs,0,'page navigation must not send native input');
@@ -161,7 +165,7 @@ async function screenshot(suffix) {
   await expect(page.locator('.wb-message-list [data-role="user"]')).toHaveCount(2);
   await screenshot('complete');
   stage='stop-run-controls';
-  await page.getByRole('button',{name:'用量与状态',exact:true}).press('Enter');
+  await nav.getByRole('link',{name:'用量与状态',exact:true}).press('Enter');
   const details=page.getByRole('region',{name:'用量与状态'});
   await details.getByRole('button',{name:'停止当前运行',exact:true}).press('Enter');
   const confirmation=page.getByRole('alertdialog',{name:'确认停止运行'});

@@ -12,18 +12,20 @@
 - **文件、搜索与 Git**：阅读当前项目文件、搜索代码、跳转行号，查看已暂存/未暂存变更和提交记录。文件与 Diff 保持只读，打开文件不会中断右侧终端。
 - **用量和保存状态**：查看本次运行的 Token、输入/输出、缓存及推理明细；缺失用量不当作零，保存异常和历史覆盖单独提示。
 - **多个项目并行**：最多 4 个活动项目，各自拥有 CLI、文件、代理、用量和保存状态。可返回首页、重新进入工作台或只停止一个项目。
-- **手机接入**：电脑端明确开启设备访问后，通过二维码配对同一项目的终端与阅读页面；支持可互访的局域网和已连接 Tailscale 的设备。
-- **历史与配置管理**：同页设置面板提供数据来源、历史占用、明确确认后的手动清理和可选保留期限。原生 Codex 数据与旧数据库不自动迁移或清理。
+- **本地局域网接入**：电脑端明确开启设备访问后，通过二维码配对同一项目的终端与阅读页面；支持可互访的局域网和已连接 Tailscale 的设备。公网中转是另一套可选账号接入。
+- **历史与配置管理**：独立设置页提供数据来源、历史占用、明确确认后的手动清理和可选保留期限。原生 Codex 数据与旧数据库不自动迁移或清理。
 
 ## 运行条件与支持范围
 
 发布包支持 **macOS / Apple Silicon（arm64）**，内嵌网页和目录选择助手，运行不需要源码、Rust 或 Node.js。安装只使用系统 `curl`、Bash 和归档工具，无需 GitHub 账号、GitHub CLI 或 sudo。
 
-开始项目需要自行安装并配置官方 Codex CLI。当前已验证接入为 `unmanaged-custom`：原生 `custom` provider、Responses、显式上游地址与静态 bearer；其他 provider、ChatGPT/管理配置及环境/命令认证尚未纳入支持。历史首页无需安装 CLI 即可打开。代码搜索需要 `rg`，Git 阅读需要 `git`；缺少时只影响对应能力。
+开始项目需要自行安装并配置官方 Codex CLI。当前已验证接入为 `unmanaged-custom`：原生 `custom` provider、Responses、显式上游地址与静态 bearer；命令式 `auth.command` 新增合成 CLI/Chrome 验证，由原版 CLI 执行和刷新，不保证所有真实 provider 均可用。其他 provider、ChatGPT/管理配置及环境认证尚未纳入支持，具体认证限制见支持范围。历史首页无需安装 CLI 即可打开。代码搜索需要 `rg`，Git 阅读需要 `git`；缺少时只影响对应能力。
 
-已有 CLI `0.154.0`、`0.155.1`、`0.156.1`、`0.159.2` 的受测记录；未知版本提示后继续检查配置，不自动升级、降级或修改 CLI。Intel macOS、Linux、Windows 完整运行尚未验收。具体能力与验证边界见[支持范围](docs/codex-native-cli-workbench-support.md)。
+已有 CLI `0.154.0`、`0.155.1`、`0.156.1`、`0.159.2` 的受测记录，命令认证专项使用 `0.162.1`；未知版本提示后继续检查配置，不自动升级、降级或修改 CLI。Intel macOS、Linux、Windows 完整工作台运行尚未验收。具体能力与验证边界见[支持范围](docs/codex-native-cli-workbench-support.md)。
 
-源码新增默认关闭的可信公网中转：本机首页绑定并开启后，通过账号门户访问自己的工作台，服务器独立部署。单工作台 IP 测试已有 Linux 资源隔离、公网 HTTPS/WSS 和系统 Chrome 手机视口证据；域名模式及真实手机完整功能验收另列，见[部署指南](docs/guides/public-relay-deployment.md)、[IP 测试指南](docs/guides/public-relay-ip-trial.md)与[阶段状态](docs/v2-implementation-plan.md)。现有 `0.3.0` 发布包不包含这项源码增量。
+源码新增默认关闭的可信公网中转：本机登录并开启后，手机通过同账号门户访问自己的多台电脑，服务器独立部署。新单 IP/单 HTTPS 端口已有 Linux/TLS 测试部署和本地三电脑回归；域名模式及真实手机完整公网验收另列，见[部署指南](docs/guides/public-relay-deployment.md)与[阶段状态](docs/v2-implementation-plan.md)。现有 `0.3.0` 发布包不包含这项源码增量。
+
+本仓库有两个独立编译/部署单元：电脑上的 **workbench**（`codex-view` / `codex-observerd`）与服务器上的 **relay**（`relay/` 中的 `codex-relayd`）。本机独立使用不需中转；服务器不需 Codex CLI、PTY 或本机历史。组件能力、部署顺序和供 AI agent 使用的操作入口见[组件指南](docs/guides/component-deployment.md)、[本机部署](docs/guides/local-workbench-deployment.md)和[中转部署](docs/guides/public-relay-deployment.md)。
 
 ## macOS 快速安装与卸载
 
@@ -80,7 +82,7 @@ codex-view
 
 左侧“文件 / 搜索代码 / Git”对应当前项目，文件和 Diff 在中央打开，关闭后恢复对话阅读位置。文件支持连续滚动、行号跳转与查找；单文件最大 1 MiB，搜索最多 200 处匹配，超限或截断会提示。底栏 Token 摘要可展开查看本次运行用量与保存状态，切换历史不会把旧用量计入当前运行。
 
-电脑端点击“手机接入 → 开启设备访问”后扫描二维码。局域网要求网络可互访；MagicDNS 要求手机已连接对应 Tailscale，无需配置 Serve。配对只授权当前项目，运行结束后失效；默认仅本机访问，局域网 HTTP 不加密。手机相册上传未提供；本机图片可在原生终端中粘贴完整路径，确认 CLI 出现附件标记后手动提交。
+电脑端点击“本地局域网接入 → 开启设备访问”后扫描二维码。局域网要求网络可互访；MagicDNS 要求手机已连接对应 Tailscale，无需配置 Serve。配对只授权当前项目，运行结束后失效；默认仅本机访问，局域网 HTTP 不加密。公网接入则在本机登录中转，手机登录同一门户选择电脑，不使用局域网配对码。手机相册上传未提供；本机图片可在原生终端中粘贴完整路径，确认 CLI 出现附件标记后手动提交。
 
 配置位于 `~/.codex-web/config/config.json`，工作台历史位于 `~/.codex-web/history`，独立于原生 `CODEX_HOME`。设置中可管理历史来源、占用与清理；手动删除和自动清理默认关闭，启用后也只处理符合条件的工作台记录。详细操作、恢复条件与设备边界见[使用指南](docs/guides/usage.md)。
 
@@ -103,19 +105,22 @@ code-view-uninstall
 ```bash
 node scripts/dev.mjs doctor
 node scripts/dev.mjs bootstrap
-node scripts/dev.mjs build
+# 只编译电脑端；服务器改为 --component relay
+node scripts/dev.mjs build --component workbench
 # 只打开历史首页，不启动 CLI
 ./target/debug/codex-view
 # 在需要启动 CLI 的项目目录使用构建产物
 <repository>/target/debug/codex-view --project .
 ```
 
-标准构建先生成 Web 资源，再编译工作台两个 Rust 入口和独立中转服务，确保内嵌页面和后端一致。发布构建使用 `node scripts/dev.mjs build --release`，安装包使用 `node scripts/dev.mjs package`，常规检查使用 `node scripts/dev.mjs check`。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令；旧历史读取方式见使用指南。
+标准构建先生成共享 Web 资源，再编译所选产品，确保内嵌页面和后端一致。只构建中转使用 `node scripts/dev.mjs build --component relay --release`；完整工作区构建/检查用 `--component all`（`build/check` 不传组件保持原全量行为）。本机 macOS 安装包用 `node scripts/dev.mjs package --component workbench`，不含中转服务器；两端专项检查分别用 `check --component workbench` / `relay`，提交前仍执行完整 `node scripts/dev.mjs check`。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令；旧历史读取方式见使用指南。
 
 ## 文档与参与
 
 - [安装指南](docs/guides/installation.md)：固定版本、升级、自定义目录、手动安装与卸载。
 - [使用指南](docs/guides/usage.md)：终端、历史、配置、手机接入和旧历史兼容。
+- [组件与部署指南](docs/guides/component-deployment.md)：本机后端与公网中转分别编译、部署，以及 AI agent 操作边界。
+- 本机维护：[架构](docs/architecture/workbench.md)与[交互](docs/interactions/workbench.md)；中转维护：[架构](docs/architecture/relay.md)与[交互](docs/interactions/relay.md)。
 - [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布。
 - [文档总索引](docs/README.md)：设计契约、ADR、验证报告与历史归档；阶段状态以 [V2 实施计划](docs/v2-implementation-plan.md)为准。
 - [贡献指南](CONTRIBUTING.md)、[项目执行规范](AGENTS.md)、[安全报告](SECURITY.md)、[第三方许可](THIRD_PARTY_NOTICES.md)与[变更日志](CHANGELOG.md)。

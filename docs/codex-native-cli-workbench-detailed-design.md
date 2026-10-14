@@ -72,9 +72,14 @@ interface CaptureProfile {
 
 这里只记录已确认的模型路由，不复制 credential、不重写官方配置合并器。R0 必须找到并验证 profile 与 CLI 最终生效 provider/config 的核对方法，覆盖命令参数/profile/管理配置的优先级；无法证明时拒绝该 profile，要求显式配置原 upstream，不猜默认地址。[安装版实验](validation/native-cli-r0-progress-2026-09-18.md#26-安装版的配置层验证)已覆盖命名 profile、本次路由覆盖和项目层：项目允许的推理设置生效，但 `model_provider`/`model_providers` 等路由认证字段被原生过滤。当前必要 unmanaged custom profile 增加了启动前来源检查：检测到系统/管理层、非 File 认证存储或可能的云管理时拒绝；只输出存在性，不覆盖策略。R1 Launcher 必须复用该边界并保持原 home，不能用通用 TOML 合并推导 provider，也不能将合成配置实验扩为全 profile 支持。
 
-已实现的适配器为 macOS 的 `unmanaged-custom`，CLI `0.154.0` 是初始基线，`0.155.1` 的[升级回归](validation/native-cli-version-compatibility-2026-09-20.md)覆盖正式入口与合成模型交互；这些版本不是启动白名单。适配器只从原 `config.toml` 与可选 `<name>.config.toml` 选择受测的标量路由字段，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL 与非空静态 `experimental_bearer_token`；`requires_openai_auth=true` 也允许原生 API Key，不能据此推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏；不覆盖模型、推理、权限或重试。`env_key`、`env_http_headers`、命令认证、AWS、managed/cloud/ChatGPT tokens/非 File 存储及 `supports_websockets=true` 均须另行验证，当前明确拒绝，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置和 `auth.json` 未改变，这不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。认证边界修正见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)及[新目录启动回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。
+已实现的适配器为 macOS 的 `unmanaged-custom`，CLI `0.154.0` 是初始基线，`0.155.1` 的[升级回归](validation/native-cli-version-compatibility-2026-09-20.md)覆盖正式入口与合成模型交互；这些版本不是启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
 
-项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；项目层的认证存储覆盖尚未验证则拒绝。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。正式 binary 的普通启动、命名 profile、两轮聊天及退出已实测；[显式 resume 验收](validation/native-cli-r1-native-interactions-2026-09-19.md#4-正式-binary-显式-resume)另验证新 Run 复用明确原生 Thread、终端恢复旧历史、新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；R3 的“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
+- 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。原有证据见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)及[新目录启动回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。
+- 命令认证：非空 `model_providers.custom.auth.command`，可选 `args` 为字符串数组，要求 `requires_openai_auth=false`；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表按原生递归覆盖语义检查，args 数组替换而非拼接。工作台只校验配置形状和路由/冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](decisions/0060-native-provider-command-auth.md)与[准确验证范围](validation/native-cli-command-auth-2026-10-14.md)，安装版与真实 provider 证据独立于配置接入。
+
+两条路径都拒绝 `env_key`、`env_http_headers`、AWS、系统/managed 路由来源及 `supports_websockets=true`，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置及认证快照未改变。检查不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。命令 token 不被工作台读取，不能按精确值脱敏上游/工具主动回显到正文的凭证；认证头始终排除观察、调用详情与 journal。
+
+项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；两条认证路径都拒绝未验证的项目层认证存储覆盖。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。正式 binary 的普通启动、命名 profile、两轮聊天及退出已实测；[显式 resume 验收](validation/native-cli-r1-native-interactions-2026-09-19.md#4-正式-binary-显式-resume)另验证新 Run 复用明确原生 Thread、终端恢复旧历史、新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；R3 的“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
 
 只为本次子进程使用版本支持的覆盖参数/环境。保留真实用户 `CODEX_HOME`、原模型、权限、sandbox、OAuth 刷新和重试。自动化测试使用临时 home。API key 与 ChatGPT 登录的 URL、路径、WS upgrade 和辅助路由各有 fixture；保留 URL 后缀对官方 capability 判定的影响。安装版与研究源码不一致时以实测支持矩阵为准。
 
@@ -83,6 +88,8 @@ interface CaptureProfile {
 模型代理是显式 base URL 路由，不安装根证书、不劫持系统 TLS。上游仍验证 TLS。代理只转发 CLI 提供的认证，不成为 token 刷新器；不把 header/body 认证材料存入浏览器或 journal。URL 映射、重定向与跨 origin 转发不允许把凭证带往另一个域名。
 
 浏览器认证与模型代理分离。Web 使用运行期配对 Cookie、严格 Host/Origin 和 CSRF 防护；模型代理使用本次运行的不可猜路由能力，固定 upstream，拒绝浏览器 Origin/CORS、CONNECT 和任意转发目标。路由能力不进入日志或页面，可经 base URL 前缀注入，出站前剥离并保留原上游路径；它是本机临时能力，不替代模型 Authorization。若该版本支持安全的独立环境 header，可在同一契约下替代路由能力。不能静默降低为开放代理。首版信任同 OS 用户，不声称能抵御该用户读取本次进程参数/内存。
+
+公网中转账号同样只保护网页/网关访问，不给 CLI 登录模型服务，不向本机下发模型凭证。模型认证继续由本机官方 CLI 和原生 provider 配置完成；中转 Cookie/账号状态不能作为模型凭证可用或请求成功的证据。
 
 上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。自动化和 Chrome 结果见[接入验证](validation/native-cli-device-access-2026-09-21.md)，真机仍按 R5/P14 单独验收。
 
@@ -670,7 +677,7 @@ interface WorkbenchViewState {
 }
 ```
 
-上例包含 R4 文件/Git 的规划状态；当前实现仅提供对话、历史与调用侧面板。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
+上例是早期布局示意；文件/Git 已实现，当前独立功能路径与导航以 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)及[本机交互](interactions/workbench.md)为准。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
 
 该状态只表达页面阅读选择，不授予输入权，也不替代 Run、request/response 或 controller generation。`path` 仍由服务端按 §8 验证。折叠和导航仅影响展示，TerminalPanel/连接保留；隐藏后的尺寸恢复遵守本节 controller resize 规则，不通过重新 spawn 修复画面。浏览器若记忆阅读位置，恢复时只恢复可用的阅读选择，不自动执行 claim/takeover、输入或模型请求。
 
@@ -726,7 +733,7 @@ RolloutReader 后台只读 `sessions` 和 `archived_sessions`，以明确 thread
 
 核心边界：后台扫描逻辑字节数并表达 partial；默认不允许手动或自动删除；精确 UUID 预览后确认，执行前复核当前项目、配置和运行 flock；整次运行移入同数据根暂存后可恢复地删除。新管理路径不等待/阻塞转发，也不修改原生会话、旧库或当前 Token/保存水位。仅移入暂存不表示空间已释放。
 
-现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。网页只在当前工作台点击展开配置面板，保留阅读选择与终端；没有独立设置页或前端路由，settings 仅为数据 API。决定与兼容取舍见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md) 及其默认路径补充 [ADR 0049](decisions/0049-workbench-user-directory.md)。
+现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。2026-10-14 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板：网页设置位于 `/settings` 或 `/runs/{runId}/settings`，单端口中转加 `/g/{gatewayId}` 前缀；同 Run 切换保留终端实例，不重放输入。设置数据 API 仍为 `/workbench/v1/application/settings` 或 `/workbench/v1/runs/{runId}/settings`，展示路由不修改 wire contract。配置与兼容取舍仍见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md) 及默认路径补充 [ADR 0049](decisions/0049-workbench-user-directory.md)，其历史验收不替代新路由验收。
 
 ## 8. 文件、搜索与 Git 阅读
 
@@ -796,7 +803,7 @@ rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安�
 | P10 实机与退役 | 系统 Chrome + 官方安装版 + 实际模型，图片/真机结果、旧历史保留和旧控制退役 | R5 |
 | P11 前端原型对照 | 按[实施计划 §4.1](v2-implementation-plan.md#prototype-acceptance)及[§4.2 聊天验收](v2-implementation-plan.md#chat-acceptance)逐条操作；对照方案 §1 的深色布局、角色标签、用户/模型气泡、工具/命令/结果卡和请求入口；左侧 Git 与中央对话共存；折叠/导航保持终端，历史不切换 CLI，捕获/保存/覆盖与接管分别呈现；键盘可达、窄屏无横向溢出 | R1–R4，真机归 P10 |
 | P12 历史管理 | 占用/partial/分页、精确候选、默认关闭删除、活动锁/跨项目/链接/路径替换负向、批量/幂等/读删并发、各删除崩溃点及暂存恢复；按可靠结束时间保留，旧/异常记录不自动删除；慢 I/O 与原生/旧数据不变 | R3.1，详见[验证契约](codex-native-cli-workbench-history-settings.md#7-验证限制与后续落点) |
-| P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；点击展开/收起及草稿保留、文件往返、焦点/终端/阅读位置保留，无独立设置页或前端路由 | R3.1，同上 |
+| P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；独立设置路由直达/前后退、同标签草稿保留、文件往返、同 Run 终端保活与不重放输入；原同页验收保留历史范围 | R3.1，同上；新路由按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) / 实施计划 RQ18 |
 | P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve | R5，见[设备接入设计](codex-native-cli-workbench-device-access.md)与[实施顺序](v2-implementation-plan.md#device-access-slices) |
 | P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 | R6-A/C/D/G |
 | P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容 | R6-B/D/E/G；E 实现已完成本片验证，见本片验证报告 |

@@ -1,11 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { HistoryRecord } from './HistoryRecord';
 import { Icon } from './Icons';
+import { useLibraryState } from './libraryState';
 import { coverageText, dateLabel, failure, libraryRead, sourceNames, type HistoryRoute, type LibraryEntry, type LibraryPage, type LibraryRecord } from './library';
 interface Block { cursor: string | null; height: number }
 interface SavedPosition { entry: string; revision: string; cursor: string | null; offset: number }
 export function LibraryReader({ route, onBack, onEntry, sources, onResume }: { onResume?: (entry: LibraryEntry) => void; route: HistoryRoute; onBack: () => void; onEntry: (id: string) => void; sources: { id: string; identity?: string }[] }) {
-  const saved = useRef<SavedPosition | undefined>(history.state?.libraryReading?.entry === route.entry ? history.state.libraryReading : undefined);
+  const state = useLibraryState();
+  const saved = useRef<SavedPosition | undefined>(state.read().libraryReading?.entry === route.entry ? state.read().libraryReading : undefined);
   const [blocks, setBlocks] = useState<Block[]>([{ cursor: saved.current?.cursor || null, height: 700 }]);
   const blocksRef = useRef(blocks); blocksRef.current = blocks;
   const cache = useRef(new Map<number, LibraryPage<LibraryRecord>>());
@@ -29,7 +31,7 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume }: { o
     const top = scroll.current?.scrollTop || 0;
     let i = 0, height = 0;
     while (i + 1 < blocksRef.current.length && height + blocksRef.current[i].height < top) height += blocksRef.current[i++].height;
-    history.replaceState({ ...history.state, libraryReading: { entry: route.entry, revision: pinned.current, cursor: blocksRef.current[i].cursor, offset: Math.max(0, top - height) } }, '');
+    state.replace({ libraryReading: { entry: route.entry, revision: pinned.current, cursor: blocksRef.current[i].cursor, offset: Math.max(0, top - height) } });
     return i;
   };
   const load = async (index: number) => {
@@ -81,7 +83,7 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume }: { o
     inflight.current?.abort(); inflight.current = null; cache.current.clear(); ignoreMatch.current = true; pinned.current = ''; saved.current = undefined;
     setEntry(undefined); setBlocks([{ cursor: null, height: 700 }]); setActive(0); setError(''); setRetry(v => v + 1);
     if (scroll.current) scroll.current.scrollTop = 0;
-    history.replaceState({ ...history.state, libraryReading: undefined }, '');
+    state.replace({ libraryReading: undefined });
   };
   const closeDetail = () => { setDetail(null); returnFocus.current?.focus(); };
   return <section className="wb-library-reader" aria-label="历史会话阅读">

@@ -2,6 +2,7 @@ import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import { TerminalWriteCoordinator } from '../terminal/terminalWriteCoordinator';
 import { runApi } from './runApi';
+import { streamURL, scopedStorageKey, workbenchContext, workbenchFetch } from './context';
 
 export interface Control {
   controllerConnection: string | null; generation: number; reconnectReserved: boolean;
@@ -48,8 +49,8 @@ export class TerminalClient {
   constructor(private readonly terminal: Terminal, private readonly fit: FitAddon, private readonly epoch: string,
     private readonly changed: (view: TerminalView) => void) {
     this.writer = new TerminalWriteCoordinator(terminal);
-    this.storageKey = `workbench-reconnect:${epoch}`;
-    this.uncertaintyKey = `workbench-pending-input:${epoch}`;
+    this.storageKey = scopedStorageKey(`workbench-reconnect:${epoch}`);
+    this.uncertaintyKey = scopedStorageKey(`workbench-pending-input:${epoch}`);
     // A newly opened/duplicated tab must not silently take authority from the
     // source tab merely because its sessionStorage was copied by the browser.
     const navigation = performance.getEntriesByType?.('navigation')?.[0] as PerformanceNavigationTiming | undefined;
@@ -139,8 +140,8 @@ export class TerminalClient {
     if (owned) this.resize(); else this.autoClaim();
   }
   private open() {
-    if (this.disposed) return;
-    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${runApi(`/terminal?epoch=${encodeURIComponent(this.epoch)}`)}`);
+    if (this.disposed || !workbenchContext().valid) return;
+    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${streamURL(runApi(`/terminal?epoch=${encodeURIComponent(this.epoch)}`))}`);
     this.socket = socket;
     this.request = 0; this.inputSeq = 0; this.generation = undefined; this.lastResize = '';
     this.controlRequest = undefined; this.autoClaimGeneration = undefined;
@@ -156,7 +157,10 @@ export class TerminalClient {
       this.generation = undefined;
       this.update({ connected: false, ready: false, owned: false, inputUncertain: uncertain });
       this.rememberInputState();
-      this.timer = setTimeout(() => this.open(), 750);
+      // Native WebSocket hides handshake status. Probe the pinned grant before reconnecting.
+      if (workbenchContext().gateway) {
+        void workbenchFetch('/workbench/v1/application').then(() => { if (!this.disposed) this.timer = setTimeout(() => this.open(), 750); }).catch(() => { if (!this.disposed && workbenchContext().valid) this.timer = setTimeout(() => this.open(), 750); });
+      } else this.timer = setTimeout(() => this.open(), 750);
     };
     socket.onerror = () => { /* onclose performs one bounded reconnect. */ };
   }

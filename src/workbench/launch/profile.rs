@@ -20,6 +20,28 @@ pub(super) struct Profile {
     home: PathBuf,
 }
 
+fn validate_command_auth(overlay: &toml::Table, base: Option<&toml::Table>) -> Result<()> {
+    let field = |key: &str| {
+        overlay
+            .get(key)
+            .or_else(|| base.and_then(|table| table.get(key)))
+    };
+    ensure!(
+        field("command")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|command| !command.trim().is_empty()),
+        LaunchFailure::Auth
+    );
+    ensure!(
+        field("args").is_none_or(|args| {
+            args.as_array()
+                .is_some_and(|args| args.iter().all(|argument| argument.as_str().is_some()))
+        }),
+        LaunchFailure::Auth
+    );
+    Ok(())
+}
+
 pub(super) fn identifier(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
@@ -102,16 +124,32 @@ impl Profile {
             field("wire_api").and_then(toml::Value::as_str) == Some("responses"),
             "capture profile requires native Responses wire_api"
         );
-        ensure!(
-            field("requires_openai_auth")
-                .and_then(toml::Value::as_bool)
-                .is_some(),
-            "native requires_openai_auth must be an explicit boolean"
-        );
+        let requires_openai_auth = field("requires_openai_auth")
+            .and_then(toml::Value::as_bool)
+            .ok_or_else(|| {
+                anyhow::anyhow!("native requires_openai_auth must be an explicit boolean")
+            })?;
+        let base_auth = base_provider.get("auth");
+        let profile_auth = profile_provider.get("auth");
+        let command_auth = if let Some(value) = profile_auth {
+            let overlay = value.as_table().ok_or(LaunchFailure::Auth)?;
+            validate_command_auth(overlay, base_auth.and_then(toml::Value::as_table))?;
+            true
+        } else if let Some(value) = base_auth {
+            validate_command_auth(value.as_table().ok_or(LaunchFailure::Auth)?, None)?;
+            true
+        } else {
+            false
+        };
+        if command_auth {
+            // The CLI owns command execution, caching and retry. True would
+            // additionally select the unrelated native OpenAI account manager.
+            ensure!(!requires_openai_auth, LaunchFailure::Auth);
+        }
         // This flag permits native API-key authentication as well as ChatGPT.
         // The explicit provider bearer below retains native precedence in both
         // cases; source inspection still excludes cloud login and managed auth.
-        for key in ["env_key", "env_http_headers", "auth", "aws"] {
+        for key in ["env_key", "env_http_headers", "aws"] {
             ensure!(field(key).is_none(), LaunchFailure::Auth);
         }
         ensure!(
@@ -123,11 +161,16 @@ impl Profile {
                 .and_then(toml::Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("explicit native upstream is required"))?,
         )?;
-        let secret = field("experimental_bearer_token")
-            .and_then(toml::Value::as_str)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("validated custom bearer authentication is required"))?;
-        let mut secrets = vec![secret.to_owned()];
+        let static_bearer = field("experimental_bearer_token")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or(LaunchFailure::Auth)
+            })
+            .transpose()?;
+        ensure!(command_auth ^ static_bearer.is_some(), LaunchFailure::Auth);
+        let mut secrets: Vec<String> = static_bearer.into_iter().map(str::to_owned).collect();
         // Retaining extra lower-precedence values for redaction cannot change
         // authentication; the CLI alone chooses what to send upstream.
         for table in [&base_provider, &profile_provider] {
@@ -135,7 +178,7 @@ impl Profile {
                 .get("experimental_bearer_token")
                 .and_then(toml::Value::as_str)
                 && !value.is_empty()
-                && value != secret
+                && !secrets.iter().any(|secret| secret == value)
             {
                 secrets.push(value.to_owned());
             }
@@ -159,6 +202,10 @@ impl Profile {
         if let Some(store) = top("cli_auth_credentials_store") {
             auth_config.insert("cli_auth_credentials_store".into(), store.clone());
         }
+        // Native login state does not supply the command-backed model token,
+        // but it can independently enable a managed configuration bundle that
+        // changes omitted provider fields. Preserve the effective-route gate
+        // and startup snapshot without ever acquiring the command token.
         let (sources_checked, auth) =
             config_sources::inspect_for_launch(home, &toml::Value::Table(auth_config))
                 .map_err(|e| LaunchFailure::Auth.wrap(e))?;
@@ -224,6 +271,19 @@ experimental_bearer_token="synthetic-private-profile"
 "#
         )
     }
+    fn command_config(url: &str) -> String {
+        format!(
+            r#"model="gpt-6-astra"
+model_provider="custom"
+cli_auth_credentials_store="file"
+[model_providers.custom]
+base_url="{url}"
+wire_api="responses"
+requires_openai_auth=false
+auth={{command="/synthetic/not-executed",args=["private-command-argument"]}}
+"#
+        )
+    }
     #[test]
     fn explicit_bearer_accepts_native_api_key_auth_without_changing_credentials() {
         let directory = tempfile::tempdir().unwrap();
@@ -259,6 +319,113 @@ experimental_bearer_token="synthetic-private-profile"
         assert!(profile.unchanged().is_err());
         assert!(Profile::load(&home, &cwd, None).is_err());
     }
+    #[test]
+    fn command_auth_is_left_to_cli_while_native_login_state_only_guards_route_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        let config = command_config("http://127.0.0.1:1/v1");
+        std::fs::write(home.join("config.toml"), &config).unwrap();
+
+        let profile = Profile::load(&home, &cwd, None).unwrap();
+        assert_eq!(profile.upstream.base_path(), "/v1");
+        profile.unchanged().unwrap();
+
+        let native_key = "synthetic-native-api-key";
+        std::fs::write(
+            home.join("auth.json"),
+            format!(r#"{{"auth_mode":"apikey","OPENAI_API_KEY":"{native_key}"}}"#),
+        )
+        .unwrap();
+        assert!(profile.unchanged().is_err());
+        let profile = Profile::load(&home, &cwd, None).unwrap();
+        assert!(
+            !profile
+                .policy
+                .scrub(native_key)
+                .as_str()
+                .contains(native_key)
+        );
+        profile.unchanged().unwrap();
+
+        std::fs::write(
+            home.join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"unused-private-token"}}"#,
+        )
+        .unwrap();
+        assert!(profile.unchanged().is_err());
+        assert!(Profile::load(&home, &cwd, None).is_err());
+
+        std::fs::write(
+            home.join("config.toml"),
+            config.replace("/v1", "/changed/v1"),
+        )
+        .unwrap();
+        assert!(profile.unchanged().is_err());
+    }
+
+    #[test]
+    fn command_auth_rejects_ambiguous_credentials_without_exposing_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let base = command_config("http://127.0.0.1:1/v1");
+        for config in [
+            base.replace("requires_openai_auth=false", "requires_openai_auth=true"),
+            format!("{base}experimental_bearer_token=\"private-static-token\"\n"),
+            format!("{base}experimental_bearer_token=\"\"\n"),
+            format!("{base}experimental_bearer_token=1\n"),
+            format!("{base}env_key=\"PRIVATE_ENV\"\n"),
+            format!("{base}env_http_headers={{x=\"PRIVATE_HEADER\"}}\n"),
+            format!("{base}aws={{profile=\"PRIVATE_AWS\"}}\n"),
+            base.replace(
+                "auth={command=\"/synthetic/not-executed\",args=[\"private-command-argument\"]}",
+                "auth={args=[\"private-command-argument\"]}",
+            ),
+            base.replace(
+                "args=[\"private-command-argument\"]",
+                "args=\"private-command-argument\"",
+            ),
+            base.replace("/synthetic/not-executed", "   "),
+            base.replace(
+                "cli_auth_credentials_store=\"file\"",
+                "cli_auth_credentials_store=\"keyring\"",
+            ),
+        ] {
+            std::fs::write(directory.path().join("config.toml"), config).unwrap();
+            let error = Profile::load(directory.path(), &cwd, None)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(!error.contains("private") && !error.contains("synthetic/not-executed"));
+        }
+    }
+
+    #[test]
+    fn named_profile_recursively_overlays_command_auth_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            command_config("http://127.0.0.1:1/v1"),
+        )
+        .unwrap();
+        for overlay in [
+            "[model_providers.custom.auth]\nargs=[\"named-private-argument\"]\n",
+            "[model_providers.custom.auth]\nrefresh_interval_ms=0\n",
+        ] {
+            std::fs::write(home.join("named.config.toml"), overlay).unwrap();
+            let profile = Profile::load(&home, &cwd, Some("named")).unwrap();
+            assert_eq!(profile.upstream.base_path(), "/v1");
+            profile.unchanged().unwrap();
+        }
+    }
+
     #[test]
     fn base_and_named_route_are_read_only_and_do_not_select_project_credentials() {
         let dir = tempfile::tempdir().unwrap();

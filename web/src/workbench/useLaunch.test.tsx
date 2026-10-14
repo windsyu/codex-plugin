@@ -154,7 +154,7 @@ it('restores only the saved operation after remount and offers a link without na
 
   expect(fetch.mock.calls.every(([url, init]) => url === `/workbench/v1/launch-operations/${operationId}` && init?.method === 'GET')).toBe(true);
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-new');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-new/chat');
   expect(sessionStorage.getItem('wb-launch:instance-1')).toBe(operationId);
 });
 
@@ -326,7 +326,7 @@ it.each([true, false])('opens a reserved tab or offers a link when popup blocked
   await flush();
   expect(open).toHaveBeenCalledWith('about:blank', '_blank');
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-b');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-b/chat');
   expect(replace).toHaveBeenCalledTimes(blocked ? 0 : 1);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith('/runs'))).toHaveLength(1);
   expect(root.querySelector('.wb-launch-start')).toBeNull();
@@ -350,7 +350,7 @@ it('uses the reserved tab even when other runs end before the launch result', as
   await validatePath();
   await act(async () => button('.wb-launch-start').click());
   await flush();
-  expect(replace).toHaveBeenCalledWith('/?run=run-b');
+  expect(replace).toHaveBeenCalledWith('/runs/run-b/chat');
   expect(enter).not.toHaveBeenCalled();
 });
 
@@ -362,9 +362,9 @@ it.each([true, false])('opens an existing run in a new tab without spawning, wit
   await act(async () => render(<Harness enter={enter} />, root));
   await validatePath();
   await act(async () => { Array.from(root.querySelectorAll('button')).find(item => item.textContent === '进入工作台')!.click(); });
-  expect(open).toHaveBeenCalledWith('/?run=run-b', '_blank', 'noopener');
+  expect(open).toHaveBeenCalledWith('/runs/run-b/chat', '_blank', 'noopener');
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-b');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-b/chat');
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(fetch.mock.calls[0][0]).toBe('/workbench/v1/launch-targets');
   expect(root.querySelector('.wb-launch-start')).toBeNull();

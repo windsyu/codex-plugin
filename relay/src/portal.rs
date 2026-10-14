@@ -15,12 +15,24 @@ use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(crate) static APPROVAL_GATE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Arc<crate::auth::LoginGate>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 pub(crate) struct Pending {
     device_hash: String,
     user_code: String,
     name: String,
     expires: i64,
     bound: Option<Bound>,
+    resume: Option<(Uuid, String)>,
+}
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ForgetGate {
+    pub reached: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
 }
 pub(crate) async fn index(
     State(s): State<App>,
@@ -42,6 +54,12 @@ pub(crate) async fn script() -> impl IntoResponse {
     (
         [("content-type", "text/javascript; charset=utf-8")],
         include_str!("../static/portal.js"),
+    )
+}
+pub(crate) async fn style() -> impl IntoResponse {
+    (
+        [("content-type", "text/css; charset=utf-8")],
+        include_str!("../static/portal.css"),
     )
 }
 pub(crate) async fn exchange_page() -> impl IntoResponse {
@@ -66,6 +84,22 @@ pub(crate) async fn binding_start(
     {
         return Err(bad());
     }
+    let resume = match (input.resume_gateway_id, input.resume_credential) {
+        (None, None) => None,
+        (Some(id), Some(credential)) if !id.is_nil() && credential.len() <= 128 => {
+            let hash = digest(&credential);
+            let valid: bool = s.0.store.0.lock().unwrap().query_row(
+                "SELECT EXISTS(SELECT 1 FROM gateways WHERE id=?1 AND credential=?2)",
+                params![id.to_string(), hash],
+                |r| r.get(0),
+            )?;
+            if !valid {
+                return Err(denied());
+            }
+            Some((id, hash))
+        }
+        _ => return Err(bad()),
+    };
     let id = Uuid::new_v4();
     let device = secret();
     let user = Uuid::new_v4().simple().to_string()[..10].to_ascii_uppercase();
@@ -82,13 +116,14 @@ pub(crate) async fn binding_start(
             name: input.name,
             expires: now() + 600,
             bound: None,
+            resume,
         },
     );
     Ok(Json(BindingPending {
         binding_id: id,
         device_code: device,
         user_code: user.clone(),
-        verification_url: format!("{}/#bind={user}", s.0.config.portal_origin),
+        verification_url: format!("{}/authorize#bind={user}", s.0.config.portal_origin),
         expires_in_seconds: 600,
         interval: 3,
     }))
@@ -123,42 +158,77 @@ pub(crate) async fn binding_preview(
     h: HeaderMap,
     Json(input): Json<Approval>,
 ) -> Result<Json<serde_json::Value>> {
-    let account = s.portal_session(&h)?;
+    let account = s.authorized_portal_session(&h)?;
     s.rate(format!("approve:{}", account.account), 20)?;
     let b = s.0.bindings.lock().unwrap();
     let p = b
         .values()
         .find(|p| p.user_code == input.user_code && p.expires > now() && p.bound.is_none())
         .ok_or_else(denied)?;
-    Ok(Json(serde_json::json!({"name":p.name})))
+    if let Some((id, hash)) = &p.resume {
+        let owned: bool = s.0.store.0.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateways WHERE id=?1 AND credential=?2 AND account=?3)",
+            params![id.to_string(), hash, account.account.to_string()],
+            |r| r.get(0),
+        )?;
+        if !owned {
+            return Err(denied());
+        }
+    }
+    Ok(Json(
+        serde_json::json!({"name":p.name,"reauthorization":p.resume.is_some()}),
+    ))
 }
 pub(crate) async fn binding_approve(
     State(s): State<App>,
     h: HeaderMap,
     Json(input): Json<Approval>,
 ) -> Result<Json<serde_json::Value>> {
-    let account = s.portal_session(&h)?;
+    let account = s.authorized_portal_session(&h)?;
+    #[cfg(test)]
+    {
+        let gate = APPROVAL_GATE.lock().unwrap().get(&account.account).cloned();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
     s.rate(format!("approve:{}", account.account), 20)?;
     let mut b = s.0.bindings.lock().unwrap();
     let p = b
         .values_mut()
         .find(|p| p.user_code == input.user_code && p.expires > now() && p.bound.is_none())
         .ok_or_else(denied)?;
-    let id = s.0.config.fixed_gateway_id.unwrap_or_else(Uuid::new_v4);
+    let id = p
+        .resume
+        .as_ref()
+        .map(|(id, _)| *id)
+        .or(s.0.config.fixed_gateway_id)
+        .unwrap_or_else(Uuid::new_v4);
     let gateway_origin = s.0.config.gateway_origin(id).ok_or_else(bad)?;
     let token = secret();
     let mut c = s.0.store.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if s.0.config.fixed_gateway_id.is_some()
+    let (username,generation): (String,i64) = tx.query_row("SELECT a.username,a.auth_generation FROM accounts a JOIN sessions s ON s.account=a.id WHERE a.id=?1 AND a.disabled=0 AND a.must_change_password=0 AND s.id=?2 AND s.gateway IS NULL AND s.parent IS NULL AND s.auth_generation=a.auth_generation AND s.expires>?3",params![account.account.to_string(),account.id.to_string(),now()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(denied)?;
+    if p.resume.is_none()
+        && s.0.config.fixed_gateway_id.is_some()
         && tx.query_row("SELECT EXISTS(SELECT 1 FROM gateways)", [], |r| {
             r.get::<_, bool>(0)
         })?
     {
         return Err(Failure(StatusCode::CONFLICT));
     }
-    let n=tx.execute("INSERT INTO gateways(id,account,name,credential) SELECT ?1,id,?2,?3 FROM accounts WHERE id=?4 AND disabled=0",params![id.to_string(),p.name,digest(&token),account.account.to_string()])?;
+    let n = if let Some((_, hash)) = &p.resume {
+        tx.execute("UPDATE gateways SET name=?1,credential=?2,auth_generation=?3,workbench_api_version=0 WHERE id=?4 AND account=?5 AND credential=?6",params![p.name,digest(&token),generation,id.to_string(),account.account.to_string(),hash])?
+    } else {
+        tx.execute("INSERT INTO gateways(id,account,name,credential,auth_generation) VALUES(?1,?2,?3,?4,?5)",params![id.to_string(),account.account.to_string(),p.name,digest(&token),generation])?
+    };
     if n != 1 {
         return Err(denied());
+    }
+    if p.resume.is_some() {
+        tx.execute("DELETE FROM sessions WHERE gateway=?1", [id.to_string()])?;
+        tx.execute("DELETE FROM open_codes WHERE gateway=?1", [id.to_string()])?;
     }
     crate::store::audit(
         &tx,
@@ -167,32 +237,50 @@ pub(crate) async fn binding_approve(
         Some(&id.to_string()),
     )?;
     tx.commit()?;
+    drop(c);
     p.bound = Some(Bound {
         account_id: account.account,
         gateway_id: id,
         credential: token,
         gateway_origin,
+        username,
     });
+    s.revoke_invalid();
     Ok(Json(serde_json::json!({"gatewayId":id})))
 }
 pub(crate) async fn gateways(
     State(s): State<App>,
     h: HeaderMap,
 ) -> Result<Json<serde_json::Value>> {
-    let account = s.portal_session(&h)?;
+    let account = s.authorized_portal_session(&h)?;
     let c = s.0.store.0.lock().unwrap();
     let mut q =
-        c.prepare("SELECT id,name FROM gateways WHERE account=?1 ORDER BY name,id LIMIT 1000")?;
+        c.prepare("SELECT id,name,workbench_api_version,auth_generation FROM gateways WHERE account=?1 ORDER BY name,id LIMIT 1000")?;
     let rows = q
         .query_map([account.account.to_string()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u32>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(q);
     drop(c);
     let tunnels = s.0.tunnels.lock().unwrap();
     Ok(Json(
-        serde_json::json!({"gateways":rows.into_iter().map(|(id,name)|{let uuid=Uuid::parse_str(&id).unwrap();serde_json::json!({"gatewayId":id,"name":name,"online":tunnels.contains_key(&uuid)})}).collect::<Vec<_>>()}),
+        serde_json::json!({"gateways":rows.into_iter().map(|(id,name,api,generation)|{
+            let uuid=Uuid::parse_str(&id).unwrap();
+            // Zero is the schema-2 sentinel for a credential whose first Hello
+            // has not arrived yet, not evidence of a mismatched API contract.
+            let incompatible=api!=0 && api!=codex_relay_protocol::WORKBENCH_API_VERSION;
+            let reauth=generation!=account.auth_generation;
+            let connected=tunnels.get(&uuid).is_some_and(|c| !*c.cancel.borrow());
+            let online=connected && !reauth && !incompatible;
+            let status=if reauth {"reauthenticationRequired"}else if incompatible {"versionIncompatible"}else if online {"online"}else if api==0 {"awaitingConnection"}else{"offline"};
+            serde_json::json!({"gatewayId":id,"name":name,"online":online,"status":status,"versionIncompatible":incompatible,"reauthorizationRequired":reauth})
+        }).collect::<Vec<_>>()}),
     ))
 }
 pub(crate) async fn forget(
@@ -200,13 +288,25 @@ pub(crate) async fn forget(
     Path(id): Path<Uuid>,
     h: HeaderMap,
 ) -> Result<StatusCode> {
-    let account = s.portal_session(&h)?;
+    let account = s.authorized_portal_session(&h)?;
+    #[cfg(test)]
+    {
+        let gate = s.0.forget_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.reached.notify_one();
+            gate.resume.notified().await;
+        }
+    }
     {
         // Match control admission's lock order so a rebind cannot install a new
         // connection between deleting the old identity and removing its tunnel.
         let mut tunnels = s.0.tunnels.lock().unwrap();
         let mut c = s.0.store.0.lock().unwrap();
         let tx = c.transaction()?;
+        let authorized: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions p JOIN accounts a ON a.id=p.account WHERE p.id=?1 AND p.account=?2 AND p.gateway IS NULL AND p.parent IS NULL AND p.expires>?3 AND p.auth_generation=a.auth_generation AND p.auth_generation=?4 AND a.disabled=0 AND a.must_change_password=0)",params![account.id.to_string(),account.account.to_string(),now(),account.auth_generation],|r|r.get(0))?;
+        if !authorized {
+            return Err(denied());
+        }
         let n = tx.execute(
             "DELETE FROM gateways WHERE id=?1 AND account=?2",
             params![id.to_string(), account.account.to_string()],
@@ -253,7 +353,7 @@ pub(crate) async fn revoke_credential(
         let mut c = s.0.store.0.lock().unwrap();
         let tx = c.transaction()?;
         let changed = tx.execute(
-            "DELETE FROM gateways WHERE id=?1 AND account=?2 AND credential=?3",
+            "DELETE FROM gateways WHERE id=?1 AND account=?2 AND credential=?3 AND EXISTS(SELECT 1 FROM accounts a WHERE a.id=gateways.account AND a.auth_generation=gateways.auth_generation AND a.disabled=0 AND a.must_change_password=0)",
             params![gateway.to_string(), account.to_string(), digest(credential)],
         )?;
         if changed != 1 {
@@ -277,15 +377,55 @@ pub(crate) async fn open(
     State(s): State<App>,
     Path(id): Path<Uuid>,
     h: HeaderMap,
+    req: axum::extract::Request,
 ) -> Result<Json<serde_json::Value>> {
-    let account = s.portal_session(&h)?;
+    let account = s.authorized_portal_session(&h)?;
+    if s.0.config.single_origin {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct OpenInput {
+            ui_api_version: u32,
+        }
+        if h.get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            != Some("application/json")
+        {
+            return Err(Failure(StatusCode::UNSUPPORTED_MEDIA_TYPE));
+        }
+        let body = axum::body::to_bytes(req.into_body(), 8192)
+            .await
+            .map_err(|_| bad())?;
+        let input: OpenInput = serde_json::from_slice(&body).map_err(|_| bad())?;
+        if input.ui_api_version != codex_relay_protocol::WORKBENCH_API_VERSION {
+            return Err(Failure(StatusCode::CONFLICT));
+        }
+        let grant = Uuid::new_v4();
+        let mut c = s.0.store.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let compatible: Option<(u32,i64)> = tx.query_row("SELECT workbench_api_version,auth_generation FROM gateways WHERE id=?1 AND account=?2",params![id.to_string(),account.account.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let Some((api, generation)) = compatible else {
+            return Err(Failure(StatusCode::NOT_FOUND));
+        };
+        if api != input.ui_api_version || generation != account.auth_generation {
+            return Err(Failure(StatusCode::CONFLICT));
+        }
+        let n = tx.execute("INSERT INTO sessions(id,hash,account,gateway,parent,expires,auth_generation,ui_api_version) SELECT ?1,?2,p.account,?3,p.id,MIN(p.expires,?4),a.auth_generation,?5 FROM sessions p JOIN accounts a ON a.id=p.account WHERE p.id=?6 AND p.account=?7 AND p.gateway IS NULL AND p.parent IS NULL AND p.expires>?8 AND p.auth_generation=a.auth_generation AND a.disabled=0 AND a.must_change_password=0",params![grant.to_string(),digest(&secret()),id.to_string(),now()+43200,input.ui_api_version,account.id.to_string(),account.account.to_string(),now()])?;
+        if n != 1 {
+            return Err(denied());
+        }
+        tx.commit()?;
+        return Ok(Json(
+            serde_json::json!({"url":format!("{}/g/{id}/#grant={grant}&session={}&api={}",s.0.config.portal_origin,account.id,input.ui_api_version)}),
+        ));
+    }
     let gateway_origin =
         s.0.config
             .gateway_origin(id)
             .ok_or(Failure(StatusCode::NOT_FOUND))?;
     let code = secret();
     let c = s.0.store.0.lock().unwrap();
-    let n=c.execute("INSERT INTO open_codes(hash,parent,gateway,expires) SELECT ?1,?2,id,?3 FROM gateways WHERE id=?4 AND account=?5",params![digest(&code),account.id.to_string(),now()+60,id.to_string(),account.account.to_string()])?;
+    let n=c.execute("INSERT INTO open_codes(hash,parent,gateway,expires) SELECT ?1,p.id,g.id,?3 FROM gateways g JOIN accounts a ON a.id=g.account JOIN sessions p ON p.account=a.id WHERE g.id=?4 AND g.account=?5 AND p.id=?2 AND p.gateway IS NULL AND p.parent IS NULL AND p.expires>?6 AND a.disabled=0 AND a.must_change_password=0 AND p.auth_generation=a.auth_generation AND g.auth_generation=a.auth_generation AND g.workbench_api_version=?7",params![digest(&code),account.id.to_string(),now()+60,id.to_string(),account.account.to_string(),now(),codex_relay_protocol::WORKBENCH_API_VERSION])?;
     if n != 1 {
         return Err(Failure(StatusCode::NOT_FOUND));
     }
@@ -314,20 +454,22 @@ pub(crate) async fn exchange(
     let token = secret();
     let mut c = s.0.store.0.lock().unwrap();
     let tx = c.transaction()?;
-    let (parent,account)=tx.query_row("SELECT p.id,p.account FROM open_codes o JOIN sessions p ON p.id=o.parent JOIN accounts a ON a.id=p.account JOIN gateways g ON g.id=o.gateway WHERE o.hash=?1 AND o.gateway=?2 AND o.expires>?3 AND p.expires>?3 AND a.disabled=0 AND g.account=p.account",params![digest(&input.code),gateway.to_string(),now()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?.ok_or_else(denied)?;
+    let (parent,account,generation)=tx.query_row("SELECT p.id,p.account,a.auth_generation FROM open_codes o JOIN sessions p ON p.id=o.parent JOIN accounts a ON a.id=p.account JOIN gateways g ON g.id=o.gateway WHERE o.hash=?1 AND o.gateway=?2 AND o.expires>?3 AND p.expires>?3 AND p.gateway IS NULL AND p.parent IS NULL AND a.disabled=0 AND a.must_change_password=0 AND g.account=p.account AND p.auth_generation=a.auth_generation AND g.auth_generation=a.auth_generation AND g.workbench_api_version=?4",params![digest(&input.code),gateway.to_string(),now(),codex_relay_protocol::WORKBENCH_API_VERSION],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).optional()?.ok_or_else(denied)?;
     tx.execute(
         "DELETE FROM open_codes WHERE hash=?1",
         [digest(&input.code)],
     )?;
     tx.execute(
-        "INSERT INTO sessions(id,hash,account,gateway,parent,expires) VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO sessions(id,hash,account,gateway,parent,expires,auth_generation,ui_api_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             Uuid::new_v4().to_string(),
             digest(&token),
             account,
             gateway.to_string(),
             parent,
-            now() + 43200
+            now() + 43200,
+            generation,
+            codex_relay_protocol::WORKBENCH_API_VERSION
         ],
     )?;
     tx.commit()?;

@@ -3,15 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { buildComponent } from './lib/components.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const help = `Usage: node scripts/dev.mjs <command>
 
   doctor                              Inspect tools without changing files
   bootstrap [--offline]               Install locked web dependencies (npm ci)
-  build [--release] [--offline]        Build web, then workbench and relay binaries
-  package [--offline]                  Build and package tested macOS arm64 release
-  check [--ci] [--offline]             Docs, binary policy, tool/web/Rust checks
+  build [--component NAME] [--release] [--offline]
+                                      Build web, then selected binaries (default all)
+  package [--component workbench] [--offline]
+                                      Package only tested macOS arm64 workbench
+  check [--component NAME] [--ci] [--offline]
+                                      Shared checks and selected Rust checks (default all)
   test-tools                          Test maintenance tools with synthetic data
   docs                                Check local Markdown links and structure
   e2e                                 Run browser tests using system Chrome
@@ -24,6 +28,8 @@ const help = `Usage: node scripts/dev.mjs <command>
 
 No command pushes, rewrites history, or downloads a browser. --offline is optional;
 use bootstrap on a connected machine first. Full native/large-data tests are opt-in.
+Components: workbench (codex-view/codex-observerd), relay (codex-relayd), all.
+Relay deployment uses build --component relay --release; package is workbench-only.
 `;
 
 // Reject misspelled/extra arguments before creating a task directory or deleting anything.
@@ -40,21 +46,26 @@ export function parseArgs(args) {
     const flag = rest[i];
     if (flags.has(flag)) throw new Error(`Repeated option: ${flag}`);
     flags.add(flag);
-    if (flag === '--profile' || flag === '--tree') {
+    if (flag === '--profile' || flag === '--tree' || flag === '--component') {
       const value = rest[++i];
       if (!value || value.startsWith('-')) throw new Error(`${flag} needs a value`);
-      options[flag === '--profile' ? 'profile' : 'ref'] = value;
+      options[flag === '--profile' ? 'profile' : flag === '--component' ? 'component' : 'ref'] = value;
     } else if (flag === '--all-branches') options.history = true;
     else if (['--apply', '--offline', '--release', '--ci'].includes(flag)) options[flag.slice(2)] = true;
     else throw new Error(`Unknown option: ${flag}`);
   }
   const allowed = {
-    doctor: [], bootstrap: ['--offline'], build: ['--offline', '--release'], package: ['--offline'],
-    check: ['--offline', '--ci'], 'test-tools': [], docs: [], e2e: [],
+    doctor: [], bootstrap: ['--offline'], build: ['--offline', '--release', '--component'], package: ['--offline', '--component'],
+    check: ['--offline', '--ci', '--component'], 'test-tools': [], docs: [], e2e: [],
     binaries: ['--tree', '--all-branches'], artifacts: ['--apply'], cache: ['--profile', '--apply'],
   }[command];
   if (!allowed) throw new Error(`Unknown command: ${command}`);
   for (const flag of flags) if (!allowed.includes(flag)) throw new Error(`${command} does not accept ${flag}`);
+  if (['build', 'check', 'package'].includes(command)) {
+    options.component ??= command === 'package' ? 'workbench' : 'all';
+    if (!['workbench', 'relay', 'all'].includes(options.component)) throw new Error('Use --component workbench|relay|all');
+    if (command === 'package' && options.component !== 'workbench') throw new Error('package supports only workbench; use build --component relay --release and the relay deployment guide');
+  }
   if (command === 'binaries' && options.ref && options.history) throw new Error('Choose --tree or --all-branches');
   if (command === 'artifacts' && (!['list', 'prune'].includes(options.action) || (options.action === 'list' && options.apply))) throw new Error('Use artifacts list or artifacts prune [--apply]');
   if (command === 'cache') {
@@ -97,7 +108,7 @@ async function managed(options, action) {
       for (const entry of report.artifacts || []) if (entry.error) console.warn(`Artifact ${entry.id}: ${entry.error}`);
     } catch (error) { console.warn(`Artifact cleanup skipped: ${error.message}`); }
   }
-  const run = artifacts.createRun(root, { label: options.command, kind: options.command === 'package' ? 'build' : 'task' });
+  const run = artifacts.createRun(root, { label: options.component ? `${options.command}-${options.component}` : options.command, kind: options.command === 'package' ? 'build' : 'task' });
   console.log(`Task artifacts: ${run.path}`);
   let success = false, interrupted = false, child, forceStop, step = 0;
   function stop(signal) {
@@ -183,14 +194,10 @@ export async function main(args = process.argv.slice(2)) {
     }
     const releaseTarget = options.command === 'package'
       ? (await import('./lib/release.mjs')).releaseTarget(root) : undefined;
-    await execute('npm', ['run', 'build', '--prefix', 'web']);
-    if (options.command === 'check') {
-      await execute('cargo', ['fmt', '--all', '--check']);
-      await execute('cargo', ['clippy', ...locked, '--all-targets', '--', '-D', 'warnings']);
-      await execute('cargo', ['test', ...locked, '--all-targets', '--', '--test-threads=4']);
-      await execute('cargo', ['build', ...locked, '--bins']);
-      await execute('cargo', ['build', ...locked, '--release', '--bins']);
-    } else await execute('cargo', ['build', ...locked, '--bins', ...(options.release || options.command === 'package' ? ['--release'] : []), ...(releaseTarget ? ['--target', releaseTarget] : [])]);
+    await buildComponent(execute, {
+      component: options.component, locked, check: options.command === 'check',
+      release: options.release || options.command === 'package', target: releaseTarget,
+    });
     if (options.command === 'package') {
       const { packageRelease } = await import('./lib/release.mjs');
       const release = packageRelease(root, run.path, options);

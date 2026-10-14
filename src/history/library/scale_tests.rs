@@ -25,8 +25,37 @@ pub(super) fn disk(path: &Path) -> u64 {
         .into_iter()
         .filter_map(|v| v.ok())
         .filter(|v| v.file_type().is_file())
-        .map(|v| v.metadata().unwrap().len())
+        .filter_map(diagnostic_file_bytes)
         .sum()
+}
+fn diagnostic_file_bytes(entry: walkdir::DirEntry) -> Option<u64> {
+    match entry.metadata() {
+        Ok(metadata) => Some(metadata.len()),
+        // SQLite may remove its temporary journal after directory enumeration.
+        // This diagnostic is not an atomic snapshot; retain every other error.
+        Err(error)
+            if error
+                .io_error()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            None
+        }
+        Err(error) => panic!("diagnostic file metadata failed: {error}"),
+    }
+}
+#[test]
+fn diagnostic_disk_tolerates_a_file_removed_after_enumeration() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("synthetic.sqlite-journal");
+    fs::write(&file, "synthetic diagnostic bytes").unwrap();
+    let entry = walkdir::WalkDir::new(temp.path())
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .find(|entry| entry.file_type().is_file())
+        .unwrap();
+    assert_eq!(diagnostic_file_bytes(entry.clone()), Some(26));
+    fs::remove_file(file).unwrap();
+    assert_eq!(diagnostic_file_bytes(entry), None);
 }
 fn corpus(home: &Path, projects: &Path, sessions: usize, large_body: bool) -> u64 {
     fs::create_dir_all(home.join("sessions")).unwrap();

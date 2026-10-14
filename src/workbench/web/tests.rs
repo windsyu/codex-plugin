@@ -15,6 +15,7 @@ mod history;
 mod history_browser;
 #[cfg(unix)]
 mod management;
+mod routes;
 #[cfg(unix)]
 mod settings;
 #[cfg(unix)]

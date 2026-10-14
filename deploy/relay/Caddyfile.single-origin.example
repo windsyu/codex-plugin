@@ -1,0 +1,22 @@
+# Use only the already selected HTTPS address; e.g. RELAY_PUBLIC_ADDRESS=<IP>:9443.
+# RELAY_CERT_NAME is the certificate basename and literal IP/domain without a port.
+# Merge into an existing proxy carefully; this standalone template does not manage renewal.
+{
+    admin 127.0.0.1:2020
+    auto_https off
+    persist_config off
+    default_sni {$RELAY_CERT_NAME}
+    servers {
+        protocols h1 h2
+    }
+}
+
+https://{$RELAY_PUBLIC_ADDRESS} {
+    tls /certs/{$RELAY_CERT_NAME}.crt /certs/{$RELAY_CERT_NAME}.key
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {hostport}
+        header_up -Forwarded
+        header_up -X-Forwarded-*
+        header_up X-Relay-Client-IP {remote_host}
+    }
+}

@@ -1,3 +1,4 @@
+import { workbenchFetch } from './context';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
 import { runApi } from './runApi';
@@ -14,7 +15,7 @@ const messages: Record<string, string> = {
   access_changed: '接入状态已变化，请重试。', stale_run: '工作台已重新启动，请刷新页面。',
   local_management_required: '请在电脑本机页面管理接入。', no_device_address: '暂未发现可用地址，请检查网络后重试。',
   listen_failed: '端口无法监听，请检查是否被占用，或在设置中改为自动选择。',
-  run_ended: '此工作台已结束。请先从首页启动新的对话，再开启手机接入。',
+  run_ended: '此工作台已结束。请先从首页启动新的对话，再开启本地局域网接入。',
   config_unavailable: '配置暂不可用，请在设置中检查并重新加载。', device_limit: '已达到 8 个浏览器，请先断开不再使用的连接。',
   revocation_pending: '访问资格已撤销，正在等待终端完成清理。请刷新状态。',
 };
@@ -45,12 +46,12 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
     const abort = new AbortController(); controller.current = abort;
     const id = ++request.current;
     try {
-      const value = await payload(await fetch(runApi('/access'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
+      const value = await payload(await workbenchFetch(runApi('/access'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
       if (!alive.current || id !== request.current) return;
       if (typeof value.pairingId !== 'string') throw new Error(messages.version_mismatch);
       infoRef.current = value; setInfo(value);
       if (value.state === 'ready' && value.addresses.length && pairingRef.current?.pairingId !== value.pairingId) {
-        const code = await payload(await fetch(runApi('/access/pairing'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
+        const code = await payload(await workbenchFetch(runApi('/access/pairing'), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal }));
         if (alive.current && id === request.current) { pairingRef.current = code; setPairing(code); }
       }
       if (alive.current && id === request.current) setLoadError('');
@@ -64,7 +65,7 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
     controller.current?.abort(); request.current++;
     try {
       const path = name === 'revoke' ? `devices/${encodeURIComponent(id!)}?runEpoch=${encodeURIComponent(epoch)}` : name;
-      await payload(await fetch(runApi(`/access/${path}`), {
+      await payload(await workbenchFetch(runApi(`/access/${path}`), {
         method: name === 'revoke' ? 'DELETE' : 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'If-Match': `"${current.revision}"` },
         ...(name === 'revoke' ? {} : { body: JSON.stringify({ runEpoch: epoch }) }),
@@ -100,12 +101,12 @@ export function AccessPanel({ epoch, open, onClose }: { epoch: string; open: boo
     try { if (!navigator.clipboard?.writeText) throw new Error(); await navigator.clipboard.writeText(text); setMessage('配对链接已复制'); setManual(''); }
     catch { setManual(text); setMessage('请复制下面选中的配对链接。'); }
   }
-  return <section id="wb-access-panel" className="wb-access-panel" hidden={!open} aria-label="手机接入" onKeyDown={event => {
+  return <section id="wb-access-panel" className="wb-access-panel" hidden={!open} aria-label="本地局域网接入" onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
   }}>
-    <div className="wb-panel-heading"><strong>手机接入</strong><button ref={closeButton} onClick={onClose}>收起</button></div>
+    <div className="wb-panel-heading"><strong>本地局域网接入</strong><button ref={closeButton} onClick={onClose}>收起</button></div>
     <div className="wb-access-body">
-      <p className="wb-subtle">手机打开同一个工作台，继续阅读和操作当前 CLI。</p>
+      <p className="wb-subtle">通过局域网或 Tailscale 直接访问本机工作台，继续阅读和操作当前 CLI；不经过公网中转站。</p>
       {!info && !loadError && <p role="status">正在读取接入状态…</p>}
       {loadError && <p className="wb-notice" role="alert">{loadError}</p>}
       {info && <>

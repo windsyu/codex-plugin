@@ -18,9 +18,9 @@ use axum::{Json, Router};
 use base64::Engine;
 #[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_workbench_assets::WorkbenchAssets as WebAssets;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::types::Value as SqlValue;
-use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -54,10 +54,6 @@ use middleware::{constant_time_eq, cookie_value};
 use query::{parse_json, parse_optional_json, search_expression};
 use router::settings_snapshot;
 use stream::{StreamFilters, WsSubscribe};
-
-#[derive(RustEmbed)]
-#[folder = "web/dist"]
-struct WebAssets;
 
 static ACTIVE_CONSUMERS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CONSUMERS: AtomicU64 = AtomicU64::new(0);

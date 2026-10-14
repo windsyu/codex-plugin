@@ -25,6 +25,7 @@ setTimeout(() => { process.stdout.write(JSON.stringify({stage:'failed',check:sta
     await route.fulfill({json:{revision:'pending',records:[],nextCursor:null,coverage:{state:'partial',reasons:['indexing']}}});
   });
   await page.goto(process.env.WORKBENCH_PROBE_URL);
+  await page.getByRole('link',{name:'全部历史',exact:true}).click();
   await expect(page.getByRole('heading',{name:'全部历史',exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:'正在整理历史',exact:true})).toBeVisible();
   assert.equal(emptyPendingServed,true);
@@ -123,8 +124,14 @@ setTimeout(() => { process.stdout.write(JSON.stringify({stage:'failed',check:sta
     assert.equal(await page.locator('.wb-library-reader img,.wb-library-reader script').count(),0);
     const area=page.getByRole('generic',{name:'会话正文'});
     await page.locator('.wb-library-body-scroll').focus();await page.keyboard.press('PageDown');
-    await page.getByRole('button',{name:'设置',exact:true}).click();await expect(page.getByRole('region',{name:'工作台设置'})).toBeVisible();
-    await page.getByRole('button',{name:'收起',exact:true}).press('Escape');await expect(page.getByRole('button',{name:'设置',exact:true})).toBeFocused();
+    const readingURL=page.url();
+    const settings=page.locator('.wb-page-nav a[href="/settings"]');
+    await settings.focus();await expect(settings).toBeFocused();await settings.press('Enter');
+    await expect(page.getByRole('region',{name:'工作台设置'})).toBeVisible();
+    await expect(page.getByRole('button',{name:'收起',exact:true})).toBeFocused();
+    assert.equal(new URL(page.url()).pathname,'/settings');
+    // Settings is a document page; Back restores the exact historical reader route.
+    await page.goBack();assert.equal(page.url(),readingURL);await expect(page.getByRole('region',{name:'历史会话阅读'})).toBeVisible();
     if(process.env.WORKBENCH_PROBE_SCREENSHOT && [1024,390].includes(width))await page.screenshot({path:`${process.env.WORKBENCH_PROBE_SCREENSHOT}.reading-${width}.png`});
     await page.getByRole('button',{name:'返回会话列表'}).click();
     await page.goBack();await expect(page.getByRole('region',{name:'历史会话阅读'})).toBeVisible();

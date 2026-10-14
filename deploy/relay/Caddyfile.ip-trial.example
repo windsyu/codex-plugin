@@ -1,4 +1,5 @@
-# Dedicated test listener. Mount only the existing IP certificate directory read-only.
+# Legacy two-port fixed-single-workbench listener; new deployments use single-origin template.
+# Mount only the existing IP certificate directory read-only.
 # RELAY_TRIAL_IP is a literal IP; this file never changes the existing Caddy routes.
 {
     admin 127.0.0.1:2020

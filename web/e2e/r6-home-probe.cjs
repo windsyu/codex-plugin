@@ -12,18 +12,22 @@ setTimeout(() => { process.stdout.write(JSON.stringify({ stage: 'failed', check:
   page.on('request', request => { paths.push(new URL(request.url()).pathname); });
   await page.goto(process.env.WORKBENCH_PROBE_URL);
   stage = 'home';
-  await expect(page.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
-  await expect(page.locator('.wb-home-sources')).toContainText('无法读取历史位置');
+  await expect(page.getByRole('heading', { name: '从这里，继续创作。', exact: true })).toBeVisible();
+  await expect(page.locator('.wb-overview-sources')).toContainText('无法读取历史位置');
   assert.equal(new URL(page.url()).hash, '');
   const instance = await page.evaluate(async () => (await (await fetch('/workbench/v1/application')).json()).instanceId);
   for (const width of [1440, 736, 390, 320]) {
     stage = `viewport-${width}`;
     await page.setViewportSize({ width, height: 1000 });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settingsLink = page.locator('.wb-page-nav a[href="/settings"]');
+    await settingsLink.focus(); await settingsLink.press('Enter');
+    assert.equal(new URL(page.url()).pathname, '/settings');
     const panel = page.getByRole('region', { name: '工作台设置', exact: true });
     await expect(panel).toBeVisible();
     await expect(panel.getByLabel('允许清理历史记录', { exact: true })).not.toBeChecked();
+    await expect(panel.getByRole('button', { name: '收起', exact: true })).toBeFocused();
+    await panel.getByRole('button', { name: '保存', exact: true }).scrollIntoViewIfNeeded();
     await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeInViewport();
     await expect(panel).not.toContainText('本次运行日志的位置');
     if (width === 1440 && process.env.WORKBENCH_TEST_HISTORY_SOURCE) {
@@ -37,18 +41,29 @@ setTimeout(() => { process.stdout.write(JSON.stringify({ stage: 'failed', check:
       await panel.getByRole('button', { name: '保存', exact: true }).click();
       await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
       await expect.poll(async () => await page.evaluate(async () => (await (await fetch('/workbench/v1/library/entries?q=' + encodeURIComponent('浏览器接入'))).json()).records.length)).toBe(1);
-      await expect(page.locator('.wb-home-sources')).toContainText('已索引 1 条记录');
+      await expect.poll(async () => (await page.evaluate(async () => (await (await fetch('/workbench/v1/application')).json()).sources)).some(source => source.message.includes('已索引 1 条记录'))).toBe(true);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       stage = 'registered-history';
     }
     if (process.env.WORKBENCH_PROBE_SCREENSHOT && [1440, 390].includes(width)) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.settings-${width}.png` });
     await panel.getByRole('button', { name: '收起', exact: true }).press('Escape');
     await expect(panel).toBeHidden();
-    await expect(page.getByRole('button', { name: '设置', exact: true })).toBeFocused();
+    assert.equal(new URL(page.url()).pathname, '/');
+    if (width === 1440 && process.env.WORKBENCH_TEST_HISTORY_SOURCE) await expect(page.locator('.wb-overview-sources')).toContainText('已索引 1 条记录');
+    // RQ18 replaces overlay focus restoration with keyboard-accessible page navigation.
+    await settingsLink.focus(); await expect(settingsLink).toBeFocused();
+    await settingsLink.press('Enter');
+    await expect(panel.getByRole('button', { name: '收起', exact: true })).toBeFocused();
+    const draft = panel.getByLabel('启动时自动打开浏览器', { exact: true });
+    const original = await draft.isChecked(); await draft.setChecked(!original);
+    await page.locator('.wb-page-nav a[href="/"]').click();
+    await settingsLink.click(); await expect(draft).toBeChecked({ checked: !original });
+    await draft.setChecked(original);
+    await page.locator('.wb-page-nav a[href="/"]').click();
   }
   stage = 'refresh';
   await page.reload();
-  await expect(page.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '从这里，继续创作。', exact: true })).toBeVisible();
   assert.equal(instance, await page.evaluate(async () => (await (await fetch('/workbench/v1/application')).json()).instanceId));
   await page.setViewportSize({ width: 1440, height: 1000 });
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.home.png`, fullPage: true });

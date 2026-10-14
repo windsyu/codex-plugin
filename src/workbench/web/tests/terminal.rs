@@ -124,6 +124,34 @@ async fn denied(request: axum::http::Request<()>, status: StatusCode) {
 }
 
 #[tokio::test]
+async fn standalone_canonical_terminal_preserves_upgrade_and_security_checks() {
+    let fixture = Fixture::start().await;
+    let epoch = fixture.server.state.hub.epoch();
+    let scoped = |id: Uuid, query: Uuid| {
+        let mut request = fixture.request();
+        *request.uri_mut() = format!(
+            "ws://{}/workbench/v1/runs/{id}/terminal?epoch={query}",
+            fixture.server.address()
+        )
+        .parse()
+        .unwrap();
+        request
+    };
+    let (mut socket, _) = connect_async(scoped(epoch, epoch)).await.unwrap();
+    let hello = next_type(&mut socket, "snapshot").await;
+    assert!(hello["control"]["controllerConnection"].is_null());
+    socket.close(None).await.unwrap();
+    let mut request = scoped(epoch, epoch);
+    request.headers_mut().remove(header::COOKIE);
+    denied(request, StatusCode::UNAUTHORIZED).await;
+    let mut request = scoped(epoch, epoch);
+    request.headers_mut().remove(header::ORIGIN);
+    denied(request, StatusCode::FORBIDDEN).await;
+    denied(scoped(Uuid::new_v4(), epoch), StatusCode::NOT_FOUND).await;
+    denied(scoped(epoch, Uuid::new_v4()), StatusCode::CONFLICT).await;
+}
+
+#[tokio::test]
 async fn terminal_handshake_requires_cookie_origin_host_and_current_epoch() {
     let fixture = Fixture::start().await;
     let mut request = fixture.request();
@@ -310,6 +338,11 @@ async fn stop_checks_csrf_epoch_and_is_idempotent_without_respawn() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap(),
+            json!({"accepted":true})
+        );
     }
     let (mut socket, hello) = fixture.connect().await;
     assert_eq!(hello["control"]["ended"], true);
