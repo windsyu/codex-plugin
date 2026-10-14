@@ -145,7 +145,7 @@
       actions.append(button(user.disabled ? '启用账号' : '禁用账号', async () => {
         if (!user.disabled && !confirm('禁用“' + user.username + '”并撤销其所有登录？')) return;
         await api('admin/users/' + user.accountId + '/' + (user.disabled ? 'enable' : 'disable'), {}); await users();
-      }, 'quiet'), button('删除账号', async () => {
+      }, user.disabled ? 'quiet' : 'quiet danger'), button('删除账号', async () => {
         if (!confirm('永久删除账号“' + user.username + '”？此操作不可撤销，将删除其中转电脑登记并撤销所有网页与电脑登录；不删除电脑上的 Codex 历史，本机 CLI 将继续运行。')) return;
         const started = epoch, currentPage = pageVersion;
         await api('admin/users/' + user.accountId, {}, 'DELETE');
