@@ -4,7 +4,12 @@
 
 ## Unreleased
 
-- 新增默认关闭的可信公网接入：邀请制密码账号、工作台归属路由、独立 RemoteOwner、出站 WSS、本机绑定面板与 Linux 中转服务；账号数据库独立于工作台历史。单工作台 IP 模式已有受限 Linux 部署、公网 TLS 与 Chrome 手机视口链路证据；域名模式及真实手机完整功能验收另列，见[公网接入契约](docs/codex-public-workbench-relay.md)与[部署验证](docs/validation/public-relay-ip-trial-2026-10-13.md)。
+- 本机工作台与中转各提供正式架构/交互维护入口，整合单 IP 运维到中转部署指南，删除已替代的混合契约和试部署指南；补齐裸 `codex-relayd` 忽略规则，构建二进制不进入 Git。
+
+- 标准构建/检查增加 `--component workbench|relay|all`，分别编译电脑后端与独立中转；完整检查显式覆盖 workspace，本机安装包不再顺带编译中转。增加两端能力与部署操作指南，区分本机模型认证、中转账号、数据与运行依赖；无运行 API/schema 改动，见 [ADR 0062](docs/decisions/0062-independent-component-builds.md)。
+- 本机 Run 的“手机接入”改名为“本地局域网接入”，同步导航、面板、端口设置及配对提示，明确直连本机而非公网中转站；LAN/Tailscale、二维码和权限保持不变。
+- 公网中转改为默认 `windsyu` 管理员管理账号、临时密码强制改密、全端凭据撤销及电脑登录后自动连接；增加单 IP/单 HTTPS 端口的可信中央前端与多电脑页面授权。schema 2 保留登记/归属但撤销旧授权，schema 3 无损改名旧默认管理员并增加普通账号永久删除；升级前备份，禁止自动恢复旧库复活权限。旧域名模式仍显式保留。参见[契约](docs/architecture/relay.md)、[ADR 0058](docs/decisions/0058-admin-accounts-single-origin-relay.md)与 [ADR 0061](docs/decisions/0061-account-deletion-admin-rename.md)。旧双端口试用的[部署验证](docs/validation/public-relay-ip-trial-2026-10-13.md)不等于新模式或真实手机验收。
+- `unmanaged-custom` 模型接入支持由官方 CLI 执行的 `auth.command`：工作台不执行命令、不持有动态 token，代理透明转发 CLI 的认证头，并保留 managed/cloud 路由来源门禁。安装版 CLI 0.162.1 与合成 provider 已覆盖首次 401 后的原生刷新；真实 provider 另验，见 [ADR 0060](docs/decisions/0060-native-provider-command-auth.md)。
 - 恢复 README 的功能、运行条件和完整使用入口；旧 `~/.local` 快速安装需先卸载再安装到新默认目录，不自动迁移用户数据。
 - README 提供 macOS 用户级快速安装脚本，使用系统 curl 匿名下载/校验公开稳定 release，默认安装至 `~/.codex-view`，并配置 zsh/Bash 登录终端 PATH；提供按清单保护卸载的 `code-view-uninstall`，保留用户历史和原生数据。
 - Bash PATH 使用现有生效的登录配置文件，避免新建 `.bash_profile` 遮蔽 `.bash_login` / `.profile`。

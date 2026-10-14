@@ -1,3 +1,4 @@
+import { workbenchFetch } from './context';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { runApi } from './runApi';
 
@@ -39,7 +40,7 @@ export function useWorkspaceQuery<T>(url: string | null, active: boolean, poll =
     async function load() {
       const abort = new AbortController(); controller.current = abort; setLoading(true); setError('');
       try {
-        const response = await fetch(url!, { credentials: 'same-origin', signal: abort.signal });
+        const response = await workbenchFetch(url!, { credentials: 'same-origin', signal: abort.signal });
         const value = await response.json();
         if (!response.ok) throw new Error(workspaceError(value.error?.code || 'failed'));
         if (!disposed && !abort.signal.aborted) setResult({ url: url!, data: value as T });

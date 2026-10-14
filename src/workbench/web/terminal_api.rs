@@ -271,7 +271,11 @@ pub(super) async fn stop_run(
         return error(StatusCode::NOT_FOUND, "terminal_unavailable");
     };
     match terminal.stop().await {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"accepted": true})),
+        )
+            .into_response(),
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "terminal_unavailable"),
     }
 }

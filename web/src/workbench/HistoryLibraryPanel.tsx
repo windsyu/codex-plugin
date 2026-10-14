@@ -1,12 +1,17 @@
+import { navigationURL } from './context';
+import { workbenchFetch } from './context';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { LibraryReader } from './LibraryReader';
+import { LibraryStateScope, useLibraryState } from './libraryState';
+import { runPath } from './routes';
 import { Icon } from './Icons';
 import { coverageText, dateLabel, failure, libraryRead, projectName, routeFromURL, routeURL, sourceNames, type HistoryRoute, type LibraryEntry, type LibraryPage, type Project } from './library';
 export interface LibrarySource { id: string; kind: string; state: string; message: string; identity?: string; revision?: string | null; indexedEntries?: number }
 interface Paging { filters: string; refresh: number; cursors: (string | null)[]; index: number; base: number }
 function usePage<T>(path: string, filters: string, refresh: number) {
+  const state = useLibraryState();
   const restore = (): Paging => {
-    const saved = history.state?.libraryLists?.[path];
+    const saved = state.read().libraryLists?.[path];
     const valid = saved?.filters === filters && Array.isArray(saved.cursors) && saved.cursors.length <= 512 && saved.cursors.every((c: unknown) => c === null || typeof c === 'string') && Number.isInteger(saved.index) && saved.index >= 0 && saved.index < saved.cursors.length;
     return { filters, refresh, cursors: valid ? saved.cursors : [null], index: valid ? saved.index : 0, base: valid ? saved.base || 0 : 0 };
   };
@@ -21,7 +26,7 @@ function usePage<T>(path: string, filters: string, refresh: number) {
   useEffect(() => { if (selected !== paging) setPaging(selected); }, [filters, refresh]);
   useEffect(() => {
     if (!page || busy || error) return;
-    history.replaceState({ ...history.state, libraryLists: { ...history.state?.libraryLists, [path]: selected } }, '');
+    state.replace({ libraryLists: { ...state.read().libraryLists, [path]: selected } });
   }, [page, busy, error]);
   useEffect(() => {
     const controller = new AbortController(), sequence = ++request.current;
@@ -37,7 +42,12 @@ function usePage<T>(path: string, filters: string, refresh: number) {
     next: () => { if (page?.nextCursor) { const cursors = [...selected.cursors.slice(0, selected.index + 1), page.nextCursor]; const drop = Math.max(0, cursors.length - 512); setPaging({ ...selected, cursors: cursors.slice(drop), index: cursors.length - 1 - drop, base: selected.base + drop }); } }
   };
 }
-export function HistoryLibraryPanel({ sources, onProjectLaunch, onResume, runs = [] }: { sources: LibrarySource[]; onProjectLaunch?: (projectId: string) => void; onResume?: (entry: LibraryEntry) => void; runs?: { runId: string; projectPath: string; state: string }[] }) {
+interface LibraryProps { instanceId?: string; sources: LibrarySource[]; onProjectLaunch?: (projectId: string) => void; onResume?: (entry: LibraryEntry) => void; runs?: { runId: string; projectPath: string; state: string }[] }
+export function HistoryLibraryPanel(props: LibraryProps) {
+  return <LibraryStateScope.Provider value={props.instanceId}><LibraryPanel {...props} /></LibraryStateScope.Provider>;
+}
+function LibraryPanel({ sources, onProjectLaunch, onResume, runs = [] }: LibraryProps) {
+  const state = useLibraryState();
   const [route, setRoute] = useState<HistoryRoute>(routeFromURL);
   const [draft, setDraft] = useState(route.q);
   const [refresh, setRefresh] = useState(0);
@@ -51,9 +61,9 @@ export function HistoryLibraryPanel({ sources, onProjectLaunch, onResume, runs =
   const list = useRef<HTMLDivElement>(null);
   const backFocus = useRef<string>('');
   const nav = (values: Partial<HistoryRoute>) => {
-    if (!route.entry) history.replaceState({ ...history.state, libraryListScroll: list.current?.scrollTop || 0 }, '');
+    if (!route.entry) state.replace({ libraryListScroll: list.current?.scrollTop || 0 });
     const next = { ...route, ...values };
-    history.pushState({ libraryListScroll: history.state?.libraryListScroll || 0, libraryLists: history.state?.libraryLists }, '', routeURL(next));
+    history.pushState(state.merge({ libraryListScroll: state.read().libraryListScroll || 0, libraryReading: undefined }), '', routeURL(next));
     setRoute(next); setDraft(next.q);
   };
   useEffect(() => {
@@ -101,7 +111,7 @@ export function HistoryLibraryPanel({ sources, onProjectLaunch, onResume, runs =
   }, [sourceSignature]);
   useEffect(() => {
     if (!route.entry && list.current) {
-      list.current.scrollTop = history.state?.libraryListScroll || 0;
+      list.current.scrollTop = state.read().libraryListScroll || 0;
       if (backFocus.current) Array.from(list.current.querySelectorAll<HTMLButtonElement>("[data-entry]")).find(b => b.dataset.entry === backFocus.current)?.focus({ preventScroll: true });
     }
   }, [route.entry, entries.page]);
@@ -110,7 +120,7 @@ export function HistoryLibraryPanel({ sources, onProjectLaunch, onResume, runs =
   const update = async () => {
     setNotice(''); setRefresh(n => n + 1);
     try {
-      const response = await fetch('/workbench/v1/library/refresh', { method: 'POST', credentials: 'same-origin' });
+      const response = await workbenchFetch('/workbench/v1/library/refresh', { method: 'POST', credentials: 'same-origin' });
       if (!response.ok) throw new Error();
       setNotice('已安排后台更新，已有记录可以继续阅读。');
     } catch { setNotice('连接暂时不可用，未能更新目录。'); }
@@ -136,7 +146,7 @@ export function HistoryLibraryPanel({ sources, onProjectLaunch, onResume, runs =
       <div className="wb-library-filters"><form onSubmit={e => { e.preventDefault(); filter({ q: draft.trim() }); }}><Icon name="search" /><input type="search" aria-label="搜索会话和消息" placeholder="搜索会话和消息" maxLength={512} value={draft} onInput={e => setDraft(e.currentTarget.value)} /><button type="submit">搜索</button></form><select aria-label="历史来源筛选" value={route.source} onChange={e => filter({ source: e.currentTarget.value })}><option value="">全部来源</option>{sources.map(s => <option key={s.id} value={s.id}>{sourceNames[s.kind] || '历史'}{sources.filter(other => other.kind === s.kind).length > 1 ? ` · 来源 ${sources.filter(other => other.kind === s.kind).findIndex(other => other.id === s.id) + 1}` : ''}</option>)}</select><select aria-label="会话分组" value={route.group} onChange={e => filter({ group: e.currentTarget.value })}><option value="">全部会话</option><option value="main">主会话</option><option value="agents">子代理</option></select></div>
       {notice && <div className="wb-library-note" role="status">{notice}<button onClick={() => { setRefresh(n => n + 1); setNotice(''); }}>刷新列表</button></div>}
       <div className="wb-library-entry-list" ref={list} hidden={!!route.entry}>
-        <div className="wb-library-list-heading"><strong>{route.project ? route.project === 'unassigned' ? '未归属项目' : projectPath ? projectName(projectPath) : '所选项目' : '最近的会话'}</strong>{route.project && route.project !== 'unassigned' && onProjectLaunch && (activeRun ? <a href={`/?run=${encodeURIComponent(activeRun.runId)}`}>进入工作台</a> : <button onClick={() => onProjectLaunch(route.project)}>开始新对话</button>)}{route.q && <button onClick={() => filter({ q: '' })}>清除“{route.q}”</button>}</div>
+        <div className="wb-library-list-heading"><strong>{route.project ? route.project === 'unassigned' ? '未归属项目' : projectPath ? projectName(projectPath) : '所选项目' : '最近的会话'}</strong>{route.project && route.project !== 'unassigned' && onProjectLaunch && (activeRun ? <a href={navigationURL(runPath(activeRun.runId))}>进入工作台</a> : <button onClick={() => onProjectLaunch(route.project)}>开始新对话</button>)}{route.q && <button onClick={() => filter({ q: '' })}>清除“{route.q}”</button>}</div>
         {entries.page && coverageText(entries.page.coverage) && <p className="wb-library-note">{coverageText(entries.page.coverage)}</p>}
         {entries.error && <p role="alert" className="wb-notice">{entries.error}<button onClick={entries.reset}>重新读取列表</button></p>}
         {entries.busy && <p role="status" className="wb-subtle">正在读取历史…</p>}

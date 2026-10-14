@@ -1,4 +1,5 @@
 use super::{Shared, storage::Saved};
+use crate::workbench::lease_clock::{Clock, Lease};
 use crate::workbench::remote_access::IngressHandle;
 use anyhow::{Result, bail};
 use codex_relay_protocol::{
@@ -24,6 +25,41 @@ use uuid::Uuid;
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const CONNECT: Duration = Duration::from_secs(10);
 const WRITE: Duration = Duration::from_secs(2);
+
+struct Backoff {
+    ceiling_ms: u64,
+    connected_at: Option<Instant>,
+}
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            ceiling_ms: 1_000,
+            connected_at: None,
+        }
+    }
+}
+impl Backoff {
+    fn connected(&mut self, now: Instant) {
+        self.connected_at = Some(now);
+    }
+    fn control_received(&mut self, now: Instant) {
+        // A welcome followed by an immediate disconnect is not recovery. Require
+        // live control traffic after a complete renewal interval before resetting.
+        if self.connected_at.is_some_and(|start| {
+            now.duration_since(start) >= Duration::from_secs(protocol::RENEW_SECONDS)
+        }) {
+            self.ceiling_ms = 1_000;
+            self.connected_at = None;
+        }
+    }
+    fn next_delay(&mut self) -> Duration {
+        self.connected_at = None;
+        let delay =
+            Duration::from_millis(rand::random_range(self.ceiling_ms / 2..=self.ceiling_ms));
+        self.ceiling_ms = (self.ceiling_ms * 2).min(30_000);
+        delay
+    }
+}
 
 pub(super) fn server_url(value: &str, insecure: bool) -> Result<Url> {
     let url = Url::parse(value).map_err(|_| anyhow::anyhow!("invalid relay URL"))?;
@@ -135,31 +171,75 @@ impl Drop for Fence {
         self.0.disconnect();
     }
 }
-pub(super) async fn run(saved: Saved, instance: Uuid, ingress: IngressHandle, snapshot: Shared) {
-    let mut delay = 1;
+/// Returns true only for a permanently rejected credential. Transient network
+/// failures remain reconnectable and never replay previous input.
+pub(super) async fn run(
+    saved: Saved,
+    instance: Uuid,
+    ingress: IngressHandle,
+    snapshot: Shared,
+) -> bool {
+    let mut backoff = Backoff::default();
     loop {
         {
             let mut state = snapshot.lock().unwrap();
             state.state = "connecting".into();
             state.error = None;
         }
-        let _ = connection(&saved, instance, &ingress, &snapshot).await;
+        let result = connection_attempt(&saved, instance, &ingress, &snapshot, &mut backoff).await;
         ingress.disconnect();
+        if result.as_ref().err().is_some_and(authentication_rejected) {
+            return true;
+        }
         {
             let mut state = snapshot.lock().unwrap();
             state.state = "offline".into();
             state.error = Some("relay_disconnected".into());
         }
-        tokio::time::sleep(Duration::from_secs(delay)).await;
-        delay = (delay * 2).min(30);
+        tokio::time::sleep(backoff.next_delay()).await;
     }
 }
+fn authentication_rejected(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
+        Some(tokio_tungstenite::tungstenite::Error::Http(response))
+        if matches!(response.status().as_u16(), 401 | 403))
+}
+#[cfg(test)]
 async fn connection(
     saved: &Saved,
     instance: Uuid,
     ingress: &IngressHandle,
     snapshot: &Shared,
 ) -> Result<()> {
+    connection_attempt(saved, instance, ingress, snapshot, &mut Backoff::default()).await
+}
+async fn connection_attempt(
+    saved: &Saved,
+    instance: Uuid,
+    ingress: &IngressHandle,
+    snapshot: &Shared,
+    backoff: &mut Backoff,
+) -> Result<()> {
+    connection_with_clock(
+        saved,
+        instance,
+        ingress,
+        snapshot,
+        backoff,
+        Clock::default(),
+    )
+    .await
+}
+async fn connection_with_clock(
+    saved: &Saved,
+    instance: Uuid,
+    ingress: &IngressHandle,
+    snapshot: &Shared,
+    backoff: &mut Backoff,
+    clock: Clock,
+) -> Result<()> {
+    let handshake = Lease::new(clock.clone(), CONNECT)
+        .ok_or_else(|| anyhow::anyhow!("relay authorization clock unavailable"))?;
     let bound = saved
         .bound
         .as_ref()
@@ -170,10 +250,14 @@ async fn connection(
         protocol::MAX_FRAME,
     )
     .await?;
+    if handshake.remaining().is_none() {
+        bail!("relay handshake expired");
+    }
     json(
         &mut socket,
         &Hello {
             version: protocol::VERSION,
+            workbench_api_version: protocol::WORKBENCH_API_VERSION,
             gateway_id: bound.gateway_id,
             instance_id: instance,
             client_version: env!("CARGO_PKG_VERSION").into(),
@@ -183,6 +267,9 @@ async fn connection(
     let Some(Ok(Message::Text(text))) = timeout(CONNECT, socket.next()).await? else {
         bail!("missing relay welcome");
     };
+    if handshake.remaining().is_none() {
+        bail!("relay handshake expired");
+    }
     let welcome: Welcome = serde_json::from_str(&text)?;
     if welcome.version != protocol::VERSION
         || welcome.account_id != bound.account_id
@@ -191,6 +278,9 @@ async fn connection(
     {
         bail!("relay identity mismatch");
     }
+    let lease_duration = Duration::from_secs(protocol::LEASE_SECONDS);
+    let mut lease = Lease::new(clock, lease_duration)
+        .ok_or_else(|| anyhow::anyhow!("relay authorization clock unavailable"))?;
     ingress.begin(
         welcome.account_id,
         welcome.gateway_id,
@@ -204,20 +294,33 @@ async fn connection(
         state.error = None;
     }
     let mut heartbeat = tokio::time::interval(Duration::from_secs(protocol::RENEW_SECONDS));
-    let mut last_control = Instant::now();
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    backoff.connected(Instant::now());
     let mut streams = JoinSet::new();
     let mut active = HashMap::<Uuid, (Uuid, tokio::task::AbortHandle, bool)>::new();
     let mut seen = HashSet::new();
     loop {
+        let remaining = lease
+            .remaining()
+            .ok_or_else(|| anyhow::anyhow!("relay control expired"))?;
         tokio::select! {
+            biased;
+            // Expiry wins over ready input, including after suspend/resume. It
+            // must not wait for the next heartbeat tick or be renewed by stale Open.
+            _=tokio::time::sleep(remaining)=> {
+                bail!("relay control expired");
+            }
             _=heartbeat.tick()=> {
-                if last_control.elapsed()>=Duration::from_secs(protocol::LEASE_SECONDS) { bail!("relay control expired"); }
+                if lease.remaining().is_none() { bail!("relay control expired"); }
                 json(&mut socket,&ToRelay::Heartbeat).await?;
             }
             result=streams.join_next(), if !streams.is_empty()=> {
                 if let Some(Ok((id,failed)))=result { active.remove(&id); if failed { json(&mut socket,&ToRelay::StreamFailed{stream_id:id,code:"stream_failed".into()}).await?; } }
             }
             message=socket.next()=> {
+                // On macOS the Tokio timer may not advance during sleep. Check
+                // continuous age before accepting buffered Renew/Open/Ping.
+                if lease.remaining().is_none() { bail!("relay control expired"); }
                 let Some(message)=message else { bail!("relay closed"); };
                 let message=message?;
                 let Message::Text(text)=message else {
@@ -226,7 +329,8 @@ async fn connection(
                 };
                 if text.len()>protocol::MAX_FRAME { bail!("relay control too large"); }
                 let message:ToGateway=serde_json::from_str(&text)?;
-                last_control=Instant::now();
+                if !lease.renew(lease_duration) { bail!("relay control expired"); }
+                backoff.control_received(Instant::now());
                 match message {
                     ToGateway::Ping=>json(&mut socket,&ToRelay::Heartbeat).await?,
                     ToGateway::Renew{session_ids}=> { if session_ids.len()>4096 { bail!("too many renewed sessions"); } ingress.renew(&session_ids); },
@@ -401,9 +505,24 @@ async fn stream(
             )
             .await?;
             let mut body = response.bytes_stream();
-            while let Some(chunk) = body.next().await {
-                for part in chunk?.chunks(16 * 1024) {
-                    send(&mut remote, Message::Binary(part.to_vec().into())).await?;
+            loop {
+                tokio::select! {
+                    message = remote.next() => {
+                        // RequestEnd already ended the only permitted request.
+                        // Continue handling websocket liveness and cancellation
+                        // even when an SSE body has no events to produce.
+                        match message {
+                            Some(Ok(Message::Ping(data))) => send(&mut remote, Message::Pong(data)).await?,
+                            Some(Ok(Message::Pong(_))) => {},
+                            _ => bail!("response consumer disconnected or sent invalid data"),
+                        }
+                    }
+                    chunk = body.next() => {
+                        let Some(chunk) = chunk else { break; };
+                        for part in chunk?.chunks(16 * 1024) {
+                            send(&mut remote, Message::Binary(part.to_vec().into())).await?;
+                        }
+                    }
                 }
             }
             json(&mut remote, &Data::ResponseEnd).await?;
@@ -464,6 +583,10 @@ async fn receive_body(socket: &mut Socket) -> Result<Vec<u8>> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "reconnect_tests.rs"]
+mod reconnect_tests;
 
 #[cfg(test)]
 mod tests {
@@ -684,7 +807,9 @@ mod integration_tests {
             name: "Synthetic".into(),
             allow_insecure_loopback: true,
             enabled: true,
+            authentication_required: false,
             bound: Some(protocol::Bound {
+                username: "synthetic".into(),
                 account_id: welcome.account_id,
                 gateway_id: welcome.gateway_id,
                 credential: "synthetic-test-credential".into(),
@@ -790,7 +915,9 @@ mod integration_tests {
             name: "Synthetic".into(),
             allow_insecure_loopback: true,
             enabled: true,
+            authentication_required: false,
             bound: Some(protocol::Bound {
+                username: "synthetic".into(),
                 account_id: welcome.account_id,
                 gateway_id: welcome.gateway_id,
                 credential: "synthetic-test-credential".into(),

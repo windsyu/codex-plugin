@@ -1,3 +1,4 @@
+import { navigationURL, workbenchFetch } from './context';
 export interface Coverage { state: string; reasons: string[] }
 export interface LibraryEntry {
   entryId: string; sourceId: string; sourceIdentity?: string; kind: string; sourceRevision: string;
@@ -16,7 +17,7 @@ export const projectName = (path: string | null) => path?.split(/[\\/]/).filter(
 export const dateLabel = (time: string | null) => time && Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间未记录';
 export class LibraryError extends Error { constructor(public status: number, message: string) { super(message); } }
 export async function libraryRead<T>(path: string, parameters: URLSearchParams, signal: AbortSignal): Promise<LibraryPage<T>> {
-  const response = await fetch(`/workbench/v1/library/${path}?${parameters}`, { credentials: 'same-origin', cache: 'no-store', signal });
+  const response = await workbenchFetch(`/workbench/v1/library/${path}?${parameters}`, { credentials: 'same-origin', cache: 'no-store', signal });
   if (!response.ok) {
     let code = '';
     try { const error = await response.json(); if (typeof error.error === 'string') code = error.error; } catch { /* Status remains sufficient when the response has no structured body. */ }
@@ -48,5 +49,5 @@ export function routeFromURL(): HistoryRoute {
 export function routeURL(route: HistoryRoute) {
   const url = new URL(location.href);
   for (const key of keys) { if (route[key]) url.searchParams.set(key, route[key]); else url.searchParams.delete(key); }
-  return url.pathname + url.search;
+  return navigationURL(url.pathname + url.search);
 }

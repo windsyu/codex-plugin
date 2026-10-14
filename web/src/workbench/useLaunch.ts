@@ -1,3 +1,6 @@
+import { navigationURL, scopedStorageKey } from './context';
+import { workbenchFetch } from './context';
+import { runPath } from './routes';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { browserId } from './browserId';
 import { launchMessage as message } from './launchMessages';
@@ -7,14 +10,14 @@ import type { LibraryEntry } from './library';
 interface Intent { path?: string; projectId?: string; resumeEntryId?: string; sourceRevision?: string }
 interface Operation { operationId: string; state: 'starting' | 'ready' | 'existing' | 'failed'; openInNewTab?: boolean; run?: { runId: string }; error?: { code: string } }
 async function request<T>(path: string, signal: AbortSignal, body?: unknown): Promise<T> {
-  const response = await fetch(`/workbench/v1/${path}`, { method: body ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store', signal,
+  const response = await workbenchFetch(`/workbench/v1/${path}`, { method: body ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store', signal,
     ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   const value = await response.json();
   if (!response.ok) throw Object.assign(new Error(message(value?.error?.code)), { code: value?.error?.code, definitive: response.status < 500 });
   return value;
 }
 export function useLaunch(instanceId: string, enter: (runId: string) => void) {
-  const storageKey = `wb-launch:${instanceId}`;
+  const storageKey = scopedStorageKey(`wb-launch:${instanceId}`);
   const [open, setOpen] = useState(false), [intent, setIntent] = useState<Intent>({ path: '' });
   const [preview, setPreview] = useState<LaunchPreview>(), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [readyHref, setReadyHref] = useState('');
@@ -37,7 +40,7 @@ export function useLaunch(instanceId: string, enter: (runId: string) => void) {
     if (value.state === 'ready' || value.state === 'existing') {
       if (!value.run?.runId) throw new Error('启动结果缺少工作台信息。');
       setPending(false); setUncertain(false); setPreview(undefined);
-      const href = `/?run=${encodeURIComponent(value.run.runId)}`;
+      const href = navigationURL(runPath(value.run.runId));
       if (value.openInNewTab || recovered.current || popup.current) {
         setReadyHref(href);
         try { if (popup.current && !popup.current.closed && popup.current.location.href === 'about:blank') { popup.current.opener = null; popup.current.location.replace(href); } } catch { /* The explicit link remains usable. */ }
@@ -142,7 +145,7 @@ export function useLaunch(instanceId: string, enter: (runId: string) => void) {
       onPathChange: (path: string) => choose({ path }, false), onValidate: () => void validate(), onStart: () => void start(),
       onCheck: () => { setError(''); setUncertain(false); setPending(true); setPoll(n => n + 1); }, onClose: () => setOpen(false), onEnter: (runId: string) => {
         if (!preview?.openInNewTab) { enter(runId); return; }
-        const href = `/?run=${encodeURIComponent(runId)}`;
+        const href = navigationURL(runPath(runId));
         // noopener may return null even when opening succeeds; always keep a usable link.
         setReadyHref(href); setPreview(undefined);
         try { window.open(href, '_blank', 'noopener'); } catch { /* Use the explicit link. */ }

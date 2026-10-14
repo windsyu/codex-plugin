@@ -1,10 +1,10 @@
-# 手机接入：同一工作台的多个访问地址
+# 本地局域网接入：同一工作台的多个访问地址
 
 日期：2026-09-21。按用户反馈修订：**局域网 IP 和 Tailscale MagicDNS 是同一服务的地址，不是互斥的产品模式。** 共用监听、配对和二维码已实现；按本日后续反馈，配对码在本次程序运行期间固定、可重复使用。默认仍仅本机，点击开启后才接受设备连接。取舍见 [ADR 0051](decisions/0051-workbench-device-access.md)，进度只在[实施计划](v2-implementation-plan.md#device-access-slices)维护。
 
 ## 1. 用户结果与范围
 
-用户点击“手机接入”，开启设备访问后看到本机局域网地址和可用的 MagicDNS 地址，复制链接或展示对应二维码。两种地址可以同时使用，打开相同页面、调用相同 API、操作同一个 Run 和 CLI。
+用户点击“本地局域网接入”，开启设备访问后看到本机局域网地址和可用的 MagicDNS 地址，复制链接或展示对应二维码。两种地址可以同时使用，打开相同页面、调用相同 API、操作同一个 Run 和 CLI。2026-10-14 按用户要求将原“手机接入”导航、面板和相关提示改名，明确这是直接访问本机的入口，不经过公网中转站；保留 Tailscale 能力，不改变监听、配对、路由或权限。
 
 选择二维码地址只改变展示，不切换服务、不使另一 URL 失效，也不踢掉已连接浏览器。访问开关、配对码、设备会话及撤销均属于当前 Run，共用一套实现。MagicDNS 首版直接访问同一 HTTP 服务端口，不以 Serve、HTTPS 证书或反向代理作为前置条件。HTTPS 如需补充，另作传输增强。
 
@@ -17,7 +17,7 @@
 | [共用接入](../src/workbench/web/access.rs)与[地址发现](../src/workbench/web/access/discovery.rs) | Application 共用设备监听与地址缓存，按 Run 选择 WebState；每 10 秒刷新 IP/MagicDNS，只读发现，不调用 Serve |
 | [Web 边界](../src/workbench/web.rs) | listener generation 与 Host 集合同时验证，每次请求的 Origin 须对应当前 Host；远端不能伪装本机管理入口 |
 | [许可](../src/workbench/permission.rs)、[终端仲裁](../src/workbench/control.rs)与[WS](../src/workbench/web/terminal_api.rs) | 单个浏览器许可可撤销；流、排队输入及断线重连保留均检查此许可 |
-| [接入面板](../web/src/workbench/AccessPanel.tsx) | 同页展开、本地 QR、固定配对码、地址选择与撤销；业务 API/WS 继续跟随页面地址 |
+| [接入面板](../web/src/workbench/AccessPanel.tsx) | 独立 Run 接入页、本地 QR、固定配对码、地址选择与撤销；业务 API/WS 继续跟随页面地址 |
 | [HTTP 随机 ID](../web/src/workbench/browserId.ts) | randomUUID 不可用时使用 getRandomValues，兼容普通 HTTP 下的历史清理操作 ID |
 
 [MagicDNS 官方说明](https://tailscale.com/docs/features/magicdns)支持用设备名称访问其 Web 服务；[连接设备说明](https://tailscale.com/docs/how-to/connect-to-devices)要求目标服务运行、端口可达且访问策略允许。名称访问不要求 Serve；手机需接入相应 Tailscale 网络及 DNS，普通局域网设备使用 IP。
@@ -26,7 +26,7 @@
 
 ## 3. 网页交互
 
-顶栏“手机接入”使用手机图标和文字，点击展开小面板；窄屏同页展开，不新增路由或卸载终端。首次显示“开启设备访问”，打开后呈现：
+2026-10-14 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)，原同页面板改为 `/runs/{runId}/access` 独立页，当前名称为“本地局域网接入”，同 Run 导航保留终端实例，未展示时隐藏，不重放输入。单端口中转的工作台页加 `/g/{gatewayId}` 前缀，但页面路由不扩大设备配对权限；公网 owner 授权另按中转契约处理。首次显示“开启设备访问”。以下为 2026-09-21 原布局示意，保留当时名称及地址/二维码/撤销内容，收起布局不代表新路由或验收：
 
 ```text
 手机接入                                   收起

@@ -108,6 +108,11 @@ impl ApplicationServer {
         });
         let app = Router::new()
             .route("/", get(home))
+            .route("/history", get(home))
+            .route("/launch", get(home))
+            .route("/settings", get(home))
+            .route("/relay", get(home))
+            .route("/runs/{run}/{page}", get(document))
             .route("/assets/{*path}", get(asset))
             .route("/workbench/v1/pair", post(pair_owner))
             .route("/workbench/v1/application", get(application))
@@ -290,6 +295,12 @@ async fn home() -> Response {
             .into_response(),
         None => error(StatusCode::SERVICE_UNAVAILABLE, "frontend_unavailable"),
     }
+}
+async fn document(request: axum::extract::Request) -> Response {
+    if !codex_relay_protocol::document_path(request.uri().path()) {
+        return error(StatusCode::NOT_FOUND, "page_unavailable");
+    }
+    home().await
 }
 async fn pair_owner(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes) -> Response {
     if !origin(&headers, &state) {

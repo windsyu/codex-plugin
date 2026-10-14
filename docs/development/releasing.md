@@ -15,6 +15,8 @@ node scripts/dev.mjs package --offline
 
 `package` 重新生成 Web 资源并编译两个 release binary，检查 binary 的版本和动态库依赖，然后在 `target/artifacts/<UUID>` 生成压缩包、`SHA256SUMS` 与解包目录。该任务按独立构建产物登记，保留 30 天；需要长期留存时由所有者明确复制或固定保留。只允许当前已受测的 macOS / Apple Silicon，不自动交叉编译或推导其他平台支持。
 
+`package` 等价于 `package --component workbench`，只编译根本机 package，不附带编译或安装 `codex-relayd`。服务器使用 `build --component relay --release` 单独构建，并按[中转部署指南](../guides/public-relay-deployment.md)分发二进制和许可；`package --component relay|all` 明确拒绝，不能误将 macOS 安装包部署到 Linux。当前没有通用 Linux 自动归档入口，静态工具链/运行库许可须由目标包装明确提供，不能宣称本机包验证覆盖中转发布。组件与 AI agent 操作入口见[组件指南](../guides/component-deployment.md)。
+
 打包构建显式指定 `--target aarch64-apple-darwin`，并读取同一 target 的 release 目录；不受 `CARGO_BUILD_TARGET` 或 Cargo 默认 target 配置影响，不从另一个构建目录拾取旧的同版本产物。
 
 生成后自动在独立 HOME/USERPROFILE/CODEX_HOME、中文及空格目录中解压安装，以合成 CLI 验证当前目录/指定路径启动、同项目复用、零 CLI 历史入口、内嵌网页资源和 SIGINT 回收；不启动真实私人 CLI 或调用模型。验证失败的任务保留诊断，不报告打包成功。

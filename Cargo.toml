@@ -7,8 +7,9 @@ description = "Native Codex CLI workbench with read-only Observer history compat
 default-run = "codex-view"
 
 [workspace]
-members = ["crates/relay-protocol", "relay"]
-default-members = [".", "relay", "crates/relay-protocol"]
+members = ["crates/relay-protocol", "crates/workbench-assets", "relay"]
+# Plain Cargo commands target the local product. Standard full checks use --workspace.
+default-members = ["."]
 resolver = "3"
 
 [[bin]]
@@ -37,7 +38,7 @@ rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots"] }
 rusqlite = { version = "0.37", features = ["bundled", "hooks", "limits"] }
 # Keep the built UI and API together in local trial binaries as well as releases.
-rust-embed = { version = "8", features = ["debug-embed"] }
+codex-workbench-assets = { path = "crates/workbench-assets" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
@@ -56,6 +57,7 @@ zstd = "0.13"
 codex-relay-protocol = { path = "crates/relay-protocol" }
 
 [dev-dependencies]
+# Cross-end authorization/stream fixtures only; not a workbench production dependency.
 codex-relayd = { path = "relay" }
 
 # 0.16.2 with the reviewed wide-cell resize fix; see vendor/vt100/PATCH.md.

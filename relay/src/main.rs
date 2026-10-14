@@ -8,12 +8,14 @@ struct Args {
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     portal_origin: Option<String>,
-    #[arg(long, global = true, conflicts_with_all = ["workbench_origin", "fixed_gateway_id"])]
+    #[arg(long, global = true, conflicts_with_all = ["workbench_origin", "fixed_gateway_id", "single_origin"])]
     workbench_domain: Option<String>,
     #[arg(long, global = true, requires = "fixed_gateway_id")]
     workbench_origin: Option<String>,
     #[arg(long, global = true, requires = "workbench_origin")]
     fixed_gateway_id: Option<uuid::Uuid>,
+    #[arg(long, global = true, conflicts_with_all = ["workbench_domain", "workbench_origin", "fixed_gateway_id"])]
+    single_origin: bool,
     #[arg(long, global = true, default_value_t = 4)]
     password_workers: usize,
     #[arg(long, global = true)]
@@ -28,18 +30,14 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         bind: SocketAddr,
-    },
-    Invite {
+        /// Private file to bootstrap windsyu; an existing administrator password is unchanged.
         #[arg(long)]
-        username: String,
+        bootstrap_password_file: Option<PathBuf>,
     },
-    Reset {
+    /// Offline windsyu administrator recovery; stop the service first.
+    RecoverAdmin {
         #[arg(long)]
-        username: String,
-    },
-    Disable {
-        #[arg(long)]
-        username: String,
+        password_file: PathBuf,
     },
 }
 impl Args {
@@ -56,6 +54,7 @@ impl Args {
             workbench_domain: self.workbench_domain.clone().unwrap_or_default(),
             workbench_origin: self.workbench_origin.clone(),
             fixed_gateway_id: self.fixed_gateway_id,
+            single_origin: self.single_origin,
             password_workers: self.password_workers,
             allow_insecure_loopback: self.allow_insecure_loopback,
             trusted_client_ip_header: self.trusted_client_ip_header.clone(),
@@ -67,18 +66,33 @@ impl Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let a = Args::parse();
+    if let Command::RecoverAdmin { password_file } = &a.command {
+        let dir = a
+            .data_dir
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--data-dir is required"))?;
+        Store::open(dir)?.recover_admin_from_file(password_file)?;
+        println!("Administrator recovery completed; all previous credentials are invalid.");
+        return Ok(());
+    }
     let c = a.config()?;
     match a.command {
-        Command::Serve { bind } => codex_relayd::serve(c, bind).await?,
-        Command::Invite { username } => {
-            let t = Store::open(&c.data_dir)?.issue(&username, false)?;
-            println!("{}/#invite={}", c.portal_origin, t);
+        Command::Serve {
+            bind,
+            bootstrap_password_file,
+        } => {
+            let store = Store::open(&c.data_dir)?;
+            if let Some(path) = bootstrap_password_file {
+                store.bootstrap_admin_from_file(&path)?;
+            }
+            anyhow::ensure!(
+                store.has_admin()?,
+                "first deployment requires --bootstrap-password-file pointing to a private password file"
+            );
+            drop(store);
+            codex_relayd::serve(c, bind).await?;
         }
-        Command::Reset { username } => {
-            let t = Store::open(&c.data_dir)?.issue(&username, true)?;
-            println!("{}/#reset={}", c.portal_origin, t);
-        }
-        Command::Disable { username } => Store::open(&c.data_dir)?.disable(&username)?,
+        Command::RecoverAdmin { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -100,6 +114,16 @@ mod tests {
             Args::try_parse_from(base.into_iter().chain(tail.iter().copied()))?.config()
         };
         assert!(parse(&["--workbench-domain", "example.com", "serve"]).is_ok());
+        assert!(parse(&["--single-origin", "serve"]).is_ok());
+        assert!(
+            parse(&[
+                "--single-origin",
+                "--workbench-domain",
+                "example.com",
+                "serve"
+            ])
+            .is_err()
+        );
         assert!(
             Args::try_parse_from([
                 "codex-relayd",

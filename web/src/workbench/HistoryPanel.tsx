@@ -1,3 +1,4 @@
+import { workbenchFetch } from './context';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { conversationEntries, readSnapshot, type ReadingView } from './reading';
 import { userMessages } from './viewItems';
@@ -34,7 +35,7 @@ export function HistoryPanel({ epoch, active, blocked = false, managementAvailab
     controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
     setBusy(true); setError('');
     try {
-      const response = await fetch(runApi(`/history${id ? `/${encodeURIComponent(id)}` : ''}${before != null ? `?before=${before}` : cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
+      const response = await workbenchFetch(runApi(`/history${id ? `/${encodeURIComponent(id)}` : ''}${before != null ? `?before=${before}` : cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
       if (!response.ok) {
         if (id && saved?.value.run.runEpoch === id && [404, 410].includes(response.status)) { setSaved(null); selectionChanged.current?.(); setRuns(old => old.filter(run => run.runEpoch !== id)); setError('此历史已删除或不存在，请刷新列表。'); return; }
         throw new Error(failure(response.status));
@@ -59,7 +60,7 @@ export function HistoryPanel({ epoch, active, blocked = false, managementAvailab
     if (!active || !managementAvailable || !saved) return;
     const id = saved.value.run.runEpoch, abort = new AbortController(); let timer = 0;
     const check = async () => {
-      try { const response = await fetch(runApi(`/history/${encodeURIComponent(id)}/status`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
+      try { const response = await workbenchFetch(runApi(`/history/${encodeURIComponent(id)}/status`), { credentials: 'same-origin', cache: 'no-store', signal: abort.signal });
         if (abort.signal.aborted) return;
         if ([404, 410].includes(response.status)) { controller.current?.abort(); setBusy(false); setSaved(null); selectionChanged.current?.(); setRuns(old => old.filter(run => run.runEpoch !== id)); setError('此历史已删除或不存在，请刷新列表。'); return; }
       } catch { /* Keep readable content on a transient network error. */ }

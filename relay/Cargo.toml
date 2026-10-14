@@ -14,6 +14,7 @@ base64 = "0.22"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 codex-relay-protocol = { path = "../crates/relay-protocol" }
+codex-workbench-assets = { path = "../crates/workbench-assets" }
 futures-util = "0.3"
 libc = "0.2"
 rand = "0.9"

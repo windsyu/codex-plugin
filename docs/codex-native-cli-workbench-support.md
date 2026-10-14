@@ -13,12 +13,15 @@
 | 电脑端 | macOS 26.5.2 / Apple Silicon 已验证；Linux、Windows 尚未完成运行验收。Windows 的 `.codex-web` 路径约定不等于平台已支持 |
 | 官方 CLI | 受测版本 0.154.0、0.155.1、0.156.1、0.159.2；最新 [0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)通过 24 项安装版 CLI/合成模型综合测试，覆盖审批/追问/取消、工具、历史恢复、多项目/手机隔离与退出。版本号不是启动白名单，其他版本提示后继续尝试，真实配置/路由不兼容会说明原因；不自动升降级 |
 | 模型路由 | `unmanaged-custom`：原生 `custom` provider、Responses、显式上游、静态 bearer；`requires_openai_auth=true/false` 均可，保留 File API Key。当前配置的 HTTPS/SSE 已有真实模型证据；true 与独立 API Key 的新增组合见[安装版合成回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。保留原模型、权限与认证，不自动改全局配置 |
-| 其他路由 | managed/ChatGPT、其他 provider、环境/命令认证和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不代表这些真实接入已验证 |
+| 命令认证接入 | `unmanaged-custom` 新增原生 `auth.command` 路径：Responses、显式 upstream、`requires_openai_auth=false`；命令及 token 完全由本机 CLI 执行/缓存/刷新。为排除原生登录触发的 cloud-managed 路由补值，工作台仍要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`；不从中取得命令 token。与静态 bearer、env key/header、AWS、true 互斥，系统/managed 路由仍拒绝。安装版 CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过；真实 provider/公网发送仍待验，见[专项记录](validation/native-cli-command-auth-2026-10-14.md)与 [ADR 0060](decisions/0060-native-provider-command-auth.md) |
+| 其他路由 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不代表这些真实接入已验证 |
 | 网页 | 系统 Chrome 153 系列已有验证；[R6-G3](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)使用 154.0.8037.58/59，覆盖原生交互、历史、手机 QR 和 1024/736/390/320 等宽度。Safari/Firefox 没有完整验收 |
 | 手机 | 用户已实际确认接入和输入成功。LAN IP 与 Tailscale MagicDNS 是同一服务的多个 URL，使用同一码和业务；真机系统、锁屏恢复及双网络组合未逐项确认，此前单 Run 真机输入已确认；R6-F 多 Run 授权通过合成自动化验证，真手机尚未复测，进一步体验优化按用户要求暂缓 |
-| 网络默认 | 默认只监听本机；本次运行显式开启“手机接入”后增加设备监听。配对码本次启动固定，下次启动更换；局域网 HTTP 不加密，Tailscale 网络策略与设备可达性由用户环境决定 |
+| 网络默认 | 默认只监听本机；本次运行显式开启“本地局域网接入”后增加设备监听。配对码本次启动固定，下次启动更换；局域网 HTTP 不加密，Tailscale 网络策略与设备可达性由用户环境决定；公网中转是另一套账号流程 |
 
 ## 2. 已交付的日常操作
+
+中转账号登录只保护网页和网关访问，不为模型服务登录。本机官方 CLI 按原 provider 配置提供模型认证，代理透明转发 `Authorization`，认证头不进入观察、页面或 journal。命令认证不读取动态 token，不能保证按精确值脱敏任意正文主动回显的 token；请勿要求模型/工具输出凭证。
 
 - `codex-view` 默认打开零 CLI 的全部历史首页，同配置/数据根复用应用。首页可对已有项目或用户输入的本机目录做只读检查，再明确开始新对话；同项目已运行时进入已有工作台。用 `--project .` 仍可从当前项目目录直接启动一个普通官方 CLI；右侧原生终端处理对话、Slash、初始化、审批与追问。
 - 中央区分用户输入、模型正文、工具参数和执行结果；流式正文中间态可见，取消/缺失不会伪装为完整。
@@ -26,7 +29,7 @@
 - 同一 CLI 下刷新、切换文件/历史、展开设置；多页面只有一个输入者，冲突时点击“在此输入”。未确认输入不会自动重发。
 - 当前项目文件、搜索与 Git 均只读；文件/Diff 单页连续滚动、全文查找、行号跳转、跨屏复制与长行横向阅读。只渲染视口附近内容，关闭即释放文档实例。
 - 历史异步保存，可查看占用、按运行/批量删除和可选保留期限；手动删除与自动清理默认关闭。活动运行、其他项目、旧 Observer 和原生 Codex 记录受保护。
-- 设置使用当前页面展开表单与 `.codex-web/config/config.json`；默认历史位于 `.codex-web/history`。更改只对界面明确标注的范围生效。
+- 设置使用独立 `/settings` 或 Run 设置页与 `.codex-web/config/config.json`；默认历史位于 `.codex-web/history`。更改只对界面明确标注的范围生效。
 - 原生图片本地路径粘贴、手动提交和真实模型识图在 macOS 已验证。图片剪贴板、拖入上传、手机相册不在当前已验收范围。
 
 ## 3. 阅读、保存与进程边界
@@ -49,6 +52,8 @@
 
 ## 4. 构建产物与旧历史
 
+2026-10-14 的展示入口按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 更新：`/` 为项目概览，全部历史在 `/history`，启动在 `/launch`，共享设置在 `/settings`，仅本机提供 `/relay`；Run 使用 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单端口中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 保持兼容并规范化，同 Run 功能切换保留终端实例、不启动 CLI、不重放输入。本段仅说明当前路由契约，不扩大下述版本/平台支持或替代既有与新公网验收；旧报告的同页设置结论保留当时范围。
+
 `0.3.0` 提供 macOS / Apple Silicon release 安装包与 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 首页。安装流程见[安装指南](guides/installation.md)，正式发行资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准。此包装不扩展上述平台、provider 或 CLI 兼容边界；本地打包输出不代表已经正式发布。
 
 `codex-view` 已接入原生、工作台及 Observer 20/25 的统一后台目录/搜索 API 和同页来源登记，项目/会话导航与按需正文阅读已由 R6-D 接入；规模与资源证据见上述 G1 记录，当前交付和自动回归结果见 [G4 报告](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)，用户整片试用状态只看实施计划。独立 `codex-observerd serve/import` 仍只允许迁移至 schema 20，不能用它直接打开 schema 25；新目录使用 A 的零写 reader，不调用该旧装配。2026-09-29 已完成实际 schema 25 的限定正文只读抽查，范围及零写证据见 [G3 阶段记录](validation/native-cli-r6-g3-compatibility-2026-09-29.md)，不代表全库完整性验证；缺必要 WAL/SHM 或需修复时返回来源不可用。
@@ -57,7 +62,7 @@
 
 ```sh
 node scripts/dev.mjs build --release --offline
-# 无参数打开全部历史；需要直接启动项目时添加 --project <directory>
+# 无参数打开项目概览，全部历史在 /history；直接启动项目添加 --project <directory>
 /path/to/codex-plugin/target/release/codex-view
 ```
 

@@ -11,6 +11,7 @@ pub mod decode;
 pub mod framing;
 #[cfg(unix)]
 pub mod launch;
+pub(crate) mod lease_clock;
 pub mod live;
 pub mod observe;
 pub mod paths;

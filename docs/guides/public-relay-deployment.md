@@ -1,81 +1,97 @@
 # Linux 公网中继部署与运维
 
-本指南是 [公网中继契约](../codex-public-workbench-relay.md)的部署草案。命令与文件名须以构建出的 `codex-relayd --help` 和 Linux 实测为准；在 [V2 实施计划](../v2-implementation-plan.md)标记通过之前，不应将示例视为已验证生产安装步骤。示例域名属于保留的 `example.com`，部署时统一替换。服务运营者可信，可看到通过中继传输的工作台内容。
+本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。实施状态以 [V2 实施计划](../v2-implementation-plan.md)为准；[2026-10-14 测试部署](../validation/public-relay-single-origin-deploy-2026-10-14.md)已覆盖受限 Linux 中转、公网 TLS 登录、旧库恢复及加密备份副本恢复，不等于真实手机或多电脑完整公网验收。
 
-## 准备域名、TLS 和服务用户
+## 构建与服务隔离
 
-用户明确选择直接 IP 的临时单工作台试用时，使用独立的 [IP 测试指南](public-relay-ip-trial.md)。域名模式继续遵循本页，不能把 IP 填入 `--workbench-domain` 来替代子域路由。
+只部署服务器时从[组件部署入口](component-deployment.md)选择 `relay`；电脑上的后端按[本机指南](local-workbench-deployment.md)单独安装。中转源码在 `relay/`，生产依赖只有共享协议/静态资源，不链接根 package 的 CLI、PTY 或历史运行模块。`src/workbench/relay` 是电脑端连接器，不要把它当成服务端部署。
 
-将 `app.example.com` 解析到服务器，并为 `*.wb.example.com` 配置 wildcard DNS。门户与工作台必须分别使用 HTTPS origin。获得覆盖门户和 wildcard 的证书，放在只有 TLS 代理可读的私有目录。若使用 Caddy 自动签发 wildcard 证书，须安装适配所用 DNS 提供商的 DNS-01 插件、配置最小权限的 DNS 凭据，并验证证书更新；标准 Caddy 安装本身不能自动完成此步骤。也可以使用外部签发证书并按更新流程替换。
-
-创建无登录权限的 `codex-relay` 系统用户和 `0700` 数据目录，例如 `/var/lib/codex-relay`。数据库、工作台凭据摘要、邀请/重置材料、日志与备份只允许服务用户或指定备份进程读取。不要把真实密码、Cookie 或密钥写入仓库、shell 历史、公开日志或 systemd 单元的命令行参数。只向外开放 TLS 入口；中继进程绑定 `127.0.0.1:8787`。
-
-中转服务独立构建，无需在 Linux 服务器安装 Codex、工作台或前端工具。准备 Rust 1.95.0、C/C++ 构建工具和受信任的版本 checkout，在该版本仓库根运行：
+中继嵌入与本机工作台同一份前端。构建机准备 Rust 1.95.0、Node 22.23.2 和 C/C++ 工具，从受信任 checkout 根目录按序构建：
 
 ```sh
-cargo build --locked --release -p codex-relayd
+node scripts/dev.mjs doctor
+node scripts/dev.mjs bootstrap
+node scripts/dev.mjs build --component relay --release
+node scripts/dev.mjs check --component relay
 ./target/release/codex-relayd --help
 ```
 
-构建结果为 `target/release/codex-relayd`；首次依赖获取需要网络。macOS 原生构建及 Linux x86-64 musl 交叉产物的 systemd/Caddy IP 测试启动已有[验证记录](../validation/public-relay-ip-trial-2026-10-13.md)，本页的目标服务器原生构建、域名/wildcard TLS 部署仍须分别验收。本机工作台通过标准 `node scripts/dev.mjs build` 构建，不能用旧后端搭配另一版本前端。
+标准入口先构建前端再构建所选 Rust package，不允许旧前端搭配新中继。原生默认 Cargo 配置下，产物为 `target/release/codex-relayd`；配置了 target 或外部 target directory 时按实际 Cargo 输出定位，不从旧缓存拾取同名产物。目标服务器只运行中转，无需安装 Node、Codex CLI 或工作台历史库。此构建应在目标 Linux 构建环境执行；macOS 产物不能直接部署 Linux。`package` 仅生成本机 macOS 安装包，不是服务器发布入口。
 
-在采用 systemd 的 Linux 主机上，可以由管理员建立服务用户和私有目录；二进制应从本项目受信任的构建产物安装，而不是从示例文档下载：
+分发时须保留项目 `LICENSE`、[第三方声明](../../THIRD_PARTY_NOTICES.md)、实际 Cargo/npm 运行依赖的原始通知与 Codicons 归属；不能因为仅分发 relay 就省略终端和其他嵌入前端依赖许可。`scripts/lib/release.mjs` 提供 `writeLicenses` / `writeChecksums` 共用收集器；独立目标包装须保留来源 commit/dirty、target、锁文件、许可索引及校验和，不包含密码或数据目录。静态链接还必须显式提供实际 sysroot/工具链运行库通知，不把 Cargo/npm 索引当作完整静态运行库许可。当前不提供通用 Linux 归档/自动安装命令，完整边界见[发布指南](../development/releasing.md)。
 
-```sh
-sudo useradd --system --home-dir /var/lib/codex-relay --shell /usr/sbin/nologin codex-relay
-sudo install -d -o codex-relay -g codex-relay -m 0700 /var/lib/codex-relay
-sudo install -o root -g root -m 0755 ./target/release/codex-relayd /usr/local/bin/codex-relayd
-sudo install -o root -g root -m 0644 deploy/relay/codex-relayd.service /etc/systemd/system/codex-relayd.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now codex-relayd.service
-```
+使用无 OS 登录权限的专用服务用户，数据目录 `0700`、数据库及 sidecar `0600`。中继仅监听 `127.0.0.1:8787`，公网仅暴露已经选定的 HTTPS 入口。不要新增通用代理或公开后端端口。安装前核对架构、路径、已有服务和备份；不覆盖运行中的其他服务。
 
-不同发行版的服务用户命令可能不同；执行前核对目标路径、已存在用户和二进制架构。启动后检查 `systemctl status codex-relayd` 与仅本机监听的 `127.0.0.1:8787`，再启用 TLS 入口和对外 DNS。
+## 单 origin 启动与 TLS
 
-预期服务命令：
+以门户 `https://app.example.com` 为例（IP 和非默认端口见[下一节](#单-ip-与受限服务器部署)）：
 
 ```sh
-codex-relayd --data-dir /var/lib/codex-relay --portal-origin https://app.example.com --workbench-domain wb.example.com --trusted-client-ip-header x-relay-client-ip serve --bind 127.0.0.1:8787
+codex-relayd --data-dir /var/lib/codex-relay \
+  --portal-origin https://app.example.com --single-origin \
+  --trusted-client-ip-header x-relay-client-ip \
+  serve --bind 127.0.0.1:8787 \
+  --bootstrap-password-file /var/lib/codex-relay/bootstrap-password
 ```
 
-仓库的 [systemd 示例](../../deploy/relay/codex-relayd.service)和 [Caddy 示例](../../deploy/relay/Caddyfile.example)仅提供文本模板；安装时核对二进制路径、服务用户、证书权限和重启策略。Caddy 示例使用外部证书路径；如果改用 DNS-01 插件，需由部署者按提供商说明配置并验证通配证书。TLS 代理必须保留真实 Host，移除 `Forwarded`/`X-Forwarded-*`，并覆盖 `X-Relay-Client-IP` 为连接来源地址；服务只有显式启用该选项且上游连接来自 loopback 时才接受这个单一 IP 值。未启用时按直连 IP 限流，Caddy 后的客户端会共享 loopback 限额。限制代理目标为本机端口，设置合理的长连接超时，并避免正文访问日志。不要将 `127.0.0.1:8787` 对外发布。
+首次部署必须通过私有文件提供默认 `windsyu` 管理员的临时密码。使用本机安全编辑器准备上述文件，由服务用户拥有、权限 `0600`，内容只有密码及可选末尾换行；禁止符号链接，不把密码写入命令行、环境变量、日志或仓库。文件父目录同样私有。密码须为 15–128 个字符并通过常见密码检查。首次登录强制改密，完成后重新登录，方可访问工作台与管理页面。初始化完成后安全移除临时密码文件，并从服务启动参数移除 `--bootstrap-password-file`。
 
-按 [Caddy 官方说明](https://caddyserver.com/docs/install)安装对应发行版的软件包，替换示例域名/证书并确认运行 Caddy 的用户可以读取私钥后，再安装配置并验证：
+[单 origin systemd 模板](../../deploy/relay/codex-relayd-single-origin.service)使用非秘密环境文件设置门户地址；[单 origin Caddy 模板](../../deploy/relay/Caddyfile.single-origin.example)使用已有证书。替换路径并验证配置后才启用。TLS 代理须保留精确 Host（非默认端口必须保留），移除 `Forwarded`/`X-Forwarded-*`，覆盖 `X-Relay-Client-IP` 为连接来源。服务仅在显式启用可信头且直连来源为 loopback 时接受该值；未启用时所有经代理客户端共享 loopback 限流。
+
+已有 Caddy 站点须合并配置，不能直接覆盖现有配置文件。保留原有证书续签机制，只验证和重载本次修改的入口。不要启用请求正文日志，访问日志也不应记录页面 grant 查询参数。生产入口必须使用受信任 TLS，不关闭证书校验。
+
+历史模式见[兼容配置](#历史域名与固定单机兼容)，三种路由模式互斥；新部署默认选择 `--single-origin`，不为新账号分配子域名或额外端口。
+
+## 单 IP 与受限服务器部署
+
+单 IP 新部署同样使用 `--single-origin`，例如 `https://<公网IP>:9443/` 和 `/g/{gatewayId}/`，不再为每台电脑开放端口。使用包含字面 IP 的受信任证书，保留浏览器和连接器证书校验。只使用已经选定的 HTTPS 入口，不改其他现有端口；后端 `127.0.0.1:8787` 和 Caddy 管理口 `127.0.0.1:2020` 不得公开。Cookie 不按端口隔离，同一 IP 上其他 HTTPS 服务仍在凭据信任边界内，不能混用不可信服务；页面 grant 不能代替父 HttpOnly Cookie。
+
+在服务器外按目标 Linux 平台构建并核对上传产物 SHA-256，不在资源有限的生产主机临时安装编译工具。先记录既有服务/容器身份、启动时间、健康状态、资源余量和端口，不覆盖现有部署路径。使用上节单 origin 服务与 Caddy 模板，服务数据由无 OS 登录权限的专用用户独占。非秘密环境文件 `/etc/codex-relay-single-origin.env` 包含：
 
 ```sh
-sudo install -o root -g root -m 0644 deploy/relay/Caddyfile.example /etc/caddy/Caddyfile
-sudo caddy validate --config /etc/caddy/Caddyfile
-sudo systemctl enable --now caddy
-sudo systemctl reload caddy
+RELAY_PORTAL_ORIGIN=https://<公网IP>:9443
 ```
 
-确认门户 HTTPS 可访问、证书受信任，工作台子域解析正确；证书更新和 Caddy 重载需另行演练。现有 Caddy 站点应先合并配置，不能直接覆盖已有配置文件。
+TLS 进程环境设置同一个 `RELAY_PUBLIC_ADDRESS=<公网IP>:9443` 和 `RELAY_CERT_NAME=<公网IP>`。若使用容器，以只读目录挂载现有证书叶目录到 `/certs`，配置的 `.crt`/`.key` 须匹配实际文件名；不要修改已有证书权限、标签或续签配置。
 
-## 账号与工作台
+模板限制 relay 为 35% 单核 CPU、384 MiB 内存、64 个任务和一个密码验证任务；启动后读取实际 cgroup 限额验证，不降低哈希成本。若独立 Caddy 容器提供入口，复用已有固定镜像版本，设置 0.15 CPU、128 MiB、64 PID、只读根、`no-new-privileges`、仅所需 `NET_BIND_SERVICE`、有界临时目录及日志轮转，不使用 privileged 或升级原容器。资源限额是部署模板，不是所有负载均可用的保证。
 
-当前服务器 CLI 的账号运维命令如下；部署后仍须通过 `--help` 核对实际安装版本：
+该模板 upstream 固定为 `127.0.0.1:8787`，relay 运行在宿主 systemd。Linux 上独立 TLS 容器必须与 relay 共享宿主网络命名空间（例如显式 host network），或使用另行验证的网络设计；默认 bridge 容器内的 `127.0.0.1` 指向容器自己，会返回 502。启用前核对选定端口没有占用，Caddy 管理口仍仅 loopback，并确认没有新增其他公网监听。不要为修复 502 把 relay 绑定到 `0.0.0.0`，也不要改动现有业务容器网络。
 
-| 操作 | 预期效果 |
-| --- | --- |
-| `invite --username exampleuser` | 发放 24 小时一次性邀请；在安全渠道交给本人 |
-| `reset --username exampleuser` | 发放 15 分钟一次性重置；用户兑换时撤销旧登录会话 |
-| `disable --username exampleuser` | 禁用账号并撤销会话与所属工作台连接 |
+首次启动仍按上节私有文件初始化 `windsyu`，改密后移除参数与文件。证书续签后仅重载本次 TLS 入口；容器挂载目录以避免原子替换后仍读旧 inode，限制重载超时，不重载无关容器或修改其续签机制。模板只启用 HTTP/1.1 与 HTTP/2，不新增 UDP/HTTP3 入口。
 
-单独撤销某工作台时，账号持有人在门户执行删除该工作台的操作，对应 `DELETE /relay/v1/gateways/{id}`；这会撤销服务器侧凭据，不删除本机 Codex 数据。服务器 CLI 当前没有工作台撤销子命令。
+## 历史域名与固定单机兼容
 
-账号命令与 `serve` 共用 `--data-dir`、`--portal-origin`、`--workbench-domain` 全局参数。例如以下命令只会把一次性邀请链接打印到管理员终端，应避免终端会话记录外泄，并将用户名与链接一同安全交给本人：
+域名模式显式使用 `--portal-origin https://app.example.com --workbench-domain wb.example.com`，配合[历史域名服务模板](../../deploy/relay/codex-relayd.service)和 [Caddy 模板](../../deploy/relay/Caddyfile.example)。需门户与工作台 wildcard DNS 和对应证书；标准 Caddy 不自动具备 DNS-01 插件。该模式使用独立 origin/一次性交换码，和旧固定单机模式一样仍转发电脑页面/静态资源，不具有新单 origin 的可信中央前端边界；须单独回归，不能从单 origin 测试推导已通过。
+
+[ADR 0057](../decisions/0057-single-workbench-ip-trial.md)的历史双端口固定单机显式使用 `--portal-origin https://<公网IP>:9443 --workbench-origin https://<公网IP>:9444 --fixed-gateway-id <UUID>`，与 `--single-origin` 互斥，仅支持一台工作台，第二次绑定前须撤销已有登记。使用[历史服务模板](../../deploy/relay/codex-relayd-ip-trial.service)和 [Caddy 模板](../../deploy/relay/Caddyfile.ip-trial.example)，不能误认为新模式需要开放 9444。
+
+历史配置 `/etc/codex-relay-trial.env` 使用 `RELAY_PORTAL_ORIGIN`、`RELAY_WORKBENCH_ORIGIN`、`RELAY_GATEWAY_ID`；Caddy 使用 `RELAY_TRIAL_IP`。账号流程仍升级为管理员创建和首次改密，不恢复邀请 CLI。现场原配置、资源和停止方式见其[历史验证](../validation/public-relay-ip-trial-2026-10-13.md)，新部署不照搬端口规划。
+
+## 账号与电脑登录
+
+管理员在门户创建普通账号并设置临时密码，安全交给本人。普通用户首次登录必须修改密码。管理页面提供重置临时密码、禁用、启用和删除账号；不再提供邀请注册或公开密码重置链接。删除仅允许普通账号，不能删除自身/管理员；确认后永久删除该账号的中转电脑登记及全部登录，不删除电脑原生 Codex 历史或停止本机 CLI。同名重建是新身份，不继承旧电脑。管理员只管理账号，工作台列表仍只显示自己的电脑。`invite`、`reset`、`disable` 旧 CLI 不再作为账号管理入口。
+
+本机 owner 在“公网接入”填写服务 HTTPS 地址和电脑名称，点击“登录并开启公网接入”。浏览器登录账号并核对电脑名称、一次性码和完整工作台权限；若弹窗被阻止，点击显式验证链接。确认后本机保存登录并自动开启连接。页面加载或普通状态轮询不会自动打开登录页面。关闭接入保留登录；取消登录终止正在进行的登录；退出登录并撤销接入会清理本机许可并尽力撤销服务器登记，失败时按提示到门户撤销。
+
+修改密码、管理员重置密码或禁用账号会撤销该账号所有网页和电脑登录；电脑保留登记但显示需要重新登录。启用普通账号不会恢复此前撤销的授权；`recover-admin` 仅撤销 `windsyu` 管理员自身的全部登录，不影响其他账号。离线、需要重新登录和版本不兼容必须分开显示。只有在线且版本兼容的电脑可打开。门户授予的页面 grant 固定绑定父浏览器会话；旧页面失效后必须回门户重新打开，不会自动获得新授权或重放输入。
+
+忘记管理员密码时，停止服务、确认进程退出，用服务用户从私有 `0600` 文件执行：
 
 ```sh
-sudo -u codex-relay codex-relayd --data-dir /var/lib/codex-relay --portal-origin https://app.example.com --workbench-domain wb.example.com invite --username exampleuser
+sudo -u codex-relay codex-relayd --data-dir /var/lib/codex-relay \
+  recover-admin --password-file /var/lib/codex-relay/recovery-password
 ```
 
-用户名使用小写 ASCII；密码长度 15–128 字符。用户在门户注册/登录后，于本机 owner 首页点“公网接入”，输入门户 HTTPS 地址和工作台名称，按一次性码完成绑定，再明确开启。手机从门户进入该账号自己的工作台。每个工作台只归一个账号，账号拥有其完整 V2 权限；没有项目共享或只读角色。关闭保留绑定以供再次开启；忘记会清除本机状态并尝试撤销服务器登记。仅在显示“服务器撤销未确认”时，还需从门户删除工作台。禁用账号应立即阻止新的 HTTP、SSE 和终端会话；已有会话的实测撤销延迟以验收报告为准。
+恢复命令只需数据目录，不需要路由参数。随后安全移除密码文件并重启服务；`windsyu` 再次强制改密，原管理员网页与电脑登录已撤销。恢复不删除其他账号、电脑登记或本机历史。
 
-## 备份、恢复与升级
+## 备份、schema 迁移与恢复
 
-停止服务或使用 SQLite 一致性在线备份方式，备份整个私有数据目录；备份文件权限设为 `0600`，加密后存放在独立位置。不要仅复制正在写入的主数据库文件而遗漏 WAL。一个可审核的停机备份流程是：停止 `codex-relayd.service`，确认进程退出，将 `/var/lib/codex-relay` 完整复制到仅备份管理员可读的私有目录，检查复制结果并加密转存，最后重启服务。记录备份时间、二进制版本和数据库校验和，但不记录账号凭据。恢复时先停止服务，将备份恢复到新的私有目录，核对所有权、迁移版本和门户/工作台域名，再启动并用测试账号验证登录、工作台归属和撤销。恢复后的已撤销凭据可能因旧快照复活；恢复流程必须比对撤销记录，无法确认时按下面步骤撤销所有会话、未兑换邀请/重置码和工作台凭据，用户重新登录并绑定。首版没有可轮换的统一服务密钥，不能用更换不存在的密钥代替撤销。不得从备份导入工作台正文，因为服务器不应保存正文。
+升级前停止服务，或采用 SQLite 一致性备份方式，保留整个私有数据目录、版本与校验和。不要复制正在写入的主库而漏掉 WAL。备份保持 `0600` 并加密保存，恢复到私有目录后核对服务用户所有权。当前 schema 3 的迁移在同一事务将旧管理员 `admin` 改为 `windsyu`，保留 UUID、密码、状态、代际、电脑归属和有效登录；重启幂等。先只读检查目标用户名冲突，任何冲突都拒绝迁移，不能覆盖或自动提权。schema 1 原有升级仍保留账号/电脑归属并撤销旧授权，旧电脑需重新登录。见 [ADR 0061](../decisions/0061-account-deletion-admin-rename.md)。
 
-停机恢复后的全量撤销针对 schema 1 执行，保留账号密码摘要；运维人员先保存恢复副本，然后用服务用户运行 SQLite 客户端。此操作会注销所有用户并删除所有工作台登记，应作为恢复流程的一部分明确告知用户：
+只有相同 schema/契约且完整性检查通过的二进制升级，才可在核实兼容后仅回退二进制/启动配置并保留当前数据库。schema 3 不能交给只支持 schema 2 的旧版；迁移开始后失败须停止专用服务、保全当前库及配置，不自动回退旧版或恢复旧快照。旧快照会丢失后续删除、改密、禁用和撤销，可能复活已删除账号及旧密码。人工恢复前必须核对并保留这些变更；无法核对则保持停服。代际提升仅撤销凭据，不能代替已删除账号和密码状态的核对。
+
+人工核对上述账号状态后，从旧快照恢复仍可能复活已撤销凭据。停服恢复后，对 schema 2/3 进行全量撤销时保留电脑登记，以服务用户执行如下事务：
 
 ```sh
 sudo -u codex-relay sqlite3 /var/lib/codex-relay/relay.sqlite3 <<'SQL'
@@ -84,13 +100,17 @@ BEGIN IMMEDIATE;
 DELETE FROM open_codes;
 DELETE FROM sessions;
 DELETE FROM tokens;
-DELETE FROM gateways;
+UPDATE accounts SET auth_generation=auth_generation+1;
 COMMIT;
 PRAGMA integrity_check;
 PRAGMA foreign_key_check;
 SQL
 ```
 
-要求完整性检查返回 `ok`，外键检查没有结果，再启动服务；过期的邀请需重新生成。若备份可能泄漏，账号密码也须通过管理员重置流程逐个重置。不要在服务运行时直接执行恢复或改库。
+完整性检查必须返回 `ok`，外键检查无结果，才可启动。不要删除 `gateways`；旧凭据因账号授权代际变化而失效，用户重新登录电脑后继续使用登记。备份疑似泄露时还需重置账号密码。服务器不应保存工作台正文，恢复不导入本机历史。
 
-升级前保存上述一致性备份、记录二进制版本与数据库 schema，执行与版本匹配的迁移，再用受邀测试账号检查登录、绑定、V2 阅读/输入、禁用和重连。升级失败时停止服务，恢复匹配版本的二进制及数据库备份；不要只回滚其中之一。升级与恢复期间，本机 CLI 可继续运行，但公网输入中断且不会自动重放。正式 Linux、TLS、手机和恢复演练结果应记录在 [验证索引](../validation/README.md)，不能用本指南代替。
+## 验收与停止
+
+电脑通过“登录并开启公网接入”确认并自动连接，手机登录同一门户并选择自己的在线电脑。至少同账号两台电脑、异账号一台，验证多电脑并行、首次改密、管理员操作、固定 grant、退出/改密后旧页拒绝、SSE/终端撤销、慢流/断网不重放、跨账号和跨 origin 拒绝、版本不兼容，以及本机 CLI 继续运行。逐项比较原服务健康与资源状态，实测只代表当时观察。Linux、证书续签、真实手机与停机恢复的实际结果记录到[验证索引](../validation/README.md)，桌面手机视口不能替代真实网络验收。
+
+停止时只停止本次新建的 relay 服务、证书刷新任务和专用 TLS 容器，不停止已有业务入口；共享入口部署只撤下本次新增路由。停用不删除账号库、本机历史或证书，私有数据不进入 Git。任何 schema 3 回退/恢复仍遵守上节规则，不自动恢复旧库复活权限。

@@ -1,3 +1,4 @@
+import { workbenchFetch } from './context';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { HistorySources, LibraryConfig, libraryDefaults } from './HistorySources';
 import { HistoryStorage, CleanupPreviewPanel } from './HistoryStorage';
@@ -17,7 +18,7 @@ export interface Settings {
   capabilities: { manualCleanup: boolean; retention: boolean };
 }
 const fieldNames: Record<string, string> = {
-  'access.port': '手机接入端口', 'launch.openBrowser': '启动时自动打开浏览器', 'launch.codexBin': 'Codex 程序位置', 'launch.profile': 'Codex 启动配置',
+  'access.port': '本地局域网接入端口', 'launch.openBrowser': '启动时自动打开浏览器', 'launch.codexBin': 'Codex 程序位置', 'launch.profile': 'Codex 启动配置',
   'launch.providerProfile': '模型连接方式', 'storage.dataDir': '历史保存位置', 'history.cleanup.enabled': '允许清理历史记录',
   'history.library': '历史来源', 'history.cleanup.retention.enabled': '自动清理过期记录', 'history.cleanup.retention.days': '保留天数', '$': '配置文件', 'schemaVersion': '配置版本'
 };
@@ -52,8 +53,8 @@ class SettingsError extends Error {
   constructor(readonly code: string, field?: string) { super(errorText(code, field)); }
 }
 
-export function SettingsPanel({ epoch, instanceId, open, managementAvailable = false, onClose, onDirtyChange, onViewHistory }: {
-  epoch: string; instanceId?: string; open: boolean; managementAvailable?: boolean; onClose: (restoreFocus: boolean) => void; onDirtyChange: (dirty: boolean) => void; onViewHistory?: () => void;
+export function SettingsPanel({ epoch, instanceId, open, managementAvailable = false, onClose, onDirtyChange, onViewHistory, embedded = false }: {
+  epoch: string; instanceId?: string; open: boolean; managementAvailable?: boolean; onClose: (restoreFocus: boolean) => void; onDirtyChange: (dirty: boolean) => void; onViewHistory?: () => void; embedded?: boolean;
 }) {
   const endpoint = instanceId ? '/workbench/v1/application/settings' : runApi('/settings');
   const [previewDays, setPreviewDays] = useState<number | null>(null);
@@ -95,7 +96,7 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
     const controller = new AbortController(); readController.current = controller;
     setLoading(true);
     try {
-      const value = await payload(await fetch(endpoint, { credentials: 'same-origin', signal: controller.signal }));
+      const value = await payload(await workbenchFetch(endpoint, { credentials: 'same-origin', signal: controller.signal }));
       if (!alive.current || controller.signal.aborted || sequence !== request.current) return;
       const previous = current.current;
       const edited = previous.draft && !same(previous.draft, previous.info?.saved);
@@ -121,9 +122,9 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
       const target = event.target;
       if (target instanceof Node && !section.current?.contains(target) && !document.getElementById('wb-settings-button')?.contains(target)) closeAction.current(false);
     };
-    document.addEventListener('pointerdown', outside);
+    if (!embedded) document.addEventListener('pointerdown', outside);
     return () => { window.clearInterval(timer); readController.current?.abort(); document.removeEventListener('pointerdown', outside); };
-  }, [open, load]);
+  }, [open, load, embedded]);
   function edit(change: (value: WorkbenchConfig) => void) {
     if (!draft) return;
     const next = structuredClone(draft); change(next); setDraft(next); setMessage('');
@@ -133,7 +134,7 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
     readController.current?.abort(); request.current++;
     current.current.saving = true; setSaving(true); setMessage('');
     try {
-      const value = await payload(await fetch(endpoint, {
+      const value = await payload(await workbenchFetch(endpoint, {
         method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'If-Match': `"${info.revision}"` },
         body: JSON.stringify(instanceId ? { instanceId, config: draft } : { currentRunEpoch: epoch, config: draft })
       }));
@@ -190,7 +191,7 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
             <p className="wb-settings-help">填写已在 Codex 中创建的配置名称，留空使用默认配置。本次使用：{info.effective.launch.profile || '默认配置'}。</p>
             <label>{label('storage.dataDir')}<input aria-label="历史保存位置" value={draft.storage.dataDir || ''} placeholder="留空使用默认位置" onInput={event => edit(c => { c.storage.dataDir = event.currentTarget.value || null; })} /></label>
             <p className="wb-settings-help">下次启动后，新记录将保存在所填位置的 runs 文件夹中。留空使用默认位置；已有记录不会搬迁。</p>
-          <label>手机接入端口<input aria-label="手机接入端口" type="number" min={0} max={65535} step={1} value={draft.access?.port ?? 0} onInput={event => edit(c => { c.access = { port: Number(event.currentTarget.value) }; })} /></label><p className="wb-settings-help">0 自动选择，或填写 1024–65535。保存后下次开启手机接入生效，不会自动开放网络。</p></details>
+          <label>本地局域网接入端口<input aria-label="本地局域网接入端口" type="number" min={0} max={65535} step={1} value={draft.access?.port ?? 0} onInput={event => edit(c => { c.access = { port: Number(event.currentTarget.value) }; })} /></label><p className="wb-settings-help">0 自动选择，或填写 1024–65535。保存后下次开启本地局域网接入生效，不会自动开放网络。</p></details>
         </fieldset>
         {!!info.restartRequired.length && <p className="wb-notice">已保存，待下次启动生效：{info.restartRequired.map(field => fieldNames[field] || field).join('、')}。</p>}
       </form>}

@@ -4,10 +4,11 @@
 
 ## 使用与开发
 
+- [组件选择与 AI agent 部署入口](guides/component-deployment.md)：本机后端和中转的能力、独立构建、数据边界及分端部署顺序。
+- [本机工作台部署与接入](guides/local-workbench-deployment.md)：只部署 codex-plugin 电脑后端、原生 CLI 认证、局域网及可选公网连接器。
 - [安装与快速启动](guides/installation.md)：发布包校验、本地安装及 `code-view` 项目入口。
 - [使用指南](guides/usage.md)：启动、终端、手机接入、历史、配置和旧 Observer。
-- [公网中继部署与运维](guides/public-relay-deployment.md)：Linux、域名 TLS、账号与备份恢复；域名模式及完整手机验收另列。
-- [单工作台 IP 测试](guides/public-relay-ip-trial.md)：复用已有受信任 IP 证书，使用独立端口及资源限额；同 IP Cookie 信任边界另列。
+- [公网中继部署与运维](guides/public-relay-deployment.md)：windsyu 管理员、账号删除、单端口中央前端、schema 3 备份恢复；域名兼容与真实手机验收另列。
 - [支持范围与限制](codex-native-cli-workbench-support.md)：可试用环境、兼容基线与资源边界。
 - [开发与维护](development/README.md)：模块、检查、构建产物生命周期、Git 文件规则和发布。
 - [Release 包装与发布](development/releasing.md)：许可收集、来源与校验和、正式发布门槛。
@@ -17,16 +18,27 @@
 
 [V2 实施计划](v2-implementation-plan.md)是唯一实施状态、需求追踪和逐片验收来源。下列文档负责契约和理由，不维护另一套进度表。
 
+### 两个组件的维护入口
+
+| 组件 | 架构说明 | 交互说明 | 部署说明 |
+| --- | --- | --- | --- |
+| 本机工作台 `workbench` | [模块、运行与数据边界](architecture/workbench.md) | [页面、原生终端与接入流程](interactions/workbench.md) | [本机部署](guides/local-workbench-deployment.md) |
+| 公网中转 `relay` | [依赖、身份、安全与 schema](architecture/relay.md) | [账号、电脑认证与固定页面 API](interactions/relay.md) | [Linux / 单 IP / 历史兼容](guides/public-relay-deployment.md) |
+
+AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和交互；跨端协议或认证变更两组都读。下列专题是更细契约，ADR 是理由，验证是带日期证据；不把旧报告当成当前行为。原混合中转契约和试部署指南已由上述正式文档完整替代，不维护重复入口。
+
+### 专题契约与依据
+
 | 文档 | 职责 |
 | --- | --- |
 | [工作台方案](codex-native-cli-workbench.md) | 体验目标、架构与可靠性取舍 |
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
 | [历史首页与项目启动](codex-native-cli-workbench-history-home.md) | Application/Run、跨来源历史、新建与恢复 |
-| [历史管理与配置](codex-native-cli-workbench-history-settings.md) | 用户历史保留和同页 JSON 设置 |
+| [历史管理与配置](codex-native-cli-workbench-history-settings.md) | 用户历史保留和独立设置页的 JSON 配置契约 |
 | [设备接入](codex-native-cli-workbench-device-access.md) | 显式监听、配对、撤销和设备作用域 |
-| [公网工作台中继契约](codex-public-workbench-relay.md) | 可信服务、账号归属、RemoteOwner、流路由与安全边界；验收状态以 V2 计划为准 |
 | [ADR 索引](decisions/README.md) | 已记录架构决定及历史背景 |
+| [独立功能页面与中转断线恢复](decisions/0059-workbench-routes-and-relay-recovery.md) | 本机/中转路由、同 Run 终端保活与不重放输入；不代替部署验收 |
 | [验证报告索引](validation/README.md) | 每次实测的环境、证据、限制与图片 |
 | [原型说明](prototypes/README.md) | 合成交互与视觉参考，不是运行时验收 |
 

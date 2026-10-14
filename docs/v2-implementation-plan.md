@@ -37,7 +37,7 @@
 | R5 完整验收与退役 | 实际模型/设备矩阵、性能与故障门槛、旧控制代码退役 | R4 | Passed | 2026-09-21 用户授权继续；[桌面阶段证据](validation/native-cli-r5-desktop-2026-09-21.md)已验证正式产物真实模型/图片、取消状态修复、当前界面性能、schema 20 只读副本及顺序回退。[退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)补齐 SIGHUP 清理及测试 Chrome 进程组回收；[终端工具独立化](validation/native-cli-r5-terminal-extraction-2026-09-21.md)移除新工作台对旧 Session 目录的引用并补漏早期调试入口。用户已确认电脑端右侧终端中文输入正常；[LAN/MagicDNS 接入](codex-native-cli-workbench-device-access.md)的 A–B 已实现并通过[自动化与 Chrome 验证](validation/native-cli-device-access-2026-09-21.md)，用户已确认手机接入及输入成功，其他手机体验按用户要求留待后续优化；锁屏/双网络等未逐项确认；2026-09-21 用户明确授权拆除旧 Session/App Server 内核，旧内核已移除，341 项 Rust、150 项前端、10 项历史 Chrome 及 5 项原生/上下文/设备回归通过，见[退役验证](validation/native-cli-r5-kernel-retirement-2026-09-21.md)。[2026-09-22 收尾验收](validation/native-cli-r5-acceptance-2026-09-22.md)统一 RQ01–RQ12 / P01–P14 的证据与范围，修复调用记录/手机接入面板的即时 Esc 焦点问题；156 项前端、341 项 Rust、10 项安装版 CLI/Chrome、10 项旧历史 Chrome 通过，release 产物另通过 3 项正式入口回归。按已确认 macOS/custom 接入范围交付，其他平台/provider 和暂缓手机优化保持未验证；本阶段完成后暂停供用户试用 |
 | R6 历史首页与按项目启动 | codex-view 默认全部历史、三类来源、旧库 20/25 只读、显式新建/恢复、多项目标签与隔离 | R5 | Passed | A–F.1 已通过分片验证与用户试用；[G1 资源与缓存边界](validation/native-cli-r6-g1-resources-2026-09-30.md)、[G2 压力/容量隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)、[G3 兼容与实际旧库限定只读抽查](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 交付/CLI 0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)已通过。2026-09-30 用户明确确认本次交付试用通过；按现有 macOS/custom 接入范围收尾，不扩大未验证平台/provider/手机组合 |
 | Release 包装 | 0.3.0 安装包、code-view 当前项目/指定路径、许可与校验、隔离安装验证 | R6 | Passed | [包装验证](validation/v2-release-packaging-2026-10-02.md)：445 项 Rust、234 项 Web、45 项维护工具及格式/Clippy/类型/debug/release 通过；实际归档解压安装、中文/空格 cwd、实例复用、历史入口、资源与 SIGINT 回收通过。显式 Cargo target 回归通过；限 macOS / Apple Silicon；本条证据为本地包装验证，正式发行资产以 GitHub Release 记录为准 |
-| 公网工作台中继 | 邀请账号、每账号自有完整 V2 工作台、出站连接、Linux 中继与手机 HTTPS 入口 | R6；[ADR 0056](decisions/0056-public-workbench-relay.md)、[ADR 0057](decisions/0057-single-workbench-ip-trial.md) | In progress | 独立服务、账号归属、本机连接器与完整 V2 owner 路由已实现；两账号真实链路、撤销和系统 Chrome 手机视口通过，见[本地验证](validation/public-workbench-relay-2026-10-10.md)。[IP 测试部署](validation/public-relay-ip-trial-2026-10-13.md)的 Linux 资源隔离、公网 HTTPS/WSS、Chrome 手机视口页面/SSE/合成终端与原服务连续性通过；域名/TLS wildcard、真实手机完整 V2/重启/备份恢复待验收；不能继承既有 LAN 验收 |
+| 公网工作台中继 | windsyu 管理员管理/删除普通账号、首次改密与全端撤销、单 IP 单 HTTPS 端口多电脑、可信中央前端 | R6；[ADR 0058](decisions/0058-admin-accounts-single-origin-relay.md)、[ADR 0061](decisions/0061-account-deletion-admin-rename.md) | In progress | [本地与三电脑 Chrome 联调](validation/public-relay-single-origin-2026-10-13.md)、[首轮 Linux 部署](validation/public-relay-single-origin-deploy-2026-10-14.md)、[页面/恢复增量升级](validation/public-relay-routes-recovery-2026-10-14.md)及[账号管理增量](validation/public-relay-account-management-2026-10-14.md)覆盖 schema 2/3、TLS、原生 CLI 合成回归、真实备份副本恢复、自动重连及默认管理员无损改名。账号删除使用隔离合成数据，真实账号未自动删除。公网真实消息等待所属账号在独立 Chrome 登录；真实手机、三电脑完整公网 V2 与续签另验。旧[本地链路](validation/public-workbench-relay-2026-10-10.md)和[双端口试用](validation/public-relay-ip-trial-2026-10-13.md)不继承 LAN 或旧双端口 Passed 证据 |
 
 状态只在本表维护：`Pending`、`In progress`、`Blocked`、`Passed`。`Passed` 必须链接本项目的版本、操作、断言、结果和限制；设计文本、源码阅读及 cc-viewer 试用均不能充当通过记录。出现阻塞须写明具体失败与下一项实验，不能只写“兼容性待确认”。
 
@@ -57,13 +57,16 @@ R5 的 Passed 限于当时明确验证的范围。随后发现实际旧库 schem
 | RQ08 | F12，图片/设备（参考产品未实测） | 先验证原生接纳；必要最小图片桥接，无自动 Enter | R5 |
 | RQ09 | [已纳入的交互原型](codex-native-cli-workbench.md#ui-prototype)与[角色/类型规则](codex-native-cli-workbench.md#chat-content-design) | 深色紧凑工作台、用户/模型气泡、工具/命令卡、项目树/消息/终端并列、面板与状态交互 | R1 布局与真实聊天、R2–R4 数据面板 |
 | RQ10 | 用户 2026-09-20 补充历史管理 | 当前项目占用、按运行/批量清理、默认关闭删除、独立启用保留期限；活动运行与原生/旧数据受保护 | R3.1 / P12 |
-| RQ11 | 用户 2026-09-20 补充统一配置及试用反馈 | 用户主目录 `.codex-web` 内统一 config/history，默认值独立于 CODEX_HOME，Windows 同名同结构；指定目录覆盖与版本化 JSON；当前工作台点击展开编辑，不建独立设置页/路由；中文说明、清理策略优先、历史/日志位置可见、高级启动参数折叠；校验/冲突/生效范围明确 | R3.1 / P13 |
+| RQ11 | 用户 2026-09-20 补充统一配置及试用反馈 | 用户主目录 `.codex-web` 内统一 config/history，默认值独立于 CODEX_HOME，Windows 同名同结构；指定目录覆盖与版本化 JSON；中文说明、清理策略优先、历史/日志位置可见、高级启动参数折叠；校验/冲突/生效范围明确。原同页编辑决定由 RQ18 的独立设置路由覆盖，不改变配置和 CLI 生命周期 | R3.1 / P13；RQ18 增量另验 |
 | RQ12 | 用户 2026-09-21 补充手机接入及简化反馈 | 当前页列出同一服务的 IP/MagicDNS URL，两地址同时可用，共用配对/业务；选择二维码不切换模式或断开连接；默认关闭、本次运行固定配对码/统一撤销、来源校验，不要求 Serve，见[设备接入设计](codex-native-cli-workbench-device-access.md) | R5 / P14 |
 | RQ13 | 用户 2026-09-22 要求整合 V1 历史，2026-09-23 指出误归类 | 同一 codex-view 首页读取原生/工作台/旧 Observer 跨项目历史与搜索；保留无项目语义，cwd 不无条件等于项目，项目按最近记录排序；旧库 20/25 只读、不迁移、不混来源 | R6-A/C/D/F.1/G / P15 |
 | RQ14 | 用户确认首页优先与项目入口 | 默认无 CLI 的全部历史；已有项目/指定现有路径明确开始；默认新对话、指定会话显式恢复，重复启动复用实例；无项目归类不抹去原 cwd 或可靠恢复资格 | R6-B/D/E/F.1/G / P16 |
 | RQ15 | 用户确认另项目新标签、原项目继续 | 独立 Run/PTY/代理/目录/保存，手机授权与清理仍按 Run/项目限制，停止与退出不串线、不恢复旧控制 | R6-E/F/G / P17、P07/P08 |
 | RQ16 | 用户 2026-10-02 要求最终 release 包装与快速启动 | 0.3.0 macOS arm64 安装包、code-view 当前目录/指定路径、独立历史入口、许可/校验与隔离安装验证；不扩展原运行边界 | §10 Release 包装 |
-| RQ17 | 用户 2026-10-10 明确要求可信公网中继和邀请制账号；2026-10-13 选择有限资源服务器、直接 IP 并复用既有 Caddy 证书试用，源码分支与 V3 分离 | Linux 独立服务、账户归属、各工作台完整 V2、出站 WSS、独立 HTTPS origin、可撤销凭据；无项目共享或 V3 IM；真实手机/公网与本机隔离必须分别验证。IP 试用另限单工作台并明确共享主机 Cookie 信任，不替代域名模式验收 | 公网工作台中继；[Issue #14](https://github.com/windsyu/codex-plugin/issues/14)、[契约](codex-public-workbench-relay.md)、[ADR 0056](decisions/0056-public-workbench-relay.md)、[ADR 0057](decisions/0057-single-workbench-ip-trial.md) |
+| RQ17 | 用户 2026-10-13 确认 admin 创建全部账号、临时密码强制改密、同账号多电脑及单 IP 单 HTTPS 入口，源码分支与 V3 分离 | 私有文件幂等初始化 admin；改密/reset/disable 全端撤销，旧电脑原所属账号重新认证；可信中央前端与固定页面授权，同源 XSS 影响当前账号全部电脑；schema 2 配套升级、保留登记/归属；无项目共享或 V3。域名/旧双端口仅显式兼容，真实手机/公网另验 | 公网工作台中继；[Issue #14](https://github.com/windsyu/codex-plugin/issues/14)、[契约](architecture/relay.md)、[ADR 0058](decisions/0058-admin-accounts-single-origin-relay.md) |
+| RQ18 | 用户 2026-10-14 要求前端美化和功能独立路由、稳定自动恢复、指定 ECS 与匿名浏览器模拟手机控制 CLI/发送消息 | 门户与工作台精确路由、刷新/前进后退/新标签、固定授权；同 Run 不重挂终端、不新建 CLI；续租超时/退避/认证失效与旧 epoch 撤销；配套构建部署后，独立 Chrome 会话验证真实消息与恢复。匿名浏览器不代替真机网络 | 公网增量分片；[ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) |
+| RQ19 | 用户 2026-10-14 要求账号删除及默认管理员名称 windsyu | 仅普通账号可删除，事务清除登记/会话/凭据并关闭连接，保留审计和本机历史/CLI；schema 3 无损迁移旧默认管理员，冲突回滚、禁止自动提权、原密码/UUID/归属保留；升级失败不自动恢复旧快照或旧二进制 | 公网工作台中继；[ADR 0061](decisions/0061-account-deletion-admin-rename.md) |
+| RQ20 | 用户 2026-10-14 要求中转和本机 codex-plugin 分开编译/部署，并供其他 AI agent 操作 | 独立 Cargo 产品、组件 build/check、本机 package 不编译中转、共享协议/可信前端不反向依赖运行模块；分别说明运行依赖/账号与模型认证/数据/升级/验证，不拆仓库、不自动部署 | 公网工程增量；[ADR 0062](decisions/0062-independent-component-builds.md)、[组件指南](guides/component-deployment.md)、[验证](validation/independent-components-2026-10-14.md) |
 
 F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；项目共享、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入当前交付。RQ12 的既有 LAN 手机入口不包含公网；用户 2026-10-10 新授权的公网账号归属范围单列为 RQ17，不追溯到 R5/R6 的 Passed 证据。
 
@@ -92,7 +95,7 @@ F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 
 | 勾选历史 → 预览 → 确认删除 → 查看结果；另启用保留期限 | 精确候选与预计大小可核对，活动/未知目标跳过；部分失败/待清理占用明确，自动策略只清理当前项目的可信到期记录 | R3.1 / P11、P12 |
 | 搜索 `AbortController` → 点击结果 → 查看文件/Git Diff → 返回对话 | 只读定位当前项目文件；Git Diff 标注工作区范围，与模型拟议 patch 分开；侧栏选择与中央阅读独立 | R4 / P09、P11 |
 | 键盘依次访问入口 → 切换 1024 / 736 / 320px 视口 | 控件可用键盘操作、焦点可见；页面无整体横向溢出，长代码在容器内滚动；窄屏可读，真实手机输入另验 | R1–R4 / P11；真机归 R5 / P10 |
-| 点击“手机接入” → 开启 → 选择 URL 的二维码/扫码 → 断开浏览器/关闭接入 | 同页展开且终端持续挂载；两地址同时有效，二维码选择只改变展示；本次运行共用固定配对码，可重复扫码；同一 CLI 和统一撤销 | R5 / P14；[接入交互](codex-native-cli-workbench-device-access.md#3-网页交互)已实现并通过 Chrome；用户已确认手机接入与输入，其他真机体验待后续优化 |
+| 点击“本地局域网接入” → 开启 → 选择 URL 的二维码/扫码 → 断开浏览器/关闭接入 | Run 接入页展示且同 Run 终端持续挂载；直连本机，不经过公网中转站；两地址同时有效，二维码选择只改变展示；本次运行共用固定配对码，可重复扫码；同一 CLI 和统一撤销 | R5 / P14；[接入交互](codex-native-cli-workbench-device-access.md#3-网页交互)已实现并通过 Chrome；用户此前已确认手机接入与输入，其他真机体验待后续优化；[2026-10-14 文案增量](validation/local-network-access-label-2026-10-14.md)不扩大网络或权限范围 |
 
 独立 HTML 已提供面板、工具展开、请求详情、示例搜索和终端演示草稿；保存异常、缺口及接管演示依赖原对话的宿主控件。真实流式跟随、xterm/PTY、输入仲裁、重连和磁盘状态均是待接入行为。原型检查只证明演示页面可操作，不能推进 §3 的运行时通过状态。
 
@@ -128,6 +131,27 @@ F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 
 R2 的[工具阶段证据](validation/native-cli-r2-tools-2026-09-19.md)、[原生结果增量](validation/native-cli-r2-native-results-2026-09-19.md)、[请求详情](validation/native-cli-r2-request-details-2026-09-19.md)、[统一消息契约](validation/native-cli-r2-view-items-2026-09-20.md)和[复杂上下文/生命周期](validation/native-cli-r2-contexts-2026-09-20.md)现共同覆盖 C03–C10 的 R2 范围。逐项结果和未扩大支持的边界见[整片验收](validation/native-cli-r2-acceptance-2026-09-20.md)：原生拒绝/中断没有工具终态时保持未知，WS create→新响应没有直接证据时仍可在请求级阅读，同轮多条提交不宣称与模型片段精确交错。恢复旧会话不等于网页持久历史已经接入，完整真实 provider/设备及性能故障矩阵仍归 R5。
 
 ## 5. 逐片实施与通过条件
+
+### 公网增量：功能页面与恢复验收（RQ18）
+
+当前分支为 `codex/public-relay`；现有账号/schema 2/中央前端改造和测试部署保留，V3 不进入本轮。当前测试中转在 ECS `i-bp16nvvpdk423m48yewl` 的选定 HTTPS 9443 入口；完整现场记录见[部署报告](validation/public-relay-single-origin-deploy-2026-10-14.md)。本机临时电脑保留私有工作台 config/history，用户授权使用真实原生 Codex 配置；自动化仍使用隔离目录。
+
+按以下有依赖的小片推进，状态仍只在 §3 的“公网工作台中继”行维护：
+
+1. **页面与导航。** 门户拆成登录/电脑/授权/安全/用户管理；工作台拆成概览/历史/启动/设置/公网接入及 Run 九类页面。统一响应式导航和状态解释。后端新增精确页面白名单与门户 CSS；兼容旧 query/设备码入口。首次握手前 `api=0` 表示“等待连接”，不是已确认版本不兼容。验证直达/刷新/前进后退/新标签、窄屏、授权清屏、跨电脑/账号、设置/历史/文件/启动和同 Run 终端挂载。
+2. **连接恢复。** 独立测试控制通道超时、有界抖动退避、稳定会话后复位、网络黑洞与空闲 SSE 回收；认证拒绝不重试。验证断开/关闭/忘记/改密与迟到结果 fencing，旧 epoch 输入许可立即撤销、本机 CLI 存活、未确认按键不重放。现有安全测试保留，新增能复现修复点的回归。
+3. **配套构建与部署。** 使用标准 `build/check/docs` 和系统 Chrome，先前端后 Rust；生成配套 macOS 与静态 Linux 产物并检查许可/敏感文件。远端先只读盘点、数据库备份与恢复路径核验，再升级现有专用服务；保持账号/电脑登记、9443 入口和业务服务不变。确认无用户活动任务才重启本机临时电脑。回归旧域名模式，不隐式混入单端口路径。
+4. **公网原生 CLI 验收。** 独立/匿名系统 Chrome 会话以移动端视口登录公网门户、选择本机电脑、检查已有目录、明确启动一个安装版官方 CLI。在终端发送不读写项目、不调用工具的低风险测试消息；核对用户输入一次、真实模型返回及 SSE 聊天呈现。测试页面路由/刷新、新标签接管、浏览器短断线和中转重启后自动恢复，并核对同一 CLI PID/Run 与无重发。缺登录凭据时请用户自行登录，不读取密码库或重置账号。记录真实 CLI/provider 支持问题、命令和失败，不用合成模型冒充公网真实发送。
+
+**2026-10-14 模型命令认证增量。** 中转登录只保护网页/网关，本机 CLI 仍负责模型认证。`unmanaged-custom` 接受 `auth.command`（显式 Responses/upstream、`requires_openai_auth=false`），工作台不执行命令、不读取/缓存生成的 token；代理透明转发认证头并排除观察。为防原生登录状态另行启用 cloud-managed 路由补值，命令路径仍保留 File store 与 `auth.json` 来源门禁/启动快照，但不把它当命令凭证。静态 bearer 原行为不变，命令与静态 bearer、env key/header、AWS、true 互斥，系统/managed 路由继续拒绝。安装版 CLI 0.162.1、系统 Chrome 与合成 provider 的命令执行及 401 重取已经通过，真实 provider、公网真实发送仍待独立验收；见 [ADR 0060](decisions/0060-native-provider-command-auth.md)与[分项验证](validation/native-cli-command-auth-2026-10-14.md)。用户确认本机试运行成功后，指定 ECS 的配套中转与中央前端已更新，保留 schema 2、账号/电脑登记，公网资源逐字节匹配、备份恢复副本及本机自动重连通过，见[后续部署记录](validation/public-relay-command-auth-deploy-2026-10-14.md)。本增量不单独推进公网切片为 Passed；无 migration。
+
+**2026-10-14 账号管理增量（RQ19）。** 默认管理员改为 `windsyu`，schema 3 将旧管理员无损改名，账号删除仅允许普通账号且不影响原生历史/本机 CLI。权限/回滚/并发及真实 loopback 流回归、最终标准 check、隔离合成账号系统 Chrome 验证通过，指定 ECS 已上线。升级先完成一致性加密备份、名称冲突检查与真实恢复副本验证，保留 3 个账号/1 台电脑、原密码/UUID/归属；公网资源逐字节匹配，既有 Chrome 登录显示新名称与删除入口，未自动删除真实账号。跨 schema 后失败保全当前库并停服，不沿用旧 schema 2 的 binary-only 回退。见[分项验证与限制](validation/public-relay-account-management-2026-10-14.md)，不追认整片 Passed。
+
+**2026-10-14 独立组件工程增量（RQ20）。** 服务器保持 `relay/` 独立 package，本机保留 CLI/PTY/历史与出站连接器，仅共享协议和可信静态资源。标准 `build/check --component` 明确选择产品，完整回归显式覆盖 workspace；本机安装包只构建本机产品。组件与两端部署指南为其他 agent 提供命令、运行依赖、配置数据及权限/升级边界，见 [ADR 0062](decisions/0062-independent-component-builds.md)和[分项验证](validation/independent-components-2026-10-14.md)。此工程增量不修改 API/schema、不自动重启本机或部署远端，不推进公网切片为 Passed。
+
+**2026-10-14 本机接入文案增量。** 按用户要求，将 Run 的“手机接入”导航、面板、端口设置及配对提示统一改为“本地局域网接入”，明确 LAN/Tailscale 直连本机，不经过公网中转站。303 项前端测试、TypeScript、标准构建与隔离系统 Chrome 配对/双地址/断线/撤销专项通过；无接口、配置、权限或 migration 变化。现有本机任务和公网部署未重启，详见[验证与交付边界](validation/local-network-access-label-2026-10-14.md)。
+
+整片通过须同时有上述四片的实际证据；页面可访问、局部绿测试或部署成功不能代替消息控制。真实手机硬件/移动网络仍单独记录，不阻止先完成用户指定的匿名浏览器模拟，但不能因此将真机状态改为 Passed。原生历史不修改；前次命令认证升级的 schema 2 binary-only 回退仅适用于当时相同结构，本次 schema 3 不能使用。结构或完整性无法确认时保全现场并另行决定恢复，不能自动恢复旧快照。
 
 ### R0：验证普通 CLI 与模型代理能成立
 

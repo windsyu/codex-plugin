@@ -20,7 +20,7 @@ pub struct ConfigSources {
     pub possible_cloud_management: bool,
 }
 impl ConfigSources {
-    pub fn require_verified(&self) -> Result<()> {
+    pub(crate) fn require_route_verified(&self) -> Result<()> {
         ensure!(
             !self.system_config,
             "system configuration requires a verified effective-route adapter"
@@ -32,6 +32,10 @@ impl ConfigSources {
                 && !self.managed_requirements_preference,
             "managed configuration is not validated for this capture profile; native policy must not be overridden"
         );
+        Ok(())
+    }
+    pub fn require_verified(&self) -> Result<()> {
+        self.require_route_verified()?;
         ensure!(
             !self.unverified_auth_store,
             "credential-store configuration is not validated for this capture profile"
@@ -83,19 +87,12 @@ fn inspect_sources_for_launch(
     system: &Path,
     preferences: (bool, bool),
 ) -> Result<(ConfigSources, AuthSnapshot)> {
-    let mut sources = ConfigSources {
-        system_config: present(&system.join("config.toml"))?,
-        managed_file: present(&system.join("managed_config.toml"))?,
-        system_requirements: present(&system.join("requirements.toml"))?,
-        managed_config_preference: preferences.0,
-        managed_requirements_preference: preferences.1,
-        // File is the installed baseline's default. Keyring/auto may resolve
-        // a ChatGPT account even when auth.json contains an API key or is absent.
-        unverified_auth_store: config
-            .get("cli_auth_credentials_store")
-            .is_some_and(|value| value.as_str() != Some("file")),
-        ..ConfigSources::default()
-    };
+    let mut sources = inspect_route_sources(system, preferences)?;
+    // File is the installed baseline's default. Keyring/auto may resolve
+    // a ChatGPT account even when auth.json contains an API key or is absent.
+    sources.unverified_auth_store = config
+        .get("cli_auth_credentials_store")
+        .is_some_and(|value| value.as_str() != Some("file"));
     let snapshot = AuthSnapshot::read(home)?;
     if let Some(bytes) = &snapshot.bytes {
         let value = auth_value(bytes)?;
@@ -105,6 +102,17 @@ fn inspect_sources_for_launch(
                 .is_some_and(|mode| !mode.is_null() && mode.as_str() != Some("apikey"));
     }
     Ok((sources, snapshot))
+}
+
+fn inspect_route_sources(system: &Path, preferences: (bool, bool)) -> Result<ConfigSources> {
+    Ok(ConfigSources {
+        system_config: present(&system.join("config.toml"))?,
+        managed_file: present(&system.join("managed_config.toml"))?,
+        system_requirements: present(&system.join("requirements.toml"))?,
+        managed_config_preference: preferences.0,
+        managed_requirements_preference: preferences.1,
+        ..ConfigSources::default()
+    })
 }
 
 // Credential bytes never enter serialized source diagnostics or Debug output.
@@ -272,6 +280,41 @@ mod tests {
                 inspect_sources(directory.path(), &config, &system, prefs)
                     .unwrap()
                     .require_verified()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn route_only_inspection_ignores_login_store_but_still_rejects_management() {
+        let directory = tempfile::tempdir().unwrap();
+        let system = directory.path().join("system");
+        std::fs::create_dir(&system).unwrap();
+
+        inspect_route_sources(&system, (false, false))
+            .unwrap()
+            .require_route_verified()
+            .unwrap();
+        for name in ["config.toml", "managed_config.toml", "requirements.toml"] {
+            let path = system.join(name);
+            std::fs::write(&path, "must remain unread").unwrap();
+            assert!(
+                inspect_route_sources(&system, (false, false))
+                    .unwrap()
+                    .require_route_verified()
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "must remain unread"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+        for preferences in [(true, false), (false, true)] {
+            assert!(
+                inspect_route_sources(&system, preferences)
+                    .unwrap()
+                    .require_route_verified()
                     .is_err()
             );
         }

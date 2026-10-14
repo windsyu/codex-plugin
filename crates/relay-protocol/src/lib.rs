@@ -2,7 +2,29 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+/// Central UI, application/start and terminal contract. Strict match required.
+pub const WORKBENCH_API_VERSION: u32 = 1;
+/// Exact document routes shared by the local server and central relay UI.
+/// `/relay` is local-only and deliberately absent from remote routing.
+pub const APPLICATION_PAGES: &[&str] = &["/", "/history", "/launch", "/settings"];
+pub const RUN_PAGES: &[&str] = &[
+    "chat", "terminal", "files", "search", "git", "history", "usage", "settings", "access",
+];
+
+pub fn document_path(path: &str) -> bool {
+    if APPLICATION_PAGES.contains(&path) {
+        return true;
+    }
+    let Some(tail) = path.strip_prefix("/runs/") else {
+        return false;
+    };
+    let Some((id, page)) = tail.split_once('/') else {
+        return false;
+    };
+    Uuid::parse_str(id).is_ok_and(|value| !value.is_nil() && value.to_string() == id)
+        && RUN_PAGES.contains(&page)
+}
 pub const MAX_HTTP_BODY: usize = 2 * 1024 * 1024;
 pub const MAX_FRAME: usize = 128 * 1024;
 // Native snapshots contain a styled 200x500 checkpoint (22 UTF-8 bytes/cell)
@@ -17,6 +39,8 @@ pub const LEASE_SECONDS: u64 = 30;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Hello {
     pub version: u32,
+    #[serde(default)]
+    pub workbench_api_version: u32,
     pub gateway_id: Uuid,
     pub instance_id: Uuid,
     pub client_version: String,
@@ -82,10 +106,14 @@ pub enum Data {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BindingStart {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_gateway_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_credential: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +136,8 @@ pub struct BindingPoll {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Bound {
+    #[serde(default)]
+    pub username: String,
     pub account_id: Uuid,
     pub gateway_id: Uuid,
     pub credential: String,
@@ -124,7 +154,7 @@ pub fn allowed(method: &str, target: &str) -> bool {
     if path.contains('%') || path.contains("..") || path.contains("//") || path.contains('\\') {
         return false;
     }
-    if path == "/" {
+    if document_path(path) {
         return method == "GET";
     }
     if path.starts_with("/assets/") {
@@ -208,6 +238,36 @@ fn uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn document_routes_are_explicit_canonical_and_get_only() {
+        let run = Uuid::new_v4();
+        for path in APPLICATION_PAGES
+            .iter()
+            .map(|p| p.to_string())
+            .chain(RUN_PAGES.iter().map(|p| format!("/runs/{run}/{p}")))
+        {
+            assert!(document_path(&path), "{path}");
+            assert!(allowed("GET", &path));
+            assert!(!allowed("POST", &path));
+        }
+        for path in [
+            "/relay".to_string(),
+            "/history/".to_string(),
+            "/login".to_string(),
+            "/workbench/v1/unknown".to_string(),
+            format!("/runs/{run}/unknown"),
+            format!("/runs/{run}/chat/"),
+            format!("/runs/{run}/chat/extra"),
+            format!("/runs/{}/chat", run.simple()),
+            format!("/runs/{}/chat", run.to_string().to_uppercase()),
+            format!("/runs/{}/chat", Uuid::nil()),
+            format!("/runs/{run}/%63hat"),
+            format!("/runs/{run}/../chat"),
+        ] {
+            assert!(!document_path(&path), "{path}");
+            assert!(!allowed("GET", &path), "{path}");
+        }
+    }
     #[test]
     fn route_boundary() {
         let run = Uuid::new_v4();

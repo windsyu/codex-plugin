@@ -29,6 +29,22 @@ it('opens a native dialog and restores the opener after cancel', async () => {
   opener.remove();
 });
 
+it('focuses manual path entry when entering and re-entering the embedded launch page', () => {
+  const opener = document.createElement('a'); opener.href = '/launch';
+  document.body.append(opener); opener.focus();
+  renderPanel({ embedded: true, preview });
+  expect(document.activeElement).toBe(root.querySelector('input[aria-label="项目目录"]'));
+  render(null, root); opener.focus();
+  renderPanel({ embedded: true, preview });
+  expect(document.activeElement).toBe(root.querySelector('input[aria-label="项目目录"]'));
+  opener.remove();
+});
+
+it('focuses the page close action when launch input is unavailable', () => {
+  renderPanel({ embedded: true, pending: true, preview });
+  expect(document.activeElement).toBe(root.querySelector('.wb-launch-close'));
+});
+
 it('keeps manual path entry, validates through Enter, and offers the folder picker when available', async () => {
   const props = renderPanel({ onPick: vi.fn() });
   const input = root.querySelector('input[aria-label="项目目录"]') as HTMLInputElement;

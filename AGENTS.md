@@ -31,6 +31,7 @@ V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再�
 - [支持范围](docs/codex-native-cli-workbench-support.md)：实际受测环境、能力与限制；
 - [ADR 索引](docs/decisions/README.md)：架构和兼容选择；[验证索引](docs/validation/README.md)：当时的版本、结果和限制；
 - [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布；参考研究、合成原型与历史归档是非规范性依据，不能替代新运行时验收。
+- 组件维护入口：[本机架构](docs/architecture/workbench.md)/[交互](docs/interactions/workbench.md)、[中转架构](docs/architecture/relay.md)/[交互](docs/interactions/relay.md)；跨端变更同时核对两组，分端部署见[组件指南](docs/guides/component-deployment.md)。
 
 需要研究官方源码时，使用自行配置的只读 checkout（可用 `CODEX_SOURCE_DIR` 指向该目录）；不把维护者机器路径作为其他贡献者的前提。该变量仅用于研究命令，不是产品运行配置。
 
@@ -343,9 +344,9 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 ### 12.1 模块和文档组织
 
-- 保留单 package、library 加两个 binary，按职责收敛接口；模块默认私有，按消费者选择 `pub(crate)` / `pub`，binary 负责启动编排。共享能力归属明确，不增加模块依赖环或跨目录实现复用。
+- 本机保持单 package、library 加两个 binary；中转为独立 `relay/` package，按 [ADR 0062](docs/decisions/0062-independent-component-builds.md) 分别构建/部署，仅共享协议与静态资源。电脑连接器属于本机，不搬到服务器；正常/构建依赖不得跨产品运行边界。模块默认私有，按消费者选择 `pub(crate)` / `pub`，binary 负责启动编排，不新增依赖环或跨目录实现复用。
 - 大文件按职责和维护难度拆分，不设机械行数门槛。workspace 拆分须有独立复用、平台隔离或实测构建收益，先解决依赖环并形成 ADR；当前双向引用和公开面改善点见[开发指南](docs/development/README.md)。
-- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，设计契约保持现有路径，ADR 与验证分别更新索引。不得复制第二套阶段状态表。
+- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，组件维护契约放 `docs/architecture/` 和 `docs/interactions/`，细分专题保持现有路径。替代中间态文档须完整迁移内容及入站链接，ADR 与有效验证证据保留并更新索引；不得复制第二套阶段状态表。
 - 文档使用可移植相对链接；外部源码用仓库和固定 commit。历史现场绝对路径只能作为带时间和上下文的证据，不能作为通用操作要求。文档修改运行 `node scripts/dev.mjs docs`。
 
 ### 12.2 构建、产物和验证

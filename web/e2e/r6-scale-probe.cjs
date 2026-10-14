@@ -28,8 +28,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   }
   stage = 'cold-interaction';
   await page.goto(process.env.WORKBENCH_PROBE_URL);
-  await expect(page.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '从这里，继续创作。', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: '设置', exact: true }).click();
   await expect(page.locator('#wb-settings-panel')).toBeVisible();
   const cold = await page.evaluate(() => ({
     navigationToInteractionMs: performance.now(),
@@ -37,6 +37,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
     firstContentfulPaintMs: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
   }));
   await page.keyboard.press('Escape');
+  await page.getByRole('link', { name: '全部历史', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
   report({ stage: 'cold-ui', ...cold });
   await sample();
   timer = setInterval(() => { void sample().catch(() => {}); }, 500);

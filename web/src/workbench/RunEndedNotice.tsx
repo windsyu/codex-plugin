@@ -1,3 +1,4 @@
+import { navigationURL } from './context';
 import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { TerminalView } from './terminalClient';
 import { Icon } from './Icons';
@@ -27,7 +28,7 @@ export function RunEndedNotice({ projectName, exit, applicationHome, onClose }: 
       <details className="wb-run-ended-reason"><summary>退出详情</summary><p>{exit.signal || `退出码 ${exit.code}`}</p></details>
     </div>
     <div className="wb-run-ended-actions">
-      {applicationHome && <a href="/">返回首页</a>}
+      {applicationHome && <a href={navigationURL("/")}>返回首页</a>}
       <button ref={continueButton} onClick={onClose}>继续查看记录</button>
     </div>
   </dialog>;

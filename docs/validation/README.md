@@ -1,6 +1,17 @@
 # 验证报告索引
 
-公网工作台中继已有本地两账号、撤销、Linux 单工作台 IP 资源隔离、公网 HTTPS/WSS 与系统 Chrome 手机视口证据；域名模式 TLS/wildcard DNS、真实手机完整 V2、重启/断网与备份恢复尚未验收。阶段状态见 [V2 实施计划](../v2-implementation-plan.md)，不得以合成或桌面手机视口测试替代真机验收。
+公网中转账号/schema 3/单端口多电脑的当前证据与旧 schema 2、双端口记录分开。新模式已覆盖受限 Linux 中转、TLS 登录、旧库恢复和加密备份副本恢复；真实手机、多电脑完整公网 V2 与实际续签仍待验收。阶段状态见 [V2 实施计划](../v2-implementation-plan.md)，不得以合成或桌面手机视口测试替代真机验收。
+
+- [本机工作台与中转独立组件（2026-10-14）](independent-components-2026-10-14.md)：组件命令、构建顺序、生产依赖与完整 workspace 检查；不自动部署或继承公网验收。
+
+- [账号删除与默认管理员改名（2026-10-14）](public-relay-account-management-2026-10-14.md)：schema 3 原子迁移、删除授权/并发/流关闭、Chrome 门户与安全部署分项证据。
+- [本地局域网接入文案（2026-10-14）](local-network-access-label-2026-10-14.md)：本机入口与公网中转区分、前端全量/构建及隔离 Chrome 配对回归；现有用户实例未重启。
+
+- [单端口中转测试部署（2026-10-14）](public-relay-single-origin-deploy-2026-10-14.md)
+- [命令认证配套中转更新（2026-10-14）](public-relay-command-auth-deploy-2026-10-14.md)：指定 ECS 的当前产物、私有备份恢复副本、公网资源逐字节核验与电脑自动重连；不替代真实手机/公网消息验收。
+- [原生命令认证接入验证（2026-10-14）](native-cli-command-auth-2026-10-14.md)：安装版 CLI 0.162.1、系统 Chrome 与合成 provider 已覆盖命令执行、首次 401 后重取及日志排除；真实 provider/公网消息仍分开验收。
+- [独立页面、连接恢复与专用中转升级（2026-10-14）](public-relay-routes-recovery-2026-10-14.md)：配套构建/Chrome 合成回归、schema 2 不变升级、真实备份恢复副本与自动重连；公网真实模型消息仍待所属账号登录。
+- [管理员账号与单端口多电脑本地验证（2026-10-13）](public-relay-single-origin-2026-10-13.md)
 
 - [公网工作台中转本地集成验证（2026-10-10）](public-workbench-relay-2026-10-10.md)
 - [单工作台 IP 测试部署（2026-10-13）](public-relay-ip-trial-2026-10-13.md)：Linux 隔离部署、公网 TLS 与 Chrome 手机视口的 WSS/页面/SSE/合成终端链路通过，真实手机验收另列。

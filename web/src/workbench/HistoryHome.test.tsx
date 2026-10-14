@@ -5,6 +5,23 @@ import { HistoryHome, type ApplicationInfo } from './HistoryHome';
 const root = document.createElement('div');
 afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const initial: ApplicationInfo = { instanceId: 'application', runs: [], launchError: null, sources: [{ id: 'native', kind: 'native', state: 'unavailable', message: '原生目录不存在 <script>unsafe</script>' }] };
+it('separates the overview, history and inline launch pages with real document links', async () => {
+  const info = { ...initial, launchAvailable: true };
+  const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => info, text: async () => JSON.stringify({ revision: 'r', records: [], nextCursor: null, coverage: { state: 'complete_for_source', reasons: [] } }) }));
+  vi.stubGlobal('fetch', fetch);
+  document.body.append(root);
+  await act(async () => render(<HistoryHome initial={info} page="overview" />, root));
+  expect(root.querySelector('h1')?.textContent).toBe('从这里，继续创作。');
+  expect(root.querySelector('.wb-library')).toBeNull();
+  expect(fetch.mock.calls.some(([url]) => url.includes('/library/'))).toBe(false);
+  expect([...root.querySelectorAll('.wb-page-nav a')].map(a => a.getAttribute('href'))).toEqual(['/', '/history', '/launch', '/settings', '/relay']);
+  await act(async () => render(<HistoryHome initial={info} page="history" />, root));
+  expect(root.querySelector('.wb-overview-heading')).toBeNull();
+  expect(root.querySelector('.wb-library')).not.toBeNull();
+  await act(async () => render(<HistoryHome initial={info} page="launch" />, root));
+  expect(root.querySelector('.wb-library')).toBeNull();
+  expect(root.querySelector('dialog.is-page[open] input[aria-label="项目目录"]')).not.toBeNull();
+});
 it('shows truthful source state with no terminal or run polling and escapes source text', async () => {
   const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => initial, text: async () => JSON.stringify({revision:'r', records:[], nextCursor:null, coverage:{state:'partial',reasons:['source_unavailable']}}) })); vi.stubGlobal('fetch', fetch);
   document.body.append(root); await act(async () => render(<HistoryHome initial={initial} />, root));

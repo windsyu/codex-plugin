@@ -18,6 +18,13 @@ it('keeps the standalone endpoint when no run is selected', () => {
   expect(runApi('/history')).toBe('/workbench/v1/history');
 });
 
+it('keeps API identity across explicit local and remote run pages', () => {
+  for (const prefix of ['', `/g/${secondRun}`]) for (const page of ['chat', 'terminal', 'files', 'settings']) {
+    history.replaceState(null, '', `${prefix}/runs/${firstRun}/${page}`);
+    expect(runApi('/live/snapshot')).toBe(`/workbench/v1/runs/${firstRun}/live/snapshot`);
+  }
+});
+
 it.each(['', 'not-a-uuid', '11111111-1111-4111-8111-11111111111z'])('rejects malformed run query %j', run => {
   history.replaceState(null, '', `/?run=${run}`);
   expect(() => runApi('/run')).toThrow('invalid run id');

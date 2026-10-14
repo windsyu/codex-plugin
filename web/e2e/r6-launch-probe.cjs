@@ -67,11 +67,12 @@ async function paste(value){await terminal().evaluate((el,value)=>{const data=ne
     }
   });
 
-  page.on('request',r=>{const path=new URL(r.url()).pathname;if(path==='/workbench/v1/runs'&&r.method()==='POST')starts++;if(/\/(live|terminal|requests|workspace|history|settings)(\/|$)/.test(path)&&!path.includes('/library/')&&!path.includes('/application/'))scoped.push(path);});
+  page.on('request',r=>{const path=new URL(r.url()).pathname;if(path==='/workbench/v1/runs'&&r.method()==='POST')starts++;if(path.startsWith('/workbench/v1/')&&/\/(live|terminal|requests|workspace|history|settings)(\/|$)/.test(path)&&!path.includes('/library/')&&!path.includes('/application/'))scoped.push(path);});
   page.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.command?.type==='input'){const text=Buffer.from(frame.command.data,'base64').toString();if(text!=='\x1b[I'&&text!=='\x1b[O')conversationInputs++;}}catch{}}));
   });
   page=await context.newPage();
-  await page.goto(process.env.WORKBENCH_PROBE_URL);await expect(page.getByRole('heading',{name:'全部历史',exact:true})).toBeVisible();assert.equal((await app()).runs.length,0);
+  await page.goto(process.env.WORKBENCH_PROBE_URL);await expect(page.getByRole('heading',{name:'从这里，继续创作。',exact:true})).toBeVisible();assert.equal((await app()).runs.length,0);
+  await page.getByRole('link',{name:'启动项目',exact:true}).click();assert.equal(new URL(page.url()).pathname,'/launch');
   stage='folder-picker';
   let picks=0;
   // Stub the OS result only; target validation and all subsequent launches use the real server.
@@ -80,25 +81,26 @@ async function paste(value){await terminal().evaluate((el,value)=>{const data=ne
     assert.deepEqual(route.request().postDataJSON(),{instanceId:(await app()).instanceId});
     await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({path:++picks===1?null:process.env.WORKBENCH_PROBE_PROJECT})});
   });
-  const historyHeading=page.getByRole('heading',{name:'全部历史',exact:true});
-  const beforePicker=await historyHeading.boundingBox();
-  await page.getByRole('button',{name:'打开其他目录',exact:true}).click();
+  const launchPanel=page.getByRole('dialog',{name:'打开项目',exact:true});
+  const beforePicker=await launchPanel.boundingBox();
+  await page.getByRole('button',{name:'选择文件夹…',exact:true}).click();
   await expect.poll(()=>picks).toBe(1);
-  await expect(page.getByRole('button',{name:'打开其他目录',exact:true})).toBeEnabled();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  assert.deepEqual(await historyHeading.boundingBox(),beforePicker);assert.equal(starts,0);
-  await page.getByRole('button',{name:'打开其他目录',exact:true}).click();
+  await expect(page.getByRole('button',{name:'选择文件夹…',exact:true})).toBeEnabled();
+  await expect(launchPanel).toBeVisible();
+  assert.deepEqual(await launchPanel.boundingBox(),beforePicker);assert.equal(starts,0);
+  await page.getByRole('button',{name:'选择文件夹…',exact:true}).click();
   await expect(page.getByRole('dialog',{name:'打开项目',exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'开始新对话',exact:true})).toBeEnabled();
   await expect(page.locator('.wb-launch-native')).toHaveCount(0);
   assert.equal(picks,2);assert.equal(starts,0);assert.equal(conversationInputs,0);
-  await page.keyboard.press('Escape');await expect(page.getByRole('dialog')).toHaveCount(0);
+  // RQ18 uses a non-modal launch document; explicit Cancel returns to overview.
+  await launchPanel.getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByRole('dialog')).toHaveCount(0);assert.equal(new URL(page.url()).pathname,'/');
   await page.unroute('**/workbench/v1/application/pick-directory');
   stage='manual-path';
-  const manual=page.getByRole('button',{name:'输入路径',exact:true});
-  await manual.click();await expect(page.getByLabel('项目目录',{exact:true})).toBeFocused();
-  await page.keyboard.press('Escape');await expect(manual).toBeFocused();
-  await manual.click();await page.getByLabel('项目目录',{exact:true}).fill(process.env.WORKBENCH_PROBE_PROJECT);
+  const manual=page.getByRole('link',{name:'启动项目',exact:true});
+  await manual.focus();await expect(manual).toBeFocused();await manual.press('Enter');await expect(page.getByLabel('项目目录',{exact:true})).toBeFocused();
+  await launchPanel.getByRole('button',{name:'取消',exact:true}).click();assert.equal(new URL(page.url()).pathname,'/');
+  await manual.focus();await expect(manual).toBeFocused();await manual.press('Enter');await page.getByLabel('项目目录',{exact:true}).fill(process.env.WORKBENCH_PROBE_PROJECT);
   await page.getByLabel('项目目录',{exact:true}).press('Enter');await expect(page.getByRole('button',{name:'开始新对话'})).toBeEnabled();assert.equal((await app()).runs.length,0);assert.equal(conversationInputs,0);
   for(const width of [1024,736,390,320]){await page.setViewportSize({width,height:900});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));if(process.env.WORKBENCH_PROBE_SCREENSHOT&&[1024,390].includes(width))await page.screenshot({path:`${process.env.WORKBENCH_PROBE_SCREENSHOT}.launch-${width}.png`});}
   await page.setViewportSize({width:1440,height:900});
@@ -111,10 +113,11 @@ async function paste(value){await terminal().evaluate((el,value)=>{const data=ne
   await page.getByRole('link',{name:'打开工作台',exact:true}).click();
   page=await recoveredPage;
   await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true');assert.equal(starts,1);assert.equal(conversationInputs,0);
-  const first=(await app()).runs[0];assert.equal(new URL(page.url()).searchParams.get('run'),first.runId);
+  const first=(await app()).runs[0];assert.equal(new URL(page.url()).pathname,`/runs/${first.runId}/chat`);
   stage='new-native-turn';await nativeReady();
   await paste('R6_E_FIRST：请记住本次合成会话。');await terminal().press('Enter');await expect(page.locator('.wb-message-list')).toContainText('R6_E_HISTORY');await expect.poll(screen).toContain('R6_E_HISTORY');
-  stage='return-keeps-cli';await page.getByRole('link',{name:'← 全部历史'}).click();assert.equal((await app()).runs[0].cliPid,first.cliPid);assert.equal((await app()).runs[0].state,'running');
+  stage='return-keeps-cli';await page.getByRole('link',{name:'← 项目概览'}).click();assert.equal((await app()).runs[0].cliPid,first.cliPid);assert.equal((await app()).runs[0].state,'running');
+  await page.getByRole('link',{name:'全部历史',exact:true}).click();
   stage='index-running-session';
   await page.getByRole('button',{name:'更新历史',exact:true}).click();
   await expect.poll(async()=>{const value=await page.evaluate(async()=>(await(await fetch('/workbench/v1/library/entries?kind=native')).json()));return value.records?.length||0;}).toBeGreaterThan(0);
@@ -122,6 +125,7 @@ async function paste(value){await terminal().evaluate((el,value)=>{const data=ne
   stage='reenter-running-session';
   await page.getByRole('button',{name:'继续此会话',exact:true}).click();await expect(page.getByRole('button',{name:'进入工作台',exact:true})).toBeVisible();await page.getByRole('button',{name:'进入工作台',exact:true}).click();await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true');if(await page.getByRole('button',{name:'在此输入',exact:true}).isVisible())await page.getByRole('button',{name:'在此输入',exact:true}).click();await expect(page.locator('.wb-terminal')).toHaveAttribute('data-owned','true');assert.equal(starts,1);
   stage='native-stop';await terminal().press('Control+d');await expect(page.locator('.wb-terminal-status')).toHaveText('已结束');await page.getByRole('dialog',{name:'本次运行已结束',exact:true}).getByRole('link',{name:'返回首页',exact:true}).click();
+  await page.getByRole('link',{name:'全部历史',exact:true}).click();
   if(projectless){
     stage='classify-projectless-fixture';
     await expect.poll(async()=>(await app()).runs.find(run=>run.runId===first.runId)?.state).toBe('stopped');
@@ -145,8 +149,8 @@ async function paste(value){await terminal().evaluate((el,value)=>{const data=ne
   const second=(await app()).runs[0];assert.notEqual(second.runId,first.runId);assert.notEqual(second.cliPid,first.cliPid);assert.ok(second.resume);assert.equal(second.projectPath,process.env.WORKBENCH_PROBE_PROJECT);assert.equal(starts,2);
   const snapshot=await page.evaluate(async id=>(await(await fetch(`/workbench/v1/runs/${id}/live/snapshot`)).json()),second.runId);assert.equal(snapshot.requests.filter(r=>r.purpose==='conversation').length,0);
   await paste('R6_E_NEXT：继续刚才的会话。');await terminal().press('Enter');await expect(page.locator('.wb-message-list')).toContainText('R6_E_DONE');
-  stage='run-routing';await page.getByRole('button',{name:'文件',exact:true}).click();await page.getByRole('treeitem').filter({hasText:'R6-check.txt'}).click();await expect(page.getByRole('region',{name:'代码内容',exact:true})).toContainText('Synthetic R6 source');
+  stage='run-routing';await page.getByRole('link',{name:'文件',exact:true}).click();assert.equal(new URL(page.url()).pathname,`/runs/${second.runId}/files`);await page.getByRole('treeitem').filter({hasText:'R6-check.txt'}).click();await expect(page.getByRole('region',{name:'代码内容',exact:true})).toContainText('Synthetic R6 source');
   assert.ok(scoped.length>5);assert.ok(scoped.every(path=>/^\/workbench\/v1\/runs\/[a-f0-9-]+\//.test(path)), 'Run clients must use explicit Run paths');
   if(process.env.WORKBENCH_PROBE_SCREENSHOT)await page.screenshot({path:`${process.env.WORKBENCH_PROBE_SCREENSHOT}.workbench.png`});
-  assert.equal(errors,0);process.stdout.write(JSON.stringify({stage:'passed',starts,viewports:[1024,736,390,320],nativePickerApiStub:true,pickerCancelKeepsLayout:true,manualEnterAndEscape:true,lostAckRecovered:true,sameNativeThread:true,projectlessResume:projectless,recordedCwdPreserved:projectless,zeroAutomaticInput:true,runScopedClients:true,pageErrors:errors,browser:browser.version()})+'\n');await close(0);
+  assert.equal(errors,0);process.stdout.write(JSON.stringify({stage:'passed',starts,viewports:[1024,736,390,320],nativePickerApiStub:true,pickerCancelKeepsLayout:true,manualKeyboardEntryAndCancel:true,lostAckRecovered:true,sameNativeThread:true,projectlessResume:projectless,recordedCwdPreserved:projectless,zeroAutomaticInput:true,runScopedClients:true,pageErrors:errors,browser:browser.version()})+'\n');await close(0);
 })().catch(async()=>{if(page&&process.env.WORKBENCH_PROBE_SCREENSHOT)await page.screenshot({path:`${process.env.WORKBENCH_PROBE_SCREENSHOT}.failed.png`}).catch(()=>{});process.stdout.write(JSON.stringify({stage:'failed',check:stage})+'\n');close(1);});

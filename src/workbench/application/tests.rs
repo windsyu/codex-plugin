@@ -169,6 +169,47 @@ async fn homepage_and_settings_need_no_cli_native_home_or_provider_and_reuse_is_
 }
 
 #[tokio::test]
+async fn application_documents_support_exact_deep_links_without_launching_a_cli() {
+    let fixture = Fixture::new();
+    let app = fixture.app(Overrides::default());
+    let run = Uuid::new_v4();
+    for path in codex_relay_protocol::APPLICATION_PAGES
+        .iter()
+        .map(|p| p.to_string())
+        .chain(std::iter::once("/relay".to_string()))
+        .chain(
+            codex_relay_protocol::RUN_PAGES
+                .iter()
+                .map(|p| format!("/runs/{run}/{p}")),
+        )
+    {
+        let response = get(&app, "", &path).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+    }
+    for path in [
+        "/unknown".to_string(),
+        "/assets/missing.js".to_string(),
+        "/workbench/v1/unknown".to_string(),
+        format!("/runs/{run}/unknown"),
+        format!("/runs/{run}/chat/extra"),
+        format!("/runs/{}/chat", Uuid::nil()),
+        format!("/runs/{}/chat", run.simple()),
+    ] {
+        assert_eq!(get(&app, "", &path).await.status(), 404, "{path}");
+    }
+    let cookie = pair(&app).await;
+    let info = json_body(get(&app, &cookie, "/workbench/v1/application").await).await;
+    assert!(info["runs"].as_array().unwrap().is_empty());
+    assert!(!fixture.home.exists());
+}
+
+#[tokio::test]
 async fn explicit_launch_runs_once_stops_independently_and_application_drop_reaps_only_its_child() {
     let fixture = Fixture::new();
     let binary = fixture.cli();

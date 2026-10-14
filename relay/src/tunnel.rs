@@ -26,6 +26,8 @@ pub(crate) struct AdmissionGate {
 }
 
 pub(crate) struct Connection {
+    pub credential: String,
+    pub workbench_api_version: u32,
     pub epoch: Uuid,
     pub instance: Uuid,
     pub sessions: HashSet<Uuid>,
@@ -43,6 +45,9 @@ pub(crate) struct Stream {
     attach: Option<oneshot::Sender<WebSocket>>,
 }
 fn bearer(h: &HeaderMap) -> Result<&str> {
+    if h.get_all("authorization").iter().count() != 1 {
+        return Err(denied());
+    }
     h.get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -115,10 +120,36 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
         if s.0.store.gateway_auth(&credential) != Some((gateway, account)) {
             return;
         }
+        if s.0
+            .store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE gateways SET workbench_api_version=?1 WHERE id=?2 AND credential=?3",
+                rusqlite::params![
+                    // Zero in storage means no handshake yet. Keep an explicitly
+                    // unversioned legacy Hello distinguishable after disconnect.
+                    if hello.workbench_api_version == 0 {
+                        u32::MAX
+                    } else {
+                        hello.workbench_api_version
+                    },
+                    gateway.to_string(),
+                    crate::store::digest(&credential)
+                ],
+            )
+            .ok()
+            != Some(1)
+        {
+            return;
+        }
         cancel_streams(&s, gateway, None);
         if let Some(old) = tunnels.insert(
             gateway,
             Connection {
+                credential: credential.clone(),
+                workbench_api_version: hello.workbench_api_version,
                 epoch,
                 instance: hello.instance_id,
                 sessions: HashSet::new(),
@@ -286,25 +317,48 @@ pub(crate) async fn forward_inner(
     req: Request,
     ws: Option<WebSocketUpgrade>,
 ) -> Result<Response> {
-    let gateway =
-        s.0.config
-            .host_origin(&h)
-            .and_then(|(_, g)| g)
-            .ok_or_else(denied)?;
-    let session =
-        s.0.store
-            .session(
-                &cookie(&h, "__Host-workbench_session").ok_or_else(denied)?,
-                Some(gateway),
-            )
-            .ok_or_else(denied)?;
-    let path = req
-        .uri()
-        .path_and_query()
-        .ok_or_else(bad)?
-        .as_str()
-        .to_string();
     let method = req.method().as_str().to_string();
+    let (gateway, session, path) = if s.0.config.single_origin {
+        if !req.uri().path().starts_with("/g/") {
+            return Err(Failure(StatusCode::NOT_FOUND));
+        }
+        let (gateway, tail) = crate::routing::canonical_gateway(req.uri().path())?;
+        if !tail.starts_with("workbench/v1/") {
+            return Err(Failure(StatusCode::NOT_FOUND));
+        }
+        let streaming = tail.ends_with("/live/events") || tail.ends_with("/terminal");
+        let (grant, query) = crate::routing::selectors(&h, req.uri().query(), streaming)?;
+        let session = crate::routing::grant_session(&s, &h, gateway, grant)?;
+        let path = format!(
+            "/{tail}{}",
+            if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{query}")
+            }
+        );
+        (gateway, session, path)
+    } else {
+        let gateway =
+            s.0.config
+                .host_origin(&h)
+                .and_then(|(_, g)| g)
+                .ok_or_else(denied)?;
+        let session =
+            s.0.store
+                .session(
+                    &cookie(&h, "__Host-workbench_session").ok_or_else(denied)?,
+                    Some(gateway),
+                )
+                .ok_or_else(denied)?;
+        let path = req
+            .uri()
+            .path_and_query()
+            .ok_or_else(bad)?
+            .as_str()
+            .to_string();
+        (gateway, session, path)
+    };
     if !protocol::allowed(&method, &path) {
         return Err(Failure(StatusCode::NOT_FOUND));
     }
@@ -317,6 +371,12 @@ pub(crate) async fn forward_inner(
         let c = tunnels
             .get(&gateway)
             .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
+        if c.workbench_api_version != protocol::WORKBENCH_API_VERSION {
+            return Err(Failure(StatusCode::CONFLICT));
+        }
+        if s.0.store.gateway_auth(&c.credential).is_none() {
+            return Err(denied());
+        }
         (
             c.capacity
                 .clone()
@@ -359,6 +419,21 @@ pub(crate) async fn forward_inner(
         _gateway_terminal_permit: gateway_terminal_permit,
         _global_terminal_permit: global_terminal_permit,
     };
+    let response_type = if s.0.config.single_origin {
+        Some(
+            if path
+                .split('?')
+                .next()
+                .is_some_and(|p| p.ends_with("/live/events"))
+            {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        )
+    } else {
+        None
+    };
     let body = tokio::time::timeout(
         Duration::from_secs(10),
         axum::body::to_bytes(req.into_body(), protocol::MAX_HTTP_BODY),
@@ -376,6 +451,11 @@ pub(crate) async fn forward_inner(
             .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
         if c.epoch != admitted_epoch {
             return Err(Failure(StatusCode::SERVICE_UNAVAILABLE));
+        }
+        if c.workbench_api_version != protocol::WORKBENCH_API_VERSION
+            || s.0.store.gateway_auth(&c.credential).is_none()
+        {
+            return Err(denied());
         }
         let mut streams = s.0.streams.lock().unwrap();
         if !s.0.store.active(session.id) {
@@ -435,7 +515,11 @@ pub(crate) async fn forward_inner(
         tokio::select! {_=stop.changed()=>return Err(denied()), r=tokio::time::timeout(Duration::from_secs(10),data.send(Message::Binary(Bytes::copy_from_slice(chunk))))=>{r.map_err(|_|Failure(StatusCode::GATEWAY_TIMEOUT))?.map_err(|_|Failure(StatusCode::BAD_GATEWAY))?;}}
     }
     tokio::select! {_=stop.changed()=>return Err(denied()),r=send_json(&mut data,&Data::RequestEnd)=>r.map_err(|_|Failure(StatusCode::BAD_GATEWAY))?};
-    let Data::ResponseHead { status, headers } = next_data(&mut data, &mut stop).await? else {
+    let Data::ResponseHead {
+        status,
+        mut headers,
+    } = next_data(&mut data, &mut stop).await?
+    else {
         return Err(Failure(StatusCode::BAD_GATEWAY));
     };
     let status = StatusCode::from_u16(status)
@@ -443,8 +527,22 @@ pub(crate) async fn forward_inner(
         .filter(|s| s.as_u16() >= 200)
         .ok_or(Failure(StatusCode::BAD_GATEWAY))?;
     let mut response = Response::builder().status(status);
-    for (key, value) in filtered_response(headers) {
+    let empty = matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED);
+    if empty
+        && let Some(expected) = response_type
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        headers.push(("content-type".into(), expected.into()));
+    }
+    for (key, value) in filtered_response(headers, response_type)? {
         response = response.header(key, value);
+    }
+    if empty {
+        return response
+            .body(Body::empty())
+            .map_err(|_| Failure(StatusCode::BAD_GATEWAY));
     }
     let stream = async_stream::try_stream! {
         let _guard=guard;
@@ -507,15 +605,36 @@ fn filtered_request(h: &HeaderMap) -> Vec<(String, String)> {
     .filter_map(|n| Some((n.to_string(), h.get(n)?.to_str().ok()?.to_string())))
     .collect()
 }
-fn filtered_response(headers: Vec<(String, String)>) -> Vec<(String, String)> {
-    headers
+fn filtered_response(
+    headers: Vec<(String, String)>,
+    expected_type: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let mut names = HashSet::new();
+    for (name, value) in &headers {
+        if !names.insert(name.to_ascii_lowercase())
+            || axum::http::HeaderName::try_from(name).is_err()
+            || axum::http::HeaderValue::try_from(value).is_err()
+            || value.len() >= 16384
+        {
+            return Err(Failure(StatusCode::BAD_GATEWAY));
+        }
+    }
+    if let Some(expected) = expected_type {
+        let supplied = headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.split(';').next().unwrap_or("").trim());
+        if supplied.is_none_or(|v| !v.eq_ignore_ascii_case(expected)) {
+            return Err(Failure(StatusCode::BAD_GATEWAY));
+        }
+    }
+    let mut output: Vec<_> = headers
         .into_iter()
         .filter(|(n, v)| {
             v.len() < 16384
                 && matches!(
                     n.to_ascii_lowercase().as_str(),
                     "content-type"
-                        | "content-security-policy"
                         | "etag"
                         | "last-modified"
                         | "content-range"
@@ -523,19 +642,86 @@ fn filtered_response(headers: Vec<(String, String)>) -> Vec<(String, String)> {
                         | "content-disposition"
                 )
         })
-        .collect()
+        .collect();
+    if let Some(expected) = expected_type {
+        output.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type"));
+        output.push(("content-type".into(), format!("{expected}; charset=utf-8")));
+    }
+    Ok(output)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn response_cannot_set_credentials_redirect_or_hop_headers() {
-        let h = filtered_response(vec![
-            ("Set-Cookie".into(), "owner=secret".into()),
-            ("Location".into(), "https://evil.test".into()),
-            ("Connection".into(), "upgrade".into()),
-            ("Content-Type".into(), "text/event-stream".into()),
-        ]);
+        let h = filtered_response(
+            vec![
+                ("Set-Cookie".into(), "owner=secret".into()),
+                ("Location".into(), "https://evil.test".into()),
+                ("Connection".into(), "upgrade".into()),
+                ("Content-Type".into(), "text/event-stream".into()),
+            ],
+            None,
+        )
+        .unwrap();
         assert_eq!(h, vec![("Content-Type".into(), "text/event-stream".into())]);
+    }
+    #[test]
+    fn same_origin_response_type_is_fixed_and_duplicate_headers_fail_closed() {
+        for malicious in [
+            "text/html",
+            "text/javascript",
+            "image/svg+xml",
+            "application/json, text/html",
+        ] {
+            assert!(
+                filtered_response(
+                    vec![("content-type".into(), malicious.into())],
+                    Some("application/json")
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            filtered_response(
+                vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("Content-Type".into(), "text/html".into())
+                ],
+                Some("application/json")
+            )
+            .is_err()
+        );
+        assert!(
+            filtered_response(
+                vec![(
+                    "content-type".into(),
+                    "application/json\r\nX-Injected: yes".into()
+                )],
+                Some("application/json")
+            )
+            .is_err()
+        );
+        assert!(filtered_response(vec![], Some("application/json")).is_err());
+        let safe = filtered_response(
+            vec![
+                (
+                    "content-type".into(),
+                    "application/json; charset=iso-8859-1".into(),
+                ),
+                ("Content-Security-Policy".into(), "default-src *".into()),
+                ("Refresh".into(), "0;url=https://evil.test".into()),
+                ("Link".into(), "</evil.js>; rel=preload".into()),
+            ],
+            Some("application/json"),
+        )
+        .unwrap();
+        assert_eq!(
+            safe,
+            vec![(
+                "content-type".into(),
+                "application/json; charset=utf-8".into()
+            )]
+        );
     }
 }

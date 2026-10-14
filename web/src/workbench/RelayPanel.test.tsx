@@ -1,6 +1,6 @@
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RelayPanel } from './RelayPanel';
 
 const root = document.createElement('div');
@@ -8,6 +8,7 @@ const instanceId = 'local-instance';
 const reply = (relay: Record<string, unknown>) => ({ ok: true, json: async () => ({ instanceId, relay }) });
 const unbound = { state: 'disabled', enabled: false };
 const bound = { state: 'online', enabled: true, gatewayId: 'gateway-1', name: 'My workstation', gatewayOrigin: 'https://one.wb.example.com' };
+beforeEach(() => { vi.stubGlobal('open', vi.fn(() => null)); });
 afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 async function show() { document.body.append(root); await act(async () => render(<RelayPanel instanceId={instanceId} open onClose={() => {}} />, root)); await act(async () => {}); }
 async function click(text: string) { await act(async () => [...root.querySelectorAll('button')].find(button => button.textContent === text)!.click()); await act(async () => {}); }
@@ -20,7 +21,7 @@ it('reads only when open and sends instance-scoped bind with a safe verification
   await show();
   const inputs = root.querySelectorAll('input');
   await act(async () => { inputs[0].value = 'https://app.example.com'; inputs[0].dispatchEvent(new Event('input', { bubbles: true })); inputs[1].value = 'My workstation'; inputs[1].dispatchEvent(new Event('input', { bubbles: true })); });
-  await click('开始绑定');
+  await click('登录并开启公网接入');
   const call = fetch.mock.calls.find(([, init]) => init?.method);
   expect(call?.[0]).toBe('/workbench/v1/application/relay/bind');
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ instanceId, serverUrl: 'https://app.example.com', name: 'My workstation' });
@@ -40,7 +41,7 @@ it('sends enable, disable and forget once with the exact instance and shows safe
   });
   vi.stubGlobal('fetch', fetch); await show();
   expect(root.textContent).toContain('已连接');
-  await click('关闭公网接入'); await click('开启公网接入'); await click('忘记此服务');
+  await click('关闭公网接入'); await click('开启公网接入'); await click('退出登录并撤销接入');
   const calls = fetch.mock.calls.filter(([, init]) => init?.method);
   expect(calls.map(([url]) => url)).toEqual(['/workbench/v1/application/relay/disable', '/workbench/v1/application/relay/enable', '/workbench/v1/application/relay/forget']);
   expect(calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([{ instanceId }, { instanceId }, { instanceId }]);
@@ -55,4 +56,28 @@ it('keeps a failed mutation uncertain, without displaying server error payload o
   expect(root.textContent).toContain('已连接');
   await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
   expect(fetch.mock.calls.filter(([, init]) => init?.method)).toHaveLength(1);
+});
+
+it('requires an explicit reauthentication click and reuses the saved service and name', async () => {
+  const fetch = vi.fn(async () => reply({ ...bound, enabled: false, state: 'authenticationRequired', serverUrl: 'https://app.example.com', username: 'alice' }));
+  vi.stubGlobal('fetch', fetch); await show();
+  expect(root.textContent).toContain('登录账号：alice');
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(window.open).not.toHaveBeenCalled();
+  await click('登录并开启公网接入');
+  expect(JSON.parse(String((fetch.mock.calls as unknown as [string, RequestInit][])[1][1].body))).toEqual({ instanceId, serverUrl: 'https://app.example.com', name: 'My workstation' });
+  expect(window.open).toHaveBeenCalledTimes(1);
+});
+
+it('canceling pending login closes its blank popup and disables without a second bind', async () => {
+  const popup = { closed: false, opener: {}, location: { href: 'about:blank' }, close: vi.fn() };
+  vi.stubGlobal('open', vi.fn(() => popup));
+  const fetch = vi.fn(async (url: string) => reply(url.endsWith('/bind')
+    ? { state: 'binding', enabled: false, binding: { userCode: 'CODE', verificationUrl: 'javascript:unsafe', expiresInSeconds: 300 } }
+    : { ...unbound, serverUrl: 'https://app.example.com', name: 'Computer' }));
+  vi.stubGlobal('fetch', fetch); await show();
+  await click('登录并开启公网接入');
+  await click('取消登录');
+  expect(popup.close).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/workbench/v1/application/relay', '/workbench/v1/application/relay/bind', '/workbench/v1/application/relay/disable']);
 });

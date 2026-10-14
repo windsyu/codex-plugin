@@ -38,9 +38,9 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   const terminal = await owner.locator('.xterm-helper-textarea').elementHandle();
   const before = await run(owner);
   stage = 'panel-keyboard';
-  const access = owner.getByRole('button', { name: '手机接入', exact: true });
+  const access = owner.getByRole('button', { name: '本地局域网接入', exact: true });
   await access.click();
-  await expect(owner.getByRole('region', { name: '手机接入', exact: true })).toBeVisible();
+  await expect(owner.getByRole('region', { name: '本地局域网接入', exact: true })).toBeVisible();
   await owner.keyboard.press('Escape');
   await expect(owner.locator('#wb-access-panel')).toBeHidden();
   await expect(access).toBeFocused();
@@ -67,7 +67,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   assert.equal(await phone.evaluate(() => typeof crypto.randomUUID), 'undefined');
   assert.equal(new URL(phone.url()).hash, ''); assert.equal(await phone.evaluate(() => document.cookie), '');
   assert.equal((await run(phone)).processId, before.processId); assert.equal((await run(phone)).runEpoch, before.runEpoch);
-  await expect(phone.getByRole('button', { name: '手机接入', exact: true })).toHaveCount(0);
+  await expect(phone.getByRole('button', { name: '本地局域网接入', exact: true })).toHaveCount(0);
   stage = 'second-address';
   await expect(owner.locator('.wb-access-device')).toHaveCount(1);
   await expect(owner.locator('.wb-access-qr canvas')).toBeVisible();
@@ -111,7 +111,7 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   assert.ok(await terminal.evaluate(e => e.isConnected)); assert.equal(sockets, 1);
   stage = 'owner-refresh'; await owner.reload();
   await expect(owner.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
-  await owner.getByRole('button', { name: '手机接入', exact: true }).click();
+  await owner.getByRole('button', { name: '本地局域网接入', exact: true }).click();
   await expect(owner.locator('.wb-access-qr canvas')).toBeVisible(); await expect.poll(qr).toBe(ip);
   assert.equal((await run(owner)).processId, before.processId);
   stage = 'disable';

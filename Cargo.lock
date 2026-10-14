@@ -364,6 +364,7 @@ dependencies = [
  "clap",
  "codex-relay-protocol",
  "codex-relayd",
+ "codex-workbench-assets",
  "futures-util",
  "hyper",
  "hyper-util",
@@ -373,7 +374,6 @@ dependencies = [
  "rand",
  "reqwest",
  "rusqlite",
- "rust-embed",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -412,6 +412,7 @@ dependencies = [
  "blake3",
  "clap",
  "codex-relay-protocol",
+ "codex-workbench-assets",
  "futures-util",
  "libc",
  "rand",
@@ -425,6 +426,13 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "codex-workbench-assets"
+version = "0.1.0"
+dependencies = [
+ "rust-embed",
 ]
 
 [[package]]

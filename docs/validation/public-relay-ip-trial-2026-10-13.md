@@ -1,6 +1,6 @@
 # IP 中转测试部署（2026-10-13）
 
-用户授权在已有重要容器的资源有限公有云服务器试用，明确使用 IP 并复用现有 Caddy SSL 证书。本报告记录实际部署、已执行检查和公网连通复验；不将服务器内部测试或桌面手机视口当成真实手机验收。[ADR 0057](../decisions/0057-single-workbench-ip-trial.md)与 [IP 操作指南](../guides/public-relay-ip-trial.md)定义本次限制。
+用户授权在已有重要容器的资源有限公有云服务器试用，明确使用 IP 并复用现有 Caddy SSL 证书。本报告记录实际部署、已执行检查和公网连通复验；不将服务器内部测试或桌面手机视口当成真实手机验收。[ADR 0057](../decisions/0057-single-workbench-ip-trial.md)与 [部署指南的历史兼容章节](../guides/public-relay-deployment.md#历史域名与固定单机兼容)定义本次限制。
 
 ## 环境和变更
 

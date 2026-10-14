@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { checkBinaries, checkDocs, classifyContent } from '../lib/repository-checks.mjs';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aW6cAAAAASUVORK5CYII=', 'base64');
@@ -13,6 +14,22 @@ function repo(t) {
   git('init', '-b', 'main'); git('config', 'user.name', 'Synthetic Test'); git('config', 'user.email', 'test@example.invalid');
   return { root, git, write: (name, value) => { fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); fs.writeFileSync(path.join(root, name), value); } };
 }
+test('repository ignore rules exclude both products and build outputs but keep source launchers', t => {
+  const { root, git, write } = repo(t);
+  write('.gitignore', fs.readFileSync(fileURLToPath(new URL('../../.gitignore', import.meta.url))));
+  const outputs = ['codex-view', 'codex-observerd', 'codex-relayd', 'local/bin/codex-relayd',
+    'target/release/codex-relayd', 'relay/target/debug/codex-relayd', 'web/dist/workbench.html',
+    'release/relay-linux.tar.gz', 'build/codex-view', 'relay/relay.sqlite3',
+    'relay/relay.sqlite3-wal', 'relay/relay.sqlite3-shm', 'relay/relay.sqlite3-journal',
+    'data/synthetic.sqlite-journal', 'data/synthetic.db-journal'];
+  for (const name of outputs) write(name, 'synthetic build output');
+  assert.deepEqual(git('check-ignore', '--no-index', ...outputs).trim().split('\n'), outputs);
+  const sources = ['scripts/release/code-view', 'relay/src/main.rs', 'src/bin/codex-view.rs',
+    'docs/architecture/relay.md', 'docs/interactions/workbench.md'];
+  for (const name of sources) write(name, 'synthetic source');
+  git('add', ...sources);
+  assert.deepEqual(git('ls-files').trim().split('\n'), [...sources].sort());
+});
 test('content permits genuine images and SVG, rejects fake image and extensionless binary', () => {
   assert.equal(classifyContent(png), null);
   assert.equal(classifyContent(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);

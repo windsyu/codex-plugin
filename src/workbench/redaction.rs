@@ -170,7 +170,7 @@ impl TextRedactor {
                 let keep_masking = match mask {
                     Mask::Rest => true,
                     Mask::Credential => {
-                        character.is_ascii_alphanumeric() || "_-./+=%".contains(character)
+                        character.is_ascii_alphanumeric() || "_-./+=%~".contains(character)
                     }
                     Mask::DataUri => !character.is_whitespace() && !"\"'<>)]}".contains(character),
                 };
@@ -193,7 +193,7 @@ impl TextRedactor {
                 let keep_masking = match mask {
                     Mask::Rest => true,
                     Mask::Credential => {
-                        character.is_ascii_alphanumeric() || "_-./+=%".contains(character)
+                        character.is_ascii_alphanumeric() || "_-./+=%~".contains(character)
                     }
                     Mask::DataUri => !character.is_whitespace() && !"\"'<>)]}".contains(character),
                 };
@@ -390,6 +390,10 @@ mod tests {
         for (input, expected) in [
             (
                 "header: Bearer abc.def+ghi=\n正常",
+                "header: [已脱敏]\n正常",
+            ),
+            (
+                "header: Bearer abc~def/ghi+==\n正常",
                 "header: [已脱敏]\n正常",
             ),
             ("x sk-proj-fixture y", "x [已脱敏] y"),
