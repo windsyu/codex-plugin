@@ -2,6 +2,7 @@ import { workbenchFetch } from './context';
 import { render } from 'preact';
 import { runApi } from './runApi';
 import type { Run } from './App';
+import './tokens.css';
 import './style.css';
 import { HistoryHome, type ApplicationInfo } from './HistoryHome';
 import { AUTH_INVALID, workbenchContext } from './context';
