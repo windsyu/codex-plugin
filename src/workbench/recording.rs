@@ -86,6 +86,7 @@ impl RecorderOptions {
 pub struct Faults {
     pub pause_ms: AtomicU64,
     pub pause_active: AtomicBool,
+    pub pause_gate: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
     pub write_error: AtomicBool,
     pub sync_error: AtomicBool,
 }
@@ -317,6 +318,13 @@ fn record(
     loop {
         #[cfg(test)]
         {
+            let gate = options.faults.pause_gate.lock().unwrap().take();
+            if let Some(release) = gate {
+                options.faults.pause_active.store(true, Ordering::Release);
+                // A disconnected sender also releases the worker on test panic.
+                let _ = release.recv();
+                options.faults.pause_active.store(false, Ordering::Release);
+            }
             let pause = options.faults.pause_ms.load(Ordering::Acquire);
             if pause > 0 {
                 options.faults.pause_active.store(true, Ordering::Release);
