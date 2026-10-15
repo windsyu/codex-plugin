@@ -50,6 +50,15 @@ it('hides local relay binding from a remote owner and uses path input when folde
   expect(fetch.mock.calls.some(([url]) => String(url).includes('pick-directory'))).toBe(false);
 });
 
+it('offers computer directory browsing to capable remote owners and uses no native picker', async () => {
+  const info = { ...initial, remoteOwner: true, launchAvailable: true, directoryPickerAvailable: false, directoryBrowserAvailable: true };
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => info }); vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryHome initial={info} page="launch" />, root));
+  expect(root.querySelector('.wb-launch-pick')?.textContent).toBe('浏览电脑目录');
+  expect(root.textContent).not.toContain('选择文件夹…');
+  expect(fetch.mock.calls.some(([url]) => String(url).includes('pick-directory'))).toBe(false);
+});
+
 it.each([
   ['native_cli_not_found', '未找到可运行的 Codex CLI'],
   ['native_auth_unverified', '当前认证方式尚未通过工作台验证'],

@@ -62,7 +62,9 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
 
 已安装包的 `code-view` 默认把当前目录作为明确项目启动请求；`code-view /path/to/project` 指定目录，`code-view --history` 只读首页。它与无参数 `codex-view` 语义不同，不要在自动化中混淆。
 
-启动器保持前台运行；关闭页面、回首页或关闭公网连接不停止 CLI。启动器 Ctrl-C/正常退出会结束应用及其所属 CLI；网页“停止当前运行”只停止选定 Run。SIGKILL、断电或工具脱离进程组不在同步回收保证内。现有项目有活动 Run 时进入原 Run，不另启；需要换运行或升级必须先得到该运行所有者的停机同意。
+需要远端长期连接时，使用 `/path/to/codex-view start`（安装包对应 `code-view start`）建立 macOS 用户级后台服务；用 `status [--json]` 检查、`open [--relay]` 打开、`stop` 完整退出。`autostart on/off` 只控制下次登录。第一次交互 `start` 无电脑绑定时打开本机注册页；已有绑定遵守 enabled 开关，非交互/系统启动不弹窗。后台不自动启动/恢复项目，完整操作见[使用指南](usage.md#后台开启远程注册和退出)。LaunchAgent 使用固定可执行文件和有效配置路径，升级前停止所有所属作用域，不直接覆盖运行中的 binary。
+
+普通启动器保持前台运行，后台模式则交给 LaunchAgent；关闭页面、回首页或关闭公网连接不停止 CLI。后台 `stop` 或前台 Ctrl-C/正常退出会结束应用及其所属 CLI；网页“停止当前运行”只停止选定 Run。SIGKILL、断电或工具脱离进程组不在同步回收保证内。现有项目有活动 Run 时进入原 Run，不另启；需要换运行或升级必须先得到该运行所有者的停机同意。
 
 ## 4. 配置和数据分离
 
@@ -72,6 +74,8 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
 | 工作台记录/派生索引 | `$HOME/.codex-web/history/` | `--data-dir` 或 JSON `storage.dataDir`；父目录须已存在，私有用户所有；不是完整终端录像 |
 | 出站中转登录 | `<有效配置目录>/relay/state.json` | 默认 `.codex-web/config/relay/state.json`；私有目录 `0700`、文件 `0600`；含电脑授权，不能作为普通配置分享 |
 | 应用发现/锁 | `$HOME/.codex-web/runtime/<scope>/` | `instance.lock`、私有 `instance.json`；不手工删锁强行复用 |
+| 后台服务登记/诊断 | 同一 `runtime/<scope>/` 下 `service.json`、`service.plist`、`service.log`、`service.lock` | 登记有效路径与非秘密启动环境，绑定本次可执行文件；不手工修改或删锁接管 |
+| 可选登录自启 | `$HOME/Library/LaunchAgents/io.github.windsyu.code-view.<scope>.plist` | 仅 `autostart on` 写入，由 `off` 移除；保持当前服务运行状态 |
 | 原生 CLI 配置/认证/会话 | 原生 `CODEX_HOME` | 官方 CLI 管理；工作台不自动搬迁或清理 |
 
 历史根中 `runs/` 保存分段记录/快照/上下文，`index.sqlite` 和 `library/catalog.sqlite` 是派生索引；`cleanup/` 可能含未完成清理任务。历史保存失败不阻断 CLI，实时显示不代表 fsync 成功，重启不保证未保存尾部完整。清理默认关闭，不以容量维护为由删除私人历史或原生会话。
@@ -90,7 +94,7 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
 
 ## 6. 升级、备份与验收
 
-升级前记录旧 binary 版本/校验、启动参数和有效数据路径，确认运行所有者同意停机，在原启动器正常退出并确认自有 CLI 已退出后，一致性备份配置及工作台历史根。备份包含私有 relay 登录，须加密/私有保存；不是可公开的调试包。原生数据需要另行按用户策略备份，不把它自动上传服务器。不要只复制仍在写入的 SQLite 主文件而漏 WAL。
+升级前记录旧 binary 版本/校验、启动参数和有效数据路径，确认运行所有者同意停机，后台用相同作用域的 `stop`，前台在原启动器正常退出；确认自有 CLI 已退出后，一致性备份配置及工作台历史根。备份包含私有 relay 登录，须加密/私有保存；不是可公开的调试包。原生数据需要另行按用户策略备份，不把它自动上传服务器。不要只复制仍在写入的 SQLite 主文件而漏 WAL。
 
 安装经过校验的新产物再启动；本机与中转可以分别升级，但须核验协议兼容。配置/数据格式升级不能假定旧 binary 可回读；回退前核验兼容与备份，勿覆盖失败现场。工作台卸载保留 `.codex-web` 和原生数据；清理它们是另一个需要明确授权的任务。
 

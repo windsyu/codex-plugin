@@ -12,14 +12,14 @@ const preview: LaunchPreview = {
   modes: ['new'], nativeHome: '/synthetic/.codex', expiresInSeconds: 30,
 };
 
-function Harness({ enter = vi.fn(), resumeEntry }: { enter?: (runId: string) => void; resumeEntry?: LibraryEntry }) {
+function Harness({ enter = vi.fn(), resumeEntry, directoryBrowser = false }: { enter?: (runId: string) => void; resumeEntry?: LibraryEntry; directoryBrowser?: boolean }) {
   const launch = useLaunch('instance-1', enter);
   return <>
     <button type="button" className="choose-folder" onClick={() => void launch.pickDirectory()}>选择目录</button>
     <button type="button" onClick={() => launch.openProject('project-a')}>project-a</button>
     <button type="button" onClick={() => launch.openProject('project-b')}>project-b</button>
     {resumeEntry && <button type="button" className="resume-entry" onClick={() => launch.openResume(resumeEntry)}>继续记录</button>}
-    <LaunchPanel {...launch.panel} />
+    <LaunchPanel {...launch.panel} onPick={directoryBrowser ? undefined : launch.panel.onPick} browserInstanceId={directoryBrowser ? 'instance-1' : undefined} />
   </>;
 }
 
@@ -259,6 +259,27 @@ it('opens one native picker, checks its exact path, and never starts a CLI autom
     expect(root.textContent).toContain('已确认目录');
     expect(button('.wb-launch-start').disabled).toBe(false);
   });
+});
+
+it('validates the exact browsed directory, invalidates the previous target, and waits for explicit Start', async () => {
+  const validation = deferred<ReturnType<typeof ok>>();
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/application/directories')) return ok({ instanceId: 'instance-1', currentPath: '/synthetic/新项目 with spaces', parentPath: '/synthetic', homePath: '/synthetic', roots: [], entries: [], canSelect: true, truncated: false });
+    if (url.endsWith('/launch-targets') && JSON.parse(String(init?.body)).path === '/synthetic/新项目 with spaces') return validation.promise;
+    if (url.endsWith('/launch-targets')) return ok(preview);
+    throw new Error(`unexpected request ${url}`);
+  }); vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<Harness directoryBrowser />, root));
+  await validatePath(); expect(button('.wb-launch-start').disabled).toBe(false);
+  await act(async () => button('.wb-launch-pick').click()); await flush();
+  await act(async () => (root.querySelector('.wb-directory-select') as HTMLButtonElement).click()); await flush();
+  expect(root.querySelector('.wb-directory-browser')).toBeNull();
+  expect(root.querySelector('.wb-launch-start')).toBeNull();
+  expect((root.querySelector('[aria-label="项目目录"]') as HTMLInputElement).value).toBe('/synthetic/新项目 with spaces');
+  expect(JSON.parse(String(fetch.mock.calls.at(-1)?.[1]?.body))).toEqual({ path: '/synthetic/新项目 with spaces' });
+  await act(async () => validation.resolve(ok({ ...preview, targetId: 'browsed-target', canonicalPath: '/synthetic/新项目 with spaces' }))); await flush();
+  expect(button('.wb-launch-start').disabled).toBe(false);
+  expect(fetch.mock.calls.some(([url]) => url === '/workbench/v1/runs')).toBe(false);
 });
 
 it('cancelling the native dialog preserves the selected directory without validation or startup', async () => {

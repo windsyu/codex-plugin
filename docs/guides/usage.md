@@ -6,6 +6,29 @@
 
 发布包的安装见[安装与快速启动](installation.md)：安装后在项目目录执行 `code-view`，或执行 `code-view /项目路径`；`code-view --history` 保留全部历史首页。
 
+## 后台开启、远程注册和退出
+
+macOS 可使用用户级后台服务，默认手动开启：
+
+```sh
+code-view start
+code-view status
+code-view status --json
+code-view open
+code-view open --relay
+code-view autostart on
+code-view autostart off
+code-view stop
+```
+
+`start` 等待工作台就绪后返回，不启动项目或自动恢复 CLI。首次在交互终端启动，尚未登记电脑时会打印提示并打开本机“公网接入”；填入可信中转 HTTPS 地址和电脑名，按现有网页登录、设备码核对和批准流程完成注册。已有电脑绑定时不重复提示；手动关闭过接入则保持关闭，临时断网自动重连，明确授权失效时才要求重新认证。注册取消或浏览器未打开不妨碍本机服务启动，可稍后运行 `code-view open --relay`。非交互启动与系统自启不弹浏览器、不等待输入，使用 `status` 查看接入状态。
+
+关闭终端或浏览器后后台服务仍运行；`autostart on/off` 只控制下次登录，不改变当前运行。注销后服务停止，睡眠期间不保证在线；唤醒后重连。异常退出可重启工作台，但不会恢复 CLI 或重放输入。`stop` 结束该作用域的所有项目、代理和连接，等待完整退出；它保留电脑绑定、自启偏好和用户历史，不影响其他独立 Codex。
+
+`--config-dir`、`--data-dir`、`--codex-bin`、`--profile`、`--provider-profile` 可在服务命令前后指定；后续命令须使用同一配置/数据作用域。重复 `start` 复用后台实例；存在前台实例时提示先正常退出，不自动接管。原有 `code-view [目录]` 可向后台实例明确启动项目；名为 `start`、`status`、`stop`、`open`、`autostart` 的项目目录使用 `./start` 等显式路径。
+
+再次运行未指定启动偏好的 `start` 会沿用已登记的偏好；显式修改偏好先停止服务。已开启登录自启时若需要修改登记参数，先 `autostart off`，停止并以新参数启动，核对后再开启自启，避免悄悄替换已有登录任务。安装操作期间暂时拒绝后台启动和 `autostart on`，仍可关闭自启；遇到遗留安装锁应先检查安装进程及失败提示，不靠删服务锁接管实例。
+
 <a id="从项目目录启动-v2-工作台"></a>
 
 ## 打开全部历史首页
@@ -39,6 +62,8 @@ cd <project>
 
 macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系统语言显示；窗口不可用时回退手动输入。运行时使用内嵌助手，无需安装编译器；实际窗口验证与首次响应边界见[目录选择记录](../validation/native-cli-r6-e-picker-responsiveness-2026-09-23.md)。Windows 完整运行尚未接入。
 
+远端“项目目录”旁的“浏览电脑目录”列出当前已连接电脑的目录，不是中转服务器目录。可从主目录、磁盘入口或面包屑进入，按名称筛选、显示隐藏目录、翻页；选择当前目录后填回原表单，再检查并明确启动。本机优先使用原生窗口，无原生能力时也可网页浏览；旧后端不提供浏览能力时继续手动输入。无权限、目录消失或电脑离线会显示错误；“列表不完整”表示扫描预算已用尽，可缩小筛选或手动输入路径，不能据此断定其他目录不存在。目录可浏览不表示符合项目启动条件，符号链接按规范目标路径显示。
+
 同目录已有活动工作台时，项目入口显示“进入工作台”，不创建第二个 CLI；若要恢复另一会话，先明确停止该项目的当前 CLI，再回到所选历史继续。启动结果暂未确认时使用“查询启动结果”；刷新或短暂断线只查询同一操作，不重新发起启动。应用重启后不会根据旧操作自动创建 CLI。
 
 ### 另一个项目、返回首页、停止和退出
@@ -47,7 +72,7 @@ macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系
 
 首页顶部工作台卡片可以重新进入。关闭网页标签不停止 CLI；在首页对应项目点击“停止”并确认，或在该工作台“用量与状态”中确认“停止当前运行”，只结束这个项目，其余项目与首页继续。“停止中”表示请求已受理；“本次运行已结束”提示出现后可继续查看记录或返回首页，不代表所有内容都已保存。
 
-已结束运行最多保留 4 项内存阅读；同项目成功开始下一次运行或超出保留数量后，旧工作台入口会失效，已保存记录仍可从首页读取。从首页再次启动不会复活旧 CLI。需要结束整个应用时，在原启动器终端按 Ctrl-C；SIGTERM/SIGHUP 同样回收全部自有 CLI、监听和私有入口，外部 Codex 不受影响。SIGKILL 无法执行正常清理，见[退出验证](../validation/native-cli-r5-process-cleanup-2026-09-21.md)。
+已结束运行最多保留 4 项内存阅读；同项目成功开始下一次运行或超出保留数量后，旧工作台入口会失效，已保存记录仍可从首页读取。从首页再次启动不会复活旧 CLI。后台实例用 `code-view stop` 结束整个应用；前台实例在原启动器终端按 Ctrl-C，SIGTERM/SIGHUP 同样回收全部自有 CLI、监听和私有入口，外部 Codex 不受影响。SIGKILL 无法执行正常清理，见[退出验证](../validation/native-cli-r5-process-cleanup-2026-09-21.md)。
 
 上述行为的实现与分片证据见[启动契约](../codex-native-cli-workbench-history-home.md#r6-e-launch)、[多项目运行](../codex-native-cli-workbench-history-home.md#r6-f-multi-project)和[验证索引](../validation/README.md)；整片验收状态以实施计划为准。
 
@@ -59,7 +84,7 @@ macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系
 | `codex-view --project <directory>` | 明确启动该现有目录的新对话；同目录已有 Run 时复用；相对路径以命令 cwd 为基准 |
 | `codex-view --resume <UUID>` | 验证并恢复启动 cwd 中的指定原生会话，不自动输入 |
 | `codex-view --project <directory> --resume <UUID>` | 同时验证指定目录与原生会话身份后恢复 |
-| `codex-view open <entryFile>` | 使用启动输出中的私有入口文件打开现有应用，接受新 v2 与旧 v1 格式；不创建 CLI |
+| `codex-view open [entryFile] [--relay]` | 打开现有应用；可用私有入口文件（新 v2 / 旧 v1）或当前配置作用域；`--relay` 打开本机接入设置，不创建 CLI |
 | `--profile <name>` | 使用原生 `$CODEX_HOME/<name>.config.toml`，不是另一份工作台配置 |
 | `--provider-profile unmanaged-custom` / `--codex-bin <path>` | 选择已验证接入适配器 / 已安装官方 CLI，不修改模型或安装程序 |
 | `--config-dir <directory>` / `--data-dir <directory>` | 明确指定工作台 JSON 目录 / 私有历史根，目录说明见下文 |

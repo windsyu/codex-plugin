@@ -5,8 +5,10 @@ use crate::workbench::{
     application::{Connect, RunHandle, RunSummary},
     config::{Config, ConfigError, ConfigHandle, LIMIT},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{path::PathBuf, sync::RwLock};
 use tower::ServiceExt;
+mod local_control;
 mod relay_api;
 
 pub(crate) struct Owner {
@@ -27,6 +29,9 @@ struct StateData {
     devices: Arc<access::SharedAccess>,
     launch_error: RwLock<Option<&'static str>>,
     picker: crate::workbench::application::folder_picker::FolderPicker,
+    directories: crate::workbench::application::directories::DirectoryBrowser,
+    shutdown_requested: AtomicBool,
+    service_label: RwLock<Option<String>>,
     relay: RwLock<Option<crate::workbench::relay::Service>>,
 }
 #[derive(Clone)]
@@ -78,6 +83,7 @@ impl ApplicationServer {
         sources: crate::history::library::LibraryHandle,
         native_home: PathBuf,
         relay_root: PathBuf,
+        browse_home: PathBuf,
     ) -> Result<Self> {
         anyhow::ensure!(
             WorkbenchAssets::get("workbench.html").is_some(),
@@ -104,6 +110,11 @@ impl ApplicationServer {
             devices: access::SharedAccess::new(),
             launch_error: RwLock::new(None),
             picker: crate::workbench::application::folder_picker::FolderPicker::new(),
+            directories: crate::workbench::application::directories::DirectoryBrowser::new(
+                browse_home,
+            ),
+            shutdown_requested: AtomicBool::new(false),
+            service_label: RwLock::new(None),
             relay: RwLock::new(None),
         });
         let app = Router::new()
@@ -134,6 +145,14 @@ impl ApplicationServer {
                 post(relay_api::forget),
             )
             .route("/workbench/v1/application/connect", post(connect))
+            .route(
+                "/workbench/v1/application/control",
+                post(local_control::control),
+            )
+            .route(
+                "/workbench/v1/application/directories",
+                post(local_control::directories),
+            )
             .route("/workbench/v1/launch-targets", post(launch_target))
             .route(
                 "/workbench/v1/application/pick-directory",
@@ -197,6 +216,15 @@ impl ApplicationServer {
     }
     pub fn origin(&self) -> String {
         self.state.owner.origin.clone()
+    }
+    pub fn shutdown_requested(&self) -> bool {
+        self.state.shutdown_requested.load(Ordering::Acquire)
+    }
+    pub fn begin_shutdown(&self) {
+        self.state.shutdown_requested.store(true, Ordering::Release);
+    }
+    pub fn set_service_label(&self, label: String) {
+        *self.state.service_label.write().unwrap() = Some(label);
     }
     pub fn bootstrap_url(&self, run: Option<Uuid>) -> String {
         format!(
@@ -337,7 +365,7 @@ async fn application(State(state): State<Arc<StateData>>, headers: Auth) -> Resp
         .iter()
         .map(|r| r.0.clone())
         .collect();
-    Json(serde_json::json!({"instanceId":state.id,"remoteOwner":headers.remote.is_some(),"mode":"history-home","settingsAvailable":true,"libraryAvailable":true,"launchAvailable":true,"directoryPickerAvailable":headers.remote.is_none() && crate::workbench::application::folder_picker::FolderPicker::supported(),"runs":runs,"sources":state.sources.statuses(),"launchError":*state.launch_error.read().unwrap()})).into_response()
+    Json(serde_json::json!({"instanceId":state.id,"remoteOwner":headers.remote.is_some(),"mode":"history-home","settingsAvailable":true,"libraryAvailable":true,"launchAvailable":!state.shutdown_requested.load(Ordering::Acquire),"directoryBrowserAvailable":true,"directoryPickerAvailable":headers.remote.is_none() && crate::workbench::application::folder_picker::FolderPicker::supported(),"runs":runs,"sources":state.sources.statuses(),"launchError":*state.launch_error.read().unwrap()})).into_response()
 }
 fn launch_result(
     result: std::result::Result<serde_json::Value, &'static str>,
@@ -381,6 +409,9 @@ fn launch_owner(
     }
     if !origin(headers, state) {
         return Err((StatusCode::FORBIDDEN, "origin_required"));
+    }
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "application_stopping"));
     }
     if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
         || headers
@@ -491,6 +522,9 @@ async fn source_status(State(state): State<Arc<StateData>>, headers: Auth) -> Re
     library_result(state.sources.sources().await)
 }
 async fn connect(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes) -> Response {
+    if headers.remote.is_some() {
+        return error(StatusCode::FORBIDDEN, "local_management_required");
+    }
     if !origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
     }
@@ -502,6 +536,9 @@ async fn connect(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes
     }
     if !matches_secret(&request.token, &state.owner.pairing) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "application_stopping");
     }
     let settings = match state.settings.read().await {
         Ok(s) => s,

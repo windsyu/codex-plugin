@@ -24,7 +24,11 @@
 | 指定 Run 的 LAN 链接 | 保留 `run` selector，消费 fragment 配对码，POST 对应 Run `/pair`；Application 不公开，转读 Run 信息 |
 | 中转工作台链接 | 固定 `{grant,session,api}` 上下文存入按会话/电脑隔离的本标签 sessionStorage，清 fragment；请求必须继续匹配原门户 Cookie |
 
-`GET A/application` 返回 `instanceId`、Run 概览、配置/历史/启动 capability；远程包含 `remoteOwner:true`、`directoryPickerAvailable:false`。Application 401 是授权失败，不能当作“无首页”回退到未授权 Run。`404` 的 scoped device 入口才使用 Run 模式。
+`GET A/application` 返回 `instanceId`、Run 概览、配置/历史/启动 capability；远程包含 `remoteOwner:true`、`directoryPickerAvailable:false`。新增可选 `directoryBrowserAvailable`，仅值为 `true` 时显示网页目录入口，旧后端缺失时保留手动输入。Application 401 是授权失败，不能当作“无首页”回退到未授权 Run。`404` 的 scoped device 入口才使用 Run 模式。
+
+`start/status/open/stop/autostart` 命令使用相同配置/数据作用域。后台由 macOS 用户 LaunchAgent 管理；`start` 等就绪后返回，重复启动幂等，发现前台实例则明确报告而不接管。`open` 可不传 entryFile，`open --relay` 指向本机接入页；已有 entryFile 打开行为保留。`status --json` 是不含私有能力或凭据的机器接口。完整退出控制只接受 loopback 私有实例能力，不能由 Cookie、RemoteOwner 或 PairedRun 替代；`stop` 等全部所属 CLI/代理退出，超时/清理失败返回失败。浏览器首次注册仍需用户明确批准；命令不等待注册结果。用户步骤见[使用指南](../guides/usage.md#后台开启远程注册和退出)。
+
+状态 JSON 为 `{state,autostart,application}`；state 是 `running/startingOrFailed/stopped`，application 为空或包含 `instanceId,processId,serviceLabel,stopping,activeRuns,relay`。`serviceLabel:null` 表示前台，relay 为空或含 `state,registered,enabled,authenticationRequired`，不返回凭据。私有 `POST A/application/control` 使用 `{instanceId,token,action:"status"|"shutdown"}`，token 来自私有实例入口；只有本机精确 Origin/Host 和实例能力均验证后才执行，不能通过中转或 Run 配对调用。
 
 中转 HTTP 带 `X-Workbench-Grant` 和 `X-Workbench-Api-Version`，SSE/WS 使用 `relayGrant`、`relayApi` query。导航/新标签显式继承固定上下文；旧标签不能借用后来登录账号的新 Cookie。401/403 或 `AUTH_INVALID` 使前端关闭流并清除内容、返回门户，不自动重试 mutation 或补发授权。服务器门户的打开与撤销流程见[中转交互](relay.md)。
 
@@ -55,8 +59,13 @@ sequenceDiagram
 | `POST /runs` | `{instanceId,targetId,mode,operationId,configRevision}`；受理后返回 operation；重复同 key/参数返回原结果，不同参数冲突 |
 | `GET /launch-operations/{id}` | `starting/ready/existing/failed`，含 Run/href；应用重启后不可用，不因此重新 spawn |
 | 本机目录 picker | 仅本机 owner、受支持平台可用；取消不生成目标，也不启动 |
+| `POST /application/directories` | `{instanceId,path?,showHidden?,filter?,cursor?}`；Application owner / RemoteOwner 当前层目录浏览，PairedRun 拒绝，不启动 CLI |
 
 目标期限当前 60 秒；目录、nativeHome、来源记录及配置修订在受理和 spawn 前重新验证。浏览器必须在 POST 前保存 operationId；丢 ACK、刷新或网络恢复后只查询原 operation，不生成新 ID 盲目重试。新建同项目已有 Run 返回 existing；另一个项目可以新标签启动，之前 CLI 继续；第五个活动 Run 受容量拒绝。弹窗被拦截时显示明确链接，不重复启动。
+
+目录响应为 `{instanceId,currentPath,parentPath,homePath,roots,entries,canSelect,selectionError,nextCursor,truncated}`；roots 是 `{name,path}`，entries 是 `{name,path,isSymlink}`。`path` 缺失或 `~` 从用户主目录开始，支持 `~/`，其余必须绝对路径；规范路径显示符号链接实际目标。筛选只作用当前层目录名，隐藏项默认关闭；不会读取文件内容。当前最多并发 2 次扫描，每次最多扫描 4096 项/750ms，调用等待最多 2 秒；每页最多 100 项/64KiB，快照保留 60 秒。超扫描/体积预算返回 `truncated:true`，分页游标必须匹配当前实例、规范路径、筛选和隐藏项开关；目录替换或游标失效须重新读取，不拼接旧快照。错误区分不可访问、无权限、目录变化和忙碌。`canSelect:false` 仍可进入子目录；能选择也不代表 CLI/认证可启动，选择后仍执行 `launch-targets`。
+
+网页选择器初次读取已填目录，失败后回主目录并显示原因；之后导航失败保留当前位置。主目录/磁盘/面包屑、上一级、名称筛选和隐藏项可用键盘操作，关闭后恢复焦点。切换、关闭或账号/电脑/实例变化时取消旧读取并丢弃迟到结果；选择只填回表单和校验，不发起 Run。远端列举的是固定授权电脑，所有请求继续受归属、epoch、撤销和 Origin 约束。
 
 恢复只接受有唯一原生记录且可安全校验的 native entry：SessionMeta.id 与 canonical rollout、原 recordedCwd/nativeHome、来源修订和文件身份一致。无法恢复的历史仍可只读。禁止根据展示项目归属猜 cwd、`--last`、拼接历史消息、自动 Enter 或从已有工作台正文伪造原生 session。源码入口：[launching.rs](../../src/workbench/application/launching.rs)、[launch.rs](../../src/workbench/launch.rs)、[useLaunch.ts](../../web/src/workbench/useLaunch.ts)。
 

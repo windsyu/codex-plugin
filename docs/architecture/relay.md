@@ -94,6 +94,8 @@ SQLite 当前 `user_version=3`，核心表由 `store.rs` 维护：`accounts` 保
 
 `crates/relay-protocol` 定义传输 `VERSION=2` 和独立 `WORKBENCH_API_VERSION=1`。后者覆盖可信页面、Application/启动与终端契约，首版严格匹配；不兼容提示配套升级，不回退加载电脑脚本。网页前端、服务器和电脑后端都须核对版本。
 
+owner 目录浏览为 API 1 的兼容扩展：精确允许 `POST /workbench/v1/application/directories`，由电脑端提供当前层目录元信息，中央前端按可选 `directoryBrowserAvailable` 显示入口。旧电脑缺少字段时手动输入，旧中转未开放该路径时需升级中转才能浏览；不修改数据库 schema。服务停止/状态控制、native picker、私有 connect 与连接器管理仍不转发。目录不是服务器文件系统，也不是配对设备权限。
+
 控制 WSS 每 10 秒续租，30 秒无续租失效。每逻辑 HTTP/SSE/WS 使用独立有界数据 WSS，避免慢流阻塞控制和 CLI；许可/session/stream ID 集合有容量边界，超限拒绝或旋转连接，不无限积累。
 
 | 预算 | 当前值 |

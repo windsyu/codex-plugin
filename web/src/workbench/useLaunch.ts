@@ -143,6 +143,7 @@ export function useLaunch(instanceId: string, enter: (runId: string) => void) {
     panel: { path: intent.path || preview?.canonicalPath || '', pathEditable: !intent.projectId && !intent.resumeEntryId, mode: intent.resumeEntryId ? 'resume' as const : 'new' as const,
       preview, readyHref, busy, picking, onPick: () => void pickDirectory(), pending: !readyHref && (posting || pending || (!!operation.current && !uncertain)), uncertain, error,
       onPathChange: (path: string) => choose({ path }, false), onValidate: () => void validate(), onStart: () => void start(),
+      onDirectorySelect: (path: string) => choose({ path }, true),
       onCheck: () => { setError(''); setUncertain(false); setPending(true); setPoll(n => n + 1); }, onClose: () => setOpen(false), onEnter: (runId: string) => {
         if (!preview?.openInNewTab) { enter(runId); return; }
         const href = navigationURL(runPath(runId));

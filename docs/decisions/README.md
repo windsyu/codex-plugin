@@ -27,3 +27,4 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0060：命令认证由原生 CLI 持有](0060-native-provider-command-auth.md)（Accepted；网页/网关登录与模型凭证分离，不执行或缓存命令凭证，保留有效路由来源门禁）
 - [ADR 0061：中转账号删除与默认管理员无损改名](0061-account-deletion-admin-rename.md)（Accepted；schema 3、默认 windsyu、普通账号事务删除与防权限复活）
 - [ADR 0062：本机工作台与中转的独立构建和部署入口](0062-independent-component-builds.md)（Accepted；按组件构建/检查，生产依赖隔离，共享协议与可信前端）
+- [ADR 0063：本机后台服务与 owner 目录浏览](0063-background-service-directory-browser.md)（Accepted；macOS 用户服务、首次注册引导、完整退出与有界远端目录元信息）

@@ -6,7 +6,7 @@
 
 - [组件选择与 AI agent 部署入口](guides/component-deployment.md)：本机后端和中转的能力、独立构建、数据边界及分端部署顺序。
 - [本机工作台部署与接入](guides/local-workbench-deployment.md)：只部署 codex-plugin 电脑后端、原生 CLI 认证、局域网及可选公网连接器。
-- [安装与快速启动](guides/installation.md)：发布包校验、本地安装及 `code-view` 项目入口。
+- [安装与快速启动](guides/installation.md)：发布包校验、本地安装、后台服务及 `code-view` 项目入口。
 - [使用指南](guides/usage.md)：启动、终端、手机接入、历史、配置和旧 Observer。
 - [公网中继部署与运维](guides/public-relay-deployment.md)：windsyu 管理员、账号删除、单端口中央前端、schema 3 备份恢复；域名兼容与真实手机验收另列。
 - [支持范围与限制](codex-native-cli-workbench-support.md)：可试用环境、兼容基线与资源边界。

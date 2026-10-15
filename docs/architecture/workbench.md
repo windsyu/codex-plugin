@@ -20,6 +20,7 @@
 | --- | --- |
 | [src/bin/codex-view.rs](../../src/bin/codex-view.rs)、[application.rs](../../src/workbench/application.rs) | 参数与应用编排、配置/历史首页、RunWorker、Run 注册和退出；binary 不承载投影规则 |
 | [application/instance.rs](../../src/workbench/application/instance.rs)、[launch/entry.rs](../../src/workbench/launch/entry.rs) | 私有运行目录、实例锁、重复启动握手；不能凭 PID 猜测或删除锁夺权 |
+| [application/service.rs](../../src/workbench/application/service.rs)、[application/management.rs](../../src/workbench/application/management.rs) | macOS 用户服务、私有生命周期控制、服务/安装登记与首次接入状态；不恢复 CLI 或扩大中转控制面 |
 | [application/launching.rs](../../src/workbench/application/launching.rs)、[launch.rs](../../src/workbench/launch.rs)、[launch/profile.rs](../../src/workbench/launch/profile.rs) | 目标验证、operation 去重、原生配置与认证门禁、CLI 启动；目录/来源快照须在受理及 spawn 前重查 |
 | [mod.rs](../../src/workbench/mod.rs) | 单 Run runtime 装配、健康检查、关闭；生产 RunSurface 挂在共享 Application，不每 Run 创建全局首页 |
 | [terminal.rs](../../src/workbench/terminal.rs)、[control.rs](../../src/workbench/control.rs)、[terminal/screen.rs](../../src/workbench/terminal/screen.rs) | PTY actor、输入控制代际、输出与 VT 快照；许可检查落到排队命令处理点 |
@@ -104,12 +105,16 @@ WorkspaceReader 绑定启动时验证的 canonical 项目根与目录描述符�
 
 `runtime/<scope>` 私有实例锁以 flock 保护同一 inode，不强制删除；`instance.json` 的实例能力用于安全 loopback 重复启动握手，不是持久 Run 控制账本。中转绑定凭据与 enabled 意图单独保存在有效配置目录的 `relay/state.json`，不进入普通设置、历史或日志；新配置默认关闭，已保存 enabled 的绑定在应用重启后会出站重连，但不自动恢复 CLI。文件异常使连接器不可用，本机仍可独立运行。
 
+macOS 后台 Application 使用用户级 LaunchAgent，沿用相同实例作用域；服务登记关联固定 binary 和有效路径。CLI 通过私有能力验证的 loopback 控制查询状态/完整退出，远端白名单不含该控制面。服务模式启动、异常恢复和登录自启均不创建 Run；停止先拒绝新启动，再清理全部所属资源并确认退出。首次交互 `start` 根据现有绑定状态打开本机注册页，非交互/系统启动不弹窗；不会替用户选择中转或批准授权。安装器维护检查只管理本安装登记，活动或无法验证的服务阻止升级/卸载，见 [ADR 0063](../decisions/0063-background-service-directory-browser.md)。
+
+Application 的目录浏览器独立于固定根 WorkspaceReader，只为完整 owner 枚举当前层可读目录元信息。规范路径、分页快照、扫描/响应预算及并发限制避免全树扫描；不读正文、不执行 Shell，不影响 PTY/模型转发。选择目录仍走原目标校验与 spawn 前复查，不能通过浏览接口扩大配对设备或 Run 文件权限。
+
 模型认证由官方 CLI 独占。当前 `unmanaged-custom` 支持已验证的 Responses provider：静态 bearer 路径或原生 `auth.command` 路径互斥；command 路径要求 `requires_openai_auth=false`，排除 bearer/env/AWS 等冲突。两条路径均保留有效路由来源门禁：File credential store、缺失或 API-key 形状的 `auth.json`；拒绝 managed/system、ChatGPT token 和未验证的 keyring/auto。命令路径读取原生登录快照只为排除 cloud-managed 路由补值，spawn 前复查，不把该文件当命令 token，细节见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)。工作台不执行命令、不读取动态命令 token，只透明转发 CLI 的 Authorization；header 不进入观察/网页/journal。已知静态密钥用于脱敏，但未知动态 token 若被上游回显在正文，不能承诺按值识别。版本探测是有界诊断，不是精确版本 allowlist；真实版本/传输兼容以支持报告为准。
 
 | 权限 | 作用域与排除项 |
 | --- | --- |
-| 本机 Application owner | 应用/全局历史、启动、共享设置、所有 Run、局域网管理、连接器管理；支持时可用本机目录 picker |
-| `RemoteOwner` | 账号自有电脑完整 V2 应用/Run、历史/启动/设置与局域网管理；排除连接器登录管理、私有 connect、本机 native picker |
+| 本机 Application owner | 应用/全局历史、启动、共享设置、所有 Run、目录浏览、局域网管理、连接器管理；支持时可用本机目录 picker；服务控制另验私有实例能力 |
+| `RemoteOwner` | 账号自有电脑完整 V2 应用/Run、历史/启动/设置、目录浏览与局域网管理；排除连接器登录管理、私有 connect/服务控制、本机 native picker |
 | `PairedRun` | 指定 Run 的阅读、终端、文件/搜索/Git、项目历史、已开放的历史管理与停止；终端输入仍须独立 claim；没有全局历史/启动/共享设置/其他 Run/接入管理权限 |
 
 RemoteOwner 只由认证出站连接器通过私有 loopback ingress 建立，不能由公网/LAN Cookie、Origin 或伪造 forwarding header 推导。protocol 白名单先于授权，代理剥离外部认证字段；许可绑定账号、电脑、连接 epoch 与续租。suspend-aware clock 失败、回退、溢出或过期不可逆撤销，无 wall-clock 降级；握手、帧受理及 PTY dequeue 都须检查。中转是可信方而非端到端加密，也不是 OS 沙箱；不同外部账号需要隔离原生 home、工作台根和历史来源。公网部分见[中转架构](relay.md)。

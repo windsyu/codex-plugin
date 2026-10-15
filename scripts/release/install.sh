@@ -2,6 +2,10 @@
 # Install this extracted release locally. No downloads or shell configuration.
 set -eu
 fail() { printf '%s\n' "install: $*" >&2; exit 1; }
+file_links() {
+  if link_count_value=$(stat -f '%l' "$1" 2>/dev/null); then printf '%s' "$link_count_value";
+  else stat -c '%h' "$1" 2>/dev/null; fi
+}
 prefix=${HOME:?HOME must be set}/.codex-view
 force=false
 while [ "$#" -gt 0 ]; do
@@ -53,6 +57,8 @@ for name in code-view codex-view codex-observerd; do
   [ ! -L "$destination" ] || fail "symbolic link destination: $destination"
   if [ -e "$destination" ]; then
     [ -f "$destination" ] || fail "not a file: $destination"
+    destination_links=$(file_links "$destination") || fail "cannot inspect destination: $destination"
+    [ "$destination_links" = 1 ] || fail "hard linked executable destination: $destination"
     [ "$force" = true ] || fail "$destination already exists; use --force to reinstall"
   fi
 done
@@ -87,6 +93,46 @@ find "$release_dir/licenses" -type f -exec sh -c '
     done
   done
 ' sh "$release_dir/licenses" "$prefix/share/code-view/licenses" {} + || fail 'installed license path type conflict'
+# Reserve the installation before probing services. Managed start/autostart
+# checks this same lock while holding its scope lock, closing the check/write gap.
+path_identity() {
+  if identity_value=$(stat -f '%d:%i' "$1" 2>/dev/null); then printf '%s' "$identity_value";
+  else stat -c '%d:%i' "$1" 2>/dev/null; fi
+}
+lock=
+lock_identity=
+cleanup() {
+  install_exit_status=$?
+  trap - 0
+  if [ -n "$lock" ]; then
+    if [ ! -L "$lock" ] && [ -d "$lock" ] && [ "$(path_identity "$lock")" = "$lock_identity" ]; then
+      rmdir -- "$lock" || printf '%s\n' 'install: installation lock cleanup failed; inspect the lock before retrying' >&2
+    else printf '%s\n' 'install: installation lock changed; preserved for inspection' >&2; fi
+  fi
+  exit "$install_exit_status"
+}
+trap cleanup 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p "$prefix"
+[ ! -e "$prefix/.code-view-install-lock" ] && [ ! -L "$prefix/.code-view-install-lock" ] || fail 'another management operation or stale lock exists'
+mkdir -- "$prefix/.code-view-install-lock" || fail 'cannot acquire installation lock'
+lock=$prefix/.code-view-install-lock
+lock_identity=$(path_identity "$lock") || fail 'cannot establish installation lock identity'
+# A running LaunchAgent must not retain an executable being replaced. Probe
+# only the validated, regular installed backend, never a PATH-resolved command.
+if [ -e "$prefix/bin/codex-view" ]; then
+  [ -x "$prefix/bin/codex-view" ] || fail 'installed backend is not executable; preserve it before reinstalling'
+  installed_version=$("$prefix/bin/codex-view" --version) || fail 'cannot validate installed backend version'
+  case "$installed_version" in 'codex-view '*) ;; *) fail 'unrecognized installed backend; preserve it before reinstalling' ;; esac
+  service_status=0
+  "$prefix/bin/codex-view" service-maintenance || service_status=$?
+  case "$service_status" in
+    0) ;;
+    2) printf '%s\n' 'Older backend has no service guard. Ensure its foreground workbench is stopped before upgrading.' >&2 ;;
+    *) fail 'background service is active or its registration cannot be verified; run code-view stop for each scope before upgrading' ;;
+  esac
+fi
 mkdir -p "$prefix/bin" "$prefix/share/code-view"
 for name in code-view codex-view codex-observerd; do
   cp "$release_dir/bin/$name" "$prefix/bin/$name"

@@ -15,7 +15,7 @@ beforeEach(() => {
   HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   HTMLDialogElement.prototype.close = function () { this.open = false; };
 });
-afterEach(() => { render(null, root); root.remove(); vi.restoreAllMocks(); });
+afterEach(() => { render(null, root); root.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it('opens a native dialog and restores the opener after cancel', async () => {
   const opener = document.createElement('button'); opener.textContent = '打开'; document.body.append(opener); opener.focus();
@@ -54,6 +54,26 @@ it('keeps manual path entry, validates through Enter, and offers the folder pick
   expect(props.onValidate).toHaveBeenCalledTimes(1);
   await act(async () => { (root.querySelector('.wb-launch-pick') as HTMLButtonElement).click(); });
   expect(props.onPick).toHaveBeenCalledTimes(1);
+});
+
+it('keeps native selection preferred and only exposes the web browser when its capability is present', () => {
+  renderPanel();
+  expect(root.textContent).not.toContain('浏览电脑目录');
+  renderPanel({ browserInstanceId: 'instance', onDirectorySelect: vi.fn() });
+  expect(root.textContent).toContain('浏览电脑目录');
+  renderPanel({ browserInstanceId: 'instance', onDirectorySelect: vi.fn(), onPick: vi.fn() });
+  expect(root.textContent).toContain('选择文件夹…');
+  expect(root.textContent).not.toContain('浏览电脑目录');
+});
+
+it('closes the browser and restores manual controls when a capability is withdrawn', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ instanceId: 'instance', currentPath: '/', homePath: '/', roots: [], entries: [], parentPath: null, canSelect: true, truncated: false }) }));
+  renderPanel({ browserInstanceId: 'instance', onDirectorySelect: vi.fn() });
+  await act(async () => { (root.querySelector('.wb-launch-pick') as HTMLButtonElement).click(); });
+  expect(root.querySelector('.wb-directory-browser')).not.toBeNull();
+  await act(async () => { renderPanel(); });
+  expect(root.querySelector('.wb-directory-browser')).toBeNull();
+  expect((root.querySelector('[aria-label="项目目录"]') as HTMLInputElement).disabled).toBe(false);
 });
 
 it('shows one confirmed target preview and explicit new or resume actions', async () => {

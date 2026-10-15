@@ -723,6 +723,16 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
         (reqwest::Method::POST, "/workbench/v1/runs", 401),
         (
             reqwest::Method::POST,
+            "/workbench/v1/application/directories",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/control",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
             "/workbench/v1/application/pick-directory",
             401,
         ),
@@ -739,7 +749,7 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
             .header("Cookie", &device)
             .header("Origin", &app.entry.address)
             .header("Content-Type", "application/json")
-            .body("{}")
+            .body(json!({"instanceId":app.instance_id,"action":"status","token":"wrong"}).to_string())
             .send()
             .await
             .unwrap();
