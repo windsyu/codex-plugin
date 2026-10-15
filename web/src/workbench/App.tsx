@@ -1,4 +1,5 @@
 import { workbenchFetch } from './context';
+import { Fragment } from 'preact';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { ModelMessage } from './ModelMessage';
 import { TerminalPanel } from './TerminalPanel';
@@ -126,7 +127,7 @@ export function App({ run, applicationHome = false, page }: { run: Run; applicat
         {(!page || page === 'chat') && <button aria-pressed={terminal} onClick={() => setTerminal(!terminal)}>{page ? '并排终端' : '终端'}</button>}
       </div>
     </header>
-    {page && <nav className="wb-page-nav" aria-label="工作台页面">{(['chat', 'terminal', ...(run.workspaceRoot ? ['files', 'search', 'git'] as const : []), ...(run.historyAvailable ? ['history'] as const : []), 'usage', ...(run.settingsAvailable ? ['settings'] as const : []), ...(run.accessAvailable ? ['access'] as const : [])] as RunPage[]).map(value => <PageLink key={value} path={runPath(run.runEpoch, value)} active={page === value}>{{ chat: '实时对话', terminal: '原生终端', files: '文件', search: '搜索', git: 'Git', history: '运行历史', usage: '用量与状态', settings: '设置', access: '本地局域网接入' }[value]}{value === 'settings' && settingsDirty ? ' · 未保存' : ''}</PageLink>)}</nav>}
+    {page && <nav className="wb-page-nav" aria-label="工作台页面">{(['chat', 'terminal', ...(run.workspaceRoot ? ['files', 'search', 'git'] as const : []), ...(run.historyAvailable ? ['history'] as const : []), 'usage', ...(run.settingsAvailable ? ['settings'] as const : []), ...(run.accessAvailable ? ['access'] as const : [])] as RunPage[]).map(value => <Fragment key={value}>{value === 'usage' && <span className="wb-page-nav-divider" aria-hidden="true" />}<PageLink path={runPath(run.runEpoch, value)} active={page === value}>{{ chat: '实时对话', terminal: '原生终端', files: '文件', search: '搜索', git: 'Git', history: '运行历史', usage: '用量与状态', settings: '设置', access: '本地局域网接入' }[value]}{value === 'settings' && settingsDirty ? ' · 未保存' : ''}</PageLink></Fragment>)}</nav>}
     {unavailablePage && <p className="wb-notice" role="status">当前运行未提供此功能。请从导航中打开可用页面。</p>}
     {run.accessAvailable && <AccessPanel key={run.runEpoch} epoch={run.runEpoch} open={accessOpen} onClose={closeAccess} />}
     <div className="wb-columns" hidden={unavailablePage || (!!page && (page === 'access' || (page === 'usage' && !inspection)))}>
