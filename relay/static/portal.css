@@ -71,7 +71,9 @@
   box-sizing:border-box
 }
 body {
-  margin:0
+  margin:0;
+  scrollbar-width:thin;
+  scrollbar-color:var(--ui-line-strong) transparent
 }
 a {
   color:inherit;
@@ -321,7 +323,7 @@ input:focus {
   box-shadow:0 0 0 3px var(--ui-accent-soft)
 }
 a:focus-visible,button:focus-visible,input:focus-visible {
-  outline:2px solid var(--ui-accent);
+  outline:2px solid var(--ui-focus);
   outline-offset:4px
 }
 .notice {
@@ -619,4 +621,16 @@ footer {
   padding:12px
 }
 
+}
+
+::-webkit-scrollbar {
+  width:8px;
+  height:8px
+}
+::-webkit-scrollbar-thumb {
+  background:var(--ui-line-strong);
+  border-radius:4px
+}
+::-webkit-scrollbar-track {
+  background:transparent
 }
