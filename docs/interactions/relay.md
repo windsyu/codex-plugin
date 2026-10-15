@@ -37,6 +37,8 @@ sequenceDiagram
 
 连接器在凭据私有落盘成功后才启用连接。取消登录、用户已关闭连接、保存失败或迟到的批准结果均不能重新开启。重启、关闭后再开启或网络恢复可用保存的凭据重连；认证失效停止无效重连并显示需要重新登录。
 
+macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`，注册仍按上述用户输入可信地址、登录、核对和明确批准完成，不自动绑定预设服务器。已有绑定不重复提示，已关闭的接入保持关闭；非交互/系统自启只启动本机服务，不弹浏览器。后台恢复连接不自动恢复 CLI。
+
 | 本机动作/状态 | 持久与运行结果 |
 | --- | --- |
 | 登录中 `binding` | 有时限设备码和显式验证地址；可取消，不自动获得权限 |
@@ -99,6 +101,8 @@ sequenceDiagram
 本机 `GET /workbench/v1/application/relay` 返回 `{instanceId,relay}`：状态、enabled、服务器地址、电脑名、username、账号/电脑 ID、验证地址及安全错误码。`POST .../relay/bind` 提交 `{instanceId,serverUrl,name}`；`enable/disable/forget` 提交 `{instanceId}`。只接受本机 owner、精确 Origin、JSON、小正文和当前 `instanceId`，远程页不能管理连接器。取消由 `disable` 终止正在进行的登录意图。
 
 远程 Application 标记 `remoteOwner:true`、`directoryPickerAvailable:false`；RemoteOwner 可管理自有工作台的 V2 项目、历史及设置，但不能打开本机 native picker 或管理中转登录。局域网配对权限只属于指定 Run，不是完整 RemoteOwner。
+
+新电脑可另外报告 `directoryBrowserAvailable:true`。远端启动表单的“浏览电脑目录”调用 `/g/{id}/workbench/v1/application/directories`，按固定电脑授权读取目录元信息；选择后进入原目标校验，不直接启动 CLI。旧电脑无能力时继续手动输入；无权限、电脑离线、目录变化和预算不完整均明确展示。列表请求也必须重验授权，不能在账号/电脑/实例变化后展示旧响应。详细字段与分页预算见[本机目录契约](workbench.md#3-项目校验新建与恢复)。本机后台服务控制不加入中转白名单。
 
 业务转发必须满足固定 grant、原父 Cookie、同账号归属、授权代际、在线 connection epoch 和 `WORKBENCH_API_VERSION`。HTTP 通过两项 `X-Workbench-*` 头传 selectors，SSE/WS 用 `relayGrant`、`relayApi` query；重复、编码别名、混用头/query 或非 canonical 电脑路径拒绝。中转保留业务 query 原始字节，剥离 selectors/认证信息及电脑路径前缀后，通过白名单转发。
 

@@ -668,11 +668,53 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
         portal.bind(&app_a, &alice, "Alice computer"),
         portal.bind(&app_b, &bob, "Bob computer")
     );
-    for (remote, app) in [(&remote_a, &app_a), (&remote_b, &app_b)] {
+    for (remote, app, fixture) in [
+        (&remote_a, &app_a, &fixture_a),
+        (&remote_b, &app_b, &fixture_b),
+    ] {
         let body = json_body(remote.get("/workbench/v1/application").await).await;
         assert_eq!(body["instanceId"], app.instance_id.to_string());
         assert_eq!(body["remoteOwner"], true);
         assert_eq!(body["directoryPickerAvailable"], false);
+        assert_eq!(body["directoryBrowserAvailable"], true);
+        let browse = remote
+            .request(Method::POST, "/workbench/v1/application/directories")
+            .body(json!({"instanceId":app.instance_id}).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(browse.status(), 200);
+        let browse = json_body(browse).await;
+        assert_eq!(
+            browse["homePath"],
+            fixture.dir.path().canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            remote
+                .request(Method::POST, "/workbench/v1/application/directories")
+                .body(json!({"instanceId":Uuid::new_v4()}).to_string())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        for path in [
+            "/workbench/v1/application/control",
+            "/workbench/v1/application/connect",
+        ] {
+            assert_eq!(
+                remote
+                    .request(Method::POST, path)
+                    .body("{}")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                404,
+                "private lifecycle route must not enter relay allowlist"
+            );
+        }
         assert_eq!(remote.get("/").await.status(), 200);
         for path in [
             "/workbench/v1/library/sources",
@@ -709,6 +751,21 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
             .client
             .get(format!("{}/workbench/v1/application", remote_a.origin))
             .header("Cookie", &remote_b.cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        remote_a
+            .request_as(
+                Method::POST,
+                "/workbench/v1/application/directories",
+                &remote_b.cookie,
+                remote_a.grant.as_deref()
+            )
+            .body(json!({"instanceId":app_a.instance_id}).to_string())
             .send()
             .await
             .unwrap()

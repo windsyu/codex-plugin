@@ -168,7 +168,9 @@ pub fn allowed(method: &str, target: &str) -> bool {
             return method == "GET";
         }
         "application/settings" => return matches!(method, "GET" | "PUT"),
-        "launch-targets" | "library/refresh" | "library/preview" => return method == "POST",
+        "application/directories" | "launch-targets" | "library/refresh" | "library/preview" => {
+            return method == "POST";
+        }
         "runs" => return matches!(method, "GET" | "POST"),
         _ => {}
     }
@@ -289,5 +291,28 @@ mod tests {
             assert!(!allowed("GET", path), "{path}");
         }
         assert!(!allowed("CONNECT", "/"));
+    }
+
+    #[test]
+    fn directory_browsing_is_explicit_and_local_controls_stay_private() {
+        assert!(allowed("POST", "/workbench/v1/application/directories"));
+        for method in ["GET", "PUT", "DELETE", "PATCH", "CONNECT"] {
+            assert!(!allowed(method, "/workbench/v1/application/directories"));
+        }
+        for path in [
+            "/workbench/v1/application/directories/",
+            "/workbench/v1/application/directories/child",
+            "/workbench/v1/application/%64irectories",
+            "/workbench/v1/application/connect",
+            "/workbench/v1/application/pick-directory",
+            "/workbench/v1/application/stop",
+            "/workbench/v1/application/status",
+            "/workbench/v1/application/relay",
+            "/workbench/v1/application/relay/bind",
+        ] {
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                assert!(!allowed(method, path), "{method} {path}");
+            }
+        }
     }
 }

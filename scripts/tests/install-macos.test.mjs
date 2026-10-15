@@ -13,6 +13,17 @@ const beginMarker = '# >>> code-view PATH >>>';
 const endMarker = '# <<< code-view PATH <<<';
 const resources = ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'RELEASE.md', 'manifest.json', 'Cargo.lock', 'web/package-lock.json', 'CHANGELOG.md', 'vendor/vt100/LICENSE', 'vendor/vt100/PATCH.md', 'web/src/workbench/icons/LICENSE', 'web/src/workbench/icons/README.md'];
 const hash = value => createHash('sha256').update(value).digest('hex');
+const backendFixture = version => `#!/bin/sh
+case "\${1-}" in
+  service-maintenance)
+    service_lock=$(dirname -- "$(dirname -- "$0")")/.code-view-install-lock
+    if [ "\${MOCK_REQUIRE_INSTALL_LOCK:-0}" = 1 ] && [ ! -d "$service_lock" ]; then exit 78; fi
+    if [ "\${MOCK_REPLACE_INSTALL_LOCK:-0}" = 1 ]; then mv -- "$service_lock" "$service_lock.original"; mkdir -- "$service_lock"; fi
+    printf '%s\\n' "$*" >> "$SERVICE_GUARD_LOG"
+    exit "\${MOCK_SERVICE_STATUS:-0}" ;;
+  *) printf '%s\\n' 'codex-view ${version}' ;;
+esac
+`;
 function command(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: 'utf8', ...options });
   return result;
@@ -33,7 +44,7 @@ function fixture(t, { specialPrefix = false, zdot = false, legacyPrefix = false 
   fs.copyFileSync(path.join(releaseScripts, 'install.sh'), path.join(source, 'install.sh'));
   fs.copyFileSync(path.join(releaseScripts, 'code-view'), path.join(source, 'bin/code-view'));
   fs.chmodSync(path.join(source, 'bin/code-view'), 0o755);
-  for (const name of ['codex-view', 'codex-observerd']) fs.writeFileSync(path.join(source, 'bin', name), '#!/bin/sh\nprintf "%s\\n" "codex-view 0.3.0"\n', { mode: 0o755 });
+  for (const name of ['codex-view', 'codex-observerd']) fs.writeFileSync(path.join(source, 'bin', name), backendFixture('0.3.0'), { mode: 0o755 });
   for (const name of [...resources, 'licenses/example/LICENSE']) {
     fs.mkdirSync(path.dirname(path.join(source, name)), { recursive: true });
     fs.writeFileSync(path.join(source, name), name === 'manifest.json' ? JSON.stringify({ version: '0.3.0', target: 'aarch64-apple-darwin' }) : `fixture ${name}\n`);
@@ -62,7 +73,7 @@ fs.mkdirSync(path.dirname(output),{recursive:true});fs.copyFileSync(source,outpu
 `;
   fs.writeFileSync(path.join(tools, 'curl'), curl, { mode: 0o755 });
   fs.writeFileSync(path.join(tools, 'gh'), '#!/bin/sh\necho "unexpected GitHub CLI dependency" >&2\nexit 77\n', { mode: 0o755 });
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), PATH: `${tools}:${process.env.PATH}`, MOCK_RELEASE_DOWNLOADS: downloads, MOCK_CURL_LOG: log, MOCK_INSTALLER_SOURCE: installer };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), PATH: `${tools}:${process.env.PATH}`, MOCK_RELEASE_DOWNLOADS: downloads, MOCK_CURL_LOG: log, MOCK_INSTALLER_SOURCE: installer, SERVICE_GUARD_LOG: path.join(root, 'service-guard.log') };
   for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_CONFIG_DIR', 'CURL_HOME']) delete env[key];
   delete env.ZDOTDIR;
   if (zdot) env.ZDOTDIR = zdotdir;
@@ -75,7 +86,7 @@ fs.mkdirSync(path.dirname(output),{recursive:true});fs.copyFileSync(source,outpu
     const name = `code-view-${version}-aarch64-apple-darwin`;
     const updated = path.join(root, name);
     fs.cpSync(source, updated, { recursive: true });
-    for (const binary of ['codex-view', 'codex-observerd']) fs.writeFileSync(path.join(updated, 'bin', binary), `#!/bin/sh\nprintf '%s\\n' 'codex-view ${version}'\n`, { mode: 0o755 });
+    for (const binary of ['codex-view', 'codex-observerd']) fs.writeFileSync(path.join(updated, 'bin', binary), backendFixture(version), { mode: 0o755 });
     fs.writeFileSync(path.join(updated, 'manifest.json'), JSON.stringify({ version, target: 'aarch64-apple-darwin' }));
     fs.writeFileSync(path.join(updated, 'CHECKSUMS.sha256'), packageFiles.map(file => `${hash(fs.readFileSync(path.join(updated, file)))}  ${file}\n`).join(''));
     for (const file of fs.readdirSync(downloads)) fs.unlinkSync(path.join(downloads, file));
@@ -185,6 +196,61 @@ test('force upgrade preserves extras and one registered PATH block', t => {
   assert.match(command(path.join(f.prefix, 'bin/code-view'), ['--version'], { env: f.env }).stdout, /0\.3\.1/);
   assert.equal(fs.readFileSync(path.join(f.home, '.zshrc'), 'utf8'), before);
   assert.equal(fs.readFileSync(path.join(f.share, 'user-extra'), 'utf8'), 'keep');
+});
+
+test('active or unverifiable service blocks upgrade and uninstall without changing owned files or PATH', t => {
+  const f = fixture(t);
+  succeeds(f.install());
+  const installed = snapshot(f.prefix);
+  const profile = fs.readFileSync(path.join(f.home, '.zshrc'));
+  f.publish('0.3.1');
+  for (const status of ['1', '77']) {
+    const upgrade = f.run(['install', '--prefix', f.prefix, '--force'], { MOCK_SERVICE_STATUS: status });
+    fails(upgrade);
+    assert.match(upgrade.stderr, /code-view stop/);
+    assert.deepEqual(snapshot(f.prefix), installed);
+    const uninstall = f.run(['uninstall', '--prefix', f.prefix], { MOCK_SERVICE_STATUS: status });
+    fails(uninstall);
+    assert.match(uninstall.stderr, /code-view stop/);
+    assert.deepEqual(snapshot(f.prefix), installed);
+    assert.deepEqual(fs.readFileSync(path.join(f.home, '.zshrc')), profile);
+  }
+  assert.deepEqual(fs.readFileSync(f.env.SERVICE_GUARD_LOG, 'utf8').trim().split('\n'), [
+    'service-maintenance', 'service-maintenance --remove', 'service-maintenance', 'service-maintenance --remove',
+  ]);
+  succeeds(f.uninstall());
+  assert.equal(fs.existsSync(path.join(f.prefix, 'bin/codex-view')), false);
+});
+
+test('older backend without a service guard retains explicit manual-stop guidance', t => {
+  const f = fixture(t);
+  succeeds(f.install());
+  const result = f.run(['uninstall', '--prefix', f.prefix], { MOCK_SERVICE_STATUS: '2' });
+  succeeds(result);
+  assert.match(result.stderr, /Older backend.*stopped/);
+});
+
+test('quick installer holds its shared reservation during guard and preserves stale or replaced locks', t => {
+  const f = fixture(t);
+  succeeds(f.install());
+  const lock = path.join(f.prefix, '.code-view-install-lock');
+  succeeds(f.run(['install', '--prefix', f.prefix, '--force'], { MOCK_REQUIRE_INSTALL_LOCK: '1' }));
+  assert.equal(fs.existsSync(lock), false);
+  const blocked = f.run(['uninstall', '--prefix', f.prefix], { MOCK_REQUIRE_INSTALL_LOCK: '1', MOCK_SERVICE_STATUS: '1' });
+  fails(blocked);
+  assert.match(blocked.stderr, /code-view stop/);
+  assert.equal(fs.existsSync(lock), false);
+  fs.mkdirSync(lock);
+  const stale = f.uninstall();
+  fails(stale);
+  assert.match(stale.stderr, /stale lock/);
+  assert.equal(fs.statSync(lock).isDirectory(), true);
+  fs.rmdirSync(lock);
+  const replacement = f.run(['uninstall', '--prefix', f.prefix], { MOCK_REPLACE_INSTALL_LOCK: '1', MOCK_SERVICE_STATUS: '1' });
+  fails(replacement);
+  assert.match(replacement.stderr, /lock changed/);
+  assert.equal(fs.statSync(lock).isDirectory(), true);
+  assert.equal(fs.statSync(`${lock}.original`).isDirectory(), true);
 });
 
 test('no-path creates no profiles on first install and preserves registered PATH on forced reinstall', t => {

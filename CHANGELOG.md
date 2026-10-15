@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- macOS 新增 `code-view start/status/open/stop/autostart`，后台运行工作台、首次电脑注册引导和完整所属项目退出；默认手动启动，登录自启可选。公网启动表单可浏览连接电脑上的目录，选择后继续校验；支持隐藏目录、筛选、分页及权限/列表不完整提示。新增 owner 目录接口与可选能力字段，无数据库迁移，见 [ADR 0063](docs/decisions/0063-background-service-directory-browser.md)。
+
 - 本机工作台与中转各提供正式架构/交互维护入口，整合单 IP 运维到中转部署指南，删除已替代的混合契约和试部署指南；补齐裸 `codex-relayd` 忽略规则，构建二进制不进入 Git。
 
 - 标准构建/检查增加 `--component workbench|relay|all`，分别编译电脑后端与独立中转；完整检查显式覆盖 workspace，本机安装包不再顺带编译中转。增加两端能力与部署操作指南，区分本机模型认证、中转账号、数据与运行依赖；无运行 API/schema 改动，见 [ADR 0062](docs/decisions/0062-independent-component-builds.md)。

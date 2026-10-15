@@ -7,19 +7,35 @@ case "${1-}" in
     cat <<'HELP'
 Usage: code-view [DIRECTORY] [OPTIONS]
        code-view --history [OPTIONS]
-       code-view open ENTRY_FILE
+       code-view start|status|stop [OPTIONS]
+       code-view open [ENTRY_FILE] [--relay] [OPTIONS]
+       code-view autostart on|off [OPTIONS]
 
 With no directory, start Codex in the current working directory.
 DIRECTORY selects another project. --history opens the history home.
 Other options are passed to codex-view; --project overrides the default.
+start runs the workbench in the background; stop ends all its projects.
+Use ./start (or another explicit path) for directories named like commands.
 
 Backend options:
 HELP
     exec "$backend" --help ;;
   --history) shift; exec "$backend" "$@" ;;
-  open|--version|-V) exec "$backend" "$@" ;;
+  start|status|stop|open|autostart|--version|-V) exec "$backend" "$@" ;;
   version) shift; exec "$backend" --version "$@" ;;
 esac
+# Scope flags may precede a subcommand. Skip their values so, for example,
+# --profile start remains a profile rather than an accidental command.
+skip_value=false
+for argument do
+  if [ "$skip_value" = true ]; then skip_value=false; continue; fi
+  case "$argument" in
+    --config-dir|--data-dir|--codex-bin|--profile|--provider-profile|--entry-file|--project|--resume) skip_value=true ;;
+    --*=*|-*) ;;
+    start|status|stop|open|autostart) exec "$backend" "$@" ;;
+    *) break ;;
+  esac
+done
 for argument do
   case "$argument" in
     --project|--project=*) exec "$backend" "$@" ;;

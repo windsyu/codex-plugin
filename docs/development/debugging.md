@@ -6,6 +6,8 @@
 
 ## 查看合成阶段调试
 
+macOS 后台服务专项先运行 `node scripts/dev.mjs build --component workbench --offline`，再执行 `node scripts/verify-background-service.mjs`。脚本用受管产物中的独立 HOME/USERPROFILE/CODEX_HOME、合成 CLI 和真实用户 LaunchAgent 检查重复启动、前台冲突、自启开关、异常重启不恢复 CLI、损坏配置下完整停止及所属子进程回收；结束时卸载自己的测试任务。该专项要求已登录的 macOS 桌面，不修改真实用户的登录自启目录，不模拟注销、重新登录或睡眠恢复。结果和安全诊断保留在任务目录。
+
 当前阶段已接上三列布局、受认证 WebSocket、原生 xterm、右侧“用户”气泡与左侧“模型”流式卡片，并在对话中交错呈现独立工具卡。用户提交来自明确匹配的原生记录，模型名有来源依据；HTTP 辅助/未知请求可在“用量概览 → 查看调用记录”中选中并展开。工具参数生成与执行状态分开，命令输出、退出码与耗时仅在存在关联证据时显示；Code Mode 保留代码工具卡。正式入口现已接入项目文件树、代码搜索及 Git 只读阅读；磁盘历史也使用上面的正式入口。下面保留的 R1 演示入口未安装 Recorder，使用普通安装版 CLI、临时项目/`CODEX_HOME` 和本机合成模型，只演示文字聊天，不访问真实模型：
 
 ```bash

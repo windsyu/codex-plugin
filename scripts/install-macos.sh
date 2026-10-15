@@ -67,6 +67,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/code-view-install.XXXXXX")
 # newly-created private workspace; installation destinations still reject links.
 work=$(cd -P -- "$work" && pwd)
 lock=
+lock_identity=
 temporary_files=()
 created_directories=()
 install_committing=false
@@ -74,7 +75,11 @@ cleanup() {
   local task_exit_status=$? temporary index
   if [[ $task_exit_status != 0 && $install_committing == true ]]; then rollback_install; fi
   for temporary in ${temporary_files[@]+"${temporary_files[@]}"}; do rm -f -- "$temporary" || true; done
-  if [[ -n $lock ]]; then rmdir -- "$lock" || true; fi
+  if [[ -n $lock ]]; then
+    if [[ ! -L $lock && -d $lock && $(path_identity "$lock") == "$lock_identity" ]]; then
+      rmdir -- "$lock" || printf '%s\n' 'Installation lock cleanup failed; inspect it before retrying.' >&2
+    else printf '%s\n' 'Installation lock changed; preserved for inspection.' >&2; fi
+  fi
   if [[ $task_exit_status != 0 ]]; then
     for ((index=${#created_directories[@]}-1; index>=0; index--)); do rmdir -- "${created_directories[index]}" 2>/dev/null || true; done
   fi
@@ -85,6 +90,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 hash_file() { shasum -a 256 -- "$1" | cut -d ' ' -f 1; }
+path_identity() {
+  local identity_value
+  if identity_value=$(stat -f '%d:%i' "$1" 2>/dev/null); then printf '%s' "$identity_value";
+  else stat -c '%d:%i' "$1" 2>/dev/null; fi
+}
 read_text() {
   text=$(cat -- "$1"; printf '.')
   text=${text%.}
@@ -316,12 +326,34 @@ acquire_lock() {
   [[ ! -e $prefix/.code-view-install-lock && ! -L $prefix/.code-view-install-lock ]] || fail 'another management operation or stale lock exists'
   mkdir -- "$prefix/.code-view-install-lock" || fail 'cannot acquire installation lock'
   lock=$prefix/.code-view-install-lock
+  lock_identity=$(path_identity "$lock") || fail 'cannot establish installation lock identity'
+}
+check_managed_service() {
+  local backend=$prefix/bin/codex-view version_output service_status=0
+  [[ -e $backend ]] || return 0
+  check_file "$backend"
+  [[ -x $backend ]] || fail 'installed backend is not executable; preserve it before retrying'
+  version_output=$("$backend" --version) || fail 'cannot validate installed backend version'
+  case $version_output in 'codex-view '*) ;; *) fail 'unrecognized installed backend; preserve it before retrying' ;; esac
+  # load_receipt/revalidate_installation have checked hashes before execution.
+  # --remove only removes verified inactive registrations for this executable.
+  if [[ $action == uninstall ]]; then
+    "$backend" service-maintenance --remove || service_status=$?
+  else
+    "$backend" service-maintenance || service_status=$?
+  fi
+  case $service_status in
+    0) ;;
+    2) printf '%s\n' 'Older backend has no service guard. Ensure its foreground workbench is stopped before continuing.' >&2 ;;
+    *) fail 'background service is active or its registration cannot be verified; run code-view stop for each scope before retrying' ;;
+  esac
 }
 if [[ $action == uninstall ]]; then
   [[ -f $receipt ]] || fail 'no quick-install receipt; use an explicit --force quick reinstall to register an existing release'
   plan_profiles
   acquire_lock
   revalidate_installation
+  check_managed_service
   for relative in ${owned_paths[@]+"${owned_paths[@]}"}; do
     case $relative in bin/code-view-uninstall|share/code-view/.install-path-block|share/code-view/.install-path-profiles) continue ;; esac
     revalidate_owned_file "$relative"
@@ -428,6 +460,7 @@ printf '%s\n' code-view-install-v1 > "$work/receipt"
 for ((index=0; index<${#owned_paths[@]}; index++)); do printf '%s\t%s\n' "${owned_hashes[index]}" "${owned_paths[index]}" >> "$work/receipt"; done
 acquire_lock
 revalidate_installation
+check_managed_service
 stage=$work/staged-prefix
 # The legacy installer validates and copies into our private stage. A failed
 # package copy cannot change an existing installation or its receipt.

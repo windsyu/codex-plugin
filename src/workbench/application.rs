@@ -16,9 +16,12 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
+pub(crate) mod directories;
 pub(crate) mod folder_picker;
 pub mod instance;
 pub(crate) mod launching;
+pub mod management;
+pub mod service;
 use launching::{
     Book, DirectoryGuard, LaunchResult, SharedBook, StartRequest, Target, TargetRequest,
 };
@@ -440,6 +443,13 @@ pub struct Application {
     pub instance_id: Uuid,
     pub entry: BrowserEntry,
 }
+impl Drop for Application {
+    fn drop(&mut self) {
+        // Close admission before any possibly slow Run/recorder cleanup. This
+        // also fences signal-driven exits, not only the local control endpoint.
+        self.web.begin_shutdown();
+    }
+}
 impl Application {
     pub fn start(
         prepared: Prepared,
@@ -469,6 +479,11 @@ impl Application {
             sources.handle(),
             home.clone(),
             relay_root,
+            paths
+                .root
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("invalid workbench root"))?
+                .to_path_buf(),
         )?;
         let runs = RunWorker::start(
             Runner {
@@ -519,6 +534,12 @@ impl Application {
         self.web.healthy()
             && self.lock.verify().is_ok()
             && self._runs.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
+    pub fn shutdown_requested(&self) -> bool {
+        self.web.shutdown_requested()
+    }
+    pub fn set_service_label(&self, label: String) {
+        self.web.set_service_label(label);
     }
 }
 
@@ -579,6 +600,7 @@ pub async fn connect(entry: &BrowserEntry, mut request: Connect) -> Result<Optio
             "launch_busy",
             "invalid_instance",
             "pairing_required",
+            "application_stopping",
         ];
         anyhow::bail!(
             "application request failed: {}",
