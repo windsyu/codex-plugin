@@ -17,12 +17,12 @@
   /* Text */
   --ui-text: #e4e8ee;
   --ui-text-2: #a3acb9;
-  --ui-text-3: #767f8c;
+  --ui-text-3: #949eac;
 
   /* Accent (links, focus, selection, primary actions) */
   --ui-accent: #7fb0f7;
-  --ui-accent-strong: #4c8bf5;
-  --ui-accent-strong-hover: #639bf7;
+  --ui-accent-strong: #2f65c7;
+  --ui-accent-strong-hover: #2760bf;
   --ui-accent-on-strong: #f4f8ff;
   --ui-accent-soft: rgb(100 148 236 / 0.16);
   --ui-accent-soft-hover: rgb(100 148 236 / 0.24);

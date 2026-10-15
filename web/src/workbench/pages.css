@@ -26,10 +26,19 @@
 .wb-overview-stats strong { display:block; color:var(--ui-text); font-size:28px; font-weight:500; margin-bottom:7px; font-variant-numeric:tabular-nums; }
 .wb-pages .wb-home-runs { display:block; width:min(1180px,100%); max-height:none; overflow:visible; padding:15px 32px 28px; margin:0 auto; background:transparent; border:0; }
 .wb-pages .wb-home-runs-label { display:block; margin-bottom:16px; font-size:14px; font-weight:500; color:var(--ui-text-2); }
-.wb-pages .wb-home-run-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px; overflow:visible; }
-.wb-pages .wb-home-run-card { min-width:0; border-radius:var(--ui-radius-lg); background:var(--ui-surface-2); border:1px solid var(--ui-line); transition:background-color var(--ui-t-fast),border-color var(--ui-t-fast),color var(--ui-t-fast),transform var(--ui-t-fast),box-shadow var(--ui-t-fast); }
-.wb-pages .wb-home-run-link { min-width:0; min-height:110px; border:0; background:transparent; padding:20px; }
+.wb-pages .wb-home-run-list { display:grid; align-items:stretch; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px; overflow:visible; }
+.wb-pages .wb-home-run-card { display:flex; flex-direction:column; align-items:stretch; gap:0; min-width:0; border-radius:var(--ui-radius-lg); background:var(--ui-surface-2); border:1px solid var(--ui-line); transition:background-color var(--ui-t-fast),border-color var(--ui-t-fast),color var(--ui-t-fast),transform var(--ui-t-fast),box-shadow var(--ui-t-fast); }
+/* Keep names and status readable, with the independent stop action below the link. */
+.wb-pages .wb-home-run-link { display:grid; align-content:start; grid-template-columns:18px minmax(0,1fr) auto; gap:12px 10px; flex:1; height:auto; min-width:0; min-height:110px; border:0; background:transparent; padding:20px; }
+.wb-pages .wb-home-run-name { max-width:none; }
+.wb-pages .wb-home-run-action { grid-column:2 / -1; margin-left:0; padding-left:0; border-left:0; }
+.wb-pages .wb-home-run-action>span:first-child { display:inline; }
+.wb-pages .wb-home-run-stop { align-self:flex-end; margin:0 20px 16px; }
 .wb-pages .wb-home-run-card:hover { border-color:var(--ui-accent-line); background:var(--ui-surface-3); transform:translateY(-1px); box-shadow:var(--ui-shadow-1); }
+@media (prefers-reduced-motion:reduce) {
+  .wb-pages .wb-home-run-card { transition:none; }
+  .wb-pages .wb-home-run-card:hover { transform:none; }
+}
 .wb-overview-empty,.wb-overview-sources { width:min(1116px,calc(100% - 64px)); margin:0 auto 28px; padding:24px; background:var(--ui-surface-2); border:1px solid var(--page-line); border-radius:var(--ui-radius-lg); }
 .wb-overview-empty { padding:42px; text-align:center; }
 .wb-overview-sources h2 { font-size:14px; }
