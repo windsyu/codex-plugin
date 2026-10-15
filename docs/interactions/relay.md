@@ -87,7 +87,7 @@ macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`�
 | `POST /bindings` | `{name,resumeGatewayId?,resumeCredential?}`；恢复字段成对，返回设备码/期限/验证地址 |
 | `POST /bindings/{id}/poll` | `{deviceCode}`；本机领取独立凭据，门户看不到 secret |
 | `POST /bindings/preview`、`/approve` | `{userCode}`；当前已改密账号核对/批准，恢复登记须原账号 |
-| `POST /gateways/{id}/open` | 单端口 `{uiApiVersion:1}`；返回固定页面授权 URL |
+| `POST /gateways/{id}/open` | 单端口 `{uiApiVersion:2}`；返回固定页面授权 URL |
 | `DELETE /gateways/{id}` | 所有者删除电脑登记，关闭接入，不修改本机历史 |
 | `POST /gateway/revoke` | 独立 Bearer 电脑凭据撤销自身登记，Cookie 不能代替 |
 | `GET /tunnel` | 独立电脑凭据认证的控制 WSS |
@@ -105,6 +105,8 @@ macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`�
 新电脑可另外报告 `directoryBrowserAvailable:true`。远端启动表单的“浏览电脑目录”调用 `/g/{id}/workbench/v1/application/directories`，按固定电脑授权读取目录元信息；选择后进入原目标校验，不直接启动 CLI。旧电脑无能力时继续手动输入；无权限、电脑离线、目录变化和预算不完整均明确展示。列表请求也必须重验授权，不能在账号/电脑/实例变化后展示旧响应。详细字段与分页预算见[本机目录契约](workbench.md#3-项目校验新建与恢复)。本机后台服务控制不加入中转白名单。
 
 业务转发必须满足固定 grant、原父 Cookie、同账号归属、授权代际、在线 connection epoch 和 `WORKBENCH_API_VERSION`。HTTP 通过两项 `X-Workbench-*` 头传 selectors，SSE/WS 用 `relayGrant`、`relayApi` query；重复、编码别名、混用头/query 或非 canonical 电脑路径拒绝。中转保留业务 query 原始字节，剥离 selectors/认证信息及电脑路径前缀后，通过白名单转发。
+
+API 2 增加精确的历史路由：`GET /workbench/v1/library/session-groups`、`GET /workbench/v1/library/session-groups/{id}`、`GET/PUT /workbench/v1/library/entries/{entry}/organization`。电脑端仍验证 Application owner/RemoteOwner，PairedRun 无全局历史权限。归类 PUT 继续验证 Origin、实例、来源身份/修订和强 `If-Match`；中转外层边界拒绝重复 `If-Match`（403）；其余允许头保留全部值，由电脑端拒绝重复 `Content-Type`（415），不可表示的头值拒绝。旧页面授权须返回门户重新打开；不会删除登记、历史或归类状态。
 
 SSE 是观察副本，不得阻塞原生模型流；终端输入仍交给当前 Run 的原版 CLI。连接关闭时不缓存待发输入；重连只恢复同一 Run 的终端连接及阅读状态，不重放键盘、审批或项目启动。启动响应中断时按原 `operationId` 查询受理结果，不盲目重发创建。
 

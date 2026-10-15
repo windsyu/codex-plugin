@@ -39,6 +39,7 @@
 | Release 包装 | 0.3.0 安装包、code-view 当前项目/指定路径、许可与校验、隔离安装验证 | R6 | Passed | [包装验证](validation/v2-release-packaging-2026-10-02.md)：445 项 Rust、234 项 Web、45 项维护工具及格式/Clippy/类型/debug/release 通过；实际归档解压安装、中文/空格 cwd、实例复用、历史入口、资源与 SIGINT 回收通过。显式 Cargo target 回归通过；限 macOS / Apple Silicon；本条证据为本地包装验证，正式发行资产以 GitHub Release 记录为准 |
 | 公网工作台中继 | windsyu 管理员管理/删除普通账号、首次改密与全端撤销、单 IP 单 HTTPS 端口多电脑、可信中央前端 | R6；[ADR 0058](decisions/0058-admin-accounts-single-origin-relay.md)、[ADR 0061](decisions/0061-account-deletion-admin-rename.md) | In progress | [本地与三电脑 Chrome 联调](validation/public-relay-single-origin-2026-10-13.md)、[首轮 Linux 部署](validation/public-relay-single-origin-deploy-2026-10-14.md)、[页面/恢复增量升级](validation/public-relay-routes-recovery-2026-10-14.md)及[账号管理增量](validation/public-relay-account-management-2026-10-14.md)覆盖 schema 2/3、TLS、原生 CLI 合成回归、真实备份副本恢复、自动重连及默认管理员无损改名。账号删除使用隔离合成数据，真实账号未自动删除。公网真实消息等待所属账号在独立 Chrome 登录；真实手机、三电脑完整公网 V2 与续签另验。旧[本地链路](validation/public-workbench-relay-2026-10-10.md)和[双端口试用](validation/public-relay-ip-trial-2026-10-13.md)不继承 LAN 或旧双端口 Passed 证据 |
 | 后台服务与远端目录浏览 | macOS 用户服务、首次注册引导、owner 当前层目录浏览、完整退出与安装保护 | 公网工作台中继；[ADR 0063](decisions/0063-background-service-directory-browser.md) | In progress | [实现与本机验证](validation/background-service-directory-browser-2026-10-15.md)及[配套中转部署](validation/background-directory-relay-deploy-2026-10-15.md)完成：目录权限/分页、注册引导、真实 LaunchAgent 生命周期、两组件构建、Linux 远端更新与真实公网目录浏览通过，本机原有项目保持运行。真实登录自启/睡眠恢复与真实手机仍待验收 |
+| R7 项目会话整理 | 稳定项目导航、主要/辅助/运行分层、明确来源折叠、单条可撤销归属及任务识别视图 | R6 | Passed | 2026-10-08 A–D 通过[原验收](validation/native-cli-r7-project-organization-2026-10-08.md)；用户试用后确认 E 四项体验改造，独立通过[任务识别与人类对话验收](validation/native-cli-r7-human-conversation-2026-10-08.md)：标准 check、增量 Web288、正式页面 Chrome/窄屏及最终 release 构建，新试用服务已在零活动 Run 后重启。封闭识别、有限索引和用户 Chrome 客户端屏蔽边界保留；不自动整理真实历史或创建远端 Issue/PR |
 
 状态只在本表维护：`Pending`、`In progress`、`Blocked`、`Passed`。`Passed` 必须链接本项目的版本、操作、断言、结果和限制；设计文本、源码阅读及 cc-viewer 试用均不能充当通过记录。出现阻塞须写明具体失败与下一项实验，不能只写“兼容性待确认”。
 
@@ -70,6 +71,8 @@ R5 的 Passed 限于当时明确验证的范围。随后发现实际旧库 schem
 | RQ20 | 用户 2026-10-14 要求中转和本机 codex-plugin 分开编译/部署，并供其他 AI agent 操作 | 独立 Cargo 产品、组件 build/check、本机 package 不编译中转、共享协议/可信前端不反向依赖运行模块；分别说明运行依赖/账号与模型认证/数据/升级/验证，不拆仓库、不自动部署 | 公网工程增量；[ADR 0062](decisions/0062-independent-component-builds.md)、[组件指南](guides/component-deployment.md)、[验证](validation/independent-components-2026-10-14.md) |
 | RQ21 | 用户 2026-10-15 要求远端可选择电脑路径，避免只手动输入 | 当前系统用户可读目录的网页浏览、主目录/磁盘/面包屑/筛选/隐藏项、有界元信息分页与明确缺口；owner/RemoteOwner 可用，PairedRun 拒绝；选择后复用既有启动校验，不读文件正文、不执行 Shell | 后台服务与远端目录浏览；[ADR 0063](decisions/0063-background-service-directory-browser.md)、[本机交互](interactions/workbench.md#3-项目校验新建与恢复) |
 | RQ22 | 用户要求本机方便后台开启/关闭、可选登录自启及首次 start 注册电脑；运行新版前关闭此前试用实例 | macOS LaunchAgent，start/status/open/stop/autostart；实例作用域/私有能力验证、完整所属 CLI 回收；首次交互未绑定或授权失效打开接入页，已有绑定保持开关，非交互不弹窗；不自动恢复项目，升级/卸载拒绝活动/未知服务 | 后台服务与远端目录浏览；[ADR 0063](decisions/0063-background-service-directory-browser.md)、[使用指南](guides/usage.md#后台开启远程注册和退出) |
+| RQ23 | 用户 2026-10-08 要求借鉴 token-monitor，明确项目分组并减少杂乱 | 独立项目上下文、辅助与运行记录分层、证据明确的来源展示组、解释未归类、单条可撤销覆盖；不做 worktree、不删除/改写原始记录、不改变恢复或手机权限 | R7-A–D；专项矩阵见[整理方案 §8](codex-native-cli-workbench-session-organization.md#8-安全故障与验收矩阵)，复用 P07/P08/P15–P17 |
+| RQ24 | 用户 2026-10-08 试用后确认四项人类视角改造 | 有效原标题优先/真实请求回退、对话优先/技术记录按需、来源独立交流预览、当前项目主标题；原始数据不改，未知和缺口可核查，不猜完成状态，不扩展空白第五项 | R7-E；[整理契约 §10](codex-native-cli-workbench-session-organization.md#10-试用改进任务识别与人类对话优先) |
 
 F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；项目共享、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入当前交付。RQ12 的既有 LAN 手机入口不包含公网；用户 2026-10-10 新授权的公网账号归属范围单列为 RQ17，不追溯到 R5/R6 的 Passed 证据。
 
@@ -531,7 +534,7 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 
 **R6 已完成本地实现、自动验证与用户试用验收。** A–F.1 的归属、启动与设备反馈已修复，G1–G4 证据及 2026-09-30 用户确认补齐整片验收。用户已确认默认全部历史、已有项目/指定目录启动、新项目独立标签和默认新对话/指定会话恢复；设计与接口见[R6 方案](codex-native-cli-workbench-history-home.md)，状态与门槛见[上节](#r6-history-home)。
 
-当前确认的 V2 分片开发及验证目标已完成，没有自动进入下一功能片的任务。本次本地提交与合并须核对暂存内容和全部分支历史的二进制策略，远端覆盖与提交前审计见 [G4 Git 交付核对](validation/native-cli-r6-g4-cli-01592-2026-09-30.md#8-git-交付与全分支二进制核对)；推送、PR 和发布继续遵循授权。G1 资源、G2 压力和 G3/G4 兼容保留各自证据；原生继承历史、缓存/搜索覆盖、手机权限及 Stale 诊断边界不因本次验收被改变。不重复读取私人正文或扩大 V3 范围。
+截至 2026-09-30 的 V2 分片开发及验证目标已完成。2026-10-08 用户新增项目会话整理需求，随后授权完成 [R7](#r7-session-organization) 与测试验证；当前逐片状态与下一项任务见 §11，不将未通过方案当成运行时已交付。提交、推送、PR、发布不在本次授权内。用户随后明确要求运行分支试用，试用服务仅在核验无活动 Run 后正常重启，不终止用户 CLI。G1 资源、G2 压力和 G3/G4 兼容保留各自证据；原生继承历史、缓存/搜索覆盖、手机权限及 Stale 诊断边界不因本次验收被改变。不重复读取私人正文或扩大 V3 范围。
 
 当前受测平台/provider 仍见[支持范围](codex-native-cli-workbench-support.md)。R6 不自动迁移旧库、修改原生配置、清理真实历史、替换当前实例、推送或发布，也不将尚未执行的设计验收算作通过。
 
@@ -548,3 +551,25 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 2026-10-02 用户追加 README 快速安装到 macOS PATH 及卸载要求。使用独立 Bash 脚本下载已有 release，默认安装至 `~/.local/bin`，管理 zsh/Bash 登录终端 PATH，并提供按清单卸载的 `code-view-uninstall`；安装、卸载和错误恢复通过独立临时 HOME 验证，见[增量验证](validation/macos-quick-install-2026-10-02.md)。该维护变更不改写 `v0.3.0` 资产、不改变运行时或用户数据格式；源码交付和 GitHub README 更新按 [Issue #8](https://github.com/windsyu/codex-plugin/issues/8) 的 PR/CI 记录核验。
 
 2026-10-02 用户确认公开现有 GitHub 仓库及历史，恢复 README 的产品与操作说明，安装改用系统 curl 匿名下载，默认前缀改为 `~/.codex-view`。旧 `~/.local` 快速安装先按清单卸载，再安装到新位置；工作台数据目录仍为 `~/.codex-web`。本次沿用不可变 `v0.3.0` 资产，维护后续打包模板的默认路径；源码评审与 CI、公开可见性及匿名真实安装分别留证，见[公开安装验证](validation/public-install-2026-10-02.md)与 [Issue #12](https://github.com/windsyu/codex-plugin/issues/12)。
+
+<a id="r7-session-organization"></a>
+
+## 11. R7：项目会话整理
+
+**用户要求与范围。** 2026-10-08 用户要求将 token-monitor 值得借鉴的优点设计成改造任务，准备改造；明确对 worktree 没有兴趣，重点是按项目分组不明确和杂乱数据。采用元数据优先、主要/辅助分层及展示与来源身份分离，不采用按目录名合并或私有 SQLite 判定。具体产品、API、持久化、故障和安全契约见[整理方案](codex-native-cli-workbench-session-organization.md)，持久化/兼容选择见 [ADR 0055](decisions/0055-project-session-organization.md)。不重开已 Passed 的 R6，不复用旧验收冒充新功能通过。
+
+按 A → B → C → D 逐片交付，每片先合成回归、相关检查/构建和试用结果再推进；不提前铺开多套未集成改造。guardian review 专门判定需公共协议/受测 rollout 证据，没有证据不阻塞已有明确子代理的分层，保持 unknown 或一般辅助。
+
+| 子任务 | 内容与文件边界 | 通过条件 | 状态 |
+| --- | --- | --- | --- |
+| R7-A 项目上下文与归属解释 | `history/library.rs`、`library/model.rs` 查询/摘要与测试；`web/src/workbench/library.ts`、`HistoryLibraryPanel.tsx`、`LibraryReader.tsx`、CSS/测试：项目搜索独立、selectedProject 不依赖分页、同名路径可辨、未归类原因、类型化更新提示 | 当前项目不在第一页/搜索无匹配/来源过滤后标题路径保持；左侧全量记录与右侧筛选数量明确；缺口/撤销不误清项目；正文锚点、旧直达链接、键盘/320px 正常；不新增持久写入；[回归/独立复核/Chrome 证据](validation/native-cli-r7-project-organization-2026-10-08.md) | Passed |
+| R7-B 主要/辅助/运行与来源展示 | `history/library/native.rs`、`scan.rs`、纯类型/关系函数、`library.rs` 查询及 tests；Application owner 新 GET 路由；Web 分层、来源选择/父入口及 tests：新增类型证据、组查询/计数/分页，投影版本重建 | unknown 可见；明确代理/运行默认折叠且搜索可达；同 home/thread/有效项目/类别的 native/Observer 才分组；Workbench Run 不冒充 thread；不同 home、身份/项目/类型冲突不合并；所有成员独立正文/Token/coverage；计数全范围，过期游标 409，来源撤销/手机拒绝；[逐片证据](validation/native-cli-r7-project-organization-2026-10-08.md#5-r7-b-分层与来源查询) | Passed |
+| R7-C 可撤销单条归类 | 新增私有 `history/library/organization.rs` 及独立持久化/故障 tests；现有归属查询接口集成；`workbench/web/application.rs` owner 路由；Web 详情编辑/确认及 tests。模块只归 history 所有，不增加反向依赖 | project/unassigned/automatic；覆盖只绑当前可靠来源身份，重启/缓存重建不丢；CAS/ACK 丢失/提交前后 crash/损坏/未知版本/写满/预算/链接负向；不同项目展示后仍恢复原 cwd/线程；raw 数据、Run/cleanup/手机边界不变；[独立复核与逐片证据](validation/native-cli-r7-project-organization-2026-10-08.md#6-r7-c-单条覆盖与故障隔离) | Passed |
+| R7-D 集成与交付 | 合成三来源/旧缓存/覆盖状态、系统 Chrome/安装版 CLI 专项；相关 Rust/Web 测试、标准 check/build；设计/支持/使用指南及真实验证报告 | RQ23/方案矩阵按[实际证据及限制](validation/native-cli-r7-project-organization-2026-10-08.md#8-r7-d-集成与收尾)完成；10k release p95≤200ms，debug失败保留；320/736/1440px、焦点/分页/旧链接；官方0.161公开no-daemon恢复原目录，不扩大默认daemon兼容；双Run压力隔离、原数据零写、完整check与文档/增量二进制/隐私审查通过 | Passed |
+| R7-E 人类对话与任务识别 | 共享来源呈现规则、有界标题/交流预览、catalog 4；正文折叠/全部记录、任务列表/项目主标题，技术计数次级；回归与实际 Chrome | 长 AGENTS/环境前缀、混合/畸形/引用 XML、既有标题/来源独立预览、三来源、v3 重建零写；错误/缺口/unknown/搜索可达，128条有界定位、锚点/撤销/恢复不变；320/736/1440px 实际 Chrome、标准 check 和最终 release build 已通过；[独立增量报告](validation/native-cli-r7-human-conversation-2026-10-08.md)保留有限索引与手动浏览器限制，不以原R7测试推导体验通过 | Passed |
+
+**下一项可直接执行。** R7-E 四项改造已通过独立验收，新 release 试用服务在核验零活动 Run 后正常重启，内嵌资源与当前构建逐字节一致；等待用户体验任务标题、交流预览和对话阅读。第5项为空，不据此扩展。真实归类仍由用户明确操作，不加入批量整理、worktree 或默认daemon兼容改造；用户 Chrome 曾出现客户端屏蔽，不绕过安全设置或据合成 Chrome 通过宣称手动配置已修复。
+
+**GitHub Issue 准备（未创建）。** 建议标题 `feat: clarify project session organization`。背景：现有首页混列、注入上下文冒充任务标题和事件流优先；价值：快速找到明确项目的主要任务并阅读人类对话。范围为 R7-A–E，非目标为 worktree/Git 聚合、模型主题生成、批量整理、原始数据清理和权限扩大。验收以 RQ23/RQ24 和上表为准；安全/兼容风险为新增 owner 状态写入、catalog 4 派生重建、有界呈现识别、计数/URL 变化与原 cwd 恢复不变；依赖 R6 已有三来源身份、只读 reader 和授权边界。关联整理方案、ADR 0055/0064 及两份实际验证报告。当前请求未授权远端 mutation，先保留本地任务，创建 Issue/PR、提交/推送或发布需另行授权。
+
+**设计准备与实施记录。** A–D 方案与实现完成独立复核，修正跨应用修订、组摘要、类型冲突、存储恢复/首次发布、DTO降级与预算诊断。实际 Rust/Web/Chrome、性能、真实CLI及负向权限证据见[逐片报告](validation/native-cli-r7-project-organization-2026-10-08.md)；后续试用与 E 增量改造见[人类对话报告](validation/native-cli-r7-human-conversation-2026-10-08.md)，不从文档检查或未执行ignored测试推导通过。物理断电/设备故障、双OS进程压力及新CLI默认daemon仍不作实测保证；原始历史未改，试用实例重启不启动 CLI，没有远端 mutation。

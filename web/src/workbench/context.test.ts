@@ -1,9 +1,9 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { createContext } from './context';
+import { createContext, UI_API_VERSION } from './context';
 const gateway = '11111111-1111-4111-8111-111111111111';
 const grant = '22222222-2222-4222-8222-222222222222';
 const session = '33333333-3333-4333-8333-333333333333';
-const entry = (g = grant) => new URL(`https://relay.example/g/${gateway}/#grant=${g}&session=${session}&api=1`);
+const entry = (g = grant) => new URL(`https://relay.example/g/${gateway}/#grant=${g}&session=${session}&api=${UI_API_VERSION}`);
 beforeEach(() => { sessionStorage.clear(); });
 it('preserves local and legacy domain routes and storage', () => {
   const context = createContext(new URL('https://old.example/?run=abc'), sessionStorage);
@@ -16,15 +16,15 @@ it('prefixes REST and navigation and carries only query auth on streams', () => 
   const context = createContext(entry(), sessionStorage);
   expect(context.path('/workbench/v1/application')).toBe(`/g/${gateway}/workbench/v1/application`);
   expect(context.headers().get('X-Workbench-Grant')).toBe(grant);
-  expect(context.headers().get('X-Workbench-Api-Version')).toBe('1');
+  expect(context.headers().get('X-Workbench-Api-Version')).toBe(String(UI_API_VERSION));
   for (const route of ['live/events', 'terminal']) {
     const url = new URL(context.stream(`/workbench/v1/${route}?epoch=run`), entry());
     expect(url.pathname).toBe(`/g/${gateway}/workbench/v1/${route}`);
     expect(url.searchParams.get('relayGrant')).toBe(grant);
-    expect(url.searchParams.get('relayApi')).toBe('1');
+    expect(url.searchParams.get('relayApi')).toBe(String(UI_API_VERSION));
     expect(url.searchParams.get('epoch')).toBe('run');
   }
-  expect(context.navigation('/?run=abc')).toBe(`/g/${gateway}/?run=abc#grant=${grant}&session=${session}&api=1`);
+  expect(context.navigation('/?run=abc')).toBe(`/g/${gateway}/?run=abc#grant=${grant}&session=${session}&api=${UI_API_VERSION}`);
   expect(context.storageKey('wb-launch:instance')).toBe(`relay:${session}:${gateway}:wb-launch:instance`);
 });
 it('pins a page grant when another page stores a newer grant and does not delete the newer one', () => {
@@ -38,7 +38,7 @@ it('pins a page grant when another page stores a newer grant and does not delete
   expect(refreshed.headers().get('X-Workbench-Grant')).toBe(newer.headers().get('X-Workbench-Grant'));
 });
 it('fails closed for missing, malformed or incompatible authorization', () => {
-  for (const fragment of ['', '#grant=bad', `#grant=${grant}&session=${session}&api=2`]) {
+  for (const fragment of ['', '#grant=bad', `#grant=${grant}&session=${session}&api=1`]) {
     expect(() => createContext(new URL(`https://relay.example/g/${gateway}/${fragment}`), sessionStorage).assert()).toThrow('失效');
   }
 });

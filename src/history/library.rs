@@ -1,7 +1,11 @@
 //! Derived history catalog. All filesystem/SQLite work stays on bounded workers.
+mod groups;
 pub(crate) mod launch;
 mod model;
 mod native;
+mod organization;
+mod organization_view;
+mod presentation;
 #[cfg(test)]
 mod scale_browser;
 mod scan;
@@ -9,8 +13,10 @@ mod scan;
 mod tests;
 mod window;
 use crate::workbench::{config::ConfigHandle, recording::fs::Directory};
+pub use groups::{GroupAnchorQuery, GroupQuery};
 use model::*;
 pub use model::{LibraryConfig, Page, Query, Source, SourceStatus};
+pub use organization_view::OrganizationWrite;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use scan::{Scan, Step};
 use serde_json::{Value, json};
@@ -26,21 +32,47 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-// Version 2 separates execution cwd from display projects. Only this derived cache is rebuilt.
-const CATALOG_VERSION: i64 = 2;
+// Version 4 derives human-readable titles/previews; rebuild checkpoints only.
+const CATALOG_VERSION: i64 = 4;
 
 type Result<T> = std::result::Result<T, &'static str>;
 type Policy = Arc<dyn Fn() -> Result<LibraryConfig> + Send + Sync>;
 struct Shared {
     home: PathBuf,
     data: PathBuf,
+    organization: organization::Store,
     policy: Policy,
     status: RwLock<Vec<SourceStatus>>,
     stop: AtomicBool,
     refresh: AtomicBool,
+    refresh_status: RwLock<RefreshStatus>,
     key: [u8; 32],
 }
+#[derive(Clone, Default, serde::Serialize)]
+struct RefreshStatus {
+    requested: u64,
+    completed: u64,
+    failed: bool,
+}
 impl Shared {
+    fn finish_scan_refresh(&self, id: u64, sources: &[Source]) {
+        let failed = self
+            .states(sources)
+            .iter()
+            .any(|s| !matches!(s.state.as_str(), "ready" | "partial"));
+        self.finish_refresh(id, failed);
+    }
+    fn fail_pending_refresh(&self) {
+        let requested = self.refresh_status.read().unwrap().requested;
+        self.finish_refresh(requested, true);
+    }
+    fn finish_refresh(&self, id: u64, failed: bool) {
+        let mut progress = self.refresh_status.write().unwrap();
+        if id > progress.completed {
+            progress.completed = id;
+            progress.failed = failed;
+        }
+    }
     fn policy(&self) -> Result<(LibraryConfig, Vec<Source>)> {
         let policy = (self.policy)()?;
         let sources = policy.resolved(&self.home, &self.data)?;
@@ -100,6 +132,10 @@ pub(crate) struct LibraryHandle {
 enum Operation {
     Sources,
     List(Query, bool),
+    Groups(GroupQuery),
+    Group(String, GroupAnchorQuery),
+    Organization(String),
+    SaveOrganization(String, String, OrganizationWrite),
     Body(String, Query),
     Details(String, Query),
     Preview(PathBuf),
@@ -134,6 +170,24 @@ impl LibraryHandle {
     }
     pub async fn list(&self, query: Query, projects: bool) -> Result<Value> {
         self.call(Operation::List(query, projects)).await
+    }
+    pub async fn groups(&self, query: GroupQuery) -> Result<Value> {
+        self.call(Operation::Groups(query)).await
+    }
+    pub async fn group(&self, id: String, query: GroupAnchorQuery) -> Result<Value> {
+        self.call(Operation::Group(id, query)).await
+    }
+    pub async fn organization(&self, id: String) -> Result<Value> {
+        self.call(Operation::Organization(id)).await
+    }
+    pub async fn save_organization(
+        &self,
+        id: String,
+        revision: String,
+        request: OrganizationWrite,
+    ) -> Result<Value> {
+        self.call(Operation::SaveOrganization(id, revision, request))
+            .await
     }
     pub async fn body(&self, id: String, query: Query) -> Result<Value> {
         self.call(Operation::Body(id, query)).await
@@ -171,11 +225,13 @@ impl HistoryLibrary {
     fn with_policy(home: PathBuf, data: PathBuf, policy: Policy) -> std::io::Result<Self> {
         let shared = Arc::new(Shared {
             home,
+            organization: organization::Store::new(data.clone()),
             data,
             policy,
             status: RwLock::new(vec![]),
             stop: AtomicBool::new(false),
             refresh: AtomicBool::new(true),
+            refresh_status: RwLock::new(RefreshStatus::default()),
             key: rand::random(),
         });
         let (sender, receiver) = mpsc::sync_channel::<Request>(16);
@@ -273,7 +329,7 @@ fn open_cache(shared: &Shared) -> Result<(Directory, std::fs::File, Connection)>
     if !(0..=CATALOG_VERSION).contains(&version) {
         return Err("cache_version_unsupported");
     }
-    if version == 1 {
+    if (1..CATALOG_VERSION).contains(&version) {
         db.execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS catalog_checkpoints; DROP TABLE IF EXISTS catalog_locators; DROP TABLE IF EXISTS catalog_records; DROP TABLE IF EXISTS catalog_entries; DROP TABLE IF EXISTS catalog_sources; PRAGMA user_version=0; COMMIT;")
             .map_err(|_| "cache_rebuilding")?;
     }
@@ -289,7 +345,7 @@ fn open_cache(shared: &Shared) -> Result<(Directory, std::fs::File, Connection)>
         DELETE FROM catalog_cwds WHERE generation NOT IN(SELECT generation FROM catalog_sources);DELETE FROM catalog_locators WHERE generation NOT IN(SELECT generation FROM catalog_sources);DELETE FROM catalog_checkpoints WHERE generation NOT IN(SELECT generation FROM catalog_sources);
         DELETE FROM catalog_records WHERE generation NOT IN(SELECT generation FROM catalog_sources);
         DELETE FROM catalog_entries WHERE generation NOT IN(SELECT generation FROM catalog_sources);
-        PRAGMA user_version=2;");
+        PRAGMA user_version=4;");
     if let Err(error) = initialize {
         if matches!(
             error.sqlite_error_code(),
@@ -322,6 +378,7 @@ fn index_worker(shared: &Shared) {
     let mut previous = String::new();
     let mut jobs = std::collections::VecDeque::<Job>::new();
     let mut pending = std::collections::VecDeque::<Job>::new();
+    let mut active_refresh = 0;
     while !shared.stop.load(Ordering::Relaxed) {
         let (policy, sources) = match shared.policy() {
             Ok(v) => v,
@@ -339,6 +396,7 @@ fn index_worker(shared: &Shared) {
                 });
                 jobs.clear();
                 pending.clear();
+                shared.fail_pending_refresh();
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -371,6 +429,7 @@ fn index_worker(shared: &Shared) {
                             cached.map(|(revision, _)| revision),
                         ));
                     }
+                    shared.fail_pending_refresh();
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
@@ -385,6 +444,9 @@ fn index_worker(shared: &Shared) {
         }
         let sources_changed = signature != previous;
         let idle = jobs.is_empty() && pending.is_empty();
+        if idle {
+            shared.finish_scan_refresh(active_refresh, &sources);
+        }
         // Consume an already queued refresh when starting a changed-source scan
         // too, so startup does not immediately schedule the same work again.
         let refresh_requested =
@@ -392,6 +454,7 @@ fn index_worker(shared: &Shared) {
         if sources_changed
             || (idle && (refresh_requested || last.elapsed() > Duration::from_secs(30)))
         {
+            active_refresh = shared.refresh_status.read().unwrap().requested;
             jobs.clear();
             pending.clear();
             // Incomplete staging generations are never visible. Checkpoints remain committed.
@@ -507,6 +570,8 @@ fn index_worker(shared: &Shared) {
                 }
                 for record in &mut doc.records {
                     *record = sanitize(record, &shared.key);
+                    record["presentation"] =
+                        presentation::normalize(record)["presentation"].clone();
                 }
                 if doc.entry.coverage.state == "partial"
                     || doc
@@ -522,7 +587,7 @@ fn index_worker(shared: &Shared) {
                 // explicitly omitted; metadata never claims they were cached.
                 for record in &mut doc.records {
                     if record.to_string().len() > 64 * 1024 {
-                        *record = json!({"kind":record["kind"],"detailsOmitted":true,"reason":"detail_limit"});
+                        *record = json!({"kind":record["kind"],"presentation":record["presentation"],"detailsOmitted":true,"reason":"detail_limit"});
                         doc.entry.issue("detail_limit");
                     }
                 }
@@ -684,7 +749,10 @@ fn publish(db: &mut Connection, shared: &Shared, mut job: Job) {
         }
         Ok(hash.finalize().to_hex().to_string())
     })();
-    let Ok(revision) = revision else { return };
+    let Ok(revision) = revision else {
+        shared.set(source_error(source, "cache_revision_failed", job.count));
+        return;
+    };
     let result = db.execute(
         "INSERT OR REPLACE INTO catalog_sources VALUES (?1,?2,?3,?4,?5)",
         params![
@@ -861,11 +929,19 @@ fn read_db(shared: &Shared) -> Result<Option<Connection>> {
 fn query(shared: &Shared, operation: Operation) -> Result<Value> {
     let (_, sources) = shared.policy()?;
     match operation {
-        Operation::Sources => Ok(json!({"sources":shared.states(&sources)})),
+        Operation::Sources => Ok(
+            json!({"sources":shared.states(&sources),"refresh":shared.refresh_status.read().unwrap().clone()}),
+        ),
         Operation::Preview(path) => Ok(json!({"source":scan::preview(path)?})),
         Operation::Refresh => {
+            let mut progress = shared.refresh_status.write().unwrap();
+            progress.requested = progress
+                .requested
+                .checked_add(1)
+                .ok_or("library_unavailable")?;
+            let id = progress.requested;
             shared.refresh.store(true, Ordering::Relaxed);
-            Ok(json!({"scheduled":true}))
+            Ok(json!({"scheduled":true,"refreshId":id}))
         }
         Operation::Launch(project, entry) => {
             let selected = launch::resolve(shared, &sources, project, entry)?;
@@ -873,6 +949,12 @@ fn query(shared: &Shared, operation: Operation) -> Result<Value> {
         }
         Operation::List(query, projects) => {
             catalog_query(shared, &sources, query, None, projects, false)
+        }
+        Operation::Groups(query) => groups::list(shared, &sources, query),
+        Operation::Group(id, query) => groups::full(shared, &sources, id, query),
+        Operation::Organization(id) => organization_view::read(shared, &sources, id),
+        Operation::SaveOrganization(id, revision, request) => {
+            organization_view::save(shared, &sources, id, revision, request)
         }
         Operation::Body(id, query) => {
             catalog_query(shared, &sources, query, Some(id), false, false)
@@ -892,6 +974,11 @@ fn catalog_query(
 ) -> Result<Value> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     if query.q.as_ref().is_some_and(|s| s.len() > 512)
+        || query
+            .project_q
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > 512)
+        || (query.project_q.is_some() && (!projects || entry.is_some() || query.q.is_some()))
         || query.cursor.as_ref().is_some_and(|s| s.len() > 4096)
         || query.limit.is_some_and(|v| v == 0 || v > 200)
         || query
@@ -939,8 +1026,13 @@ fn catalog_query(
     let limit = query.limit.unwrap_or(50);
     query.limit = Some(limit);
     let binding = digest(&json!([query, entry, projects, details]).to_string());
-    let Some(db) = read_db(shared)? else {
-        return Ok(json!(Page {
+    let (db, snapshot) = if entry.is_some() {
+        organization_view::open_source(shared, sources)?
+    } else {
+        organization_view::open(shared, sources)?
+    };
+    let Some(db) = db else {
+        let mut result = json!(Page {
             revision: "pending".into(),
             records: vec![],
             next_cursor: None,
@@ -948,11 +1040,22 @@ fn catalog_query(
                 state: "partial".into(),
                 reasons: vec!["indexing".into()]
             }
-        }));
+        });
+        if entry.is_none() && !projects {
+            result["totalRecords"] = json!(0);
+            result["selectedProject"] = query
+                .project_id
+                .as_deref()
+                .filter(|p| *p != "unassigned")
+                .map(|id| json!({"projectId":id,"path":null,"status":"indexing"}))
+                .unwrap_or(Value::Null);
+        }
+        if shared.policy()?.1 != sources {
+            return Err("source_revoked");
+        }
+        return Ok(result);
     };
-    // One read transaction pins source generations and all query rows together.
-    db.execute_batch("BEGIN DEFERRED")
-        .map_err(|_| "cache_busy")?;
+    // organization_view pins both the immutable organization snapshot and catalog.
     let mut generation = vec![];
     let mut revisions = vec![];
     let mut reasons = shared
@@ -977,7 +1080,8 @@ fn catalog_query(
             reasons.push("indexing".into());
         }
     }
-    let revision = digest(&json!([CATALOG_VERSION, revisions, sources]).to_string());
+    let revision =
+        digest(&json!([CATALOG_VERSION, revisions, sources, snapshot.revision]).to_string());
     let offset = if let Some(cursor) = cursor {
         let bytes = URL_SAFE_NO_PAD
             .decode(cursor)
@@ -1020,6 +1124,9 @@ fn catalog_query(
         }
         let mut entry_value = serde_json::to_value(&entry).unwrap();
         relate(&db, sources, &generations, &mut entry_value)?;
+        if snapshot.revision == "unavailable" {
+            organization_view::unavailable(&mut entry_value);
+        }
         metadata = Some(entry_value);
         if details && !entry.capabilities.inspect_calls {
             return Err("details_unavailable");
@@ -1048,9 +1155,9 @@ fn catalog_query(
         .collect::<Result<_>>()?
     } else {
         let sql = if projects {
-            "SELECT json_object('projectId',project,'path',min(json_extract(metadata,'$.projectPath')),'latestRecordedAt',nullif(max(time),''),'entries',count(*)) FROM catalog_entries WHERE project IS NOT NULL AND generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) GROUP BY project ORDER BY max(time) DESC,min(json_extract(metadata,'$.projectPath')),project LIMIT ?5 OFFSET ?6"
+            "SELECT json_object('projectId',project,'path',min(json_extract(metadata,'$.projectPath')),'latestRecordedAt',nullif(max(time),''),'entries',count(*)) FROM catalog_entries WHERE project IS NOT NULL AND generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND (?8 IS NULL OR instr(lower(json_extract(metadata,'$.projectPath')),lower(?8))>0) GROUP BY project ORDER BY max(time) DESC,min(json_extract(metadata,'$.projectPath')),project LIMIT ?5 OFFSET ?6"
         } else {
-            "SELECT metadata FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) ORDER BY time DESC,id LIMIT ?5 OFFSET ?6"
+            "SELECT metadata FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND ?8 IS NULL ORDER BY time DESC,id LIMIT ?5 OFFSET ?6"
         };
         let mut stmt = db.prepare(sql).map_err(|_| "cache_unavailable")?;
         stmt.query_map(
@@ -1061,7 +1168,8 @@ fn catalog_query(
                 pattern,
                 limit + 1,
                 offset,
-                query.group
+                query.group,
+                query.project_q
             ],
             |r| r.get::<_, String>(0),
         )
@@ -1122,34 +1230,62 @@ fn catalog_query(
         let count: u64 = db.query_row("SELECT count(*) FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND project IS NULL AND (?2 IS NULL OR kind=?2) AND (?3='' OR instr(lower(metadata||search),lower(?3))>0) AND (?4 IS NULL OR (?4='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?4='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL))",params![generations,query.kind,pattern,query.group],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
         result["unassignedRecords"] = json!(count);
     }
+    if entry.is_none() && !projects {
+        let count: u64 = db.query_row("SELECT count(*) FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?5 IS NULL OR (?5='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?5='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL))",params![generations,query.project_id,query.kind,pattern,query.group],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
+        result["totalRecords"] = json!(count);
+        result["selectedProject"] = Value::Null;
+    }
     if entry.is_none()
         && !projects
         && let Some(project) = query.project_id.as_deref().filter(|p| *p != "unassigned")
     {
-        let identities =
-            serde_json::to_string(&sources.iter().map(Source::identity).collect::<Vec<_>>())
-                .unwrap();
-        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_entries e JOIN catalog_sources s ON s.generation=e.generation WHERE e.project=?1 AND s.identity IN(SELECT value FROM json_each(?2)))",params![project,identities],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
-        let published: usize = db.query_row("SELECT count(*) FROM catalog_sources WHERE identity IN(SELECT value FROM json_each(?1))",[&identities],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
-        let incomplete: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_sources s, json_each(s.issues) issue WHERE s.identity IN(SELECT value FROM json_each(?1)) AND issue.value != 'entry_coverage_partial')",[&identities],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
-        if exists
-            || (!incomplete
-                && published == sources.len()
-                && shared
-                    .states(sources)
-                    .iter()
-                    .all(|s| matches!(s.state.as_str(), "ready" | "partial" | "read_only")))
-        {
-            result["projectExists"] = json!(exists);
-        }
+        selected_project(&db, shared, sources, Some(project), &mut result)?;
     }
     if let Some(metadata) = metadata {
         result["entry"] = metadata;
     }
+    result["organizationRevision"] = json!(snapshot.revision);
     if shared.policy()?.1 != sources {
         return Err("source_revoked");
     }
     Ok(result)
+}
+
+fn selected_project(
+    db: &Connection,
+    shared: &Shared,
+    sources: &[Source],
+    project: Option<&str>,
+    result: &mut Value,
+) -> Result<()> {
+    let Some(project) = project.filter(|p| *p != "unassigned") else {
+        return Ok(());
+    };
+    let identities =
+        serde_json::to_string(&sources.iter().map(Source::identity).collect::<Vec<_>>()).unwrap();
+    let (count,path):(u64,Option<String>)=db.query_row("SELECT count(*),min(json_extract(e.metadata,'$.projectPath')) FROM catalog_entries e JOIN catalog_sources s ON s.generation=e.generation WHERE e.project=?1 AND s.identity IN(SELECT value FROM json_each(?2))",params![project,identities],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|"cache_unavailable")?;
+    let published:usize=db.query_row("SELECT count(*) FROM catalog_sources WHERE identity IN(SELECT value FROM json_each(?1))",[&identities],|r|r.get(0)).map_err(|_|"cache_unavailable")?;
+    let incomplete:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_sources s,json_each(s.issues) issue WHERE s.identity IN(SELECT value FROM json_each(?1)) AND issue.value!='entry_coverage_partial')",[&identities],|r|r.get(0)).map_err(|_|"cache_unavailable")?;
+    let definitive = !incomplete
+        && published == sources.len()
+        && shared
+            .states(sources)
+            .iter()
+            .all(|s| matches!(s.state.as_str(), "ready" | "partial" | "read_only"));
+    if count > 0 || definitive {
+        result["projectExists"] = json!(count > 0);
+    }
+    let status = match path.as_deref() {
+        Some(path) => match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => "available",
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+            _ => "unknown",
+        },
+        None if !definitive => "indexing",
+        None => "unknown",
+    };
+    result["selectedProject"] = json!({"projectId":project,"path":path,"status":status});
+    Ok(())
 }
 
 fn reuse_checkpoint(
@@ -1223,6 +1359,8 @@ fn reuse_checkpoint(
 }
 
 fn relate(db: &Connection, sources: &[Source], generations: &str, entry: &mut Value) -> Result<()> {
+    organization_view::decorate(entry);
+    entry["unassignedReason"] = json!(unassigned_reason(entry));
     if let Some(parent) = entry["parentEntryId"].as_str() {
         let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND id=?2 AND source=?3)",params![generations,parent,entry["sourceId"].as_str()],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
         if !exists {

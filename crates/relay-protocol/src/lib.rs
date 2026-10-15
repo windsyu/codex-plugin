@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const VERSION: u32 = 2;
 /// Central UI, application/start and terminal contract. Strict match required.
-pub const WORKBENCH_API_VERSION: u32 = 1;
+pub const WORKBENCH_API_VERSION: u32 = 2;
 /// Exact document routes shared by the local server and central relay UI.
 /// `/relay` is local-only and deliberately absent from remote routing.
 pub const APPLICATION_PAGES: &[&str] = &["/", "/history", "/launch", "/settings"];
@@ -164,7 +164,11 @@ pub fn allowed(method: &str, target: &str) -> bool {
         return false;
     };
     match tail {
-        "application" | "library/sources" | "library/projects" | "library/entries" => {
+        "application"
+        | "library/sources"
+        | "library/projects"
+        | "library/entries"
+        | "library/session-groups" => {
             return method == "GET";
         }
         "application/settings" => return matches!(method, "GET" | "PUT"),
@@ -179,9 +183,15 @@ pub fn allowed(method: &str, target: &str) -> bool {
         return segments.len() == 2 && uuid(segments[1]) && method == "GET";
     }
     if segments.len() >= 3 && segments[0] == "library" && segments[1] == "entries" {
-        return method == "GET"
-            && matches!(segments.len(), 3 | 4)
-            && (segments.len() == 3 || segments[3] == "details");
+        return match segments.as_slice() {
+            [_, _, entry] if !entry.is_empty() => method == "GET",
+            [_, _, entry, "details"] if !entry.is_empty() => method == "GET",
+            [_, _, entry, "organization"] if !entry.is_empty() => matches!(method, "GET" | "PUT"),
+            _ => false,
+        };
+    }
+    if segments.len() == 3 && segments[0] == "library" && segments[1] == "session-groups" {
+        return !segments[2].is_empty() && method == "GET";
     }
     if segments.len() < 2 || segments[0] != "runs" || !uuid(segments[1]) {
         return false;
@@ -240,6 +250,32 @@ fn uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_groups_and_organization_have_exact_owner_api_routes() {
+        for path in [
+            "/workbench/v1/library/session-groups?section=primary",
+            "/workbench/v1/library/session-groups/g_synthetic?anchorEntryId=e_synthetic&revision=r_synthetic",
+            "/workbench/v1/library/entries/e_synthetic/organization",
+        ] {
+            assert!(allowed("GET", path), "{path}");
+            for method in ["POST", "DELETE", "PATCH", "CONNECT"] {
+                assert!(!allowed(method, path), "{method} {path}");
+            }
+            assert_eq!(allowed("PUT", path), path.ends_with("/organization"));
+        }
+        for path in [
+            "/workbench/v1/library/session-groups/",
+            "/workbench/v1/library/session-groups/g_synthetic/extra",
+            "/workbench/v1/library/session-%67roups",
+            "/workbench/v1/library/entries//organization",
+            "/workbench/v1/library/entries/e_synthetic/organization/extra",
+            "/workbench/v1/library/entries/e_synthetic/%6frganization",
+        ] {
+            for method in ["GET", "PUT"] {
+                assert!(!allowed(method, path), "{method} {path}");
+            }
+        }
+    }
     #[test]
     fn document_routes_are_explicit_canonical_and_get_only() {
         let run = Uuid::new_v4();

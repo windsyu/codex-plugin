@@ -1,4 +1,4 @@
-export const UI_API_VERSION = 1;
+export const UI_API_VERSION = 2;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const AUTH_INVALID = 'workbench-auth-invalid';
 const expired = '登录或工作台授权已失效，请返回门户重新登录并打开工作台。';

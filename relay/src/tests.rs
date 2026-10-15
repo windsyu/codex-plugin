@@ -2,7 +2,8 @@ use super::*;
 use axum::body::Body;
 use axum::http::{Request, header};
 use codex_relay_protocol::{
-    BindingPending, BindingPoll, BindingStart, Bound, Data, Hello, ToGateway, VERSION, Welcome,
+    BindingPending, BindingPoll, BindingStart, Bound, Data, Hello, ToGateway, VERSION,
+    WORKBENCH_API_VERSION, Welcome,
 };
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::params;
@@ -56,11 +57,12 @@ impl Fixture {
                 .unwrap();
             }
             c.execute(
-                "INSERT INTO gateways(id,account,name,credential,workbench_api_version) VALUES(?1,?2,'Synthetic workbench',?3,1)",
+                "INSERT INTO gateways(id,account,name,credential,workbench_api_version) VALUES(?1,?2,'Synthetic workbench',?3,?4)",
                 params![
                     gateway.to_string(),
                     account.to_string(),
-                    store::digest(&credential)
+                    store::digest(&credential),
+                    WORKBENCH_API_VERSION
                 ],
             )
             .unwrap();
@@ -222,7 +224,7 @@ async fn mint_grant(f: &Fixture, router: &Router) -> Uuid {
         .oneshot(f.request(
             &format!("/relay/v1/gateways/{}/open", f.gateway),
             "POST",
-            serde_json::json!({"uiApiVersion":1}),
+            serde_json::json!({"uiApiVersion":WORKBENCH_API_VERSION}),
             false,
         ))
         .await
@@ -235,7 +237,7 @@ async fn mint_grant(f: &Fixture, router: &Router) -> Uuid {
     let values = url::form_urlencoded::parse(url.fragment().unwrap().as_bytes())
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(values["session"], f.parent.to_string());
-    assert_eq!(values["api"], "1");
+    assert_eq!(values["api"], WORKBENCH_API_VERSION.to_string());
     Uuid::parse_str(&values["grant"]).unwrap()
 }
 fn grant_request(f: &Fixture, grant: Uuid, tail: &str) -> Request<Body> {
@@ -250,7 +252,7 @@ fn grant_request(f: &Fixture, grant: Uuid, tail: &str) -> Request<Body> {
         .insert("x-workbench-grant", grant.to_string().parse().unwrap());
     request
         .headers_mut()
-        .insert("x-workbench-api-version", "1".parse().unwrap());
+        .insert("x-workbench-api-version", WORKBENCH_API_VERSION.into());
     request
 }
 #[tokio::test]
@@ -397,7 +399,7 @@ async fn single_origin_never_proxies_documents_and_rejects_incompatible_opens() 
         .oneshot(f.request(
             &format!("/relay/v1/gateways/{}/open", f.gateway),
             "POST",
-            serde_json::json!({"uiApiVersion":1}),
+            serde_json::json!({"uiApiVersion":WORKBENCH_API_VERSION}),
             false,
         ))
         .await
@@ -430,7 +432,7 @@ async fn streaming_selectors_require_parent_cookie_and_strip_identity_only_after
     let grant = mint_grant(&f, &router).await;
     for route in ["live/events", "terminal"] {
         let path = format!(
-            "/g/{}/workbench/v1/runs/{}/{route}?relayGrant={grant}&relayApi=1&epoch={}",
+            "/g/{}/workbench/v1/runs/{}/{route}?relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}&epoch={}",
             f.gateway,
             Uuid::new_v4(),
             Uuid::new_v4()
@@ -447,7 +449,7 @@ async fn streaming_selectors_require_parent_cookie_and_strip_identity_only_after
             StatusCode::UNAUTHORIZED
         );
         let request = f.request(
-            &format!("{path}&relayApi=1"),
+            &format!("{path}&relayApi={WORKBENCH_API_VERSION}"),
             "GET",
             serde_json::json!({}),
             false,
@@ -462,11 +464,16 @@ async fn streaming_selectors_require_parent_cookie_and_strip_identity_only_after
 #[test]
 fn selectors_are_consumed_once_without_mutating_business_query() {
     let grant = Uuid::new_v4();
+    let encoded_api: String = WORKBENCH_API_VERSION
+        .to_string()
+        .bytes()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
     let headers = HeaderMap::new();
     let (id, query) = routing::selectors(
         &headers,
         Some(&format!(
-            "relayGrant={grant}&path=a%2Fb&relayApi=1&epoch=abc"
+            "relayGrant={grant}&path=a%2Fb&relayApi={WORKBENCH_API_VERSION}&epoch=abc"
         )),
         true,
     )
@@ -475,12 +482,18 @@ fn selectors_are_consumed_once_without_mutating_business_query() {
     assert_eq!(id, grant);
     assert_eq!(query, "path=a%2Fb&epoch=abc");
     for query in [
-        format!("relayGrant={grant}&relayGrant={grant}&relayApi=1"),
-        format!("relayGrant={grant}&relayApi=1&relayApi=1"),
-        format!("relay%47rant={grant}&relayApi=1"),
-        format!("relayGrant={grant}&relayApi=%31"),
-        format!("relayGrant={grant}&relayApi=2"),
-        format!("relayGrant={}&relayApi=1", grant.simple()),
+        format!("relayGrant={grant}&relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}"),
+        format!(
+            "relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}&relayApi={WORKBENCH_API_VERSION}"
+        ),
+        format!("relay%47rant={grant}&relayApi={WORKBENCH_API_VERSION}"),
+        format!("relayGrant={grant}&relayApi={encoded_api}"),
+        format!("relayGrant={grant}&relayApi=1"),
+        format!("relayGrant={grant}&relayApi=99"),
+        format!(
+            "relayGrant={}&relayApi={WORKBENCH_API_VERSION}",
+            grant.simple()
+        ),
     ] {
         assert!(
             routing::selectors(&headers, Some(&query), true).is_err(),
@@ -489,12 +502,14 @@ fn selectors_are_consumed_once_without_mutating_business_query() {
     }
     let mut headers = HeaderMap::new();
     headers.insert("x-workbench-grant", grant.to_string().parse().unwrap());
-    headers.insert("x-workbench-api-version", "1".parse().unwrap());
+    headers.insert("x-workbench-api-version", WORKBENCH_API_VERSION.into());
     assert!(routing::selectors(&headers, None, false).is_ok());
     assert!(
         routing::selectors(
             &headers,
-            Some(&format!("relayGrant={grant}&relayApi=1")),
+            Some(&format!(
+                "relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}"
+            )),
             true
         )
         .is_err()
@@ -1100,7 +1115,7 @@ async fn legacy_hello_zero_is_incompatible_even_after_disconnect() {
             .oneshot(f.request(
                 &format!("/relay/v1/gateways/{}/open", f.gateway),
                 "POST",
-                serde_json::json!({"uiApiVersion": 1}),
+                serde_json::json!({"uiApiVersion": WORKBENCH_API_VERSION}),
                 false,
             ))
             .await

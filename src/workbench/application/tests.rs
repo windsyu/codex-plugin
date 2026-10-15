@@ -367,6 +367,9 @@ async fn owner_endpoints_reject_cross_origin_unknown_host_and_wrong_capability()
     for path in [
         "/workbench/v1/application",
         "/workbench/v1/library/sources",
+        "/workbench/v1/library/entries/e_fake/organization",
+        "/workbench/v1/library/session-groups",
+        "/workbench/v1/library/session-groups/g_fake?anchorEntryId=e_fake&revision=r_fake",
         "/workbench/v1/application/settings",
     ] {
         assert_eq!(get(&app, "workbench_remote=fake", path).await.status(), 401);
@@ -636,6 +639,9 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
         "/workbench/v1/library/entries",
         "/workbench/v1/library/entries/e_fake",
         "/workbench/v1/library/entries/e_fake/details",
+        "/workbench/v1/library/entries/e_fake/organization",
+        "/workbench/v1/library/session-groups",
+        "/workbench/v1/library/session-groups/g_fake?anchorEntryId=e_fake&revision=r_fake",
     ] {
         assert_eq!(get(&app, "", path).await.status(), 401);
     }
@@ -657,6 +663,51 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
         );
     }
     let initial = json_body(get(&app, &cookie, "/workbench/v1/library/entries").await).await;
+    let groups = get(&app, &cookie, "/workbench/v1/library/session-groups").await;
+    assert_eq!(groups.status(), 200);
+    assert!(
+        json_body(groups).await["records"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for query in [
+        "body=true",
+        "group=main",
+        "section=invalid",
+        "limit=201",
+        "limit=0",
+    ] {
+        assert_eq!(
+            get(
+                &app,
+                &cookie,
+                &format!("/workbench/v1/library/session-groups?{query}")
+            )
+            .await
+            .status(),
+            400,
+            "{query}"
+        );
+    }
+    for query in [
+        "",
+        "anchorEntryId=e_fake",
+        "anchorEntryId=e_fake&revision=r_fake&q=body",
+        "anchorEntryId=e_fake&revision=r_fake&sourceId=extra",
+    ] {
+        assert_eq!(
+            get(
+                &app,
+                &cookie,
+                &format!("/workbench/v1/library/session-groups/g_fake?{query}")
+            )
+            .await
+            .status(),
+            400,
+            "{query}"
+        );
+    }
     assert!(initial["records"].as_array().unwrap().is_empty());
     assert!(!fixture.home.exists());
     assert!(!fixture.paths.history_dir().join("runs").exists());
@@ -708,6 +759,194 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
     .await
     .unwrap();
     let entry = entries["records"][0]["entryId"].as_str().unwrap();
+    let organization_path = format!("/workbench/v1/library/entries/{entry}/organization");
+    let organization = get(&app, &cookie, &organization_path).await;
+    assert_eq!(organization.status(), 200);
+    let etag = organization.headers()["etag"].to_str().unwrap().to_string();
+    let organization = json_body(organization).await;
+    assert_eq!(organization["organizationRevision"], "absent");
+    assert_eq!(organization["canAdjust"], true);
+    assert!(!fixture.paths.history_dir().join("organization").exists());
+    let mutation = serde_json::json!({"instanceId":app.instance_id,"sourceIdentity":entries["records"][0]["sourceIdentity"],"sourceRevision":entries["records"][0]["sourceRevision"],"action":"unassigned"});
+    for (field, value, status) in [
+        ("instanceId", serde_json::json!(Uuid::new_v4()), 409),
+        ("sourceIdentity", serde_json::json!("fake"), 409),
+        ("sourceRevision", serde_json::json!("fake"), 409),
+        (
+            "projectPath",
+            serde_json::json!("/arbitrary/client/path"),
+            400,
+        ),
+        ("projectId", serde_json::json!("p_fake"), 400),
+        ("action", serde_json::json!("delete"), 400),
+    ] {
+        let mut invalid = mutation.clone();
+        invalid[field] = value;
+        let result = client()
+            .put(format!("{}{organization_path}", app.entry.address))
+            .header("Cookie", &cookie)
+            .header("Origin", &app.entry.address)
+            .header("If-Match", &etag)
+            .header("Content-Type", "application/json")
+            .body(invalid.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), status, "{field}");
+    }
+    let mut invalid_target = mutation.clone();
+    invalid_target["action"] = serde_json::json!("project");
+    invalid_target["projectId"] = serde_json::json!("p_fake");
+    assert_eq!(
+        client()
+            .put(format!("{}{organization_path}", app.entry.address))
+            .header("Cookie", &cookie)
+            .header("Origin", &app.entry.address)
+            .header("If-Match", &etag)
+            .header("Content-Type", "application/json")
+            .body(invalid_target.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        client()
+            .put(format!("{}{organization_path}", app.entry.address))
+            .header("Cookie", &cookie)
+            .header("Origin", &app.entry.address)
+            .header("If-Match", &etag)
+            .header("Content-Type", "application/json")
+            .body("x".repeat(16 * 1024 + 1))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        413
+    );
+    assert!(
+        !fixture.paths.history_dir().join("organization").exists(),
+        "invalid first saves do not publish or create state"
+    );
+    for (token, origin, status) in [
+        (None, true, 428),
+        (Some(etag.as_str()), false, 403),
+        (Some("W/\"absent\""), true, 400),
+        (Some("*"), true, 400),
+    ] {
+        let mut request = client()
+            .put(format!("{}{organization_path}", app.entry.address))
+            .header("Cookie", &cookie)
+            .header("Content-Type", "application/json")
+            .body(mutation.to_string());
+        if origin {
+            request = request.header("Origin", &app.entry.address);
+        }
+        if let Some(token) = token {
+            request = request.header("If-Match", token);
+        }
+        assert_eq!(request.send().await.unwrap().status(), status);
+    }
+    let saved_organization = client()
+        .put(format!("{}{organization_path}", app.entry.address))
+        .header("Cookie", &cookie)
+        .header("Origin", &app.entry.address)
+        .header("If-Match", &etag)
+        .header("Content-Type", "application/json")
+        .body(mutation.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved_organization.status(), 200);
+    let new_etag = saved_organization.headers()["etag"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let saved_organization = json_body(saved_organization).await;
+    assert_eq!(
+        saved_organization["organization"]["effective"]["basis"],
+        "user_unassigned"
+    );
+    assert_eq!(
+        client()
+            .put(format!("{}{organization_path}", app.entry.address))
+            .header("Cookie", &cookie)
+            .header("Origin", &app.entry.address)
+            .header("If-Match", &etag)
+            .header("Content-Type", "application/json")
+            .body(mutation.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let unassigned = json_body(
+        get(
+            &app,
+            &cookie,
+            "/workbench/v1/library/entries?projectId=unassigned&sourceId=extra",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unassigned["records"][0]["entryId"], entry);
+    assert_eq!(
+        unassigned["records"][0]["unassignedReason"],
+        "user_unassigned"
+    );
+    let mut automatic = mutation.clone();
+    automatic["action"] = serde_json::json!("automatic");
+    let restored = client()
+        .put(format!("{}{organization_path}", app.entry.address))
+        .header("Cookie", &cookie)
+        .header("Origin", &app.entry.address)
+        .header("If-Match", new_etag)
+        .header("Content-Type", "application/json")
+        .body(automatic.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), 200);
+    let grouped = json_body(
+        get(
+            &app,
+            &cookie,
+            "/workbench/v1/library/session-groups?sourceId=extra&q=searchable",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(grouped["records"].as_array().unwrap().len(), 1);
+    let group_id = grouped["records"][0]["groupId"].as_str().unwrap();
+    assert_eq!(grouped["records"][0]["members"][0]["entryId"], entry);
+    let anchor_path = format!(
+        "/workbench/v1/library/session-groups/{group_id}?anchorEntryId={entry}&revision={}",
+        grouped["revision"].as_str().unwrap()
+    );
+    let anchor = get(&app, &cookie, &anchor_path).await;
+    assert_eq!(anchor.status(), 200);
+    let anchor = json_body(anchor).await;
+    assert!(!anchor.to_string().contains("response_item"));
+    for field in [
+        "q=searchable",
+        "sourceId=extra",
+        "projectId=unassigned",
+        "kind=native",
+        "section=primary",
+        "limit=1",
+        "cursor=fake",
+        "body=true",
+    ] {
+        assert_eq!(
+            get(&app, &cookie, &format!("{anchor_path}&{field}"))
+                .await
+                .status(),
+            400,
+            "{field}"
+        );
+    }
     assert_eq!(entries["records"][0]["capabilities"]["manage"], false);
     assert_eq!(
         get(
@@ -743,6 +982,22 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    let revoked_group = get(&app, &cookie, &anchor_path).await;
+    let revoked_organization = get(&app, &cookie, &organization_path).await;
+    assert_eq!(revoked_organization.status(), 404);
+    assert!(
+        !json_body(revoked_organization)
+            .await
+            .to_string()
+            .contains("projectPath")
+    );
+    assert!(matches!(revoked_group.status().as_u16(), 404 | 409));
+    assert!(
+        !json_body(revoked_group)
+            .await
+            .to_string()
+            .contains("searchable")
+    );
     assert_eq!(
         get(
             &app,
@@ -764,3 +1019,4 @@ async fn library_api_is_owner_only_cached_paginated_and_revocation_scoped() {
 include!("launching_tests.rs");
 include!("surface_lifecycle_tests.rs");
 include!("multi_run_tests.rs");
+include!("r7_organization_integration_tests.rs");

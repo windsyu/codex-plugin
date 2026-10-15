@@ -443,7 +443,7 @@ pub(crate) async fn forward_inner(
     .map_err(|_| Failure(StatusCode::PAYLOAD_TOO_LARGE))?;
     let (attachment, receiver) = oneshot::channel();
     let (cancel, mut stop) = watch::channel(false);
-    let request_headers = filtered_request(&h);
+    let request_headers = filtered_request(&h)?;
     {
         let mut tunnels = s.0.tunnels.lock().unwrap();
         let c = tunnels
@@ -589,8 +589,9 @@ async fn bridge(
     }
     // Dropping both sockets terminates without replay or terminal ACK synthesis.
 }
-fn filtered_request(h: &HeaderMap) -> Vec<(String, String)> {
-    [
+fn filtered_request(h: &HeaderMap) -> Result<Vec<(String, String)>> {
+    let mut output = Vec::new();
+    for name in [
         "origin",
         "accept",
         "content-type",
@@ -600,10 +601,12 @@ fn filtered_request(h: &HeaderMap) -> Vec<(String, String)> {
         "if-modified-since",
         "last-event-id",
         "range",
-    ]
-    .into_iter()
-    .filter_map(|n| Some((n.to_string(), h.get(n)?.to_str().ok()?.to_string())))
-    .collect()
+    ] {
+        for value in h.get_all(name) {
+            output.push((name.to_string(), value.to_str().map_err(|_| bad())?.into()));
+        }
+    }
+    Ok(output)
 }
 fn filtered_response(
     headers: Vec<(String, String)>,
@@ -652,6 +655,29 @@ fn filtered_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn organization_preconditions_keep_duplicates_and_reject_opaque_values() {
+        use axum::http::HeaderValue;
+        for name in ["if-match", "content-type"] {
+            let mut headers = HeaderMap::new();
+            headers.append(name, HeaderValue::from_static("first"));
+            headers.append(name, HeaderValue::from_static("second"));
+            headers.insert("authorization", HeaderValue::from_static("private"));
+            let forwarded = filtered_request(&headers).unwrap();
+            assert_eq!(
+                forwarded,
+                vec![
+                    (name.into(), "first".into()),
+                    (name.into(), "second".into())
+                ]
+            );
+            headers.append(name, HeaderValue::from_bytes(b"\xff").unwrap());
+            assert!(matches!(
+                filtered_request(&headers),
+                Err(Failure(StatusCode::BAD_REQUEST))
+            ));
+        }
+    }
     #[test]
     fn response_cannot_set_credentials_redirect_or_hop_headers() {
         let h = filtered_response(

@@ -12,6 +12,9 @@
 - 本机 Run 的“手机接入”改名为“本地局域网接入”，同步导航、面板、端口设置及配对提示，明确直连本机而非公网中转站；LAN/Tailscale、二维码和权限保持不变。
 - 公网中转改为默认 `windsyu` 管理员管理账号、临时密码强制改密、全端凭据撤销及电脑登录后自动连接；增加单 IP/单 HTTPS 端口的可信中央前端与多电脑页面授权。schema 2 保留登记/归属但撤销旧授权，schema 3 无损改名旧默认管理员并增加普通账号永久删除；升级前备份，禁止自动恢复旧库复活权限。旧域名模式仍显式保留。参见[契约](docs/architecture/relay.md)、[ADR 0058](docs/decisions/0058-admin-accounts-single-origin-relay.md)与 [ADR 0061](docs/decisions/0061-account-deletion-admin-rename.md)。旧双端口试用的[部署验证](docs/validation/public-relay-ip-trial-2026-10-13.md)不等于新模式或真实手机验收。
 - `unmanaged-custom` 模型接入支持由官方 CLI 执行的 `auth.command`：工作台不执行命令、不持有动态 token，代理透明转发 CLI 的认证头，并保留 managed/cloud 路由来源门禁。安装版 CLI 0.162.1 与合成 provider 已覆盖首次 401 后的原生刷新；真实 provider 另验，见 [ADR 0060](docs/decisions/0060-native-provider-command-auth.md)。
+- 历史任务标题优先有效原标题，否则提取真实用户请求，已确认注入上下文不抢占；列表显示来源独立的交流片段和时间，选中项目成为主标题。正文默认对话优先，技术过程按需核查，错误/缺口与搜索命中不隐藏；派生 catalog 4 只重建缓存，原始历史及归类状态不变。
+- 历史首页新增独立项目搜索、稳定完整路径摘要与明确未归类原因；主要/辅助/运行记录分层，仅可信同原生身份的来源折叠展示，正文与用量仍独立。
+- 支持 owner 单条记录“归入已有项目/设为未归类/恢复自动归类”；独立 organization schema 1 状态、强 ETag CAS 与故障降级，不删除或改写原始历史、不改变继续会话的原 cwd。仅重建派生 catalog，JSON 配置 schema 2 不变。
 - 恢复 README 的功能、运行条件和完整使用入口；旧 `~/.local` 快速安装需先卸载再安装到新默认目录，不自动迁移用户数据。
 - README 提供 macOS 用户级快速安装脚本，使用系统 curl 匿名下载/校验公开稳定 release，默认安装至 `~/.codex-view`，并配置 zsh/Bash 登录终端 PATH；提供按清单保护卸载的 `code-view-uninstall`，保留用户历史和原生数据。
 - Bash PATH 使用现有生效的登录配置文件，避免新建 `.bash_profile` 遮蔽 `.bash_login` / `.profile`。

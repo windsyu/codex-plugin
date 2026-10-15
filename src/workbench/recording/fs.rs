@@ -353,6 +353,55 @@ impl Directory {
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
     }
+    /// Publish an owned, single-link file without replacing any existing name.
+    /// The source inode and containing directory stay pinned through publication.
+    pub(crate) fn publish_file_no_replace(
+        &self,
+        from: &str,
+        to: &str,
+        identity: Identity,
+    ) -> io::Result<()> {
+        self.verify_location()?;
+        let source = self.open(from, false)?;
+        let metadata = source.metadata()?;
+        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        if self.entry_info(from)?.identity != identity {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let destination = to;
+        let from = name(from)?;
+        let to = name(to)?;
+        #[cfg(target_os = "macos")]
+        let rc = unsafe {
+            libc::renameatx_np(
+                self.file.as_raw_fd(),
+                from.as_ptr(),
+                self.file.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::renameat2(
+                self.file.as_raw_fd(),
+                from.as_ptr(),
+                self.file.as_raw_fd(),
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.verify_location()?;
+        if self.entry_info(destination)?.identity != identity {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.sync()
+    }
     pub fn blob(&self, bytes: &[u8]) -> io::Result<String> {
         if bytes.len() > FILE_LIMIT {
             return Err(io::ErrorKind::InvalidData.into());

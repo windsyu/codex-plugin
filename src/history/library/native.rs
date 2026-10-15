@@ -16,6 +16,7 @@ pub(super) struct NativeFile {
     discarding: bool,
     bytes: usize,
     identity: bool,
+    kind_evidence: Option<Value>,
     last_message: Option<(String, String, String)>,
 }
 impl NativeFile {
@@ -47,6 +48,7 @@ impl NativeFile {
             discarding: false,
             bytes: 0,
             identity: false,
+            kind_evidence: None,
             last_message: None,
         })
     }
@@ -75,6 +77,8 @@ impl NativeFile {
                         .entry
                         .issue_at("source_changed_during_read", self.offset);
                     self.document.entry.capabilities.resume = false;
+                    self.document.entry.conversation_kind = "unknown".into();
+                    self.document.entry.kind_basis = "metadata_conflict_v1".into();
                 }
                 if !self.identity {
                     self.document
@@ -125,6 +129,41 @@ impl NativeFile {
         let payload = &safe["payload"];
         let top = safe["type"].as_str().unwrap_or("");
         if top == "session_meta" {
+            let agent = &payload["source"]["subagent"]["thread_spawn"];
+            let evidence = json!({"source":payload["source"],"parent":payload["parent_thread_id"],"nestedParent":agent["parent_thread_id"]});
+            let (kind, basis) = native_conversation_kind(payload);
+            let conflict = self
+                .kind_evidence
+                .as_ref()
+                .is_some_and(|old| old != &evidence);
+            if conflict {
+                self.document
+                    .entry
+                    .issue_at("conflicting_conversation_metadata", self.offset);
+            }
+            self.kind_evidence.get_or_insert(evidence);
+            if self.document.entry.coverage.reasons.iter().any(|s| {
+                matches!(
+                    s.as_str(),
+                    "conflicting_conversation_metadata"
+                        | "conflicting_session_identity"
+                        | "event_identity_conflict"
+                        | "source_changed_during_read"
+                        | "source_revision_changed"
+                )
+            }) {
+                self.document.entry.conversation_kind = "unknown".into();
+                self.document.entry.kind_basis = "metadata_conflict_v1".into();
+            } else {
+                self.document.entry.conversation_kind = kind.into();
+                self.document.entry.kind_basis = basis.into();
+                if basis == "metadata_conflict_v1"
+                    || basis == "metadata_invalid_v1"
+                    || basis == "source_unknown_v1"
+                {
+                    self.document.entry.issue_at(basis, self.offset);
+                }
+            }
             if let Some(id) = payload["id"]
                 .as_str()
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
@@ -136,6 +175,8 @@ impl NativeFile {
                         .entry
                         .issue_at("conflicting_session_identity", self.offset);
                     self.document.entry.capabilities.resume = false;
+                    self.document.entry.conversation_kind = "unknown".into();
+                    self.document.entry.kind_basis = "metadata_conflict_v1".into();
                     return;
                 }
                 self.identity = true;
@@ -234,6 +275,8 @@ impl NativeFile {
                     self.document
                         .entry
                         .issue_at("event_identity_conflict", self.offset);
+                    self.document.entry.conversation_kind = "unknown".into();
+                    self.document.entry.kind_basis = "metadata_conflict_v1".into();
                     kind = "unknown".into();
                 }
             } else if matches!(
@@ -282,12 +325,6 @@ impl NativeFile {
                 return;
             }
             self.last_message = Some((kind.clone(), top.into(), digest(&summary)));
-            if kind == "user_message"
-                && self.document.entry.title == "未命名会话"
-                && !summary.is_empty()
-            {
-                self.document.entry.title = summary.chars().take(120).collect();
-            }
         } else {
             self.last_message = None;
         }
@@ -295,9 +332,14 @@ impl NativeFile {
             self.document.entry.recorded_at = Some(time);
         }
         let mut record = serde_json::json!({"kind":kind,"text":summary,"offset":self.offset,"recordId":self.offset.saturating_sub(bytes.len() as u64),"raw":safe});
+        // Metadata keeps advancing even after the bounded body cache fills.
+        let projected = presentation::normalize(&record);
+        presentation::observe_view(&mut self.document.entry, &projected);
+        record["presentation"] = projected["presentation"].clone();
         let mut size = serde_json::to_vec(&record).unwrap().len();
         if size > 64 * 1024 {
             record.as_object_mut().unwrap().remove("raw");
+            record["text"] = projected["text"].clone();
             record["detailsOmitted"] = true.into();
             size = serde_json::to_vec(&record).unwrap().len();
             self.document.entry.issue_at("detail_limit", self.offset);

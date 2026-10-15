@@ -20,6 +20,7 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0052：连续滚动的只读文件阅读](0052-continuous-file-reading.md)
 - [ADR 0053：历史首页、按项目启动与旧历史只读整合](0053-history-first-workbench.md)
 - [ADR 0054：保留显式 provider bearer 与原生 API Key 认证](0054-native-custom-bearer-auth.md)
+- [ADR 0055：项目会话的分层展示与本机可撤销归属](0055-project-session-organization.md)
 - [ADR 0056：可信公网中转与账号归属路由](0056-public-workbench-relay.md)（Accepted；实现与公网手机验收另列）
 - [ADR 0057：独立端口的单工作台 IP 测试](0057-single-workbench-ip-trial.md)（Accepted；共享主机 Cookie 信任边界，单独验收）
 - [ADR 0058：管理员账号与单端口可信工作台前端](0058-admin-accounts-single-origin-relay.md)（Accepted；替代邀请流程，新模式同源边界和 schema 2）
@@ -28,3 +29,5 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0061：中转账号删除与默认管理员无损改名](0061-account-deletion-admin-rename.md)（Accepted；schema 3、默认 windsyu、普通账号事务删除与防权限复活）
 - [ADR 0062：本机工作台与中转的独立构建和部署入口](0062-independent-component-builds.md)（Accepted；按组件构建/检查，生产依赖隔离，共享协议与可信前端）
 - [ADR 0063：本机后台服务与 owner 目录浏览](0063-background-service-directory-browser.md)（Accepted；macOS 用户服务、首次注册引导、完整退出与有界远端目录元信息）
+- [ADR 0064：任务识别与人类对话优先的历史呈现](0064-human-conversation-presentation.md)
+- [ADR 0065：以 main 为基础整合历史模块与公网中转 API 2](0065-main-history-relay-integration.md)

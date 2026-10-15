@@ -1,11 +1,13 @@
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { HistoryLibraryPanel } from './HistoryLibraryPanel';
 import type { LibraryEntry, LibraryRecord } from './library';
 const root = document.createElement('div');
 const entry: LibraryEntry = { entryId: 'e_a', title: '修复阅读界面', sourceId: 's', kind: 'native', sourceRevision: 'v1', projectId: 'p_a', projectPath: '/synthetic/app', recordedAt: '2026-09-22T02:00:00Z', nativeThreadId: 'thread-a', runId: null, coverage: { state: 'complete_for_source', reasons: [] }, capabilities: { read: true, inspectCalls: false, resume: true, manage: false }, relatedEntryIds: [] };
 const sources = [{ id: 's', kind: 'native', state: 'ready', revision: 'source-v1', message: '已索引 1 条记录' }];
+// Keep the legacy entries/A contract suite explicit; default groups have dedicated tests below.
+beforeEach(() => { if (!location.search) history.replaceState(null, '', '/?view=records'); });
 it.each(['indexing', 'read_only'])('rechecks an empty pending catalog while %s without a revision event', async state => {
   vi.useFakeTimers();
   try {
@@ -90,9 +92,10 @@ async function click(text: string) { const button = Array.from(root.querySelecto
 afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); });
 it('opens read-only history and loads individual raw details only on demand, escaping unsafe content', async () => {
   const fetch = mockFetch(); await mount();
-  expect(root.textContent).toContain('未归属项目'); await click('修复阅读界面');
+  expect(root.textContent).toContain('未归类会话'); await click('修复阅读界面');
   expect(root.querySelector('[data-role=user]')?.textContent).toContain('你好 <script>unsafe</script>');
   expect(root.querySelector('[data-role=assistant] strong')?.textContent).toBe('模型');
+  await act(async () => { const fold = root.querySelector<HTMLDetailsElement>('.wb-library-record-fold')!; fold.open = true; fold.dispatchEvent(new Event('toggle')); });
   expect(root.querySelector('[data-kind=tool_call]')?.textContent).toContain('不代表已执行成功');
   expect(root.querySelector('script,img,iframe')).toBeNull();
   expect(fetch.mock.calls.some(([url]) => url.includes('/details'))).toBe(false);
@@ -105,12 +108,12 @@ it('opens read-only history and loads individual raw details only on demand, esc
 it('binds filters, search hit location, and back/forward navigation to the URL', async () => {
   const fetch = mockFetch(u => u.pathname.endsWith('/entries') && u.searchParams.has('q') ? { ok: true, text: async () => JSON.stringify(page([{ ...entry, match: { record: 7, sourceRevision: 'v1', text: '命中的消息' } }])) } : undefined);
   await mount();
-  await act(async () => { const input = root.querySelector('input')!; input.value = '命中'; input.dispatchEvent(new Event('input', { bubbles: true })); });
-  await act(async () => { root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+  await act(async () => { const input = root.querySelector<HTMLInputElement>('[aria-label="搜索会话和消息"]')!; input.value = '命中'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await act(async () => { root.querySelector('.wb-library-filters form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
   await flush(); await click('修复阅读界面');
   expect(location.search).toContain('match=7'); expect(fetch.mock.calls.some(([url]) => url.includes('record=7') && url.includes('sourceRevision=v1'))).toBe(true);
   await act(async () => { history.replaceState(null, '', '/?q=命中&project=unassigned'); dispatchEvent(new PopStateEvent('popstate')); });
-  expect(root.querySelector('.wb-library-reader')).toBeNull(); expect(root.querySelector<HTMLInputElement>('input')?.value).toBe('命中');
+  expect(root.querySelector('.wb-library-reader')).toBeNull(); expect(root.querySelector<HTMLInputElement>('[aria-label="搜索会话和消息"]')?.value).toBe('命中');
   await flush(); expect(fetch.mock.calls.some(([url]) => url.includes('projectId=unassigned'))).toBe(true);
 });
 it('keeps the reading version when a source updates and does not append an expired page', async () => {
@@ -166,10 +169,10 @@ it('keeps unassigned navigation outside project pagination with record counts', 
   mockFetch(u => u.pathname.endsWith('/projects') ? { ok: true, text: async () => JSON.stringify({ ...page([{ projectId: 'p_a', path: '/synthetic/app', entries: 2 }], 'next-projects'), unassignedRecords: 31 }) } : undefined);
   await mount();
   const nav = root.querySelector('.wb-library-projects')!;
-  expect(nav.textContent).toContain('全部会话');
+  expect(nav.textContent).toContain('全部项目');
   expect(nav.textContent).toContain('31 条记录');
-  expect(nav.querySelector('.wb-library-project-list')?.textContent).not.toContain('未归属项目');
-  await click('未归属项目');
+  expect(nav.querySelector('.wb-library-project-list')?.textContent).not.toContain('未归类会话');
+  await click('未归类会话');
   expect(location.search).toContain('project=unassigned');
 });
 it('shows an unassigned record without turning its cwd into a project and retains explicit resume', async () => {
@@ -178,14 +181,14 @@ it('shows an unassigned record without turning its cwd into a project and retain
   mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify(page([unassigned])) } : u.pathname.endsWith('/e_a') ? { ok: true, text: async () => JSON.stringify({ ...page(messages), entry: unassigned }) } : undefined);
   document.body.append(root);
   await act(async () => render(<HistoryLibraryPanel sources={sources} onResume={resume} />, root)); await flush();
-  expect(root.querySelector('.wb-library-entry')?.textContent).toContain('未归属项目');
+  expect(root.querySelector('.wb-library-entry')?.textContent).toContain('未归类会话');
   expect(root.querySelector('.wb-library-entry')?.textContent).not.toContain('new-chat');
   await click('修复阅读界面');
   expect(root.querySelector('.wb-library-identity')?.textContent).toContain('工作目录：/synthetic/Documents/Codex/2026-09-23/new-chat');
   await click('继续此会话'); expect(resume).toHaveBeenCalledWith(unassigned);
 });
 it('clears only a confirmed obsolete project filter and preserves the open reading route', async () => {
-  history.replaceState(null, '', '/?project=p_old&entry=e_a&revision=v1');
+  history.replaceState(null, '', '/?view=records&project=p_old&entry=e_a&revision=v1');
   mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify({ ...page([]), projectExists: false }) } : undefined);
   await mount();
   expect(location.search).not.toContain('project=');
@@ -205,11 +208,11 @@ it('preserves a selected unassigned group with zero matches and applies filters 
   const fetch = mockFetch(u => u.pathname.endsWith('/projects') ? { ok: true, text: async () => JSON.stringify({ ...page([]), unassignedRecords: 0 }) } : undefined);
   await mount();
   const fixed = root.querySelector('.wb-library-projects button[aria-pressed=true]');
-  expect(fixed?.textContent).toContain('未归属项目'); expect(fixed?.textContent).toContain('0 条记录');
+  expect(fixed?.textContent).toContain('未归类会话'); expect(fixed?.textContent).toContain('0 条记录');
   const projectRequest = new URL(fetch.mock.calls.find(([url]) => url.includes('/projects?'))![0], 'http://localhost');
-  expect(projectRequest.searchParams.get('sourceId')).toBe('s');
-  expect(projectRequest.searchParams.get('group')).toBe('agents');
-  expect(projectRequest.searchParams.get('q')).toBe('hello');
+  expect(projectRequest.searchParams.has('sourceId')).toBe(false);
+  expect(projectRequest.searchParams.has('group')).toBe(false);
+  expect(projectRequest.searchParams.has('q')).toBe(false);
   expect(projectRequest.searchParams.has('projectId')).toBe(false);
   expect(root.textContent).not.toContain('开始新对话');
 });
@@ -217,7 +220,7 @@ it('does not invent a stale project when validity is unknown during indexing', a
   history.replaceState(null, '', '/?project=p_pending');
   mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify(page([])) } : undefined);
   await mount(); expect(location.search).toContain('project=p_pending');
-  expect(root.querySelector('.wb-library-list-heading')?.textContent).toBe('所选项目');
+  expect(root.querySelector('h1')?.textContent).toBe('所选项目');
 });
 
 it('explains an unavailable parent without offering a broken jump', async () => {
@@ -233,7 +236,259 @@ it('revokes parent and related navigation when the current source is removed', a
   await act(async () => render(<HistoryLibraryPanel sources={[]} />, root));
   for (const label of ['查看父会话', '查看关联来源的记录']) {
     const button = Array.from(root.querySelectorAll('button')).find(b => b.textContent === label);
-    expect(button?.disabled).toBe(true);
+    expect(button).toBeUndefined();
   }
   expect(location.search).toContain('entry=e_a');
+});
+it('keeps project navigation independent of message, source and group filters', async () => {
+  history.replaceState(null, '', '/?projectQ=app&q=needle&source=s&group=agents');
+  const fetch = mockFetch(); await mount();
+  const projectRequest = new URL(fetch.mock.calls.find(([url]) => url.includes('/projects?'))![0], 'http://localhost');
+  expect(projectRequest.searchParams.get('projectQ')).toBe('app');
+  for (const field of ['q', 'sourceId', 'group']) expect(projectRequest.searchParams.has(field)).toBe(false);
+  expect(root.querySelector<HTMLInputElement>('[aria-label="搜索项目"]')?.value).toBe('app');
+});
+it('retains selected project identity without matches or a matching project page', async () => {
+  history.replaceState(null, '', '/?view=records&project=p_elsewhere&q=missing');
+  mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify({ ...page([]), selectedProject: { projectId: 'p_elsewhere', path: '/synthetic/elsewhere', status: 'available' }, totalRecords: 0 }) } : undefined);
+  await mount();
+  expect(root.querySelector('h1')?.textContent).toContain('elsewhere');
+  const path = root.querySelector('.wb-library-selected-path');
+  expect(path?.querySelector('summary')).not.toBeNull();
+  expect(path?.textContent).toContain('/synthetic/elsewhere');
+  expect(root.textContent).toContain('当前筛选 · 0 条来源记录');
+});
+it('makes the selected project the main heading while preserving its full-path identity', async () => {
+  history.replaceState(null, '', '/?project=p_elsewhere&q=missing');
+  mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([]), selectedProject: { projectId: 'p_elsewhere', path: '/synthetic/elsewhere', status: 'available' }, counts: { primary: { groups: 0, records: 0 }, auxiliary: { groups: 0, records: 0 }, runs: { groups: 0, records: 0 } } }) } : undefined);
+  await mount();
+  expect(root.querySelector('h1')?.textContent).toBe('elsewhere');
+  expect(root.querySelector('.wb-library-selected-path')?.textContent).toContain('/synthetic/elsewhere');
+  expect(root.querySelector('.wb-library-section-heading')?.textContent).not.toContain('展示组');
+  expect(root.querySelector('.wb-library-section-heading')?.textContent).not.toContain('来源记录');
+  expect(root.querySelector('.wb-library-count-details')?.textContent).toContain('0 个展示组');
+});
+it('shows the entry preview in all-records mode without repeating cwd or source tags in the primary row', async () => {
+  mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify(page([{ ...entry, preview: { text: '已找到渲染错位原因，等待下一步确认。', role: 'assistant' } }])) } : undefined);
+  await mount();
+  const row = root.querySelector('.wb-library-entry')!;
+  expect(row.textContent).toContain('已找到渲染错位原因');
+  expect(row.textContent).not.toContain('/synthetic/app');
+  expect(row.textContent).not.toContain('原生会话');
+  expect(root.querySelector<HTMLDetailsElement>('.wb-library-entry-info')?.open).toBe(false);
+});
+it('does not infer selected project from an unrelated entry and disables missing directory launch', async () => {
+  history.replaceState(null, '', '/?view=records&project=p_missing');
+  mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify({ ...page([entry]), selectedProject: { projectId: 'p_missing', path: '/synthetic/missing', status: 'missing' } }) } : undefined);
+  document.body.append(root); await act(async () => render(<HistoryLibraryPanel sources={sources} onProjectLaunch={vi.fn()} />, root)); await flush();
+  expect(root.querySelector('h1')?.textContent).toContain('missing');
+  expect(Array.from(root.querySelectorAll('button')).find(b => b.textContent === '开始新对话')?.disabled).toBe(true);
+});
+it('explains an unassigned reason without exposing it as a project', async () => {
+  const unassigned = { ...entry, projectId: null, projectPath: null, unassignedReason: 'desktop_generated' };
+  mockFetch(u => u.pathname.endsWith('/e_a') ? { ok: true, text: async () => JSON.stringify({ ...page(messages), entry: unassigned }) } : undefined);
+  await mount(); await click('修复阅读界面');
+  expect(root.textContent).toContain('未归类原因：应用生成的工作目录');
+});
+it('keeps project search and its popstate value separate while retaining an open reader', async () => {
+  const fetch = mockFetch(); await mount(); await click('修复阅读界面');
+  const pathDetail = root.querySelector<HTMLDetailsElement>('.wb-library-project-path')!;
+  expect(pathDetail.querySelector('summary')).not.toBeNull(); pathDetail.open = true;
+  expect(pathDetail.textContent).toContain('/synthetic/app');
+  await act(async () => { const input = root.querySelector<HTMLInputElement>('[aria-label="搜索项目"]')!; input.value = 'new'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await click('查找项目');
+  expect(location.search).toContain('projectQ=new'); expect(location.search).toContain('entry=e_a');
+  expect(root.querySelector('[data-role=user]')).not.toBeNull();
+  expect(fetch.mock.calls.some(([url]) => url.includes('/projects?') && url.includes('projectQ=new'))).toBe(true);
+  await act(async () => { history.replaceState(null, '', '/?projectQ=back&entry=e_a&revision=v1'); dispatchEvent(new PopStateEvent('popstate')); });
+  await flush(); expect(root.querySelector<HTMLInputElement>('[aria-label="搜索项目"]')?.value).toBe('back');
+});
+it('does not borrow a record path for a selected project with no reliable summary', async () => {
+  history.replaceState(null, '', '/?project=p_other');
+  mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify(page([entry])) } : undefined);
+  await mount();
+  expect(root.querySelector('h1')?.textContent).toBe('所选项目');
+  expect(root.querySelector('.wb-library-selected-path')).toBeNull();
+});
+it('distinguishes scheduled scans, a new directory and scan failure', async () => {
+  let failed = false;
+  mockFetch(u => u.pathname.endsWith('/refresh') ? { ok: !failed, json: async () => ({ scheduled: true, refreshId: 1 }) } : undefined);
+  await mount(); await click('更新历史');
+  expect(root.querySelector('[data-update-state="scanning"]')?.textContent).toContain('已安排后台扫描');
+  expect(Array.from(root.querySelectorAll('button')).some(b => b.textContent === '载入新结果')).toBe(false);
+  await act(async () => render(<HistoryLibraryPanel sources={[{ ...sources[0], revision: 'new-directory' }]} />, root));
+  expect(root.querySelector('[data-update-state="available"]')?.textContent).toContain('新目录可读取');
+  failed = true; await click('更新历史');
+  expect(root.querySelector('[data-update-state="failed"]')?.textContent).toContain('扫描失败');
+});
+it('finishes an unchanged scan without blocking future scans', async () => {
+  mockFetch(u => u.pathname.endsWith('/refresh') ? { ok: true, json: async () => ({ scheduled: true, refreshId: 1 }) } : u.pathname.endsWith('/sources') ? { ok: true, text: async () => JSON.stringify({ sources, refresh: { requested: 1, completed: 1, failed: false } }) } : undefined);
+  await mount(); await click('更新历史');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); }); await flush();
+  expect(root.querySelector('[data-update-state="info"]')?.textContent).toContain('后台扫描已结束');
+  expect(Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('更新历史'))?.disabled).toBe(false);
+});
+it('never enables missing project launch from a fallback page while filters reload or fail', async () => {
+  history.replaceState(null, '', '/?project=p_a');
+  let changed = false;
+  let finish: (value: unknown) => void = () => {};
+  const fetch = vi.fn(async (url: string) => {
+    const u = new URL(url, 'http://localhost');
+    if (u.pathname.endsWith('/projects')) return { ok: true, text: async () => JSON.stringify(page([{ projectId: 'p_a', path: '/synthetic/app', entries: 1 }])) };
+    if (changed) return new Promise(resolve => { finish = resolve; });
+    return { ok: true, text: async () => JSON.stringify({ ...page([entry]), selectedProject: { projectId: 'p_a', path: '/synthetic/app', status: 'missing' } }) };
+  }); vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryLibraryPanel sources={sources} onProjectLaunch={vi.fn()} />, root)); await flush();
+  const start = () => Array.from(root.querySelectorAll('button')).find(b => b.textContent === '开始新对话');
+  expect(start()?.disabled).toBe(true);
+  changed = true;
+  await act(async () => { const select = root.querySelector<HTMLSelectElement>('[aria-label="历史来源筛选"]')!; select.value = 's'; select.dispatchEvent(new Event('change', { bubbles: true })); }); await flush();
+  expect(start()?.disabled).toBe(true);
+  await act(async () => finish({ ok: false, status: 503 })); await flush();
+  expect(start()?.disabled).toBe(true);
+});
+it.each([false, true])('observes ready-to-ready scan completion without an indexing sample, failed=%s', async failed => {
+  const fetch = mockFetch(u => u.pathname.endsWith('/refresh') ? { ok: true, json: async () => ({ scheduled: true, refreshId: 7 }) } : u.pathname.endsWith('/sources') ? { ok: true, text: async () => JSON.stringify({ sources, refresh: { requested: 8, completed: 8, failed } }) } : undefined);
+  await mount(); await click('更新历史');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); }); await flush();
+  expect(root.querySelector(`[data-update-state="${failed ? 'failed' : 'info'}"]`)?.textContent).toContain(failed ? '扫描失败' : '后台扫描已结束');
+  expect(fetch.mock.calls.some(([url]) => url.endsWith('/sources'))).toBe(true);
+});
+it('ends scanning when refresh status cannot be read', async () => {
+  mockFetch(u => u.pathname.endsWith('/refresh') ? { ok: true, json: async () => ({ scheduled: true, refreshId: 1 }) } : u.pathname.endsWith('/sources') ? { ok: false } : undefined);
+  await mount(); await click('更新历史');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); }); await flush();
+  expect(root.querySelector('[data-update-state="failed"]')?.textContent).toContain('无法确认后台扫描结果');
+});
+it('aborts a pending status read and never overwrites a newly available directory', async () => {
+  let finish: (value: unknown) => void = () => {};
+  let signal: AbortSignal | undefined;
+  const fetch = mockFetch(u => u.pathname.endsWith('/refresh') ? { ok: true, json: async () => ({ scheduled: true, refreshId: 1 }) } : undefined);
+  const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (url: string, options?: RequestInit) => {
+    if (url.endsWith('/sources')) { signal = options?.signal || undefined; return await new Promise<Awaited<ReturnType<typeof original>>>(resolve => { finish = value => resolve(value as Awaited<ReturnType<typeof original>>); }); }
+    return original(url);
+  });
+  await mount(); await click('更新历史');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); });
+  await act(async () => render(<HistoryLibraryPanel sources={[{ ...sources[0], revision: 'published' }]} />, root));
+  expect(signal?.aborted).toBe(true);
+  await act(async () => finish({ ok: true, text: async () => JSON.stringify({ sources, refresh: { requested: 1, completed: 1, failed: false } }) })); await flush();
+  expect(root.querySelector('[data-update-state="available"]')?.textContent).toContain('新目录可读取');
+  await click('更新历史');
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); });
+  await act(async () => render(null, root));
+  expect(signal?.aborted).toBe(true);
+});
+const groupedMember = { entryId: 'e_a', sourceId: 's', kind: 'native', sourceRevision: 'v1', title: '主要会话', coverage: entry.coverage, capabilities: entry.capabilities };
+const grouped = { groupId: 'g_a', section: 'primary', conversationKind: 'unknown', preferredEntryId: 'e_a', members: [groupedMember], projectId: 'p_a', projectPath: '/synthetic/app', latestRecordedAt: entry.recordedAt };
+const groupCounts = { primary: { groups: 1, records: 1 }, auxiliary: { groups: 2, records: 3 }, runs: { groups: 1, records: 1 } };
+it('explains the global grouping budget and keeps the source-record view available', async () => {
+  history.replaceState(null, '', '/');
+  mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: false, status: 413, json: async () => ({ error: { code: 'query_budget_exceeded' } }) } : undefined);
+  await mount();
+  expect(root.querySelector('[role="alert"]')?.textContent).toContain('整理视图达到目录查询上限，可切换“全部来源记录”');
+  await act(async () => { const select = root.querySelector<HTMLSelectElement>('[aria-label="历史展示方式"]')!; select.value = 'records'; select.dispatchEvent(new Event('change', { bubbles: true })); }); await flush();
+  expect(location.search).toContain('view=records');
+  expect(root.querySelector('[data-entry="e_a"]')).not.toBeNull();
+});
+it('defaults to primary groups and only loads auxiliary records when expanded', async () => {
+  history.replaceState(null, '', '/');
+  const fetch = mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([{ ...grouped, section: u.searchParams.get('section') || 'primary' }]), counts: groupCounts, organizationRevision: 'absent' }) } : undefined);
+  await mount();
+  expect(root.textContent).toContain('类型未确认');
+  expect(root.querySelector('.wb-library-count-details')?.textContent).toContain('辅助会话 · 2 个展示组');
+  expect(root.querySelector('.wb-library-section-toggle')?.textContent).toBe('辅助会话');
+  expect(fetch.mock.calls.some(([url]) => url.includes('/session-groups?') && url.includes('section=primary'))).toBe(true);
+  expect(fetch.mock.calls.some(([url]) => url.includes('section=auxiliary') || url.includes('section=runs'))).toBe(false);
+  await click('辅助会话');
+  expect(location.search).toContain('section=auxiliary');
+  expect(fetch.mock.calls.some(([url]) => url.includes('section=auxiliary'))).toBe(true);
+});
+it('opens the preferred observer search member with its own revision and match', async () => {
+  history.replaceState(null, '', '/?q=needle');
+  const observer = { ...groupedMember, entryId: 'e_observer', kind: 'observer', sourceRevision: 'observer-v', title: '旧来源命中', match: { record: 17, text: 'needle', sourceRevision: 'observer-v' } };
+  const fetch = mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([{ ...grouped, preferredEntryId: observer.entryId, members: [observer] }]), counts: groupCounts, organizationRevision: 'absent' }) } : undefined);
+  await mount(); await click('旧来源命中');
+  expect(location.search).toContain('entry=e_observer'); expect(location.search).toContain('revision=observer-v'); expect(location.search).toContain('match=17');
+  expect(fetch.mock.calls.some(([url]) => url.includes('/e_observer?') && url.includes('record=17') && url.includes('sourceRevision=observer-v'))).toBe(true);
+});
+it('preserves legacy explicit group URLs and switches back to grouped display without losing filters', async () => {
+  history.replaceState(null, '', '/?group=agents&q=needle&projectQ=app');
+  const fetch = mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([grouped]), counts: groupCounts, organizationRevision: 'absent' }) } : undefined);
+  await mount();
+  expect(fetch.mock.calls.some(([url]) => url.includes('/entries?') && url.includes('group=agents'))).toBe(true);
+  expect(fetch.mock.calls.some(([url]) => url.includes('/session-groups'))).toBe(false);
+  await act(async () => { const select = root.querySelector<HTMLSelectElement>('[aria-label="历史展示方式"]')!; select.value = 'groups'; select.dispatchEvent(new Event('change', { bubbles: true })); }); await flush();
+  expect(location.search).toContain('view=groups'); expect(location.search).toContain('q=needle'); expect(location.search).toContain('projectQ=app'); expect(location.search).not.toContain('group=');
+  expect(fetch.mock.calls.some(([url]) => url.includes('/session-groups?') && url.includes('section=primary'))).toBe(true);
+});
+it('keeps grouped pagination and section in URL across list restoration', async () => {
+  history.replaceState(null, '', '/?view=groups&section=runs');
+  const fetch = mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([{ ...grouped, groupId: u.searchParams.get('section') === 'runs' ? 'g_run' : 'g_a', section: u.searchParams.get('section') || 'primary', members: [{ ...groupedMember, title: u.searchParams.has('cursor') ? '第二页组' : '第一页组' }] }], u.searchParams.get('section') === 'primary' && !u.searchParams.has('cursor') ? 'next-group' : null), counts: groupCounts, organizationRevision: 'absent' }) } : undefined);
+  await mount(); await click('下一页'); expect(root.textContent).toContain('第二页组');
+  await act(async () => render(null, root)); await mount();
+  expect(location.search).toContain('section=runs'); expect(root.textContent).toContain('第二页组');
+  expect(fetch.mock.calls.filter(([url]) => url.includes('section=auxiliary'))).toHaveLength(0);
+  await act(async () => { history.replaceState(null, '', '/?view=groups&section=auxiliary'); dispatchEvent(new PopStateEvent('popstate')); }); await flush();
+  expect(root.querySelector('[aria-label="辅助会话"]')).not.toBeNull();
+});
+it('puts reliable parent navigation above folded record details and explains conflicting parents', async () => {
+  mockFetch(u => u.pathname.endsWith('/e_a') ? { ok: true, text: async () => JSON.stringify({ ...page(messages), entry: { ...entry, isSubagent: true, parentEntryId: 'e_parent', parentThreadId: 'parent' } }) } : undefined);
+  await mount(); await click('修复阅读界面');
+  expect(root.querySelector('.wb-library-parent')?.textContent).toContain('查看父会话');
+  expect(root.querySelector('.wb-library-identity button')?.textContent).not.toBe('查看父会话');
+});
+it('never joins auxiliary rows from a newer directory to an old primary list', async () => {
+  history.replaceState(null, '', '/');
+  mockFetch(u => u.pathname.endsWith('/session-groups') ? { ok: true, text: async () => JSON.stringify({ ...page([{ ...grouped, section: u.searchParams.get('section') || 'primary', members: [{ ...groupedMember, title: u.searchParams.get('section') === 'auxiliary' ? '较新辅助内容' : '原主要会话' }] }]), revision: u.searchParams.get('section') === 'auxiliary' ? 'new-directory' : 'v1', counts: groupCounts, organizationRevision: 'absent' }) } : undefined);
+  await mount(); await click('辅助会话');
+  expect(root.textContent).not.toContain('较新辅助内容'); expect(root.textContent).toContain('载入新结果后查看');
+});
+it('offers explicit owner-only organization without replacing the selected source reader', async () => {
+  const fetch = mockFetch();
+  document.body.append(root);
+  await act(async () => render(<HistoryLibraryPanel sources={sources} instanceId="application" />, root)); await flush(); await click('修复阅读界面');
+  expect(Array.from(root.querySelectorAll('button')).some(button => button.textContent === '调整项目归属')).toBe(true);
+  expect(location.search).toContain('entry=e_a'); expect(location.search).toContain('revision=v1');
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/organization'))).toHaveLength(0);
+});
+it('refreshes organization lists after saving without refetching body, losing its anchor or changing the URL', async () => {
+  history.replaceState(null, '', '/?view=records&project=p_a');
+  const automatic = { automatic: { projectId: 'p_a', projectPath: '/synthetic/app', basis: 'cwd_inferred' }, effective: { projectId: 'p_a', projectPath: '/synthetic/app', basis: 'automatic' }, overrideState: 'none', conversationKind: 'ordinary', kindBasis: 'known', unassignedReason: null };
+  let saved = false;
+  const fetch = vi.fn(async (url: string, request: RequestInit) => {
+    const u = new URL(url, 'http://localhost');
+    if (u.pathname.endsWith('/organization')) { if (request.method === 'PUT') saved = true; return { ok: true, text: async () => JSON.stringify({ organization: saved ? { ...automatic, effective: { projectId: null, projectPath: null, basis: 'user_unassigned' }, overrideState: 'applied', unassignedReason: 'user_unassigned' } : automatic, organizationRevision: saved ? 'store:1' : 'absent', revision: saved ? 'new' : 'v1', canAdjust: true }) }; }
+    if (u.pathname.endsWith('/projects')) return { ok: true, text: async () => JSON.stringify({ ...page([]), revision: saved ? 'new' : 'v1', unassignedRecords: saved ? 1 : 0 }) };
+    if (u.pathname.endsWith('/entries')) return { ok: true, text: async () => JSON.stringify({ ...page([entry]), projectExists: !saved }) };
+    return { ok: true, text: async () => JSON.stringify({ ...page(messages), entry: { ...entry, sourceIdentity: 'identity', recordedCwd: '/original/execution' } }) };
+  }); vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryLibraryPanel sources={sources} instanceId="application" />, root)); await flush(); await click('修复阅读界面');
+  const body = root.querySelector<HTMLElement>('.wb-library-body-scroll')!; body.scrollTop = 45;
+  await act(async () => { body.dispatchEvent(new Event('scroll')); });
+  const url = location.search;
+  const bodyReads = fetch.mock.calls.filter(([url]) => new URL(url, 'http://localhost').pathname.endsWith('/e_a')).length;
+  const lists = fetch.mock.calls.filter(([url]) => new URL(url, 'http://localhost').pathname.endsWith('/projects')).length;
+  await click('调整项目归属');
+  await act(async () => { const select = root.querySelector<HTMLSelectElement>('[aria-label="调整方式"]')!; select.value = 'unassigned'; select.dispatchEvent(new Event('change', { bubbles: true })); }); await flush();
+  await act(async () => { const confirm = root.querySelector<HTMLInputElement>('input[type=checkbox]')!; confirm.checked = true; confirm.dispatchEvent(new Event('change', { bubbles: true })); }); await flush();
+  await click('保存归属'); await click('关闭');
+  expect(location.search).toBe(url); expect(body.scrollTop).toBe(45); expect(root.querySelector('.wb-library-body-scroll')).toBe(body);
+  expect(fetch.mock.calls.filter(([url]) => new URL(url, 'http://localhost').pathname.endsWith('/e_a'))).toHaveLength(bodyReads);
+  expect(fetch.mock.calls.filter(([url]) => new URL(url, 'http://localhost').pathname.endsWith('/projects')).length).toBeGreaterThan(lists);
+  expect(document.activeElement?.textContent).toBe('调整项目归属');
+  expect(root.querySelector('.wb-library-identity')?.textContent).toContain('用户设为未归类');
+  await click('返回会话列表');
+  expect(location.search).not.toContain('project=');
+});
+it('reads original body and keeps explicit native resume when organization storage is unavailable', async () => {
+  const organization = { automatic: { projectId: 'p_a', projectPath: '/synthetic/app', basis: 'cwd_inferred' }, effective: { projectId: 'p_a', projectPath: '/synthetic/app', basis: 'automatic' }, overrideState: 'unavailable', conversationKind: 'ordinary', kindBasis: 'known', unassignedReason: null };
+  const fetch = mockFetch(u => u.pathname.endsWith('/e_a') ? { ok: true, text: async () => JSON.stringify({ ...page(messages), entry: { ...entry, organization } }) } : undefined);
+  const resume = vi.fn(); document.body.append(root); await act(async () => render(<HistoryLibraryPanel sources={sources} instanceId="application" onResume={resume} />, root)); await flush(); await click('修复阅读界面');
+  expect(root.textContent).toContain('用户归类暂不可用；原始记录仍可阅读，继续会话使用原工作目录。');
+  expect(root.querySelector('[data-role=user]')?.textContent).toContain('你好');
+  expect(resume).not.toHaveBeenCalled(); expect(fetch.mock.calls.every(([url]) => !url.includes('/launch'))).toBe(true);
+  expect(Array.from(root.querySelectorAll('button')).some(button => button.textContent === '调整项目归属')).toBe(false);
+  expect(root.textContent).not.toContain('项目归属已保存'); await click('继续此会话'); expect(resume).toHaveBeenCalledOnce();
 });

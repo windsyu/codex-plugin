@@ -1,4 +1,4 @@
-use super::{model::*, native::NativeFile};
+use super::{model::*, native::NativeFile, presentation};
 use crate::history::{
     files::BlobRoot,
     legacy_reader::{Collection, LegacyReader, Query, ReadBudget},
@@ -28,6 +28,7 @@ pub(super) struct Scan {
     thread_key: Option<String>,
     bytes: usize,
     context_loaded: bool,
+    preview_order: Option<u64>,
     pub issues: Vec<String>,
 }
 impl Scan {
@@ -97,6 +98,7 @@ impl Scan {
             thread_key: None,
             bytes: 0,
             context_loaded: false,
+            preview_order: None,
             issues: vec![],
         })
     }
@@ -105,7 +107,7 @@ impl Scan {
     }
     pub fn step(&mut self, key: &[u8; 32]) -> Result<Step, &'static str> {
         if self.legacy.is_some() {
-            return self.legacy_step();
+            return self.legacy_step(key);
         }
         if let Some(file) = &mut self.native {
             match file.step(&self.source, self.root.as_ref().unwrap(), key) {
@@ -195,12 +197,6 @@ impl Scan {
                     let mut entry = Entry::new(&self.source, &epoch.to_string());
                     entry.run_id = Some(epoch.to_string());
                     entry.workspace_id = meta["workspaceId"].as_str().map(String::from);
-                    entry.title = meta["projectName"]
-                        .as_str()
-                        .unwrap_or("工作台运行")
-                        .chars()
-                        .take(120)
-                        .collect();
                     entry.recorded_at = meta["startedAt"].as_str().map(String::from);
                     entry.source_revision = revision;
                     entry.coverage.state = "complete_for_source".into();
@@ -250,6 +246,7 @@ impl Scan {
                     });
                     for record in records {
                         let record = sanitize(&record, key);
+                        presentation::observe(&mut entry, &record);
                         let size = record.to_string().len();
                         if bytes + size > 2 * 1024 * 1024 {
                             entry.issue("body_cache_limit");
@@ -274,7 +271,7 @@ impl Scan {
             self.issues.push(code.into());
         }
     }
-    fn legacy_step(&mut self) -> Result<Step, &'static str> {
+    fn legacy_step(&mut self, key: &[u8; 32]) -> Result<Step, &'static str> {
         let reader = self.legacy.as_ref().unwrap();
         if let Some(doc) = &mut self.current {
             if !self.context_loaded {
@@ -293,6 +290,32 @@ impl Scan {
                             return Err("source_changed");
                         }
                         for record in page.records {
+                            let mut issues = doc.entry.coverage.reasons.clone();
+                            issues.extend(record.issues.iter().cloned());
+                            issues.extend(page.issues.iter().cloned());
+                            let (kind, basis) = observer_conversation_kind(&record.fields, &issues);
+                            let parent = record.fields["parentThreadId"].as_str();
+                            let parent_entry = record.fields["parentThreadKey"]
+                                .as_str()
+                                .map(|id| Entry::new(&self.source, id).entry_id);
+                            let parent_conflict = doc.entry.conversation_kind == "subagent"
+                                && (doc.entry.parent_thread_id.as_deref() != parent
+                                    || doc.entry.parent_entry_id != parent_entry);
+                            // Context rows must not wash away an earlier unreliable identity.
+                            if doc.entry.kind_basis != "metadata_invalid_v1"
+                                && doc.entry.kind_basis != "metadata_conflict_v1"
+                            {
+                                if parent_conflict
+                                    || (doc.entry.conversation_kind == "subagent"
+                                        && kind != "subagent")
+                                {
+                                    doc.entry.conversation_kind = "unknown".into();
+                                    doc.entry.kind_basis = "metadata_conflict_v1".into();
+                                } else {
+                                    doc.entry.conversation_kind = kind.into();
+                                    doc.entry.kind_basis = basis.into();
+                                }
+                            }
                             doc.entry.parent_thread_id =
                                 record.fields["parentThreadId"].as_str().map(String::from);
                             doc.entry.parent_entry_id = record.fields["parentThreadKey"]
@@ -309,6 +332,14 @@ impl Scan {
                             doc.records.push(value);
                         }
                         for issue in page.issues {
+                            if issue.contains("parentThread")
+                                || issue.contains("identity")
+                                || issue.contains("source_changed")
+                                || issue.contains("source_revision_changed")
+                            {
+                                doc.entry.conversation_kind = "unknown".into();
+                                doc.entry.kind_basis = "metadata_invalid_v1".into();
+                            }
                             doc.entry.issue(&issue);
                         }
                     }
@@ -331,7 +362,19 @@ impl Scan {
                         return Err("source_changed");
                     }
                     for record in page.records {
-                        let value = json!({"kind":"observer_item","raw":record.fields,"issues":record.issues});
+                        let value = sanitize(
+                            &json!({"kind":"observer_item","raw":record.fields,"issues":record.issues}),
+                            key,
+                        );
+                        let previous_preview = doc.entry.preview.clone();
+                        if presentation::observe(&mut doc.entry, &value) {
+                            let order = value["raw"]["lastEventSeq"].as_u64();
+                            if self.preview_order.is_some() && order < self.preview_order {
+                                doc.entry.preview = previous_preview;
+                            } else {
+                                self.preview_order = order;
+                            }
+                        }
                         let size = value.to_string().len();
                         if self.bytes + size <= 2 * 1024 * 1024 {
                             self.bytes += size;
@@ -358,19 +401,17 @@ impl Scan {
         }
         if let Some(record) = self.threads.pop_front() {
             let fields = record.fields;
-            let key = fields["threadKey"]
+            let thread_key = fields["threadKey"]
                 .as_str()
                 .ok_or("thread_identity_missing")?
                 .to_string();
-            let mut entry = Entry::new(&self.source, &key);
+            let mut entry = Entry::new(&self.source, &thread_key);
+            entry.kind_basis = "observer_kind_unconfirmed_v1".into();
             entry.source_revision = self.revision.clone().unwrap_or_default();
             entry.title = fields["name"]
                 .as_str()
-                .or(fields["lastMessagePreview"].as_str())
-                .unwrap_or("旧版会话")
-                .chars()
-                .take(120)
-                .collect();
+                .and_then(|name| presentation::stored_title(name, key))
+                .unwrap_or_else(|| "未命名会话".into());
             entry.native_thread_id = fields["codexThreadId"].as_str().map(String::from);
             entry.legacy_path(&fields, &record.issues);
             entry.recorded_at = fields["recencyAtMs"]
@@ -387,14 +428,15 @@ impl Scan {
                 .any(|c| c.collection == Collection::Context && c.readable);
             self.current = Some(Document {
                 entry,
-                locator: json!({"thread":key}),
+                locator: json!({"thread":thread_key}),
                 records: vec![
                     json!({"kind":"observer_context","raw":fields,"issues":record.issues}),
                 ],
             });
-            self.thread_key = Some(key);
+            self.thread_key = Some(thread_key);
             self.bytes = 0;
             self.context_loaded = false;
+            self.preview_order = None;
             return Ok(Step::More);
         }
         if self.started && self.cursor.is_none() {

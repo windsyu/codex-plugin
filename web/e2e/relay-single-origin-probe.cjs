@@ -62,7 +62,7 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     const result=await page.evaluate(async ({gatewayId,url})=>{
       // The page intentionally consumes/removes the fragment on bootstrap.
       const auth=new URLSearchParams(new URL(url).hash.slice(1));
-      const response=await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':auth.get('grant'),'X-Workbench-Api-Version':'1'}});
+      const response=await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':auth.get('grant'),'X-Workbench-Api-Version':auth.get('api')}});
       return {status:response.status,body:await response.json()};
     },gateway);
     assert.equal(result.status,200); assert.equal(result.body.instanceId,gateway.expectedInstanceId); assert.equal(result.body.remoteOwner,true);
@@ -100,10 +100,10 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
   }
   stage='pinned-context-isolation';
   const grant=new URLSearchParams(new URL(input.gateways[0].url).hash.slice(1)).get('grant');
-  const wrong=await pages[1].evaluate(async ({gatewayId,grant})=>(await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':grant,'X-Workbench-Api-Version':'1'}})).status,{gatewayId:input.gateways[1].gatewayId,grant});
+  const wrong=await pages[1].evaluate(async ({gatewayId,grant})=>(await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':grant,'X-Workbench-Api-Version':'2'}})).status,{gatewayId:input.gateways[1].gatewayId,grant});
   assert.equal(wrong,401);
   await alice.addCookies([cookie(input.gateways[2].accountCookie,origin)]);
-  const switched=await pages[0].evaluate(async ({gatewayId,grant})=>(await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':grant,'X-Workbench-Api-Version':'1'}})).status,{gatewayId:input.gateways[0].gatewayId,grant});
+  const switched=await pages[0].evaluate(async ({gatewayId,grant})=>(await fetch(`/g/${gatewayId}/workbench/v1/application`,{headers:{'X-Workbench-Grant':grant,'X-Workbench-Api-Version':'2'}})).status,{gatewayId:input.gateways[0].gatewayId,grant});
   assert.equal(switched,401); assert.equal(errors,0); assert.ok(assets>=3);assert.equal(starts,0);assert.equal(inputs,0);
   report({stage:'passed',chrome:browser.version(),mobileWidth:390,portals:2,workbenches:3,assetResponses:assets,sse:events,terminalSockets:terminals,crossGatewayDenied:true,accountSwitchDenied:true,deepRoutes:true,refreshAndBack:true,sameRunTerminalPreserved:true,implicitLaunches:starts,implicitInputs:inputs});
   await alice.close(); await bob.close(); await shutdown(0);
