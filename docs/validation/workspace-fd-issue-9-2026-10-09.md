@@ -105,3 +105,19 @@ macOS `/dev/fd` 副本共享偏移也已验证；EOF 探针返回 128/short-read
 补充修复后完整 `node scripts/dev.mjs check --offline --ci` 通过：工具 80、Web 234、Rust 456 passed / 0 failed / 56 ignored，fmt、类型检查、Clippy all-targets `-D warnings`、两个 binary 的 debug/release 构建通过；受管任务 `83e25c8e-5e53-4db3-a18e-3f9e3dd4ee54`（隔离运行器 `33f0acab-2287-4e4b-98ff-63f458a79479`）。追加报告后文档 107 项复查通过，实际暂存四文件二进制检查通过；独立安全复审无新增阻断项。远端当前提交的检查仍须单独通过后才合并。
 
 范围限制：优化只在没有 pending/mask 且非 tool 模式时启用；若前一块留下 `x`，后续连续 `x` 仍可能走原慢路径，不承诺所有切块都同样加速。差分验证保留既有 configured-secret 匹配优先级，不将等价性当作所有既有脱敏语义绝对安全的证明。原有 ignored 专项未因本次常规通过而追认为已执行。
+
+### 第二轮 CI：录制器退出测试的观察竞争
+
+性能修复提交 `54f8253` 的 [push 检查](https://github.com/windsyu/codex-plugin/actions/runs/38669648607)完整通过：Rust 456 项、历史原失败用例及 workspace/FD 回归均通过，分支历史二进制策略检查通过。同期 [PR 检查](https://github.com/windsyu/codex-plugin/actions/runs/38669654770)中历史和 FD 回归也通过，但录制器退出用例在预期 `unclean` 时读到了 `active`，因此没有合并。
+
+原用例在设置 3 秒暂停后固定睡眠 150 ms，Drop 的 2 秒等待超时后再固定睡眠 1100 ms，即假定后台线程已经释放运行锁。线程调度和 fsync 没有这个完成保证；仍持有 flock 的运行应继续报告 `active`，不能为了测试通过提前宣称非活动。受控地保持线程暂停，可稳定复现完全相同的断言失败（`05062a4c-1351-48e9-90d0-accda96ad8ef`）；这验证了用例的观察竞争，不声称已追踪远端每次调度或 I/O。
+
+修复只涉及 `cfg(test)`：一次性通道门闩确认工作线程进入暂停，Drop 后确认超时及仍活动，显式放行后在原测试辅助函数的 5 秒上限内等待线程完成并 join，再验证 `unclean`、`uncertainTail=true` 且不存在 `lifecycle.json`。通道发端断开也会放行，避免断言失败遗留永久暂停线程。保留 Drop 小于 2300 ms 的原断言和实际 2 秒退出预算；不改生产录制、运行锁、提交、历史状态或 CI 并发。
+
+录制器测试族 14/14 通过（`a2feb6d4-d260-4733-96d8-cfdfe3b1d0f5`）。另做一次自动恢复的负向 mutation：临时将超时路径的退出许可撤销改为不撤销，新测试稳定以 `ended` / `unclean` 失败（`e0a65bb5-5e4e-4e67-9167-b6216abdcb73`），随后恢复生产代码；该失败不计作最终版本结果，证明同步测试未削弱原缺陷检测。恢复后连续 10 次精确回归通过（`873f50e8-092e-4cb8-93dd-24c9cd391aae`）；独立只读复审实际 diff 无新增合并阻断项。当前完整源码的分项检查结果如下，新提交的远端检查仍须通过后才合并。
+
+独立复审保留的既有边界：本用例覆盖超时发生在最终提交开始前的迟到 worker；原 `journal::Writer::commit_when` 在检查退出许可后写 `meta.json`，若该写入跨过退出超时，存在落盘 `ended=true` 的潜在窗口。`lifecycle` 再检查许可不能替代 history 对 `meta.ended` 的读取；这是未做故障注入验证的原有生产一致性问题，不是本次 `active` 失败原因，也不是测试改动引入。下一项独立工作应在检查许可与 meta 原子替换之间注入阻塞，验证并设计超时后的结束语义，不在本次测试修复中悄悄更改持久化契约。
+
+本轮 `node scripts/dev.mjs check --offline --ci` 的工具 80、Web 234、fmt、类型检查与 Clippy 通过，但 Rust 阶段一个未改动配置用例在第二次 `Prepared::load` 返回 `config_busy`，整条命令退出非零，不能记为通过（`56b1265e-c154-43bd-b6a9-d5a042ebd8f4`）。配置测试族随后 15/15 通过（`6d4e6cb8-adcd-4359-9723-1562285c0535`），当前源码的完整 Rust 四线程对照 456 passed / 0 failed / 56 ignored（`dc0e16ed-a88a-4a3e-89af-d703b5c43d67`）。复用源码未变的前置检查，并通过标准 `build --offline --release` / `build --offline` 补齐两个 binary 的 release/debug 构建（`37fac2e6-db80-4316-9a16-1f5a6aae4af4` / `830b7173-337d-4e29-8dc3-f17d39e59543`）。文档和实际暂存二进制策略在提交前另行复查。
+
+对该配置失败，源码确认加载结束仅 close 锁 File，所有 flock 错误均映射 `config_busy`，当次未记录原始 errno。2026-10-15 独立合成管道握手探针证实：子进程保留 fork 继承的 CLOEXEC FD 时，父进程仅 close 后重新 open 加锁返回 errno 35 / EWOULDBLOCK；显式 LOCK_UN 再 close 可获取，子进程退出后两组均可获取。两组在父进程真实持锁时都拒绝新 writer。现场探针源码/结果保存在临时证据目录 `/private/tmp/codex-config-flock-probe.aEYrMn`，不是项目运行依赖。这只能证明旧锁引用延长机制成立，不能追溯认定当次失败就是该原因，也不是已验证的生产修复。没有发现并发覆盖配置的证据；独立审查接受保留失败与未确定因果、完整 Rust/剩余构建及新 head 远端检查通过后继续本 PR，不通过重试写入或修改配置互斥语义掩盖该问题。
