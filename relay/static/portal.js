@@ -88,7 +88,7 @@
     if (url.protocol !== 'https:' || url.username || url.password) throw new Error('unsafe_url');
     if (url.origin === location.origin) {
       const auth = new URLSearchParams(url.hash.slice(1));
-      if (url.pathname !== '/g/' + gatewayId + '/' || url.search || !uuid.test(auth.get('grant') || '') || !uuid.test(auth.get('session') || '') || auth.get('api') !== '1') throw new Error('invalid_entry');
+      if (url.pathname !== '/g/' + gatewayId + '/' || url.search || !uuid.test(auth.get('grant') || '') || !uuid.test(auth.get('session') || '') || auth.get('api') !== '2') throw new Error('invalid_entry');
     }
     return url.href;
   }
@@ -113,7 +113,7 @@
           const stateNode = node('div', Object.hasOwn(labels, state) ? labels[state] : '状态未知 · 请刷新后重试', 'state'); stateNode.dataset.state = state;
           info.append(node('h2', gateway.name, 'computer-name'), stateNode);
           const open = button('打开工作台', async () => {
-            const result = await api('gateways/' + gateway.gatewayId + '/open', { uiApiVersion: 1 });
+            const result = await api('gateways/' + gateway.gatewayId + '/open', { uiApiVersion: 2 });
             location.assign(openURL(result.url, gateway.gatewayId));
           }, 'primary');
           open.disabled = state !== 'online';

@@ -171,7 +171,16 @@ impl ApplicationServer {
             .route("/workbench/v1/library/sources", get(source_status))
             .route("/workbench/v1/library/projects", get(library_projects))
             .route("/workbench/v1/library/entries", get(library_entries))
+            .route("/workbench/v1/library/session-groups", get(library_groups))
+            .route(
+                "/workbench/v1/library/session-groups/{id}",
+                get(library_group),
+            )
             .route("/workbench/v1/library/entries/{entry}", get(library_body))
+            .route(
+                "/workbench/v1/library/entries/{entry}/organization",
+                get(library_organization).put(library_organization_save),
+            )
             .route(
                 "/workbench/v1/library/entries/{entry}/details",
                 get(library_details),
@@ -714,14 +723,131 @@ fn library_result(result: std::result::Result<serde_json::Value, &'static str>) 
                 "stale_cursor"
                 | "source_revoked"
                 | "source_revision_changed"
+                | "group_changed"
+                | "organization_changed"
+                | "organization_identity_unconfirmed"
                 | "search_position_unavailable" => StatusCode::CONFLICT,
-                "entry_unavailable" | "details_unavailable" => StatusCode::NOT_FOUND,
+                "entry_unavailable"
+                | "details_unavailable"
+                | "group_unavailable"
+                | "project_unavailable" => StatusCode::NOT_FOUND,
+                "query_budget_exceeded" | "organization_budget_exceeded" => {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                }
                 "invalid_cursor" | "invalid_query" => StatusCode::BAD_REQUEST,
                 _ => StatusCode::SERVICE_UNAVAILABLE,
             },
             code,
         ),
     }
+}
+fn organization_result(result: std::result::Result<serde_json::Value, &'static str>) -> Response {
+    match result {
+        Ok(value) => {
+            let etag = format!(
+                "\"{}\"",
+                value["organizationRevision"].as_str().unwrap_or("")
+            );
+            let mut response = Json(value).into_response();
+            if let Ok(etag) = HeaderValue::from_str(&etag) {
+                response.headers_mut().insert(header::ETAG, etag);
+            }
+            response
+        }
+        Err(code) => library_result(Err(code)),
+    }
+}
+async fn library_organization(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(entry): Path<String>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    organization_result(state.sources.organization(entry).await)
+}
+async fn library_organization_save(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(entry): Path<String>,
+    body: Bytes,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    if !origin(&headers, &state) {
+        return error(StatusCode::FORBIDDEN, "origin_required");
+    }
+    if body.len() > 16 * 1024 {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "organization_body_limit");
+    }
+    if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+        || headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(';').next())
+            != Some("application/json")
+    {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "json_required");
+    }
+    let Ok(request) = serde_json::from_slice::<crate::history::library::OrganizationWrite>(&body)
+    else {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_request");
+    };
+    if request.instance_id != state.id {
+        return error(StatusCode::CONFLICT, "stale_instance");
+    }
+    if !headers.contains_key(header::IF_MATCH) {
+        return error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "organization_revision_required",
+        );
+    }
+    if headers.get_all(header::IF_MATCH).iter().count() != 1 {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_revision");
+    }
+    let Some(revision) = headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix('"'))
+        .and_then(|s| s.strip_suffix('"'))
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-:".contains(&b))
+        })
+    else {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_revision");
+    };
+    organization_result(
+        state
+            .sources
+            .save_organization(entry, revision.into(), request)
+            .await,
+    )
+}
+async fn library_groups(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Query(query): Query<crate::history::library::GroupQuery>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    library_result(state.sources.groups(query).await)
+}
+async fn library_group(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(id): Path<String>,
+    Query(query): Query<crate::history::library::GroupAnchorQuery>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    library_result(state.sources.group(id, query).await)
 }
 async fn library_projects(
     State(state): State<Arc<StateData>>,
@@ -792,4 +918,19 @@ async fn library_details(
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
     library_result(state.sources.details(entry, query).await)
+}
+
+#[cfg(test)]
+mod group_error_tests {
+    use super::*;
+    #[test]
+    fn group_errors_preserve_http_contract() {
+        for (code, status) in [
+            ("group_unavailable", StatusCode::NOT_FOUND),
+            ("query_budget_exceeded", StatusCode::PAYLOAD_TOO_LARGE),
+            ("group_changed", StatusCode::CONFLICT),
+        ] {
+            assert_eq!(library_result(Err(code)).status(), status);
+        }
+    }
 }

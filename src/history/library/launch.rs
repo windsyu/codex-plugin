@@ -155,7 +155,12 @@ pub(super) fn resolve(
     project: Option<String>,
     resume: Option<(String, String)>,
 ) -> Result<Selection> {
-    let db = read_db(shared)?.ok_or("project_unavailable")?;
+    let (db, snapshot) = if resume.is_some() {
+        organization_view::open_source(shared, sources)?
+    } else {
+        organization_view::open(shared, sources)?
+    };
+    let db = db.ok_or("project_unavailable")?;
     let identities =
         serde_json::to_string(&sources.iter().map(Source::identity).collect::<Vec<_>>()).unwrap();
     let result = if let Some((id, revision)) = resume {
@@ -165,7 +170,7 @@ pub(super) fn resolve(
         if entry.source_revision != revision {
             return Err("source_revision_changed");
         }
-        if project.is_some() && project != entry.project_id {
+        if snapshot.revision != "unavailable" && project.is_some() && project != entry.project_id {
             return Err("project_changed");
         }
         if entry.kind != "native"

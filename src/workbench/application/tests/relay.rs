@@ -391,6 +391,139 @@ async fn start_remote_run(remote: &Remote, app: &Application, cwd: &std::path::P
     .unwrap()
 }
 
+async fn remote_library_organization(remote: &Remote, app: &Application, fixture: &Fixture) {
+    let thread = Uuid::new_v4();
+    std::fs::create_dir_all(fixture.home.join("sessions")).unwrap();
+    let source = fixture.home.join("sessions/relay-organization.jsonl");
+    let raw = format!(
+        "{}\n",
+        json!({"type":"session_meta","payload":{"id":thread,"source":"cli","cwd":fixture.cwd}})
+    );
+    std::fs::write(&source, &raw).unwrap();
+    assert_eq!(
+        remote
+            .request(Method::POST, "/workbench/v1/library/refresh")
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        202
+    );
+    let entry = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let response = remote
+                .get("/workbench/v1/library/entries?kind=native")
+                .await;
+            assert_eq!(response.status(), 200);
+            let body = json_body(response).await;
+            if let Some(entry) = body["records"].as_array().and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["nativeThreadId"] == thread.to_string())
+            }) {
+                break entry.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("synthetic native history indexed through relay");
+    let response = remote
+        .get("/workbench/v1/library/session-groups?kind=native")
+        .await;
+    assert_eq!(response.status(), 200);
+    let groups = json_body(response).await;
+    let group = groups["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["preferredEntryId"] == entry["entryId"])
+        .expect("remote group includes indexed synthetic session");
+    let mut detail = reqwest::Url::parse(&remote.origin).unwrap();
+    detail.set_path(&format!(
+        "/workbench/v1/library/session-groups/{}",
+        group["groupId"].as_str().unwrap()
+    ));
+    detail
+        .query_pairs_mut()
+        .append_pair("anchorEntryId", entry["entryId"].as_str().unwrap())
+        .append_pair("revision", groups["revision"].as_str().unwrap());
+    let response = remote
+        .get(&format!("{}?{}", detail.path(), detail.query().unwrap()))
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(json_body(response).await, *group);
+
+    let path = format!(
+        "/workbench/v1/library/entries/{}/organization",
+        entry["entryId"].as_str().unwrap()
+    );
+    let response = remote.get(&path).await;
+    assert_eq!(response.status(), 200);
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let original = json_body(response).await;
+    assert_eq!(original["canAdjust"], true);
+    assert_eq!(
+        etag,
+        format!("\"{}\"", original["organizationRevision"].as_str().unwrap())
+    );
+    let body = json!({"instanceId":app.instance_id,"sourceIdentity":entry["sourceIdentity"],"sourceRevision":entry["sourceRevision"],"action":"unassigned"});
+    for (header, value, status, code) in [
+        ("If-Match", etag.as_str(), 403, None),
+        (
+            "Content-Type",
+            "application/json",
+            415,
+            Some("json_required"),
+        ),
+    ] {
+        let rejected = remote
+            .request(Method::PUT, &path)
+            .header("If-Match", &etag)
+            .header(header, value)
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        let actual_status = rejected.status();
+        let rejected_body = rejected.text().await.unwrap();
+        assert_eq!(actual_status, status, "duplicate {header}: {rejected_body}");
+        if let Some(code) = code {
+            let rejected_body: Value = serde_json::from_str(&rejected_body).unwrap();
+            assert_eq!(rejected_body["error"]["code"], code);
+        } else {
+            // The relay's outer boundary rejects duplicate preconditions before forwarding.
+            assert!(rejected_body.is_empty());
+        }
+        let unchanged = remote.get(&path).await;
+        assert_eq!(unchanged.status(), 200);
+        assert_eq!(unchanged.headers()["etag"].to_str().unwrap(), etag);
+        assert_eq!(json_body(unchanged).await, original);
+    }
+    let saved = remote
+        .request(Method::PUT, &path)
+        .header("If-Match", &etag)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+    let saved_etag = saved.headers()["etag"].to_str().unwrap().to_owned();
+    assert_ne!(saved_etag, etag);
+    let saved = json_body(saved).await;
+    assert_eq!(saved["organization"]["overrideState"], "applied");
+    assert_eq!(
+        saved["organization"]["effective"]["basis"],
+        "user_unassigned"
+    );
+    assert!(saved["organization"]["effective"]["projectId"].is_null());
+    let read = remote.get(&path).await;
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.headers()["etag"].to_str().unwrap(), saved_etag);
+    assert_eq!(json_body(read).await, saved);
+    assert_eq!(std::fs::read_to_string(source).unwrap(), raw);
+}
+
 async fn chrome_probe(script: &str, input: Value) {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("node")
@@ -448,6 +581,7 @@ async fn single_origin_three_computers_password_revocation_and_resume_preserve_o
         portal.bind(&app_b, &alice, "Alice desktop"),
         portal.bind(&app_c, &bob, "Bob laptop")
     );
+    remote_library_organization(&remote_a, &app_a, &first).await;
     assert_ne!(remote_a.gateway, remote_b.gateway);
     assert_ne!(remote_b.gateway, remote_c.gateway);
     for (remote, app) in [
@@ -668,6 +802,7 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
         portal.bind(&app_a, &alice, "Alice computer"),
         portal.bind(&app_b, &bob, "Bob computer")
     );
+    remote_library_organization(&remote_a, &app_a, &fixture_a).await;
     for (remote, app, fixture) in [
         (&remote_a, &app_a, &fixture_a),
         (&remote_b, &app_b, &fixture_b),

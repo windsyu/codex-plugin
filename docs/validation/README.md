@@ -19,6 +19,8 @@
 - [公网工作台中转本地集成验证（2026-10-10）](public-workbench-relay-2026-10-10.md)
 - [单工作台 IP 测试部署（2026-10-13）](public-relay-ip-trial-2026-10-13.md)：Linux 隔离部署、公网 TLS 与 Chrome 手机视口的 WSS/页面/SSE/合成终端链路通过，真实手机验收另列。
 
+- [R7-E 任务识别与人类对话呈现（2026-10-08）](native-cli-r7-human-conversation-2026-10-08.md)
+- [R7 项目会话整理：逐片验证（2026-10-08）](native-cli-r7-project-organization-2026-10-08.md)
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)
 - [V2 0.3.0 Release 包装、安装与快速启动（2026-10-02）](v2-release-packaging-2026-10-02.md)

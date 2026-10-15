@@ -35,6 +35,7 @@ AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和
 | [核心约束](codex-local-gateway-v2-development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](codex-native-cli-workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
 | [历史首页与项目启动](codex-native-cli-workbench-history-home.md) | Application/Run、跨来源历史、新建与恢复 |
+| [项目会话整理](codex-native-cli-workbench-session-organization.md) | 明确项目上下文、辅助/来源分层、单条可撤销归属的实现契约；不做 worktree |
 | [历史管理与配置](codex-native-cli-workbench-history-settings.md) | 用户历史保留和独立设置页的 JSON 配置契约 |
 | [设备接入](codex-native-cli-workbench-device-access.md) | 显式监听、配对、撤销和设备作用域 |
 | [ADR 索引](decisions/README.md) | 已记录架构决定及历史背景 |
