@@ -20,3 +20,5 @@ ADR 记录决定及其理由；适用边界以当前架构和[实施计划](../v
 - [ADR 0052：连续滚动的只读文件阅读](0052-continuous-file-reading.md)
 - [ADR 0053：历史首页、按项目启动与旧历史只读整合](0053-history-first-workbench.md)
 - [ADR 0054：保留显式 provider bearer 与原生 API Key 认证](0054-native-custom-bearer-auth.md)
+- [ADR 0055：项目会话的分层展示与本机可撤销归属](0055-project-session-organization.md)
+- [ADR 0056：任务识别与人类对话优先的历史呈现](0056-human-conversation-presentation.md)

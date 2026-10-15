@@ -37,6 +37,7 @@
 | R5 完整验收与退役 | 实际模型/设备矩阵、性能与故障门槛、旧控制代码退役 | R4 | Passed | 2026-09-21 用户授权继续；[桌面阶段证据](validation/native-cli-r5-desktop-2026-09-21.md)已验证正式产物真实模型/图片、取消状态修复、当前界面性能、schema 20 只读副本及顺序回退。[退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)补齐 SIGHUP 清理及测试 Chrome 进程组回收；[终端工具独立化](validation/native-cli-r5-terminal-extraction-2026-09-21.md)移除新工作台对旧 Session 目录的引用并补漏早期调试入口。用户已确认电脑端右侧终端中文输入正常；[LAN/MagicDNS 接入](codex-native-cli-workbench-device-access.md)的 A–B 已实现并通过[自动化与 Chrome 验证](validation/native-cli-device-access-2026-09-21.md)，用户已确认手机接入及输入成功，其他手机体验按用户要求留待后续优化；锁屏/双网络等未逐项确认；2026-09-21 用户明确授权拆除旧 Session/App Server 内核，旧内核已移除，341 项 Rust、150 项前端、10 项历史 Chrome 及 5 项原生/上下文/设备回归通过，见[退役验证](validation/native-cli-r5-kernel-retirement-2026-09-21.md)。[2026-09-22 收尾验收](validation/native-cli-r5-acceptance-2026-09-22.md)统一 RQ01–RQ12 / P01–P14 的证据与范围，修复调用记录/手机接入面板的即时 Esc 焦点问题；156 项前端、341 项 Rust、10 项安装版 CLI/Chrome、10 项旧历史 Chrome 通过，release 产物另通过 3 项正式入口回归。按已确认 macOS/custom 接入范围交付，其他平台/provider 和暂缓手机优化保持未验证；本阶段完成后暂停供用户试用 |
 | R6 历史首页与按项目启动 | codex-view 默认全部历史、三类来源、旧库 20/25 只读、显式新建/恢复、多项目标签与隔离 | R5 | Passed | A–F.1 已通过分片验证与用户试用；[G1 资源与缓存边界](validation/native-cli-r6-g1-resources-2026-09-30.md)、[G2 压力/容量隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)、[G3 兼容与实际旧库限定只读抽查](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 交付/CLI 0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)已通过。2026-09-30 用户明确确认本次交付试用通过；按现有 macOS/custom 接入范围收尾，不扩大未验证平台/provider/手机组合 |
 | Release 包装 | 0.3.0 安装包、code-view 当前项目/指定路径、许可与校验、隔离安装验证 | R6 | Passed | [包装验证](validation/v2-release-packaging-2026-10-02.md)：445 项 Rust、234 项 Web、45 项维护工具及格式/Clippy/类型/debug/release 通过；实际归档解压安装、中文/空格 cwd、实例复用、历史入口、资源与 SIGINT 回收通过。显式 Cargo target 回归通过；限 macOS / Apple Silicon；本条证据为本地包装验证，正式发行资产以 GitHub Release 记录为准 |
+| R7 项目会话整理 | 稳定项目导航、主要/辅助/运行分层、明确来源折叠、单条可撤销归属及任务识别视图 | R6 | Passed | 2026-10-08 A–D 通过[原验收](validation/native-cli-r7-project-organization-2026-10-08.md)；用户试用后确认 E 四项体验改造，独立通过[任务识别与人类对话验收](validation/native-cli-r7-human-conversation-2026-10-08.md)：标准 check、增量 Web288、正式页面 Chrome/窄屏及最终 release 构建，新试用服务已在零活动 Run 后重启。封闭识别、有限索引和用户 Chrome 客户端屏蔽边界保留；不自动整理真实历史或创建远端 Issue/PR |
 
 状态只在本表维护：`Pending`、`In progress`、`Blocked`、`Passed`。`Passed` 必须链接本项目的版本、操作、断言、结果和限制；设计文本、源码阅读及 cc-viewer 试用均不能充当通过记录。出现阻塞须写明具体失败与下一项实验，不能只写“兼容性待确认”。
 
@@ -62,6 +63,8 @@ R5 的 Passed 限于当时明确验证的范围。随后发现实际旧库 schem
 | RQ14 | 用户确认首页优先与项目入口 | 默认无 CLI 的全部历史；已有项目/指定现有路径明确开始；默认新对话、指定会话显式恢复，重复启动复用实例；无项目归类不抹去原 cwd 或可靠恢复资格 | R6-B/D/E/F.1/G / P16 |
 | RQ15 | 用户确认另项目新标签、原项目继续 | 独立 Run/PTY/代理/目录/保存，手机授权与清理仍按 Run/项目限制，停止与退出不串线、不恢复旧控制 | R6-E/F/G / P17、P07/P08 |
 | RQ16 | 用户 2026-10-02 要求最终 release 包装与快速启动 | 0.3.0 macOS arm64 安装包、code-view 当前目录/指定路径、独立历史入口、许可/校验与隔离安装验证；不扩展原运行边界 | §10 Release 包装 |
+| RQ17 | 用户 2026-10-08 要求借鉴 token-monitor，明确项目分组并减少杂乱 | 独立项目上下文、辅助与运行记录分层、证据明确的来源展示组、解释未归类、单条可撤销覆盖；不做 worktree、不删除/改写原始记录、不改变恢复或手机权限 | R7-A–D；专项矩阵见[整理方案 §8](codex-native-cli-workbench-session-organization.md#8-安全故障与验收矩阵)，复用 P07/P08/P15–P17 |
+| RQ18 | 用户 2026-10-08 试用后确认四项人类视角改造 | 有效原标题优先/真实请求回退、对话优先/技术记录按需、来源独立交流预览、当前项目主标题；原始数据不改，未知和缺口可核查，不猜完成状态，不扩展空白第五项 | R7-E；[整理契约 §10](codex-native-cli-workbench-session-organization.md#10-试用改进任务识别与人类对话优先) |
 
 F11 UltraPlan 不进入本轮，Plan/Goal 按官方 CLI 自有能力使用。IM 属于 V3；多用户远程控制、外部 CLI 接管、网页 Composer/队列、文件编辑、搜索替换、Git 写操作、任意 Shell 和开发端口代理均不进入本轮交付。RQ12 只扩展同一使用者的设备入口，不引入远程多用户或公网服务。
 
@@ -502,7 +505,7 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 
 **R6 已完成本地实现、自动验证与用户试用验收。** A–F.1 的归属、启动与设备反馈已修复，G1–G4 证据及 2026-09-30 用户确认补齐整片验收。用户已确认默认全部历史、已有项目/指定目录启动、新项目独立标签和默认新对话/指定会话恢复；设计与接口见[R6 方案](codex-native-cli-workbench-history-home.md)，状态与门槛见[上节](#r6-history-home)。
 
-当前确认的 V2 分片开发及验证目标已完成，没有自动进入下一功能片的任务。本次本地提交与合并须核对暂存内容和全部分支历史的二进制策略，远端覆盖与提交前审计见 [G4 Git 交付核对](validation/native-cli-r6-g4-cli-01592-2026-09-30.md#8-git-交付与全分支二进制核对)；推送、PR 和发布继续遵循授权。G1 资源、G2 压力和 G3/G4 兼容保留各自证据；原生继承历史、缓存/搜索覆盖、手机权限及 Stale 诊断边界不因本次验收被改变。不重复读取私人正文或扩大 V3 范围。
+截至 2026-09-30 的 V2 分片开发及验证目标已完成。2026-10-08 用户新增项目会话整理需求，随后授权完成 [R7](#r7-session-organization) 与测试验证；当前逐片状态与下一项任务见 §11，不将未通过方案当成运行时已交付。提交、推送、PR、发布不在本次授权内。用户随后明确要求运行分支试用，试用服务仅在核验无活动 Run 后正常重启，不终止用户 CLI。G1 资源、G2 压力和 G3/G4 兼容保留各自证据；原生继承历史、缓存/搜索覆盖、手机权限及 Stale 诊断边界不因本次验收被改变。不重复读取私人正文或扩大 V3 范围。
 
 当前受测平台/provider 仍见[支持范围](codex-native-cli-workbench-support.md)。R6 不自动迁移旧库、修改原生配置、清理真实历史、替换当前实例、推送或发布，也不将尚未执行的设计验收算作通过。
 
@@ -519,3 +522,25 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 2026-10-02 用户追加 README 快速安装到 macOS PATH 及卸载要求。使用独立 Bash 脚本下载已有 release，默认安装至 `~/.local/bin`，管理 zsh/Bash 登录终端 PATH，并提供按清单卸载的 `code-view-uninstall`；安装、卸载和错误恢复通过独立临时 HOME 验证，见[增量验证](validation/macos-quick-install-2026-10-02.md)。该维护变更不改写 `v0.3.0` 资产、不改变运行时或用户数据格式；源码交付和 GitHub README 更新按 [Issue #8](https://github.com/windsyu/codex-plugin/issues/8) 的 PR/CI 记录核验。
 
 2026-10-02 用户确认公开现有 GitHub 仓库及历史，恢复 README 的产品与操作说明，安装改用系统 curl 匿名下载，默认前缀改为 `~/.codex-view`。旧 `~/.local` 快速安装先按清单卸载，再安装到新位置；工作台数据目录仍为 `~/.codex-web`。本次沿用不可变 `v0.3.0` 资产，维护后续打包模板的默认路径；源码评审与 CI、公开可见性及匿名真实安装分别留证，见[公开安装验证](validation/public-install-2026-10-02.md)与 [Issue #12](https://github.com/windsyu/codex-plugin/issues/12)。
+
+<a id="r7-session-organization"></a>
+
+## 11. R7：项目会话整理
+
+**用户要求与范围。** 2026-10-08 用户要求将 token-monitor 值得借鉴的优点设计成改造任务，准备改造；明确对 worktree 没有兴趣，重点是按项目分组不明确和杂乱数据。采用元数据优先、主要/辅助分层及展示与来源身份分离，不采用按目录名合并或私有 SQLite 判定。具体产品、API、持久化、故障和安全契约见[整理方案](codex-native-cli-workbench-session-organization.md)，持久化/兼容选择见 [ADR 0055](decisions/0055-project-session-organization.md)。不重开已 Passed 的 R6，不复用旧验收冒充新功能通过。
+
+按 A → B → C → D 逐片交付，每片先合成回归、相关检查/构建和试用结果再推进；不提前铺开多套未集成改造。guardian review 专门判定需公共协议/受测 rollout 证据，没有证据不阻塞已有明确子代理的分层，保持 unknown 或一般辅助。
+
+| 子任务 | 内容与文件边界 | 通过条件 | 状态 |
+| --- | --- | --- | --- |
+| R7-A 项目上下文与归属解释 | `history/library.rs`、`library/model.rs` 查询/摘要与测试；`web/src/workbench/library.ts`、`HistoryLibraryPanel.tsx`、`LibraryReader.tsx`、CSS/测试：项目搜索独立、selectedProject 不依赖分页、同名路径可辨、未归类原因、类型化更新提示 | 当前项目不在第一页/搜索无匹配/来源过滤后标题路径保持；左侧全量记录与右侧筛选数量明确；缺口/撤销不误清项目；正文锚点、旧直达链接、键盘/320px 正常；不新增持久写入；[回归/独立复核/Chrome 证据](validation/native-cli-r7-project-organization-2026-10-08.md) | Passed |
+| R7-B 主要/辅助/运行与来源展示 | `history/library/native.rs`、`scan.rs`、纯类型/关系函数、`library.rs` 查询及 tests；Application owner 新 GET 路由；Web 分层、来源选择/父入口及 tests：新增类型证据、组查询/计数/分页，投影版本重建 | unknown 可见；明确代理/运行默认折叠且搜索可达；同 home/thread/有效项目/类别的 native/Observer 才分组；Workbench Run 不冒充 thread；不同 home、身份/项目/类型冲突不合并；所有成员独立正文/Token/coverage；计数全范围，过期游标 409，来源撤销/手机拒绝；[逐片证据](validation/native-cli-r7-project-organization-2026-10-08.md#5-r7-b-分层与来源查询) | Passed |
+| R7-C 可撤销单条归类 | 新增私有 `history/library/organization.rs` 及独立持久化/故障 tests；现有归属查询接口集成；`workbench/web/application.rs` owner 路由；Web 详情编辑/确认及 tests。模块只归 history 所有，不增加反向依赖 | project/unassigned/automatic；覆盖只绑当前可靠来源身份，重启/缓存重建不丢；CAS/ACK 丢失/提交前后 crash/损坏/未知版本/写满/预算/链接负向；不同项目展示后仍恢复原 cwd/线程；raw 数据、Run/cleanup/手机边界不变；[独立复核与逐片证据](validation/native-cli-r7-project-organization-2026-10-08.md#6-r7-c-单条覆盖与故障隔离) | Passed |
+| R7-D 集成与交付 | 合成三来源/旧缓存/覆盖状态、系统 Chrome/安装版 CLI 专项；相关 Rust/Web 测试、标准 check/build；设计/支持/使用指南及真实验证报告 | RQ17/方案矩阵按[实际证据及限制](validation/native-cli-r7-project-organization-2026-10-08.md#8-r7-d-集成与收尾)完成；10k release p95≤200ms，debug失败保留；320/736/1440px、焦点/分页/旧链接；官方0.161公开no-daemon恢复原目录，不扩大默认daemon兼容；双Run压力隔离、原数据零写、完整check与文档/增量二进制/隐私审查通过 | Passed |
+| R7-E 人类对话与任务识别 | 共享来源呈现规则、有界标题/交流预览、catalog 4；正文折叠/全部记录、任务列表/项目主标题，技术计数次级；回归与实际 Chrome | 长 AGENTS/环境前缀、混合/畸形/引用 XML、既有标题/来源独立预览、三来源、v3 重建零写；错误/缺口/unknown/搜索可达，128条有界定位、锚点/撤销/恢复不变；320/736/1440px 实际 Chrome、标准 check 和最终 release build 已通过；[独立增量报告](validation/native-cli-r7-human-conversation-2026-10-08.md)保留有限索引与手动浏览器限制，不以原R7测试推导体验通过 | Passed |
+
+**下一项可直接执行。** R7-E 四项改造已通过独立验收，新 release 试用服务在核验零活动 Run 后正常重启，内嵌资源与当前构建逐字节一致；等待用户体验任务标题、交流预览和对话阅读。第5项为空，不据此扩展。真实归类仍由用户明确操作，不加入批量整理、worktree 或默认daemon兼容改造；用户 Chrome 曾出现客户端屏蔽，不绕过安全设置或据合成 Chrome 通过宣称手动配置已修复。
+
+**GitHub Issue 准备（未创建）。** 建议标题 `feat: clarify project session organization`。背景：现有首页混列、注入上下文冒充任务标题和事件流优先；价值：快速找到明确项目的主要任务并阅读人类对话。范围为 R7-A–E，非目标为 worktree/Git 聚合、模型主题生成、批量整理、原始数据清理和权限扩大。验收以 RQ17/RQ18 和上表为准；安全/兼容风险为新增 owner 状态写入、catalog 4 派生重建、有界呈现识别、计数/URL 变化与原 cwd 恢复不变；依赖 R6 已有三来源身份、只读 reader 和授权边界。关联整理方案、ADR 0055/0056 及两份实际验证报告。当前请求未授权远端 mutation，先保留本地任务，创建 Issue/PR、提交/推送或发布需另行授权。
+
+**设计准备与实施记录。** A–D 方案与实现完成独立复核，修正跨应用修订、组摘要、类型冲突、存储恢复/首次发布、DTO降级与预算诊断。实际 Rust/Web/Chrome、性能、真实CLI及负向权限证据见[逐片报告](validation/native-cli-r7-project-organization-2026-10-08.md)；后续试用与 E 增量改造见[人类对话报告](validation/native-cli-r7-human-conversation-2026-10-08.md)，不从文档检查或未执行ignored测试推导通过。物理断电/设备故障、双OS进程压力及新CLI默认daemon仍不作实测保证；原始历史未改，试用实例重启不启动 CLI，没有远端 mutation。

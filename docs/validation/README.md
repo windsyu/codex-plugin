@@ -1,5 +1,7 @@
 # 验证报告索引
 
+- [R7-E 任务识别与人类对话呈现（2026-10-08）](native-cli-r7-human-conversation-2026-10-08.md)
+- [R7 项目会话整理：逐片验证（2026-10-08）](native-cli-r7-project-organization-2026-10-08.md)
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)
 - [V2 0.3.0 Release 包装、安装与快速启动（2026-10-02）](v2-release-packaging-2026-10-02.md)

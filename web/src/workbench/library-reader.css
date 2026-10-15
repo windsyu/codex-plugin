@@ -1,0 +1,10 @@
+.wb-library-reading-mode { display: flex; gap: 6px; padding: 4px 28px 8px; }
+/* A measured virtual window must contain its children’s outer margins. */
+.wb-library-body-scroll > [data-library-block] { display: flow-root; }
+.wb-library-reading-mode button[aria-pressed="true"] { background: var(--wb-button-bg, #253f5b); color: var(--wb-fg, inherit); }
+.wb-library-record-fold { max-width: 880px; margin: 8px 0; border: 1px solid var(--wb-border, #353535); border-radius: 6px; }
+.wb-library-record-fold > summary { cursor: pointer; padding: 9px 12px; font-size: 12px; color: var(--wb-muted, #a5abb4); }
+.wb-library-record-fold > summary span { margin-left: 10px; font-size: 11px; }
+.wb-library-record-fold > .wb-library-record { margin: 8px; }
+.wb-library-reading-mode + .wb-library-body-scroll .wb-message-meta code { font-size: 11px; }
+@media (max-width: 760px) { .wb-library-reading-mode { padding-left: 14px; padding-right: 14px; } .wb-library-record-fold > summary span { display: block; margin: 4px 0 0 14px; } }
