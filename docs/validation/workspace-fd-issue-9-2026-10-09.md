@@ -80,4 +80,28 @@ macOS `/dev/fd` 副本共享偏移也已验证；EOF 探针返回 128/short-read
 
 修复的是应用对 macOS 伪路径的依赖，不是系统内核；不宣称其它 macOS、Linux/Windows 或所有未来 Git 版本已验证。rg 仍用匿名 FD，本次不将其跨独立进程伪路径行为算作新平台验收。真实 CLI、浏览器、模型和大数据等原有 ignored 专项未执行。元数据诊断不是 Git 每字节读取追踪。
 
-没有 Git index/工作区文件实际删除证据；修复保持只读浏览契约。原始症状复现、独立干扰因果对照、去除危险路径及最终回归已满足用户本次授权的关闭条件，而非仅凭重复通过。代码和本报告作为一个本地修复 commit 交付在 `codex/issue-9-staged-diff`；Issue 实际状态与关闭说明以其链接为准。发布/安装环境仍需取得并部署本地修复，未 push、未创建 PR、未 merge，也没有远端 CI 结果。
+没有 Git index/工作区文件实际删除证据；修复保持只读浏览契约。原始症状复现、独立干扰因果对照、去除危险路径及最终回归已满足用户本次授权的关闭条件，而非仅凭重复通过。2026-10-09 的交付为 `codex/issue-9-staged-diff` 上的本地修复 commit；当时未 push、未创建 PR、未 merge，也没有远端 CI 结果。Issue 实际状态与关闭说明以其链接为准；后续合并验证另记如下。
+
+## 2026-10-15：合并前 CI 与历史索引热点
+
+用户授权合并并删除原分支后，精确修复提交 `e48d731` 推送并创建 [PR #15](https://github.com/windsyu/codex-plugin/pull/15)。其 [PR 检查](https://github.com/windsyu/codex-plugin/actions/runs/38666265849)在两项历史库大正文用例的 8 秒就绪断言失败；[push 检查](https://github.com/windsyu/codex-plugin/actions/runs/38666227557)仅其中缓存预算用例失败。两轮所有 workspace/FD 回归通过。历史失败早于首项 workspace 测试约一分钟；独立审查未发现新增 FD 压力污染历史线程的路径。
+
+未修改的 `main` / `b0ae129` 在当天相同 `macos-26-arm64` / `20260907.0351.1` 镜像上的[基线对照](https://github.com/windsyu/codex-plugin/actions/runs/38667589631)完整通过。故不能称基线稳定失败，也不能把失败简单归为 runner 故障。两项用例各含约 2.7 MB 正文；其 `indexing / 0` 状态可表示首篇仍在解析/脱敏，不能单凭该状态断言死锁。
+
+定位到的确定性热点是 `TextRedactor` 只按首字节筛候选：连续 `x` 均误命中 `xox*` 的首字节，逐字进入完整状态机。先加入测试专用慢路径计数，原实现对 4096 个 `x` 产生 4096 步而失败（受管诊断 `4baa1a5c-8ca1-4946-8b3d-df26b344c8f0`），再改为首字节对应的第二字节低六位位图。位碰撞只能增加候选，单字节 secret 整行置位；通用前缀覆盖首两字节全部大小写，块尾候选仍交给原状态机。非 ASCII 候选停点仍为 UTF-8 首字节。pending、mask、tool 模式及全部脱敏规则不变，没有新增外部配置或数据格式。
+
+新增常规回归验证慢路径步数为常数级（整体扫描仍为 O(n)），并逐次比较 push 输出、pending、mask、finish：大小写组合、位碰撞、单字节/重叠 secret、UTF-8、块尾以及长 lookalike 后的真实凭证。脱敏子集 9 通过 / 1 忽略，原历史库子集 27 通过 / 2 忽略。未缩小夹具、延长 8 秒期限、降低四线程并发或跳过原断言。
+
+同一本机 debug 用例诊断（总用例耗时，非单独索引 CPU/正式性能认证）：
+
+| 用例 | 原实现 | 新筛选 |
+| --- | --- | --- |
+| cache_body_and_response_budgets… | 4.65 s | 0.81 s |
+| source_windows_read_past_cache…（含按需分页） | 10.07 s | 1.03 s |
+| 历史库子集，四线程 | 13.35 s | 4.11 s |
+
+原始诊断 `a8659bc3-1d15-47ac-a898-b118a173a162`，优化后 `b7af30eb-4ed1-490e-b81e-2301e51d8c35`；全部合成且隔离 HOME/USERPROFILE/CODEX_HOME，不接触私人历史。加速支持热点解释，但单轮基线/耗时差异不证明所有 CI 波动都只有同一原因。完整集成状态以当前 PR 的标准检查为准。
+
+补充修复后完整 `node scripts/dev.mjs check --offline --ci` 通过：工具 80、Web 234、Rust 456 passed / 0 failed / 56 ignored，fmt、类型检查、Clippy all-targets `-D warnings`、两个 binary 的 debug/release 构建通过；受管任务 `83e25c8e-5e53-4db3-a18e-3f9e3dd4ee54`（隔离运行器 `33f0acab-2287-4e4b-98ff-63f458a79479`）。追加报告后文档 107 项复查通过，实际暂存四文件二进制检查通过；独立安全复审无新增阻断项。远端当前提交的检查仍须单独通过后才合并。
+
+范围限制：优化只在没有 pending/mask 且非 tool 模式时启用；若前一块留下 `x`，后续连续 `x` 仍可能走原慢路径，不承诺所有切块都同样加速。差分验证保留既有 configured-secret 匹配优先级，不将等价性当作所有既有脱敏语义绝对安全的证明。原有 ignored 专项未因本次常规通过而追认为已执行。
