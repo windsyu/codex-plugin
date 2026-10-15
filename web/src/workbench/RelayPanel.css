@@ -1,4 +1,4 @@
-.wb-relay-panel { position:fixed; z-index:21; top:54px; right:12px; width:min(440px,calc(100vw - 24px)); max-height:calc(100dvh - 66px); display:flex; flex-direction:column; background:var(--ui-surface-2); border:1px solid var(--ui-line-strong); border-radius:var(--ui-radius-md); box-shadow:var(--ui-shadow-2); color:var(--ui-text); font-size:12px; }
+.wb-relay-panel { position:fixed; z-index:21; top:54px; right:12px; width:min(440px,calc(100vw - 24px)); max-height:calc(100dvh - 66px); display:flex; flex-direction:column; background:var(--ui-surface-2); border:1px solid var(--ui-line-strong); border-radius:var(--ui-radius-lg); box-shadow:var(--ui-shadow-2); color:var(--ui-text); font-size:12px; }
 .wb-relay-heading { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--ui-line); }
 .wb-relay-heading button { font-size:20px; line-height:1; }
 .wb-relay-body { padding:14px; overflow:auto; overflow-wrap:anywhere; }
