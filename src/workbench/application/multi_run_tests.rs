@@ -718,6 +718,18 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
             401,
         ),
         (reqwest::Method::GET, "/workbench/v1/library/entries", 401),
+        (reqwest::Method::GET,"/workbench/v1/library/entries/e_fake/organization",401),
+        (reqwest::Method::PUT,"/workbench/v1/library/entries/e_fake/organization",401),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/library/session-groups",
+            401,
+        ),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/library/session-groups/g_fake?anchorEntryId=e_fake&revision=r_fake",
+            401,
+        ),
         (reqwest::Method::GET, "/workbench/v1/library/sources", 401),
         (reqwest::Method::POST, "/workbench/v1/launch-targets", 401),
         (reqwest::Method::POST, "/workbench/v1/runs", 401),

@@ -77,7 +77,7 @@ export function HistoryHome({ initial }: { initial: ApplicationInfo }) {
       </a>{run.state === 'running' && <button className="wb-home-run-stop" aria-label={`停止项目 ${run.projectName}`} disabled={stoppingIds.includes(run.runId)} onClick={() => void stopRun(run)}>{stoppingIds.includes(run.runId) ? '停止中…' : '停止'}</button>}</div>)}</div>
     </nav>}
     {launch.open && <LaunchPanel {...launch.panel} onPick={info.directoryPickerAvailable ? launch.panel.onPick : undefined} />}
-    <HistoryLibraryPanel sources={info.sources} onProjectLaunch={info.launchAvailable ? launch.openProject : undefined} onResume={info.launchAvailable ? launch.openResume : undefined} runs={info.runs} />
+    <HistoryLibraryPanel instanceId={info.instanceId} sources={info.sources} onProjectLaunch={info.launchAvailable ? launch.openProject : undefined} onResume={info.launchAvailable ? launch.openResume : undefined} runs={info.runs} />
     <SettingsPanel epoch={info.instanceId} instanceId={info.instanceId} open={open} onClose={restore => { setOpen(false); if (restore) button.current?.focus(); }} onDirtyChange={setDirty} />
   </div>;
 }

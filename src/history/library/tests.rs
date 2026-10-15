@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use tempfile::TempDir;
+#[path = "organization_view_tests.rs"]
+mod organization_view_tests;
 
 fn rollout(path: &Path, id: uuid::Uuid, cwd: &Path, text: &str, tail: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -70,6 +72,188 @@ fn wait(library: &HistoryLibrary, count: usize) -> Value {
 fn refresh(library: &HistoryLibrary) {
     let _ = query(&library.handle.shared, Operation::Refresh);
     std::thread::sleep(Duration::from_millis(150));
+}
+
+#[test]
+fn r7_selected_project_survives_empty_filtered_pages_and_reports_missing_directory() {
+    let (temp, home, _data, config, library) = fixture();
+    let first = temp.path().join("team-a/app");
+    let second = temp.path().join("team-b/app");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    for (name, cwd) in [("first", &first), ("second", &second)] {
+        rollout(
+            &home.join(format!("sessions/{name}.jsonl")),
+            uuid::Uuid::new_v4(),
+            cwd,
+            "needle",
+            "",
+        );
+    }
+    refresh(&library);
+    wait(&library, 2);
+    let (id, normalized) = project(second.to_str().unwrap()).unwrap();
+    for source in [None, Some("default-workbench")] {
+        let result = query(
+            &library.handle.shared,
+            Operation::List(
+                Query {
+                    project_id: Some(id.clone()),
+                    source_id: source.map(String::from),
+                    q: Some("not present".into()),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+                false,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["records"], json!([]));
+        assert_eq!(result["totalRecords"], 0);
+        assert_eq!(
+            result["selectedProject"],
+            json!({"projectId":id,"path":normalized,"status":"available"})
+        );
+        assert_eq!(result["projectExists"], true);
+    }
+    fs::remove_dir(&second).unwrap();
+    let result = query(
+        &library.handle.shared,
+        Operation::List(
+            Query {
+                project_id: Some(id.clone()),
+                ..Default::default()
+            },
+            false,
+        ),
+    )
+    .unwrap();
+    assert_eq!(result["selectedProject"]["status"], "missing");
+    assert_eq!(result["records"].as_array().unwrap().len(), 1);
+    // Revoking the source cannot expose a cached project path.
+    config.write().unwrap().enabled = false;
+    let result = query(
+        &library.handle.shared,
+        Operation::List(
+            Query {
+                project_id: Some(id),
+                ..Default::default()
+            },
+            false,
+        ),
+    )
+    .unwrap();
+    assert!(result["selectedProject"]["path"].is_null());
+    assert_eq!(result["projectExists"], false);
+}
+
+#[test]
+fn r7_project_search_is_path_only_and_rejects_mixed_or_entry_query() {
+    let (temp, home, _data, _config, library) = fixture();
+    for team in ["team-a", "team-b"] {
+        let cwd = temp.path().join(format!("{team}/app"));
+        fs::create_dir_all(&cwd).unwrap();
+        rollout(
+            &home.join(format!("sessions/{team}.jsonl")),
+            uuid::Uuid::new_v4(),
+            &cwd,
+            "body-only-secret",
+            "",
+        );
+    }
+    refresh(&library);
+    wait(&library, 2);
+    let read = |value: Value, projects| {
+        query(
+            &library.handle.shared,
+            Operation::List(serde_json::from_value(value).unwrap(), projects),
+        )
+    };
+    let result = read(json!({"projectQ":"team-b"}), true).unwrap();
+    assert_eq!(result["records"].as_array().unwrap().len(), 1);
+    assert!(
+        result["records"][0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("team-b")
+    );
+    assert_eq!(
+        read(json!({"projectQ":"body-only-secret"}), true).unwrap()["records"],
+        json!([])
+    );
+    assert_eq!(
+        read(json!({"q":"body-only-secret"}), true).unwrap()["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        read(json!({"projectQ":"team", "q":""}), true).unwrap_err(),
+        "invalid_query"
+    );
+    assert_eq!(
+        read(json!({"projectQ":"team"}), false).unwrap_err(),
+        "invalid_query"
+    );
+    assert_eq!(
+        read(json!({"projectQ":"x".repeat(513)}), true).unwrap_err(),
+        "invalid_query"
+    );
+    assert_eq!(read(json!({"limit":1}), false).unwrap()["totalRecords"], 2);
+}
+
+#[test]
+fn r7_refresh_completion_is_observable_even_without_revision_changes_or_indexing_poll() {
+    let (_temp, home, _data, config, library) = fixture();
+    rollout(
+        &home.join("sessions/a.jsonl"),
+        uuid::Uuid::new_v4(),
+        Path::new("/synthetic"),
+        "stable",
+        "",
+    );
+    refresh(&library);
+    let original = wait(&library, 1)["revision"].clone();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let completed = |target: u64| {
+        loop {
+            let state = query(&library.handle.shared, Operation::Sources).unwrap();
+            if state["refresh"]["completed"].as_u64().unwrap() >= target {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "refresh completion not published"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let first = query(&library.handle.shared, Operation::Refresh).unwrap()["refreshId"]
+        .as_u64()
+        .unwrap();
+    let second = query(&library.handle.shared, Operation::Refresh).unwrap()["refreshId"]
+        .as_u64()
+        .unwrap();
+    assert!(second > first);
+    assert_eq!(completed(second)["refresh"]["failed"], false);
+    assert_eq!(
+        query(
+            &library.handle.shared,
+            Operation::List(Query::default(), false)
+        )
+        .unwrap()["revision"],
+        original
+    );
+    // Failure is durable observable progress, not an intermediate status that a browser must sample.
+    config.write().unwrap().sources.push(Source::Native {
+        id: "unavailable".into(),
+        codex_home: home.join("absent"),
+    });
+    let failed = query(&library.handle.shared, Operation::Refresh).unwrap()["refreshId"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(completed(failed)["refresh"]["failed"], true);
 }
 #[test]
 fn incomplete_discovery_does_not_clear_project_selection_and_counts_follow_filters() {
@@ -454,10 +638,12 @@ fn classification_cache_upgrade_rebuilds_unchanged_rollout_and_preserves_identit
     let shared = Shared {
         home: home.clone(),
         data: data.clone(),
+        organization: organization::Store::new(data.clone()),
         policy: Arc::new(move || Ok(policy.read().unwrap().clone())),
         status: RwLock::new(vec![]),
         stop: AtomicBool::new(false),
         refresh: AtomicBool::new(false),
+        refresh_status: RwLock::new(RefreshStatus::default()),
         key: [7; 32],
     };
     assert!(
@@ -501,6 +687,115 @@ fn classification_cache_upgrade_rebuilds_unchanged_rollout_and_preserves_identit
             .unwrap(),
         CATALOG_VERSION
     );
+}
+
+#[test]
+fn human_metadata_v3_cache_rebuilds_without_source_changes() {
+    let (_temp, home, data, config, library) = fixture();
+    let path = home.join("sessions/human.jsonl");
+    let instructions =
+        "# AGENTS.md instructions for /synthetic\n<INSTRUCTIONS>context</INSTRUCTIONS>";
+    let tail = format!(
+        "{}\n",
+        json!({"type":"event_msg","payload":{"type":"user_message","message":"构建清晰的会话列表"}})
+    );
+    rollout(
+        &path,
+        uuid::Uuid::new_v4(),
+        Path::new("/synthetic"),
+        instructions,
+        &tail,
+    );
+    let before = fs::read(&path).unwrap();
+    refresh(&library);
+    let first = wait(&library, 1);
+    assert_eq!(first["records"][0]["title"], "构建清晰的会话列表");
+    let entry_id = first["records"][0]["entryId"].clone();
+    drop(library);
+    let db = Connection::open(data.join("library/catalog.sqlite")).unwrap();
+    db.execute("UPDATE catalog_entries SET metadata=json_remove(json_set(metadata,'$.title',?1),'$.preview')", [instructions]).unwrap();
+    db.execute_batch("PRAGMA user_version=3;").unwrap();
+    drop(db);
+    let policy = config.clone();
+    let library = HistoryLibrary::with_policy(
+        home,
+        data,
+        Arc::new(move || Ok(policy.read().unwrap().clone())),
+    )
+    .unwrap();
+    let rebuilt = wait(&library, 1);
+    assert_eq!(rebuilt["records"][0]["entryId"], entry_id);
+    assert_eq!(rebuilt["records"][0]["title"], "构建清晰的会话列表");
+    assert_eq!(
+        rebuilt["records"][0]["preview"],
+        json!({"text":"构建清晰的会话列表","role":"user"})
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn human_observer_metadata_retains_named_title_and_ignores_injected_messages() {
+    let legacy = crate::history::tests::Fixture::new(25);
+    let db = Connection::open(&legacy.path).unwrap();
+    db.execute_batch("UPDATE threads SET name=NULL WHERE thread_key='thread-a'; UPDATE items SET summary_text='# AGENTS.md instructions for /synthetic\n<INSTRUCTIONS>context</INSTRUCTIONS>' WHERE item_id='item-a'; UPDATE items SET item_type='userMessage',summary_text='修复项目页面' WHERE item_id='item-b'; INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,summary_text,projection_json,provenance_json,last_event_seq) VALUES ('thread-a','turn-a','item-c','turn-a','agentMessage','completed','已找到问题','{}','{}',3);").unwrap();
+    // A later rowid can be an older imported item; it must not replace the
+    // newest observed exchange identified by the source event sequence.
+    db.execute_batch("INSERT INTO items(thread_key,turn_scope,item_id,turn_id,item_type,status,summary_text,projection_json,provenance_json,last_event_seq) VALUES ('thread-a','turn-a','item-d','turn-a','agentMessage','completed','旧的导入回答','{}','{}',1);").unwrap();
+    drop(db);
+    let before = fs::read(&legacy.path).unwrap();
+    let (_temp, _home, _data, config, library) = fixture();
+    config.write().unwrap().sources.push(Source::Observer {
+        id: "old".into(),
+        database: legacy.path.clone(),
+        blob_directory: Some(legacy.blobs.clone()),
+        native_home: None,
+    });
+    refresh(&library);
+    let entries = wait(&library, 3);
+    let records = entries["records"].as_array().unwrap();
+    let e = records
+        .iter()
+        .find(|e| e["nativeThreadId"] == "native-a")
+        .unwrap();
+    assert_eq!(e["title"], "修复项目页面");
+    assert_eq!(
+        e["preview"],
+        json!({"text":"已找到问题","role":"assistant"})
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|e| e["nativeThreadId"] == "native-b")
+            .unwrap()["title"],
+        "Synthetic B"
+    );
+    let body = query(
+        &library.handle.shared,
+        Operation::Body(
+            e["entryId"].as_str().unwrap().into(),
+            Query {
+                limit: Some(32),
+                window: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    assert!(
+        body["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["presentation"] == "context")
+    );
+    assert!(
+        body["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["text"] == "修复项目页面" && r["presentation"] == "conversation")
+    );
+    assert_eq!(fs::read(&legacy.path).unwrap(), before);
 }
 
 #[test]
@@ -1078,8 +1373,14 @@ fn settings_validation_and_explicit_preview_import_only_paths() {
 #[test]
 fn three_source_kinds_schema20_and25_read_together_without_writes() {
     use crate::workbench::{
+        decode::{
+            Change, Decoded, TextKey,
+            request::{PurposeBasis, RequestInfo, RequestPurpose},
+        },
         live::{LiveHub, LiveLimits},
         recording::{Recorder, RecorderOptions, library::Project},
+        redaction::RedactionPolicy,
+        rollout::{UserKey, UserRecord, UserSource},
     };
     let legacy20 = crate::history::tests::Fixture::new(20);
     let legacy25 = crate::history::tests::Fixture::new(25);
@@ -1096,6 +1397,44 @@ fn three_source_kinds_schema20_and25_read_together_without_writes() {
         "",
     );
     let hub = LiveHub::new(LiveLimits::default());
+    let request = uuid::Uuid::new_v4();
+    let thread = uuid::Uuid::new_v4();
+    hub.apply(Decoded {
+        request_id: request,
+        capture_seq: 0,
+        received_at: Instant::now(),
+        change: Change::Request {
+            info: RequestInfo {
+                client_request_index: None,
+                requested_model: None,
+                codex_thread_id: Some(thread),
+                codex_turn_id: Some("turn".into()),
+                purpose: RequestPurpose::Conversation,
+                purpose_basis: PurposeBasis::CodexTurnMetadata,
+            },
+        },
+    });
+    hub.apply_user(UserRecord {
+        key: UserKey { codex_thread_id: thread, codex_turn_id:"turn".into(), native_item_id:"user".into() },
+        role:"user", text:"# AGENTS.md instructions for /synthetic\n<INSTRUCTIONS>context</INSTRUCTIONS>\n工作台的真实请求".into(), revision:1, truncated:false, omitted:false,
+        source: UserSource {source_ref:uuid::Uuid::new_v4(), byte_offset:0, ordinal:Some(0)},
+    });
+    hub.apply(Decoded {
+        request_id: request,
+        capture_seq: 1,
+        received_at: Instant::now(),
+        change: Change::TextReplace {
+            key: TextKey {
+                request_id: request,
+                response_id: Some("response".into()),
+                wire_item_id: "assistant".into(),
+                content_index: 0,
+            },
+            text: RedactionPolicy::new(vec![])
+                .unwrap()
+                .scrub("工作台的独立回答"),
+        },
+    });
     let mut options = RecorderOptions::new(data.clone(), &cwd, "test workbench".into());
     options.project = Some(Project {
         format_version: 1,
@@ -1139,6 +1478,15 @@ fn three_source_kinds_schema20_and25_read_together_without_writes() {
         6
     );
     let workbench = entries.iter().find(|e| e["kind"] == "workbench").unwrap();
+    assert_eq!(workbench["title"], "工作台的真实请求");
+    assert_eq!(
+        workbench["preview"],
+        json!({"text":"工作台的独立回答","role":"assistant"})
+    );
+    assert_eq!(
+        entries.iter().find(|e| e["kind"] == "native").unwrap()["preview"],
+        json!({"text":"native hello","role":"user"})
+    );
     assert_eq!(
         workbench["projectPath"],
         cwd.canonicalize().unwrap().to_string_lossy().as_ref()
@@ -1418,7 +1766,9 @@ fn interrupted_generation_never_replaces_committed_rows_and_cold_query_does_not_
         status: RwLock::new(vec![]),
         stop: AtomicBool::new(false),
         refresh: AtomicBool::new(false),
+        refresh_status: RwLock::new(RefreshStatus::default()),
         key: [5; 32],
+        organization: organization::Store::new(data.clone()),
     };
     // Source changed after shutdown. A cache-only query cannot see the new file.
     rollout(
@@ -1842,8 +2192,42 @@ async fn binary_history_reading_chrome_all_sources_and_bounded_dom() {
     let parent = uuid::Uuid::new_v4();
     let path = home.join("sessions/reading.jsonl");
     rollout(&path, parent, &cwd, "优化文件阅读界面", "");
+    // Exercise full injected envelopes, not an abbreviated keyword fixture.
+    // The native source remains unchanged throughout all browser operations.
+    let instructions = format!(
+        "# AGENTS.md instructions for /synthetic/app\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+        "Synthetic project guidance. ".repeat(240)
+    );
+    let environment = "<environment_context><cwd>/synthetic/app</cwd><shell>zsh</shell><current_date>2026-10-08</current_date></environment_context>";
+    let inject_prefix = |path: &Path, count: usize| {
+        let raw = fs::read_to_string(path).unwrap();
+        let mut lines = raw.lines();
+        let meta = lines.next().unwrap();
+        let request: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        let mut contents = format!("{meta}\n");
+        for i in 0..count {
+            contents.push_str(&format!("{}\n", json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":if i%2==0 { instructions.as_str() } else { environment }}]}})));
+            // Search deliberately retains only a 64 KiB excerpt. Put one
+            // explicit tool within it rather than pretending late arguments
+            // beyond the long injected prefix have full-text coverage.
+            if count == 48 && i == 0 {
+                contents.push_str(&format!("{}\n", json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}","call_id":"early-indexed-tool"}})));
+            }
+        }
+        let mut request = request;
+        request["payload"]["content"][0]["text"] = json!(format!(
+            "{instructions}\n{environment}\n{}",
+            request["payload"]["content"][0]["text"].as_str().unwrap()
+        ));
+        contents.push_str(&format!("{request}\n"));
+        fs::write(path, contents).unwrap();
+    };
+    inject_prefix(&path, 48);
     use std::io::Write;
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"error","text":"合成错误：保存失败，不应折叠"}})).unwrap();
+    writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"history_gap","text":"合成缺口：部分过程未记录，不应折叠"}})).unwrap();
+    writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"future_variant","text":"合成未知过程保留"}})).unwrap();
     for i in 0..180 {
         writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":format!("## 模型回复 {i}\n已完成 **文件阅读** 的布局调整。\n\n```rust\nfn main() {{ println!(\"安全阅读\"); }}\n```\n\n<img src=\"https://example.invalid/blocked\"><script>window.historyInjected=true</script>")}]}})).unwrap();
         writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}","call_id":format!("call-{i}")}})).unwrap();
@@ -1856,9 +2240,11 @@ async fn binary_history_reading_chrome_all_sources_and_bounded_dom() {
         "子代理检查",
         "",
     );
-    let child = home.join("sessions/child.jsonl");
-    let raw=fs::read_to_string(&child).unwrap().replace("\"timestamp\":\"2026-09-22T01:00:00Z\"",&format!("\"source\":{{\"subagent\":{{\"thread_spawn\":{{\"parent_thread_id\":\"{parent}\",\"depth\":1,\"agent_nickname\":\"检查员\"}}}}}},\"timestamp\":\"2026-09-22T01:00:00Z\""));
-    fs::write(child, raw).unwrap();
+    let child_path = home.join("sessions/child.jsonl");
+    inject_prefix(&child_path, 144);
+    let raw=fs::read_to_string(&child_path).unwrap().replace("\"timestamp\":\"2026-09-22T01:00:00Z\"",&format!("\"source\":{{\"subagent\":{{\"thread_spawn\":{{\"parent_thread_id\":\"{parent}\",\"depth\":1,\"agent_nickname\":\"检查员\"}}}}}},\"timestamp\":\"2026-09-22T01:00:00Z\""));
+    fs::write(&child_path, raw).unwrap();
+    let before_child = fs::read(&child_path).unwrap();
     let hub = LiveHub::new(LiveLimits::default());
     let request = uuid::Uuid::new_v4();
     let policy = RedactionPolicy::new(vec![]).unwrap();
@@ -1978,6 +2364,7 @@ async fn binary_history_reading_chrome_all_sources_and_bounded_dom() {
     assert!(!home.join("invocations").exists());
     assert_eq!(fs::read(&path).unwrap(), before_native);
     assert_eq!(fs::read(&unassigned_path).unwrap(), before_unassigned);
+    assert_eq!(fs::read(&child_path).unwrap(), before_child);
     assert_eq!(fs::read(&legacy.path).unwrap(), before_legacy);
     assert_eq!(fs::read(run.join("meta.json")).unwrap(), before_run);
     drop(child);

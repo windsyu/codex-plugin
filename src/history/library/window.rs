@@ -56,12 +56,12 @@ pub(super) fn read(
         || query.source_id.is_some()
         || query.group.is_some()
         || query.q.is_some()
+        || query.project_q.is_some()
     {
         return Err("invalid_query");
     }
-    let db = read_db(shared)?.ok_or("entry_unavailable")?;
-    db.execute_batch("BEGIN DEFERRED")
-        .map_err(|_| "cache_busy")?;
+    let (db, snapshot) = organization_view::open_source(shared, sources)?;
+    let db = db.ok_or("entry_unavailable")?;
     let identities =
         serde_json::to_string(&sources.iter().map(Source::identity).collect::<Vec<_>>()).unwrap();
     let found:Option<(String,String,String)>=db.query_row("SELECT e.metadata,l.locator,e.generation FROM catalog_entries e JOIN catalog_sources s ON s.generation=e.generation JOIN catalog_locators l ON l.generation=e.generation AND l.entry=e.id WHERE e.id=?1 AND s.identity IN(SELECT value FROM json_each(?2))",params![id,identities],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|"cache_unavailable")?;
@@ -113,6 +113,9 @@ pub(super) fn read(
         &serde_json::to_string(&generations).unwrap(),
         &mut entry_value,
     )?;
+    if snapshot.revision == "unavailable" {
+        organization_view::unavailable(&mut entry_value);
+    }
     // No database transaction remains open while the selected source is read.
     drop(db);
     let limit = if details {
@@ -185,9 +188,16 @@ pub(super) fn read(
     let mut next = window.next;
     for (record, position) in window.records {
         let safe = sanitize(&record, &shared.key);
-        let mut value = if details { safe } else { preview(&safe) };
+        let projected = presentation::normalize(&safe);
+        let mut value = if details {
+            let mut safe = safe;
+            safe["presentation"] = projected["presentation"].clone();
+            safe
+        } else {
+            projected
+        };
         if value.to_string().len() > 800 * 1024 {
-            value = json!({"kind":value["kind"],"detailsOmitted":true,"text":"此条详情超过读取限制，未返回完整内容。"});
+            value = json!({"kind":value["kind"],"presentation":"attention","detailsOmitted":true,"text":"此条详情超过读取限制，未返回完整内容。"});
         }
         let size = value.to_string().len();
         if bytes + size > 880 * 1024 {
@@ -337,89 +347,4 @@ fn record_identity(record: &Value) -> String {
         ])
         .to_string(),
     )
-}
-
-fn text(value: &Value) -> String {
-    for field in [
-        "text",
-        "summaryText",
-        "message",
-        "output",
-        "arguments",
-        "command",
-    ] {
-        if let Some(s) = value[field].as_str() {
-            return s.into();
-        }
-    }
-    for field in ["content", "summary"] {
-        if let Some(values) = value[field].as_array() {
-            let s = values
-                .iter()
-                .filter_map(|v| v["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    String::new()
-}
-fn preview(record: &Value) -> Value {
-    let mut kind = record["kind"].as_str().unwrap_or("unknown").to_owned();
-    let raw = &record["raw"];
-    let mut content = text(record);
-    let mut role = None;
-    let mut label = String::new();
-    if kind == "observer_item" {
-        kind = raw["itemType"].as_str().unwrap_or("unknown").into();
-        content = text(raw);
-        if content.is_empty() {
-            content = text(&raw["raw"]["payload"]);
-        }
-    } else if kind == "items" {
-        kind = raw["kind"].as_str().unwrap_or("unknown").into();
-        role = raw["author"]["role"].as_str();
-        content = text(raw);
-    }
-    if matches!(kind.as_str(), "user_message" | "userMessage") {
-        role = Some("user");
-    }
-    if matches!(kind.as_str(), "agent_message" | "agentMessage") {
-        role = Some("assistant");
-    }
-    let payload = if raw["payload"].is_object() {
-        &raw["payload"]
-    } else {
-        raw
-    };
-    if content.is_empty() {
-        content = text(payload);
-    }
-    if matches!(kind.as_str(), "tool_call" | "toolCall") {
-        if let Some(arguments) = payload["arguments"].as_str().or(raw["arguments"].as_str()) {
-            content = serde_json::from_str::<Value>(arguments)
-                .ok()
-                .and_then(|v| {
-                    v["cmd"]
-                        .as_str()
-                        .or(v["command"].as_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| arguments.into());
-        }
-    } else if kind == "tool_output"
-        && let Some(output) = payload["output"].as_str()
-    {
-        content = output.into();
-    }
-    if let Some(name) = payload["name"].as_str() {
-        label = name.into();
-    }
-    let truncated = content.chars().count() > 12000
-        || record["detailsOmitted"] == true
-        || raw["truncated"] == true;
-    let content = content.chars().take(12000).collect::<String>();
-    json!({"kind":kind,"role":role,"text":content,"label":label,"status":payload["status"],"truncated":truncated,"offset":record["offset"],"issues":record["issues"],"model":raw["author"]["requestedModel"],"usage":if kind=="responses"{raw["usage"].clone()}else{Value::Null}})
 }

@@ -22,6 +22,46 @@ async fn product_homepage_resumes_unassigned_native_session_in_recorded_director
     homepage_launch(false, true).await;
 }
 
+#[tokio::test]
+#[ignore = "requires installed official CLI; isolated child application and synthetic loopback upstream"]
+async fn product_reclassified_native_resume_keeps_original_cwd_and_thread() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command.kill_on_drop(true);
+    command.env_clear();
+    for name in ["PATH", "TMPDIR", "LANG", "WORKBENCH_TEST_CODEX"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let output = tokio::time::timeout(Duration::from_secs(90),command
+        .args([
+            "--ignored",
+            "--exact",
+            "workbench::application::tests::r7_organization_integration::installed_resume_helper",
+            "--nocapture",
+        ])
+        .env("HOME", root.path())
+        .env("USERPROFILE", root.path())
+        .env("CODEX_HOME", root.path())
+        .env("R7_NATIVE_PROBE_ISOLATED_ROOT", root.path())
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
+        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+        .output()).await.expect("isolated probe must finish within its bounded deadline").unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "isolated probe failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("R7_NATIVE_RESUME_PROOF"),
+        "helper did not run: {stdout}"
+    );
+    println!("{stdout}");
+}
+
 fn authenticated_reply() -> Response {
     let stream = async_stream::stream! {
         let response = "resp_auth_home_0";
