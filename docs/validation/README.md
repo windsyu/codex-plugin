@@ -1,5 +1,6 @@
 # 验证报告索引
 
+- [Issue #9：工作区快照、FD 与 Git 执行调查（2026-10-09）](workspace-fd-issue-9-2026-10-09.md)
 - [公开发布、README 与匿名安装（2026-10-02）](public-install-2026-10-02.md)
 - [macOS 快速安装、PATH 与卸载（2026-10-02）](macos-quick-install-2026-10-02.md)
 - [V2 0.3.0 Release 包装、安装与快速启动（2026-10-02）](v2-release-packaging-2026-10-02.md)
