@@ -129,11 +129,11 @@ it('restarts bounded pages when filtering or toggling hidden directories and pre
 it('returns focus to the opener, traps Tab, and cancels on Escape without focusing a mobile input', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(ok(listing)));
   const opener = document.createElement('button'); document.body.append(opener); opener.focus();
-  const props = await mount(); const close = button('取消'), select = button('选择此目录');
+  const props = await mount(); const close = button('取消'), last = button('中文 <script>unsafe</script>›');
   expect(document.activeElement).toBe(close);
   await act(async () => { close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })); });
-  expect(document.activeElement).toBe(select);
-  await act(async () => { select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })); });
+  expect(document.activeElement).toBe(last);
+  await act(async () => { last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })); });
   expect(document.activeElement).toBe(close);
   await act(async () => { close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
   expect(props.onClose).toHaveBeenCalledTimes(1);

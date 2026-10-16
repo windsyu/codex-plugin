@@ -189,11 +189,12 @@ export function DirectoryBrowser({ instanceId, initialPath, onClose, onSelect }:
     <header className="wb-directory-heading"><h2 id="wb-directory-title">浏览电脑目录</h2><button ref={closeButton} type="button" onClick={onClose}>取消</button></header>
     <div className="wb-directory-body">
       <p id="wb-directory-description" className="wb-directory-description">选择已连接电脑上的项目目录。选择后会检查目录，不会立即启动项目。</p>
+      {!blocked && <form className="wb-directory-path" onSubmit={event => { event.preventDefault(); if (pathDraft.trim()) navigate(pathDraft.trim()); }}>
+        <label>目录路径<input name="directory-path" aria-label="浏览目录路径" autoComplete="off" spellcheck={false} value={instance.current === instanceId ? pathDraft : ''} onInput={event => setPathDraft(event.currentTarget.value)} placeholder="例如 ~/projects…" /></label>
+        <button type="submit" disabled={!pathDraft.trim()}>前往</button>
+      </form>}
+      <div className="wb-directory-selection"><span>{activeListing && !blocked ? activeListing.currentPath : '选择目录后继续检查'}</span><button type="button" className="wb-directory-select" disabled={!canSelect} onClick={choose}>选择此目录</button></div>
       {!blocked && <>
-        <form className="wb-directory-path" onSubmit={event => { event.preventDefault(); if (pathDraft.trim()) navigate(pathDraft.trim()); }}>
-          <label>目录路径<input name="directory-path" aria-label="浏览目录路径" autoComplete="off" spellcheck={false} value={instance.current === instanceId ? pathDraft : ''} onInput={event => setPathDraft(event.currentTarget.value)} placeholder="例如 ~/projects…" /></label>
-          <button type="submit" disabled={!pathDraft.trim()}>前往</button>
-        </form>
         <nav className="wb-directory-shortcuts" aria-label="目录快捷入口">
           <button type="button" onClick={() => navigate(shortcut?.homePath || null)}>主目录</button>
           {(shortcut?.roots || []).filter(root => root.path !== shortcut?.homePath).map(root => <button key={root.path} type="button" onClick={() => navigate(root.path)} title={root.path}>{root.name}</button>)}
@@ -222,6 +223,5 @@ export function DirectoryBrowser({ instanceId, initialPath, onClose, onSelect }:
         </>}
       </div>
     </div>
-    <footer className="wb-directory-footer"><span>{activeListing && !blocked ? activeListing.currentPath : '选择目录后继续检查'}</span><button type="button" className="wb-directory-select" disabled={!canSelect} onClick={choose}>选择此目录</button></footer>
   </dialog>;
 }

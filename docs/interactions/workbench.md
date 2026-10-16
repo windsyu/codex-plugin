@@ -65,7 +65,7 @@ sequenceDiagram
 
 目录响应为 `{instanceId,currentPath,parentPath,homePath,roots,entries,canSelect,selectionError,nextCursor,truncated}`；roots 是 `{name,path}`，entries 是 `{name,path,isSymlink}`。`path` 缺失或 `~` 从用户主目录开始，支持 `~/`，其余必须绝对路径；规范路径显示符号链接实际目标。筛选只作用当前层目录名，隐藏项默认关闭；不会读取文件内容。当前最多并发 2 次扫描，每次最多扫描 4096 项/750ms，调用等待最多 2 秒；每页最多 100 项/64KiB，快照保留 60 秒。超扫描/体积预算返回 `truncated:true`，分页游标必须匹配当前实例、规范路径、筛选和隐藏项开关；目录替换或游标失效须重新读取，不拼接旧快照。错误区分不可访问、无权限、目录变化和忙碌。`canSelect:false` 仍可进入子目录；能选择也不代表 CLI/认证可启动，选择后仍执行 `launch-targets`。
 
-网页选择器初次读取已填目录，失败后回主目录并显示原因；之后导航失败保留当前位置。主目录/磁盘/面包屑、上一级、名称筛选和隐藏项可用键盘操作，关闭后恢复焦点。切换、关闭或账号/电脑/实例变化时取消旧读取并丢弃迟到结果；选择只填回表单和校验，不发起 Run。远端列举的是固定授权电脑，所有请求继续受归属、epoch、撤销和 Origin 约束。
+网页选择器初次读取已填目录，失败后回主目录并显示原因；之后导航失败保留当前位置。“选择此目录”位于路径输入框下方、目录列表上方，桌面与手机打开长列表后无需滚动到底部即可确认当前目录，键盘顺序也先到达确认按钮。主目录/磁盘/面包屑、上一级、名称筛选和隐藏项可用键盘操作，关闭后恢复焦点。切换、关闭或账号/电脑/实例变化时取消旧读取并丢弃迟到结果；选择只填回表单和校验，不发起 Run。远端列举的是固定授权电脑，所有请求继续受归属、epoch、撤销和 Origin 约束。
 
 恢复只接受有唯一原生记录且可安全校验的 native entry：SessionMeta.id 与 canonical rollout、原 recordedCwd/nativeHome、来源修订和文件身份一致。无法恢复的历史仍可只读。禁止根据展示项目归属猜 cwd、`--last`、拼接历史消息、自动 Enter 或从已有工作台正文伪造原生 session。源码入口：[launching.rs](../../src/workbench/application/launching.rs)、[launch.rs](../../src/workbench/launch.rs)、[useLaunch.ts](../../web/src/workbench/useLaunch.ts)。
 
