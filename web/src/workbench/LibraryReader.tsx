@@ -15,6 +15,7 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume, insta
   const cache = useRef(new Map<number, LibraryPage<LibraryRecord>>());
   const [version, setVersion] = useState(0);
   const [active, setActive] = useState(0);
+  const activeRef = useRef(active); activeRef.current = active;
   const [entry, setEntry] = useState<LibraryEntry>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -59,7 +60,7 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume, insta
       if (!page.entry || page.entry.entryId !== route.entry || (pinned.current && page.entry.sourceRevision !== pinned.current)) throw new Error('source changed');
       pinned.current = page.entry.sourceRevision;
       cache.current.set(index, page);
-      for (const key of cache.current.keys()) if (Math.abs(key - active) > 2) cache.current.delete(key);
+      for (const key of cache.current.keys()) if (Math.abs(key - activeRef.current) > 2) cache.current.delete(key);
       setEntry(page.entry); setVersion(v => v + 1); setError('');
       if (page.nextCursor && index + 1 === blocksRef.current.length && blocksRef.current.length < 2048) {
         setBlocks(previous => [...previous, { cursor: page.nextCursor, height: 700 }]);
@@ -120,7 +121,13 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume, insta
     if (scroll.current) scroll.current.scrollTop = 0;
     state.replace({ libraryReading: undefined });
   };
-  const closeDetail = () => { setDetail(null); returnFocus.current?.focus(); };
+  useLayoutEffect(() => {
+    if (detail === null && returnFocus.current) {
+      returnFocus.current.focus({ preventScroll: true });
+      returnFocus.current = null;
+    }
+  }, [detail]);
+  const closeDetail = () => { setDetail(null); };
   const changeMode = (all: boolean) => {
     const element = scroll.current;
     if (element) {
@@ -143,15 +150,28 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume, insta
       <nav className="wb-library-reading-mode" aria-label="正文显示方式"><button aria-pressed={!allRecords} onClick={() => changeMode(false)}>对话</button><button aria-pressed={allRecords} onClick={() => changeMode(true)}>全部记录</button></nav>
       {prefixNotice && <p className="wb-library-note" role="status">{prefixNotice}</p>}
       <div className="wb-library-body-scroll" ref={scroll} tabIndex={0} aria-label="会话正文" onScroll={() => {
+        // A click can scroll a visible record before its scroll event is delivered.
+        // Keep the inspected window mounted until the detail returns focus to it.
+        if (returnFocus.current) return;
         seeking.current = false;
-        const i = remember(); if (i !== active) setActive(i);
+        let i = remember();
+        const area = scroll.current!;
+        const viewport = area.getBoundingClientRect();
+        const visible = Array.from(area.querySelectorAll<HTMLElement>('[data-library-block]')).filter(node => {
+          const rect = node.getBoundingClientRect();
+          return rect.bottom > viewport.top && rect.top < viewport.bottom;
+        }).map(node => Number(node.dataset.libraryBlock));
+        // Short folded windows can share the viewport. Keep every visible mounted
+        // window inside the three-window range, including a button being clicked.
+        if (visible.length) i = Math.max(Math.max(...visible) - 1, Math.min(i, Math.min(...visible) + 1));
+        if (i !== active) setActive(i);
       }}>
         <div aria-hidden="true" style={{ height: blocks.slice(0, start).reduce((n, b) => n + b.height, 0) }} />
         {blocks.slice(start, end).map((block, local) => {
           const index = start + local, page = cache.current.get(index);
           return page ? <div key={index} data-library-block={index}>
             {allRecords && page.window != null && <p className="wb-library-note">保存窗口 · 观察位置 {page.window}</p>}
-            <RecordWindow records={page.records} all={allRecords} reveal={!!route.match && index === 0 && !ignoreMatch.current} onInspect={(cursor, button) => { remember(); returnFocus.current = button; setDetail(cursor); }} />
+            <RecordWindow records={page.records} all={allRecords} reveal={!!route.match && index === 0 && !ignoreMatch.current} onInspect={(cursor, button) => { remember(); returnFocus.current = button; setActive(index); setDetail(cursor); }} />
             {!page.records.length && !page.nextCursor && <p className="wb-subtle">此窗口没有可展示的正文。</p>}
             {page.nextCursor && blocks.length >= 2048 && index === blocks.length - 1 && <button onClick={() => { cache.current.clear(); setBlocks([{ cursor: page.nextCursor, height: 700 }]); setActive(0); setRetry(n => n + 1); if (scroll.current) scroll.current.scrollTop = 0; }}>继续读取后续记录</button>}
             {!page.nextCursor && <p className="wb-library-end">已读到此来源的记录末尾</p>}
@@ -167,7 +187,7 @@ export function LibraryReader({ route, onBack, onEntry, sources, onResume, insta
 function RecordDetail({ id, revision, cursor, onClose }: { id: string; revision: string; cursor: string; onClose: () => void }) {
   const [text, setText] = useState(''); const [error, setError] = useState(''); const [length, setLength] = useState(16000); const close = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    close.current?.focus(); const controller = new AbortController();
+    close.current?.focus({ preventScroll: true }); const controller = new AbortController();
     void libraryRead<unknown>(`entries/${encodeURIComponent(id)}/details`, new URLSearchParams({ window: 'true', sourceRevision: revision, cursor }), controller.signal).then(page => {
       if (!controller.signal.aborted) setText(JSON.stringify(page.records.map(record => {
         if (record && typeof record === 'object') { const { detailCursor: _cursor, ...fields } = record as Record<string, unknown>; return fields; } return record;

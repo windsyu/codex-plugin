@@ -595,21 +595,41 @@ async fn recorder_exit_has_a_deadline_and_a_late_worker_cannot_mark_it_clean() {
     let hub = LiveHub::new(LiveLimits::default());
     let options = options(dir.path());
     let faults = options.faults.clone();
-    let recorder = Recorder::start(&hub, options).unwrap();
+    let mut recorder = Recorder::start(&hub, options).unwrap();
     let history = recorder.history.clone();
     wait(|| hub.recorder_status().state == "saved");
-    faults.pause_ms.store(3000, Ordering::Release);
-    std::thread::sleep(Duration::from_millis(150));
+    let (release, pause) = mpsc::channel();
+    *faults.pause_gate.lock().unwrap() = Some(pause);
+    wait(|| faults.pause_active.load(Ordering::Acquire));
+    // Observe actual worker completion after releasing the stall, not an
+    // assumed scheduler/fsync delay. Drop still waits on its real done channel.
+    let worker = recorder.thread.take().unwrap();
     publish(&hub, &key(), "tail after stall");
     let started = Instant::now();
     drop(recorder);
     assert!(started.elapsed() < Duration::from_millis(2300));
     assert_eq!(hub.recorder_status().error, Some("shutdown_timeout"));
-    faults.pause_ms.store(0, Ordering::Release);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(!worker.is_finished());
+    let active = history
+        .query(Query::Status { epoch: hub.epoch() })
+        .await
+        .unwrap();
+    assert_eq!(active["run"]["state"], "active");
+    release.send(()).unwrap();
+    wait(|| worker.is_finished());
+    worker.join().unwrap();
     let read = history
         .query(Query::Run { epoch: hub.epoch() })
         .await
         .unwrap();
     assert_eq!(read["run"]["state"], "unclean");
+    assert_eq!(read["uncertainTail"], true);
+    assert!(
+        !dir.path()
+            .join("history/runs")
+            .join(hub.epoch().to_string())
+            .join("lifecycle.json")
+            .try_exists()
+            .unwrap()
+    );
 }

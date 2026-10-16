@@ -396,8 +396,9 @@ async fn remote_library_organization(remote: &Remote, app: &Application, fixture
     std::fs::create_dir_all(fixture.home.join("sessions")).unwrap();
     let source = fixture.home.join("sessions/relay-organization.jsonl");
     let raw = format!(
-        "{}\n",
-        json!({"type":"session_meta","payload":{"id":thread,"source":"cli","cwd":fixture.cwd}})
+        "{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":thread,"source":"cli","cwd":fixture.cwd}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Synthetic remote history conversation"}]}})
     );
     std::fs::write(&source, &raw).unwrap();
     assert_eq!(

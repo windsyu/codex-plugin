@@ -136,18 +136,21 @@ async function workbench(browser, input, gateway, index) {
   assert.equal(app.body.remoteOwner, true);
   assert.equal(app.body.directoryPickerAvailable, false);
   await expect(page.getByRole('button', { name: '公网接入', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: '公网接入', exact: true })).toHaveCount(0);
   await expect(page.locator('.wb-relay-panel')).toHaveCount(0);
   if (input.cwd && app.body.launchAvailable) {
     stage = `path-input-${index}`;
-    await page.getByRole('button', { name: '打开其他目录', exact: true }).click();
+    await page.getByRole('link', { name: '启动项目', exact: true }).click();
+    assert.equal(new URL(page.url()).pathname, '/launch');
     await expect(page.getByLabel('项目目录', { exact: true })).toBeVisible();
     await page.getByLabel('项目目录', { exact: true }).fill(input.cwd);
-    await expect(page.locator('.wb-launch-pick')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '选择文件夹…', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '浏览电脑目录', exact: true })).toHaveCount(app.body.directoryBrowserAvailable ? 1 : 0);
     assert.equal(pickerCalls, 0);
-    await page.locator('.wb-launch-close').click();
   }
   stage = `settings-${index}`;
-  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('link', { name: '设置', exact: true }).click();
+  assert.equal(new URL(page.url()).pathname, '/settings');
   const settings = page.locator('#wb-settings-panel');
   await expect(settings).toBeVisible();
   await expect(settings.locator('#wb-settings-form')).toBeVisible();

@@ -28,7 +28,7 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     const url=new URL(gateway.url); assert.equal(url.origin,origin.origin);
     assert.ok(uuid.test(gateway.gatewayId)); assert.equal(url.pathname,`/g/${gateway.gatewayId}/`);
     const auth=new URLSearchParams(url.hash.slice(1));
-    assert.ok(uuid.test(auth.get('grant'))); assert.ok(uuid.test(auth.get('session'))); assert.equal(auth.get('api'),'1');
+    assert.ok(uuid.test(auth.get('grant'))); assert.ok(uuid.test(auth.get('session'))); assert.equal(auth.get('api'),'2');
     assert.match(gateway.accountCookie,/^[^=;]+=[^;]+$/);
   }
   stage='chrome';
@@ -51,7 +51,7 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     stage=`workbench-${index}`; const gateway=input.gateways[index]; const context=index<2?alice:bob;
     const page=await context.newPage(); page.setDefaultTimeout(12000); pages.push(page);
     page.on('pageerror',()=>errors++);
-    page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname.endsWith('/application/launch'))starts++;});
+    page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname.endsWith('/workbench/v1/runs'))starts++;});
     page.on('response',response=>{const url=new URL(response.url()); if(url.pathname.startsWith('/assets/') && response.status()===200) assets++; if(url.pathname.endsWith('/live/events')&&response.status()===200)events++;});
     let pageSockets=0;
     page.on('websocket',ws=>{const url=new URL(ws.url()); assert.ok(url.pathname.startsWith(`/g/${gateway.gatewayId}/workbench/v1/`)); assert.ok(url.searchParams.has('relayGrant')); terminals++;pageSockets++;ws.on('framesent',frame=>{try{if(JSON.parse(frame.payload).command?.type==='input')inputs++;}catch{}});});
@@ -74,6 +74,18 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     await page.reload(); await expect(page.locator('#wb-settings-form')).toBeVisible();
     await page.getByRole('link',{name:'全部历史',exact:true}).click();
     assert.equal(new URL(page.url()).pathname,`/g/${gateway.gatewayId}/history`);
+    if (index === 0) {
+      stage='remote-history-reader';
+      await page.locator('.wb-library-entry').filter({hasText:'Synthetic remote history conversation'}).click();
+      await expect(page.locator('.wb-library-body-scroll')).toContainText('Synthetic remote history conversation');
+      await page.getByRole('button',{name:'调整项目归属',exact:true}).click();
+      const editor=page.getByRole('dialog',{name:'调整项目归属'});
+      await expect(editor).toContainText('用户调整已生效');
+      await editor.getByRole('button',{name:'关闭',exact:true}).click();
+      await page.getByRole('button',{name:'← 返回会话列表',exact:true}).click();
+      await page.goBack();
+      await page.goBack();
+    }
     await page.goBack(); await expect(page.locator('#wb-settings-form')).toBeVisible();
     await page.getByRole('link',{name:'项目概览',exact:true}).click();
     const dimensions=await page.evaluate(()=>({viewport:document.documentElement.clientWidth,content:document.documentElement.scrollWidth}));

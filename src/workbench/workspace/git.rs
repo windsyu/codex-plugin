@@ -253,10 +253,18 @@ impl Reader {
         let fingerprint = blake3::hash(format!("{before}\0{after}").as_bytes())
             .to_hex()
             .to_string();
+        // /dev/fd vnodes can race across independent processes on macOS, even
+        // with different parent FD tables. Reopen only our private snapshots,
+        // never the selected workspace path. TempDir cleans up on all returns.
+        let directory = process::snapshot_directory()?;
+        let before_path = directory.path().join("before");
+        let after_path = directory.path().join("after");
         let files = [
-            process::snapshot(before.as_bytes())?,
-            process::snapshot(after.as_bytes())?,
+            process::snapshot_at(&before_path, before.as_bytes())?,
+            process::snapshot_at(&after_path, after.as_bytes())?,
         ];
+        let before_path = before_path.to_str().ok_or(Fault("unsupported_path"))?;
+        let after_path = after_path.to_str().ok_or(Fault("unsupported_path"))?;
         let output = self.git(
             &[
                 "diff",
@@ -266,8 +274,8 @@ impl Reader {
                 "--no-color",
                 "--no-renames",
                 "--",
-                "/dev/fd/64",
-                "/dev/fd/65",
+                before_path,
+                after_path,
             ],
             &files,
             budget,
@@ -275,11 +283,12 @@ impl Reader {
         if !output.truncated && !matches!(output.code, Some(0 | 1)) {
             return Err(Fault("git_read_failed"));
         }
-        // Strip descriptor headers; the UI labels the explicitly selected path.
+        // Strip private snapshot headers; a TMPDIR component may itself contain
+        // "@@ ", so only a hunk marker at the start of a line is eligible.
         let raw = String::from_utf8_lossy(&output.bytes);
         let patch = raw
-            .find("@@ ")
-            .map(|start| raw[start..].to_string())
+            .find("\n@@ -")
+            .map(|start| raw[start + 1..].to_string())
             .unwrap_or_default();
         Ok(
             json!({"path":path,"scope":if staged {"staged"} else {"working"},"patch":patch,"revision":fingerprint,"truncated":output.truncated,"comparison":"file_contents","empty":before==after}),

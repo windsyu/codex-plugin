@@ -501,7 +501,11 @@ async fn gateway_waiting_for_first_handshake_is_not_reported_as_incompatible() {
     assert_eq!(list["gateways"][0]["status"], "awaitingConnection");
     assert_eq!(list["gateways"][0]["online"], false);
     assert_eq!(list["gateways"][0]["versionIncompatible"], false);
-    for (api, expected) in [(99, "versionIncompatible"), (1, "offline")] {
+    for (api, expected) in [
+        (99, "versionIncompatible"),
+        (1, "versionIncompatible"),
+        (codex_relay_protocol::WORKBENCH_API_VERSION, "offline"),
+    ] {
         f.store
             .0
             .lock()

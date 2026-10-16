@@ -4,6 +4,37 @@
 
 以下历史调试命令用于显式专项检查。先通过标准入口构建；真实 CLI 子进程必须隔离 HOME/USERPROFILE 和 CODEX_HOME，不能指向私人数据。现有 `/private/tmp` 示例是 macOS 临时路径，复现时选择自己的私有临时目录；未登记输出不会被自动过期删除。
 
+## 工作区 FD 诊断
+
+`CODEX_WORKSPACE_DIAGNOSTICS=1` 在工作台进程中显式开启本机 stderr JSONL，默认关闭；应在启动新的实例前设置，复用已有实例不会更改它的环境。它不修改配置、HTTP 响应、历史、Git index 或原始文件。
+
+- `workspace_snapshot / created`：预期字节数及实际 FD、长度、偏移、device/inode、mode、descriptor/status flags；未能读取的字段为 null，stat/offset errno 单独提供。
+- `workspace_process / before_spawn` 和 `finished`：同一 pid/operation 的输入 FD 数组（Diff 顺序为 before、after）、继承方案、实际 childPid、启动 errno、退出码/信号、stdout 长度、截断，以及 stderr 已观察字节数、是否到 EOF/超限、静态错误类别。
+- stderr 原文只在诊断开启时保留最多 64 KiB 的内存副本，分类后释放；日志不含正文、内容摘要、路径、完整 argv 或环境。未知错误为 `unclassified`，不能据此还原具体错误文本。超时/超限可能没有退出状态，`stderrComplete=false` 表示捕获不完整。
+
+诊断只读取元数据和当前偏移，不读正文、不 rewind。rg 的 macOS `/dev/fd/N` 打开共享偏移，子进程完成后到 EOF 是正常现象，不代表快照变空。Git 已改用私有命名快照，避免同号 `/dev/fd` 并发 stat 导致假删除，原始症状的旧/新对照见 [Issue #9 记录](../validation/workspace-fd-issue-9-2026-10-09.md)。这些文件位于随机 `codex-workspace-diff-*` 0700 目录，文件 0600，正常/错误/取消后清理；强制终止或清理失败可能遗留，不应公开正文或擅自批量清理未知目录。元数据诊断本身不能证明 Git 实际读取的每个字节。
+
+先构建 Web，再在独立 HOME 下运行目标与 workspace 测试（若是新环境，先按开发指南 bootstrap）：
+
+```sh
+npm run build --prefix web
+task_home=$(mktemp -d)
+task_cargo_home=${CARGO_HOME:-$HOME/.cargo}
+task_rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+HOME="$task_home" USERPROFILE="$task_home" CODEX_HOME="$task_home/codex" \
+  CARGO_HOME="$task_cargo_home" RUSTUP_HOME="$task_rustup_home" \
+  cargo test --locked --offline --lib \
+  workbench::workspace::tests::git_nested_project_and_literal_paths_staging_log_and_no_external_execution -- --exact
+HOME="$task_home" USERPROFILE="$task_home" CODEX_HOME="$task_home/codex" \
+  CARGO_HOME="$task_cargo_home" RUSTUP_HOME="$task_rustup_home" \
+  cargo test --locked --offline --lib workbench::workspace::tests:: -- --test-threads=4
+HOME="$task_home" USERPROFILE="$task_home" CODEX_HOME="$task_home/codex" \
+  CARGO_HOME="$task_cargo_home" RUSTUP_HOME="$task_rustup_home" \
+  node scripts/dev.mjs check --offline
+```
+
+FD 压力回归自行 re-exec 到隔离子进程，逐个持有 FD 至 54–68，验证 exec 失败不损坏快照及成功 Git 对比；并发专项持有 FD 至 192，同时执行四条 Diff 流和独立快照读取。原始场景另覆盖 10 种布局 × 1/4 线程（100 次完整 fixture），以及持续 stat 干扰下 20 次 fixture；隔离 TMPDIR 故意含 `@@ `，精确补丁断言防止路径泄漏。无需覆盖测试主进程的固定 FD。脱敏诊断负向测试独立启用日志，压力测试不输出大批诊断。开启运行时诊断时可执行 `CODEX_WORKSPACE_DIAGNOSTICS=1 target/debug/codex-view --no-open`，但这不是隔离合成测试，需由用户选择数据与运行目录；保存 stderr 应使用权限 0600 的私有受管产物，不能直接公开混合日志。
+
 ## 查看合成阶段调试
 
 macOS 后台服务专项先运行 `node scripts/dev.mjs build --component workbench --offline`，再执行 `node scripts/verify-background-service.mjs`。脚本用受管产物中的独立 HOME/USERPROFILE/CODEX_HOME、合成 CLI 和真实用户 LaunchAgent 检查重复启动、前台冲突、自启开关、异常重启不恢复 CLI、损坏配置下完整停止及所属子进程回收；结束时卸载自己的测试任务。该专项要求已登录的 macOS 桌面，不修改真实用户的登录自启目录，不模拟注销、重新登录或睡眠恢复。结果和安全诊断保留在任务目录。

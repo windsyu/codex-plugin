@@ -32,7 +32,7 @@ impl SafeText {
 // No Debug: these are the actual values that must never enter a log or DTO.
 pub struct RedactionPolicy {
     secrets: Vec<String>,
-    possible_start: [bool; 256],
+    possible_second: [u64; 256],
 }
 
 impl RedactionPolicy {
@@ -46,18 +46,31 @@ impl RedactionPolicy {
         }
         secrets.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
         secrets.dedup();
-        let mut possible_start = [false; 256];
+        // A lossy second-byte filter: collisions only enter the original slow
+        // path. One-byte secrets accept every following byte. Keep a nonzero
+        // row at chunk end so a split prefix is still held by the state machine.
+        let mut possible_second = [0_u64; 256];
+        let mut register = |first: u8, second: Option<u8>| {
+            possible_second[first as usize] |= second.map_or(u64::MAX, |byte| 1_u64 << (byte & 63));
+        };
         for secret in &secrets {
-            possible_start[secret.as_bytes()[0] as usize] = true;
+            let bytes = secret.as_bytes();
+            register(bytes[0], bytes.get(1).copied());
         }
         for (prefix, _) in PREFIXES {
-            let first = prefix.as_bytes()[0];
-            possible_start[first as usize] = true;
-            possible_start[first.to_ascii_uppercase() as usize] = true;
+            let bytes = prefix.as_bytes();
+            for first in [bytes[0], bytes[0].to_ascii_uppercase()] {
+                for second in [
+                    bytes.get(1).copied(),
+                    bytes.get(1).map(u8::to_ascii_uppercase),
+                ] {
+                    register(first, second);
+                }
+            }
         }
         Ok(Arc::new(Self {
             secrets,
-            possible_start,
+            possible_second,
         }))
     }
 
@@ -114,6 +127,8 @@ pub(crate) struct TextRedactor {
     tool_fields: bool,
     #[cfg(test)]
     reference: bool,
+    #[cfg(test)]
+    slow_path_steps: usize,
 }
 
 impl TextRedactor {
@@ -125,6 +140,8 @@ impl TextRedactor {
             tool_fields: false,
             #[cfg(test)]
             reference: false,
+            #[cfg(test)]
+            slow_path_steps: 0,
         }
     }
 
@@ -148,21 +165,33 @@ impl TextRedactor {
         let mut remaining = text;
         while !remaining.is_empty() {
             // Only bypass the state machine when no earlier text or mask can
-            // affect this chunk. Every possible secret/prefix first byte stops
-            // the scan, including non-ASCII configured secrets. A matching
-            // non-ASCII byte is a UTF-8 leading byte, so the stop is a boundary.
+            // affect this chunk. Every possible secret/prefix byte pair stops
+            // the scan, as does a candidate first byte at chunk end. Registered
+            // non-ASCII first bytes are UTF-8 leading bytes, so the stop is a
+            // character boundary. Rejected pairs cannot start any match.
             let fast = !self.tool_fields && self.masked.is_none() && self.pending.is_empty();
             if fast {
-                let length = remaining
-                    .as_bytes()
+                let bytes = remaining.as_bytes();
+                let length = bytes
                     .iter()
-                    .position(|byte| self.policy.possible_start[*byte as usize])
+                    .enumerate()
+                    .position(|(index, byte)| {
+                        let mask = self.policy.possible_second[*byte as usize];
+                        mask != 0
+                            && bytes
+                                .get(index + 1)
+                                .is_none_or(|next| mask & (1_u64 << (next & 63)) != 0)
+                    })
                     .unwrap_or(remaining.len());
                 output.push_str(&remaining[..length]);
                 remaining = &remaining[length..];
                 if remaining.is_empty() {
                     break;
                 }
+            }
+            #[cfg(test)]
+            {
+                self.slow_path_steps += 1;
             }
             let character = remaining.chars().next().unwrap();
             remaining = &remaining[character.len_utf8()..];
