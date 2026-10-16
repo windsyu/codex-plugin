@@ -574,4 +574,4 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 
 **设计准备与实施记录。** A–D 方案与实现完成独立复核，修正跨应用修订、组摘要、类型冲突、存储恢复/首次发布、DTO降级与预算诊断。实际 Rust/Web/Chrome、性能、真实CLI及负向权限证据见[逐片报告](validation/native-cli-r7-project-organization-2026-10-08.md)；后续试用与 E 增量改造见[人类对话报告](validation/native-cli-r7-human-conversation-2026-10-08.md)，不从文档检查或未执行ignored测试推导通过。物理断电/设备故障、双OS进程压力及新CLI默认daemon仍不作实测保证；原始历史未改，试用实例重启不启动 CLI，没有远端 mutation。
 
-2026-10-16 用户要求公网分支以 main 为祖先并同步新版历史；完整整合 R7、保留公网/后台/目录能力，UI/API 配套升至2。既有 catalog4 沿用，不通过删除数据解决版本不兼容；同步修复短折叠块与迟到响应导致详情目标卸载的问题。增量证据与尚未验证范围见[整合记录](validation/main-history-public-relay-2026-10-16.md)，真实中转部署单列，不以旧 R7 验收替代。
+2026-10-16 用户要求公网分支以 main 为祖先并同步新版历史；完整整合 R7、保留公网/后台/目录能力，UI/API 配套升至2。既有 catalog4 沿用，不通过删除数据解决版本不兼容；同步修复短折叠块与迟到响应导致详情目标卸载的问题。增量证据与尚未验证范围见[整合记录](validation/main-history-public-relay-2026-10-16.md)。[真实部署与试用](validation/main-history-relay-deploy-2026-10-16.md)已完成指定 ECS 更新、备份恢复副本核验、17项公网检查及本机已有历史阅读；真实远端私有页面待所属账号重新登录门户，不以本机 online 或旧 R7 验收替代。
