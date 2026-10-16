@@ -15,11 +15,17 @@ node scripts/dev.mjs package --offline
 
 `package` 重新生成 Web 资源并编译两个 release binary，检查 binary 的版本和动态库依赖，然后在 `target/artifacts/<UUID>` 生成压缩包、`SHA256SUMS` 与解包目录。该任务按独立构建产物登记，保留 30 天；需要长期留存时由所有者明确复制或固定保留。只允许当前已受测的 macOS / Apple Silicon，不自动交叉编译或推导其他平台支持。
 
+`package` 等价于 `package --component workbench`，只编译根本机 package，不附带编译或安装 `codex-relayd`。服务器使用 `build --component relay --release` 单独构建，并按[中转部署指南](../guides/public-relay-deployment.md)分发二进制和许可；`package --component relay|all` 明确拒绝，不能误将 macOS 安装包部署到 Linux。当前没有通用 Linux 自动归档入口，静态工具链/运行库许可须由目标包装明确提供，不能宣称本机包验证覆盖中转发布。组件与 AI agent 操作入口见[组件指南](../guides/component-deployment.md)。
+
 打包构建显式指定 `--target aarch64-apple-darwin`，并读取同一 target 的 release 目录；不受 `CARGO_BUILD_TARGET` 或 Cargo 默认 target 配置影响，不从另一个构建目录拾取旧的同版本产物。
 
 生成后自动在独立 HOME/USERPROFILE/CODEX_HOME、中文及空格目录中解压安装，以合成 CLI 验证当前目录/指定路径启动、同项目复用、零 CLI 历史入口、内嵌网页资源和 SIGINT 回收；不启动真实私人 CLI 或调用模型。验证失败的任务保留诊断，不报告打包成功。
 
 包内包括项目入口 `bin/code-view`、历史入口 `bin/codex-view`、兼容入口 `bin/codex-observerd`、安装器、版本/来源 manifest、使用说明、锁文件、项目许可、vt100 补丁说明、Codicons 归属及第三方许可。无需额外携带 `web/dist` 或目录助手。`code-view` 是保持 cwd 的 shell 包装器，复用 `codex-view --project`，不增加 Rust binary 或运行协议。
+
+包装器原样转发 `start/status/open/stop/autostart` 及其作用域参数；只有项目用法补 `--project`，同名目录用 `./start` 等显式路径。维护测试使用合成 backend 检查参数、cwd、活动服务阻止升级/卸载和文件保全。安装器在目标类型/清单/已有哈希验证后，调用该绝对路径 binary 的 `service-maintenance`；返回 0 才继续，1 或其他运行失败拒绝，旧 binary 的未知子命令 2 仅提供手动停机提示。卸载加 `--remove`，只移除验证过的非活动所属登记；安装/升级不自动停止服务。服务维护检查不替代真实 LaunchAgent 启停、登录自启、完整 CLI 清理或浏览器注册验收。
+
+手动包安装器和快速安装器都在服务检查前取得 `<prefix>/.code-view-install-lock`，持有到程序/PATH 写入结束。后台 `start`、`autostart on` 及受管子进程启动在作用域服务锁内检查同一安装保留，避免检查后突然启动旧程序；若启动已取得作用域锁，安装检查会失败而不覆盖文件。`autostart off` 可在安装期间关闭自启。已有安装锁（含无法确认的遗留锁）拒绝，不自动删除。退出清理只删除本次创建且设备/inode 身份未变化的空锁目录；路径被替换时保留并报告。
 
 许可收集使用当前 host 的 Cargo metadata，包含解析依赖及 build/test 依赖；npm 部分只收集已安装的运行依赖，未分发的前端开发工具不进入运行包。逐依赖保留实际 LICENSE/COPYING/NOTICE/COPYRIGHT 文件，包含嵌套原生材料；缺失许可、锁文件不匹配、符号链接或越界会使打包失败。`licenses/INDEX.json` 记录版本、许可表达式与通知位置，不含本机源码路径。维护者仍需复核实际许可内容。
 
@@ -27,10 +33,10 @@ node scripts/dev.mjs package --offline
 
 ## 发布门槛
 
-README 的[快速安装脚本](../../scripts/install-macos.sh)是单独维护的 Bash 3.2 入口，通过匿名 HTTPS 下载公开稳定 release，解析 latest 后固定 tag 下载归档和校验文件，默认安装到 `~/.codex-view`，增加用户级 PATH 和卸载清单，不需要改写已发布的资产。它使用包内安装器在私有 staging 校验复制，再准备同目录临时文件并原子替换；安装失败按旧文件快照及已知新内容回滚。卸载使用固定路径范围的 SHA256 清单，保留未知文件与用户数据，不把整个前缀视为可删除目录。该脚本的合成归档、升级、卸载、shell 配置和故障测试纳入 `test-tools` / `check`；运行时 binary/API/schema 保持原版。
+README 的[快速安装脚本](../../scripts/install-macos.sh)是单独维护的 Bash 3.2 入口，通过匿名 HTTPS 下载公开稳定 release，解析 latest 后固定 tag 下载归档和校验文件，默认安装到 `~/.codex-view`，增加用户级 PATH 和卸载清单，不需要改写已发布的资产。它使用包内安装器在私有 staging 校验复制，再准备同目录临时文件并原子替换；安装失败按旧文件快照及已知新内容回滚。卸载使用固定路径范围的 SHA256 清单，保留未知文件与用户数据，不把整个前缀视为可删除目录。该脚本的合成归档、升级、卸载、shell 配置和故障测试纳入 `test-tools` / `check`；不会给已发布旧 binary 补装新运行时功能。
 
 正式 GitHub Release 必须从干净、已评审且 CI 通过的 `main` tag 生成，tag 与 Cargo/Web 版本一致。核对常规检查、实际解压安装/项目启动、第三方许可、支持范围及已知问题后准备 release notes；GitHub Release 上传压缩包与 SHA256SUMS，二进制不进入 Git。
 
-本地 `package` 不执行 push、创建 Issue/PR、merge、tag 或发布，不安装到真实用户目录。远程操作按当前用户授权执行，不因添加维护命令而扩大授权。发布前需区分此前 R6 功能验收、新包的安装验证和远端 CI 的实际结果。
+本地 `package` 不执行 push、创建 Issue/PR、merge、tag 或发布，不安装到真实用户目录。远程操作按当前用户授权执行，不因添加维护命令而扩大授权。发布前需区分已有功能验收、新包的安装验证和远端 CI 的实际结果。
 
 本次包装不升级官方 CLI、不修改原生模型/权限、不迁移数据库，也不扩展 V3、平台或 provider。当前功能与兼容限制见[支持范围](../codex-native-cli-workbench-support.md)。

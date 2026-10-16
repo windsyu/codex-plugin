@@ -504,13 +504,13 @@ fn attachments_require_event_scope_hash_and_safe_components() {
 
 // A distinct process is essential: SQLite's native VFS shares SHM nodes for
 // same-process connections. Production never starts the old writer internally.
-struct Writer {
+pub(super) struct Writer {
     child: Child,
     input: ChildStdin,
     output: Receiver<String>,
 }
 impl Writer {
-    fn start(path: &Path, mode: &str) -> Self {
+    pub(super) fn start(path: &Path, mode: &str) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

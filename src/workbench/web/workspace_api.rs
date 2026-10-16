@@ -13,7 +13,7 @@ pub(super) struct Params {
 }
 pub(super) async fn read(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     uri: axum::http::Uri,
     params: std::result::Result<Query<Params>, axum::extract::rejection::QueryRejection>,
 ) -> Response {

@@ -14,7 +14,7 @@
 bash scripts/install-macos.sh
 # 可固定版本或指定绝对安装前缀
 bash scripts/install-macos.sh --version v0.3.0 --prefix "$HOME/.codex-view"
-# 明确升级已有安装：先 Ctrl-C 退出旧工作台，再运行
+# 明确升级已有安装：后台先 code-view stop，前台先 Ctrl-C
 bash scripts/install-macos.sh --force
 # 只安装程序，由自己管理 PATH
 bash scripts/install-macos.sh --no-path
@@ -39,7 +39,7 @@ code-view --version
 
 ## 卸载
 
-先在启动器终端 Ctrl-C 退出工作台，再执行：
+后台实例先运行 `code-view stop`，前台实例在启动器终端 Ctrl-C；确认各配置/数据作用域的工作台及所属 CLI 已退出后，再执行：
 
 ```sh
 code-view-uninstall
@@ -48,6 +48,8 @@ code-view-uninstall
 ```
 
 自定义前缀使用 `<prefix>/bin/code-view-uninstall`。源码脚本也支持 `bash scripts/install-macos.sh uninstall --prefix <prefix>`。卸载读取安装清单，只删除已登记且未被修改的普通文件，移除安装时登记的精确 PATH 区块，并清理空资源目录；未知文件及 `~/.codex-web`、原生 `CODEX_HOME`、旧数据库保留。
+
+支持后台服务的新版本会在升级/卸载改文件前检查本安装的服务登记；仍在运行或无法验证时拒绝，并提示先停止。卸载只移除本可执行文件所属、已验证且不活动的 LaunchAgent 和服务登记，不自动停止进程。旧 binary 没有服务检查接口时会提示手动确认退出；原有安装文件、PATH 和清单验证仍适用。`autostart` 是显式选择，安装器不会自动开启登录自启。
 
 程序文件被修改、PATH 区块残缺/重复、清单异常或路径被替换为符号链接时，卸载会在写入前停止并报告冲突；保存修改后恢复该文件，或自行移除已改的区块后重试。`--force` 仅用于安装，不跳过卸载保护。普通删除/配置写入失败保留清单和卸载器，修复原因后可以重试。安装用私有 staging、原子文件替换与旧文件快照处理失败回滚；若回滚本身因 I/O 或并发修改未完成，日志指出实际未恢复文件，不报告成功。进程被 SIGKILL 或机器突然断电时不承诺事务恢复。
 
@@ -72,6 +74,8 @@ code-view --version
 
 包内安装器先校验内容、平台与目标冲突，再复制到指定前缀的 `bin` 和 `share/code-view`；已发布的 `v0.3.0` 包内默认仍为 `~/.local`，所以上面显式传入新前缀，无需 sudo；后续从当前源码生成的包默认使用 `~/.codex-view`。这个手动入口不编辑 shell 配置或生成快速卸载清单；需要 PATH 和卸载管理时使用上面的快速脚本。手动安装器遇到已有文件会停止，明确升级时使用 `./install.sh --prefix "$HOME/.codex-view" --force`。升级前先在原启动器中 Ctrl-C 退出旧应用，再启动新版本。
 
+当前源码的包安装器拒绝符号链接、非普通文件或多硬链接的可执行文件目标；`--force` 不绕过这些检查，避免覆盖同一文件的其他安装路径。升级服务检查与安装锁同样适用于手动包入口。
+
 包也可以不安装，直接使用解压目录中的 `bin/code-view`。校验和用于检查传输完整性；当前本地包没有 Apple 签名或 notarization。Linux、Windows 和 Intel macOS 未完成验收。
 
 ## 从项目目录启动
@@ -87,7 +91,7 @@ code-view --profile named --no-open
 code-view --history
 ```
 
-`code-view` 将当前目录作为明确项目启动请求；路径参数以调用命令的目录为基准，不切换到安装目录。已有同目录 Run 时复用，默认开始新对话，不自动续最近会话。终端启动器保持前台运行；浏览器自动打开工作台，原生 CLI 负责实际输入与审批。关闭网页保留运行；在启动器终端按 Ctrl-C 结束应用及其自有 CLI。
+`code-view` 将当前目录作为明确项目启动请求；路径参数以调用命令的目录为基准，不切换到安装目录。已有同目录 Run 时复用，默认开始新对话，不自动续最近会话。首次普通项目启动仍保持前台；已有后台实例时复用它。原生 CLI 负责实际输入与审批，关闭网页保留运行。前台使用 Ctrl-C 退出；需要常驻时先运行 `code-view start`，结束时用 `code-view stop`，详见[后台服务与首次注册](usage.md#后台开启远程注册和退出)。这些命令需安装包含该功能的新构建，已发布旧包不会自动获得源码新增功能。
 
 `codex-view` 无参数仍打开全部历史首页，`code-view open <entryFile>` 可重新打开已运行应用。`code-view --help` 显示快速入口和底层参数。配置、历史及原生数据目录继续沿用现有约定，没有数据迁移；细节见[使用指南](usage.md)。
 

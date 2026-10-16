@@ -19,7 +19,7 @@ pub(super) struct Epoch {
 
 pub(super) async fn upgrade(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(epoch): Query<Epoch>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -252,7 +252,7 @@ async fn dispatch(terminal: &TerminalHandle, connection: Uuid, frame: ClientFram
 
 pub(super) async fn stop_run(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -271,7 +271,11 @@ pub(super) async fn stop_run(
         return error(StatusCode::NOT_FOUND, "terminal_unavailable");
     };
     match terminal.stop().await {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"accepted": true})),
+        )
+            .into_response(),
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "terminal_unavailable"),
     }
 }

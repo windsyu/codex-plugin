@@ -1,8 +1,7 @@
-# R6：历史首页与按项目启动原生工作台
+# 历史首页与按项目启动原生工作台
 
-> 初稿日期：2026-09-22。本文描述 R6 的历史读取、首页、项目启动、恢复与多 Run 契约；2026-09-23 的项目归属问题诊断与修正契约见 §14。实际进度只在实施计划维护，不以设计文字代替实现验收。
-> 用户要求将 V1 的跨项目历史整合进 `codex-view`，并倾向默认先进入全部历史，再从已有项目或指定目录进入原生 CLI 工作台。
-> 任务顺序、状态和通过条件只在[实施计划 R6](v2-implementation-plan.md#r6-history-home)维护；关键决定见 [ADR 0053](decisions/0053-history-first-workbench.md)。
+> 本文定义历史读取、项目导航、明确启动/恢复与多 Run 契约。项目分层、单条可撤销归属和任务呈现另见[项目会话整理](codex-native-cli-workbench-session-organization.md)。关键决定见 [ADR 0053](decisions/0053-history-first-workbench.md)。
+> 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)，无参数启动进入项目概览 `/`，全部历史为 `/history`，启动与设置为 `/launch`、`/settings`，仅本机提供 `/relay`。历史只读、显式启动与 Run 隔离不随页面变化。
 
 ## 1. 用户价值、范围与已确认选择
 
@@ -10,49 +9,47 @@
 
 成功标准：
 
-1. 无参数启动先打开全部项目历史；只阅读、搜索、选项目时，新增 CLI、PTY、模型请求均为零。
+1. 无参数启动先打开项目概览，可进入全部项目历史；只阅读、搜索、选项目时，新增 CLI、PTY、模型请求均为零。
 2. 没有安装 CLI、模型配置不可用或旧 Observer 无法读取时，历史首页仍可打开，并分别说明哪些来源暂不可用。
 3. 选择已有项目后点击“开始新对话”，或在“打开其他目录”中指定现有路径后明确启动，进入现有原生工作台；目录信任、输入和审批仍由普通 CLI 完成。
 4. 历史详情中的“继续此会话”只恢复明确选中的、可验证的原生会话；点击记录本身只阅读。
 5. 项目历史、原生会话、旧 Observer 记录与工作台保存记录有明确来源；同一条记录不能因为来源重复而混合正文、用量或保存完整性。
 6. 本机实际 schema 25 的旧历史通过新的只读适配路径验证，不降低数据库版本、不恢复旧控制内核。
 
-已确定并实现的方向：历史首页优先；统一入口；支持已有项目和另一个现有目录；保留原生 CLI。A–F.1 已有分片证据，G 的分项结果与整片验收边界只在实施计划维护。
+统一入口支持已有项目和另一个现有目录，保留原生 CLI。项目概览、历史、设置和项目工作台使用独立页面，不因导航隐式创建 CLI。
 
-用户随后已确认以下两项选择，作为 R6 的产品契约：
+项目启动遵守以下选择：
 
 | 选择 | 已确认方案 | 未采用方案的影响 |
 | --- | --- | --- |
 | 一个项目已经运行，再启动另一个项目 | 新工作台标签页，保留原项目；同一应用实例管理独立 Run | 当前页先确认停止原项目再切换，可缩小并发装配，但会打断正在执行的任务 |
 | 从项目开始工作 | 默认新对话；会话详情另有“继续此会话” | 自动恢复最近会话需要定义“最近”、来源优先级与失效回退，并可能恢复用户未选择的上下文 |
 
-R6-E 实现网页启动与显式恢复；R6-F 扩展独立项目并行 Run，具体契约见 §13。综合资源预算仍由 R6-G 验证。不增加第三套原生对话界面。
+网页启动与显式恢复见 §12，独立项目并行 Run 见 §13。综合资源按 §8 验收，不增加第三套原生对话界面。
 
-非目标：恢复旧 Controller/App Server、网页 Composer、自动输入/审批、任意 Shell、网页文件编辑、Git 写入、删除原生/旧 Observer 数据、跨机器目录启动、IM/多用户、OS 后台常驻服务。新路径指未收录的现有目录；R6 不代建文件夹。Linux/Windows 完整运行、未支持 provider 和更多手机体验仍不由本设计扩大为已支持。
+非目标：恢复旧 Controller/App Server、网页 Composer、自动输入/审批、任意 Shell、网页文件编辑、Git 写入、删除原生/旧 Observer 数据、跨机器自动启动或 IM。新路径指所连电脑上的现有目录，不代建文件夹。macOS 后台服务与 owner 远端目录浏览另见 [ADR 0063](decisions/0063-background-service-directory-browser.md)，公网账号授权另见[中转架构](architecture/relay.md)。Linux/Windows 完整运行、未支持 provider 和更多手机体验仍不由本设计扩大为已支持。
 
-## 2. 已核对的事实与证据限制
+## 2. 设计依据与兼容限制
 
-研究基线：本仓库 `a1f96e5`；官方只读参考仓库实际 commit `633ab199cfd724aa78013c006b27a2b3d049fc3b`。本节“当前/现有”记录的是 R6 实施前核对的历史基线，后续实现以 §9–14 的契约和实施计划证据为准；不依赖运行时访问官方源码目录。
+官方协议研究固定于 `633ab199cfd724aa78013c006b27a2b3d049fc3b`；运行时不依赖参考 checkout。历史运行单元、恢复身份和只读边界必须分别处理：
 
-| 已核对事实 | 依据 / 对设计的影响 |
+| 依据 | 对设计的约束 |
 | --- | --- |
-| 当前无参数启动立即校验 CLI/profile、创建代理、Recorder 和 PTY，再打开页面 | [启动器](../src/bin/codex-view.rs)、[运行装配](../src/workbench/launch.rs)。不能仅把首页导航换成历史，必须拆分应用与 Run 生命周期 |
-| 现有历史查询句柄绑定 workspace 哈希，跨项目目标被拒绝 | [历史 worker](../src/workbench/recording/history.rs)、[API](../src/workbench/web/history_api.rs)。新增全局只读目录，不直接删除现有作用域检查 |
-| V1 项目分组、搜索、会话与工具阅读仍存在 | [旧网页](../web/src/App.tsx)、[查询客户端](../web/src/api.ts)、[项目规则](../src/domain/project.rs)。可抽取阅读组件/纯函数，不能把整个旧 App 或服务端启动流程嵌入新工作台 |
-| V1 `serve` 会导入、迁移和初始化自有库；不是一个纯只读数据库 reader | [Observer main](../src/main.rs)、[Store](../src/store/mod.rs)。新路径禁止调用 `serve`、`migrate`、writer、purge、retention 或 blob sweep |
-| 本机旧库 `user_version=25`，上一轮只读 doctor 的 quickCheck=ok，原生来源可读；当前 migrate 上限为 20 | [schema](../src/store/schema.rs)。这是实际未覆盖场景，不是旧数据已经丢失；R5 旧库验收范围仍只到其明确验证的 schema 20 |
-| 本轮用内存库执行 migrations 1–20，再对实际旧库只读比较表名及列元数据：原有表无缺失，核心历史表列一致 | schema 25 多出 7 个控制相关表，只有 `image_uploads` 多一列 `queue_entry_id`。不读取会话正文，不复制用户数据库到 fixture。列一致只是兼容设计依据，不等于 JSON 语义、查询、并发 WAL 已通过验收 |
-| schema 25 多出的表 | `native_upload_events`、`native_upload_uses`、`native_uploads`、`session_goal_owner_transitions`、`session_goal_owners`、`session_input_queue`、`session_input_queue_transitions`。R6 只读 adapter 不需要这些表，也不会恢复其行为 |
-| 当前 Workbench meta 只保存 workspace 哈希与显示名，没有 cwd | [RecorderOptions](../src/workbench/recording.rs)、[Meta](../src/workbench/recording/journal.rs)。老记录无法仅靠项目名还原路径；须保留“路径未记录”，不能猜目录 |
-| 官方当前源码的 `SessionMeta` 有稳定 thread ID、cwd、parent/fork/history_base 等信息，rollout 包有 sessions/archived_sessions 读取和测试 | [协议定义](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/protocol/src/protocol.rs#L3025)、[列表实现](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/list.rs#L1128)、[rollout 测试](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/recorder_tests.rs)。文件名中的 rollout ID 可能不同于会话 ID，不能把文件名 UUID 直接用于 resume |
+| Application 与 CLI 的生命周期不同 | 首页先提供只读能力，明确启动才装配代理、Recorder 和 PTY；每 Run 的清理和文件根继续隔离 |
+| V1 提供项目分组、搜索和工具阅读，但 `serve` 同时会导入、迁移和初始化库 | 可复用纯查询/分类函数，不调用旧 `serve`、writer、purge、retention 或 blob sweep；详见[Observer 兼容契约](architecture/observer-compatibility.md) |
+| 旧 Observer 写入口只迁移至 schema 20，另有 schema 25 历史形状 | 新 reader 只按明确列与能力读取，不把迁移上限改为 25，不恢复多出的控制表；结构相容不能代替 JSON/锁/WAL 测试 |
+| 旧 Workbench meta 可能只有 workspace 哈希和显示名，没有 cwd | 显示“路径未记录”，不能按项目名猜路径；新 Run 的 project sidecar 与源位置另有明确身份 |
+| 公共 SessionMeta 分开表达 thread ID、cwd、parent/fork/history_base | [协议定义](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/protocol/src/protocol.rs#L3025)与[列表实现](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/list.rs#L1128)提供有版本范围的依据；文件名 UUID 不能直接作为 resume 身份，cwd 也不保证代表用户项目 |
 
-当前可达 Git 历史没有提供完整 schema 25 的 migration 链；已找到的旧输入队列演进不作为恢复整套旧内核的理由。R6-A 用最小合成结构证明读契约，未知结构单独降级；不直接把 `LATEST_SCHEMA_VERSION` 从 20 改成 25。
+兼容能力取决于实际字段、文件身份与只读访问条件；未知结构局部降级，不复制私人正文作为 fixture。
 
 ## 3. 入口和交互
 
 ### 3.1 启动首页
 
 首页是 V1 跨项目阅读能力在当前工作台样式中的呈现，复用 Codicons、现有消息/工具样式和中文说明。没有空终端、输入权按钮或“等待模型回复”的占位。
+
+当前应用导航为项目概览、全部历史、启动项目、设置和仅本机的公网接入。下图仅示意 `/history` 的筛选与阅读区域，不代表完整导航：
 
 ```text
 Codex 工作台                [打开其他目录] [输入路径] [设置]
@@ -74,9 +71,13 @@ Codex 工作台                [打开其他目录] [输入路径] [设置]
 - 支持“未归属项目”及子代理分组；显示名相同、目录不同的项目保持独立。项目已删除仍可读历史，“启动”不可用并说明原因。
 - 索引首次构建时先显示已有结果与覆盖范围；无记录、正在索引、来源故障是三种状态，不混成“没有历史”。重试只安排后台扫描。
 - 当前命令的 cwd 可作为“打开其他目录”的预填值，不因启动命令所在目录自动缩小历史，也不自动启动 CLI。
-- 设置仍从当前页展开；优先清理策略、历史来源及已有日志位置。技术 schema/配置文件路径折叠在诊断，不新增设置路由。
+- 设置位于 `/settings`；优先清理策略、历史来源及已有日志位置。技术 schema/配置文件路径折叠在诊断，配置与删除作用域不随页面路由变化。
 
 ### 3.2 进入与返回工作台
+
+Run 的当前页面为 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，runId 为规范的非零 UUID。单端口中转在所有工作台页面前加 `/g/{gatewayId}`；远程不提供 `/relay`。旧 `/?run=<runId>` 入口仍兼容，加载后规范化到 `/runs/{runId}/chat`，不重放输入、不创建 CLI。服务端只接受精确页面白名单，未知页面、API 或资源不能经通用 SPA fallback 变为工作台 HTML。
+
+同 Run 的实时对话页可选并排终端，终端页独立显示原生 CLI。阅读与运行的关系如下：
 
 ```text
 全部历史 → 项目 A → 开始新对话 → 项目 A 工作台
@@ -87,13 +88,13 @@ Codex 工作台                [打开其他目录] [输入路径] [设置]
 
 首次启动可在当前标签进入工作台。同项目已有运行时按钮显示“进入工作台”，复用同一个 Run，不重复 spawn；另一个项目打开新标签并拥有独立 Run，原项目继续运行，不同项目不会复用 PTY。当前最多 4 个活动 Run，具体容量及同项目/原生会话互斥见 §13。
 
-顶栏“← 全部历史”返回首页，不停止 CLI；再次进入仍连接同一 Run。当前工作台内切换阅读面板保留 TerminalPanel，首页不挂载所有项目终端；其它项目在自己的标签挂载终端。浏览器前进/后退、刷新、重复点击都不启动新进程。关闭标签不停止 CLI；首页工作台卡片可以重新进入或逐项目确认停止。结束一个 Run 后首页与其它 Run 仍可用，并可从同一 Application 明确启动新的 Run。
+顶栏“← 项目概览”返回 `/`，不停止 CLI；再次进入仍连接同一 Run。同 Run 页面通过 history/popstate 切换，保留同一个 TerminalPanel，未显示终端的页面只隐藏它；返回 Application 页后不承诺保留浏览器终端实例，但 CLI 继续。首页不挂载所有项目终端；其它项目在自己的标签挂载终端。浏览器前进/后退、刷新、重复点击都不启动新进程。关闭标签不停止 CLI；概览工作台卡片可以重新进入或逐项目确认停止。结束一个 Run 后概览与其它 Run 仍可用，并可从同一 Application 明确启动新的 Run。页面授权固定于原入口，不能因后来登录另一账号的 Cookie 补发权限。
 
 历史阅读可以跨项目，文件/Git 与输入始终属于 URL 中的当前 Run。阅读项目 B 历史时不得用 B 的消息链接扩大项目 A 的文件根；全局历史的文件路径默认作为文字，进入相应工作台后才能使用其固定根阅读。全局页没有“当前 Token 总量”；运行用量仍绑定各自 Run。
 
 ### 3.3 指定目录与恢复会话
 
-“打开其他目录”在 macOS 弹出系统文件夹选择窗口，支持浏览目录以及通过 `⌘⇧G` 输入路径。旁边的“输入路径”打开同页居中对话框，支持粘贴绝对路径及用户 `~`；不再在历史列表上方插入大块表单。系统选中目录后自动执行只读校验，随后在对话框显示真实目录和“开始新对话”；选目录本身不启动 CLI，取消选择保留原有草稿和预览。窗口不可用时提示并回退到手动输入。不存在、非目录、系统平台不匹配或无法安全打开时不启动；launch 时重新检查身份，目录发生替换返回 `project_changed`。无文件上传、无 Shell 展开、无任意命令输入。系统窗口目前仅实现 macOS；Windows 原生工作台运行支持尚未接入，其它平台保留手动路径入口。
+启动功能位于 `/launch`，历史中的新建/继续动作先进入该页核验。支持时可调用 macOS 系统文件夹选择窗口，通过 `⌘⇧G` 输入路径；手动入口支持粘贴绝对路径及用户 `~`。系统选中目录后自动执行只读校验，在启动页显示真实目录和“开始新对话”；选目录本身不启动 CLI，取消选择保留原有草稿和预览。窗口不可用时保留手动输入；具备目录浏览能力的远程连接提供网页目录选择器，选择只填回表单并执行现有校验，不直接启动 CLI，详见[本机交互](interactions/workbench.md)。不存在、非目录、系统平台不匹配或无法安全打开时不启动；launch 时重新检查身份，目录发生替换返回 `project_changed`。无文件上传、无 Shell 展开、无任意命令输入。系统窗口目前仅实现 macOS；Windows 原生工作台运行支持尚未接入。
 
 历史中的 cwd 是不可信元数据，不能仅凭它创建进程。“开始”显式绑定所显示的真实路径、当前设置修订和本次应用实例；普通 CLI 自己进行 trust/profile/权限检查，不添加 `--skip-*`。
 
@@ -121,22 +122,25 @@ flowchart LR
 - `LaunchOptions` 原生参数构造、代理、脱敏、PTY、Recorder 尽量沿用；拆出 `WorkbenchRuntime`，不再自行拥有全局网页、配置服务或私有应用入口。每 Run 独立观察队列、代理能力、固定 cwd、单写仲裁和保存水位。
 - Run 状态为 `starting → running → stopping → stopped`，失败为 `failed`；“running”只说明进程存活，不等于模型生成中/任务完成。启动失败只清理本次部分创建资源。
 - 点击开始可创建进程，仍须用户在原生终端实际提交。启动请求丢 ACK 时客户端只查询同一 operation，不重放；进程重启后旧 operation 返回失效，不重建运行。E 的 operation 由客户端随机 UUID 标识，在 Application 内短期保存；同键同参返回同一结果，异参冲突。
-- 启动器仍为前台进程。SIGINT/SIGTERM/SIGHUP 或正常退出回收自身所有 Run、listener、worker 和私有入口；不停止外部 Codex。SIGKILL 的既有限制保留。
+- 默认入口保持前台运行，macOS `code-view start` 通过用户级 LaunchAgent 后台运行；`stop` 回收全部自有 Run、listener、worker 与私有入口，SIGINT/SIGTERM/SIGHUP 也执行所属资源清理。不停止外部 Codex，SIGKILL 的既有限制保留。
 
 ### 4.1 重复启动与命令兼容
 
-为同一有效配置目录和数据根提供应用实例锁与私有发现文件，位于 `~/.codex-web/runtime/<scope>/`，0700/0600，仅保存运行期发现信息，不是另一份用户配置。重复执行 `codex-view` 验证所属用户、实例握手和监听地址后打开已有首页，不新增 CLI/后台服务。锁在但握手失败时明确提示重试，不凭 PID 杀进程、不启动第二个写者；残留文件只在取得锁且验证文件身份后清理。不增加 launchd/systemd 或自动脱离终端。
+为同一有效配置目录和数据根提供应用实例锁与私有发现文件，位于 `~/.codex-web/runtime/<scope>/`，0700/0600，仅保存运行期发现信息，不是另一份用户配置。重复执行 `codex-view` 验证所属用户、实例握手和监听地址后打开已有首页，不新增 CLI/后台服务。锁在但握手失败时明确提示重试，不凭 PID 杀进程、不启动第二个写者；残留文件只在取得锁且验证文件身份后清理。macOS 后台模式使用同一锁与作用域，不接管已有前台实例，具体生命周期见 [ADR 0063](decisions/0063-background-service-directory-browser.md)。
 
-建议命令契约：
+命令契约：
 
-| 命令 | R6 行为 |
+| 命令 | 行为 |
 | --- | --- |
-| `codex-view` | 打开/复用全部历史首页；0 新 CLI |
+| `codex-view` | 打开/复用项目概览；全部历史在 `/history`；0 新 CLI |
 | `codex-view --no-open` | 同上，只输出安全地址与私有入口位置 |
 | `codex-view --project /existing/project` | 用户明确要求直接进入该目录工作台，复用现有 Run 或新建对话 |
 | `codex-view --resume <thread-id>` | 保留显式恢复意图，使用启动 cwd/nativeHome 验证后恢复；不因新首页吞掉该参数 |
 | `codex-view --project /existing/project --resume <thread-id>` | 指定目录和会话都验证一致后恢复 |
-| `codex-view open <entryFile>` | 同时读新的 Application entry v2 与旧 v1 entry；严格校验所属用户、loopback 和 URL 格式 |
+| `codex-view open <entryFile>` | 同时读 Application entry v2 与旧 v1 entry；严格校验所属用户、loopback 和 URL 格式 |
+| `code-view start / status / stop` | 启动后台零 CLI 工作台、读取运行/中转状态、完整退出所属服务和项目 |
+| `code-view open` / `open --relay` | 打开当前工作台或本机远程接入设置 |
+| `code-view autostart on/off` | 修改下次登录自启偏好，不改变当前运行状态 |
 
 `--profile`、`--provider-profile`、`--codex-bin` 单独出现只定义本次应用的启动默认值，不隐式创建 CLI。复用实例时这些显式启动设置若与现有实例不一致，返回配置冲突，不静默忽略；`--project/--resume` 是明确启动请求。直接 `--project --resume` 也在版本探测和 PTY 创建前读取原生 header，验证 canonical cwd/nativeHome、canonical rollout 文件名和 `SessionMeta.id`，并在 spawn 前再次验证；不符合的 rollout 仍可由历史页阅读。仅修改启动 cwd 作为首页预填路径的打开操作不等于切换任何 Run。
 
@@ -154,7 +158,7 @@ flowchart LR
 
 原生历史是持续发现新会话的基础，不能只读一份停止更新的旧 Observer 库。旧库保留原生文件已不存在时的历史和已有投影，因此也不能以“重新导入原生文件”替代旧库兼容。
 
-旧来源首次通过现有设置展开面板“接入旧历史”登记；只读取用户选定 `observer.toml` 的来源/数据库/blob 路径白名单，按该文件目录解析相对路径，展示结果后保存到统一 JSON。候选文件本身不能扩大读取授权；不扫全磁盘寻找数据库，不读/继承 token、tailscale、controller、retention 或 permission 设置。登记后在任何 cwd 启动都可发现，不重复操作。原生默认历史无需这个步骤。
+旧来源首次通过设置页“接入旧历史”登记；只读取用户选定 `observer.toml` 的来源/数据库/blob 路径白名单，按该文件目录解析相对路径，展示结果后保存到统一 JSON。候选文件本身不能扩大读取授权；不扫全磁盘寻找数据库，不读/继承 token、tailscale、controller、retention 或 permission 设置。登记后在任何 cwd 启动都可发现，不重复操作。原生默认历史无需这个步骤。
 
 ### 5.2 数据模型与身份
 
@@ -197,7 +201,7 @@ interface HistoryEntry {
 
 合成 schema 25 fixture 由 schema 20 加观察到的结构差异构造，用户正文/真实路径/凭证不复制进 fixture；额外控制表填合成哨兵验证从不读写。列形状对照结果不替代实际查询/JSON/缺列/锁/WAL/未知版本测试。旧 `codex-observerd` 的写入口仍保持现有版本保护，R6 不为它放开更高 schema 写入。
 
-R6-A 已落地为 `src/history` 的独立只读 adapter，当前 bundled SQLite 3.50.2 使用专用 VFS 禁止写/创建/截断/删除并结合 `readonly_shm=1`；保留原锁与 WAL 一致性检查。若缺少必要 WAL/SHM、需要热日志恢复或同进程只能得到可写 SHM，则返回不可用，不修复源文件。缺列/附件不可用按能力降级；页/字段/附件预算、取消、V1 对照及实际范围见[验证记录](validation/native-cli-r6-a-legacy-reader-2026-09-22.md)。C/D 已接入显式来源登记与首页阅读；G3 的[实际 schema 25 限定抽查](validation/native-cli-r6-g3-compatibility-2026-09-29.md)另外验证受限正文查询与源文件零写，不等于全库完整性或真人正文语义审查。
+`src/history` 的独立只读 adapter 使用专用 VFS 禁止写、创建、截断与删除，并结合 `readonly_shm=1` 保留原锁和 WAL 一致性检查。缺少必要 WAL/SHM、需要热日志恢复或同进程只能得到可写 SHM 时返回不可用，不修复源文件。缺列/附件不可用按能力降级，页、字段、附件及取消均有预算。实际旧库的限定抽查不能推导全库完整性或用户正文语义正确；详见[Observer 兼容契约](architecture/observer-compatibility.md)。
 
 ### 5.4 索引、分页、资源与恢复
 
@@ -245,7 +249,7 @@ Windows 路径布局同名；这不表示 R6 已验证 Windows PTY。显式 `sto
 | --- | --- |
 | `POST /launch-targets` | 新建使用 `{projectId}` 或 `{path}`；恢复使用 `{resumeEntryId, sourceRevision}`，由服务端读取原 cwd。兼容恢复时额外提供 path/projectId（至多一个），仍须匹配原记录。只做路径/身份/来源校验，返回短期 targetId、canonicalPath、可见操作、openInNewTab 提示和配置修订；绝不启动 CLI |
 | `POST /runs` | `{instanceId, targetId, mode:"new"\|"resume", operationId, configRevision}`；202 返回 operationId；resume 必须是 target 中已核对的具体条目 |
-| `GET /launch-operations/{operationId}` | starting/ready/failed/existing，完成返回 run、openInNewTab 和同源 `/?run=<runId>`；不返回模型凭证 |
+| `GET /launch-operations/{operationId}` | starting/ready/failed/existing，完成返回 run、openInNewTab 和同源工作台链接；当前进入 `/runs/{runId}/chat`，旧 `/?run=<runId>` 链接保持兼容；不返回模型凭证 |
 | `GET /runs` / `GET /runs/{runId}` | 仅本实例运行摘要；相同项目重复点击返回已有 Run |
 | `POST /runs/{runId}/stop` | 沿用停止确认与幂等，只停止该 Run |
 | `/runs/{runId}/live/*`、`terminal`、`requests/*`、`history/*`、`workspace/*` | 复用现有 handler/权限，明确注入对应 Runtime；请求不按“最后活跃项目”选 hub |
@@ -306,7 +310,7 @@ R6 加载旧 schema 1 时补齐内存默认值，不为一次只读启动改写�
 
 ## 8. 验收与实施原则
 
-详细任务见[实施计划](v2-implementation-plan.md#r6-history-home)，按 A → B → C → D → E → F → F.1（项目归属反馈）→ G 顺序形成可试用切片；每片都需要实际结果，不用本方案取代测试。
+验收以下主链、资源门槛与故障场景，设计文本不能取代可重复的实际结果。
 
 必须覆盖四条主链：
 
@@ -315,59 +319,59 @@ R6 加载旧 schema 1 时补齐内存默认值，不为一次只读启动改写�
 3. 选择已有项目/指定现有路径 → 新对话；指定会话 → 显式 resume：一次点击只产生一个对应 CLI，无自动 Enter、无隐式 --last；失败保留历史页。
 4. 项目 A 正在输入与流式 → 项目 B 独立运行/阅读 → 手机仅访问授权 A → 停止 B / 启动器退出：作用域不串接，现有终端与保存隔离成立。
 
-性能门槛为验收目标：固定硬件/合成语料下，暖索引元数据查询 p95 ≤200ms、首屏页面交互 ≤1s；冷启动历史页不能等待全量扫描。至少 1 万会话、20 万 item、多 GB 来源与慢旧库/重建故障并行运行 CLI，记录查询/后台 CPU、峰值内存、缓存预算、TTFB/Paint 和取消时间；转发/PTY 延迟沿用 P07 相同测点比较，不改变原有阈值掩盖退化。已有[G1 规模与故障](validation/native-cli-r6-g-scale-2026-09-24.md)、[资源补充](validation/native-cli-r6-g1-resources-2026-09-30.md)和[G2 运行隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)实测，具体负载、测点与限制见报告。缓存预算触顶与未知来源明确展示覆盖，不把一次样本宣称为全负载性能保证。
+性能门槛为验收目标：固定硬件/合成语料下，暖索引元数据查询 p95 ≤200ms、首屏页面交互 ≤1s；冷启动历史页不能等待全量扫描。至少 1 万会话、20 万 item、多 GB 来源与慢旧库/重建故障并行运行 CLI，记录查询/后台 CPU、峰值内存、缓存预算、TTFB/Paint 和取消时间；转发/PTY 延迟沿用 P07 相同测点比较，不改变原有阈值掩盖退化。缓存预算触顶与未知来源明确展示覆盖，不把一次样本宣称为全负载性能保证。
 
 所有自动化使用临时 HOME/USERPROFILE/CODEX_HOME 与合成 SQLite/rollout；本机旧库人工只读抽查与合成可重复回归分开记录。只读验证包含数据库与 WAL/辅助文件、blob、原 audit/控制哨兵的前后检查；不导出用户正文做 fixture。使用系统 Chrome，不下载浏览器。
 
-R6-A–D 将三类历史的只读目录/搜索/正文接入默认首页；E 实现网页启动/恢复，F 实现多项目并行与手机作用域，F.1 修正归属/恢复与派生缓存。G 已有规模、故障、隔离和限定旧库抽查的分项证据，完整 R6 交付与用户试用仍以唯一计划为准。R5 原验收保留当时事实，不能替代 R6 的对应验证。R0–R5 历史基线为 `a1f96e5`，A–F.1 汇总为 `466dff7`；后续提交与实际远端状态见实施计划，不用历史“本地增量”描述当前代码。没有原始历史 migration、自动服务替换或自动发布。
+原始历史不做 migration，不自动替换服务或发布。跨源读取、显式启动与多 Run 隔离各自验收，不以旧版、单个样本或局部通过代替当前集成验证。
 
 ## 9. R6-B 应用生命周期的实现基线
 
-本节记录 B 完成时的历史边界；后续目录/来源与配置变更以 §10 为准，当前正文阅读契约见 §11。
+Application 持有共享服务和实例身份，单次 CLI 的运行装配保持独立。目录与来源见 §10，正文阅读见 §11，项目启动和多 Run 见 §12–13。
 
 Application 已独立持有网页、随机 instanceId、本机 owner 配对、配置、来源探测和私有发现锁；WorkbenchRuntime 只持有单次 CLI/PTY/模型代理/记录器。默认启动、刷新、展开设置不执行 CLI 版本探测；只有显式 `--project` 或 `--resume` 进入原生路径。首页不依赖 nativeHome 或可执行文件存在；JSON 损坏时显示原始字段错误、禁用启动与删除，不覆盖原配置。
 
-应用接口已增加 `GET /workbench/v1/application`、`GET /workbench/v1/library/sources`，以及独立的 `GET/PUT /workbench/v1/application/settings`。设置保存使用 `{instanceId, config}` 和 `If-Match`，无需伪造 runEpoch；既有 Run 设置契约暂时保留。私有启动器握手 `POST /workbench/v1/application/connect` 接受 entry capability、instanceId、显式启动默认值与可选 project/resume，只对本机入口提供；B 阶段它不是网页项目选择协议，后者已在 E 接入，见 §12。明确启动失败保留首页并返回安全错误码，错误不携带原生配置正文。
+应用接口已增加 `GET /workbench/v1/application`、`GET /workbench/v1/library/sources`，以及独立的 `GET/PUT /workbench/v1/application/settings`。设置保存使用 `{instanceId, config}` 和 `If-Match`，无需伪造 runEpoch；既有 Run 设置契约暂时保留。私有启动器握手 `POST /workbench/v1/application/connect` 接受 entry capability、instanceId、显式启动默认值与可选 project/resume，只对本机入口提供；它不是网页项目选择协议，网页启动使用 §12 的 launch-targets/runs 接口。明确启动失败保留首页并返回安全错误码，错误不携带原生配置正文。
 
 `runtime/<scope>` 的 scope 绑定规范化配置目录和有效数据根。实例锁使用私有普通文件与非阻塞 flock，锁文件不删除以保持所有调用者锁定同一 inode；入口正常退出按身份清除。持锁但入口尚未就绪最多等待两秒，握手失败报错且不新建进程。握手使用 loopback、禁代理/重定向、严格实例身份和有界响应；显式启动参数冲突不被忽略。`open` 继续识别 v1；v2 必须有 instanceId，首页没有 cliPid/runEpoch，可选 runId 必须与 URL 完全一致。
 
-本片只开放一个 Run 槽位，同一明确项目/恢复参数复用既有运行，其他项目请求返回冲突。B 阶段已结束的 Run 保持阅读，开始下一次运行需退出后重新启动应用；E 已允许停止后的重新创建和正式 runBase 路由，仍保持一个运行中项目。上述为 B 的历史基线；F 已取消无 Run 前缀的别名并扩展多 Run 注册表。手机入口始终不挂载 Application/library/应用设置接口；F 的共享设备 listener 见 §13。
+所有 Run 接口显式携带 runId，不提供无 Run 前缀的运行别名。注册表最多保留 4 个活动 Run 和额外 4 个已结束 Run 的内存阅读；手机入口不挂载 Application/library/应用设置接口，共享设备 listener 见 §13。
 
-B 阶段的历史 worker 在独立线程有界探测来源，已用合成源验证 A reader 首批项目查询和错误隔离；当时生产旧来源列表为空，尚不读取 cwd 的 observer.toml。当前首页只有真实的目录可用/未索引/未登记状态；不会把它解释成“历史为空”。原生/工作台索引与来源持久登记在 C 接入，完整历史阅读在 D 接入。配置仍为 schema 1，不执行用户历史 migration。验证与截图见 [R6-B](validation/native-cli-r6-b-application-2026-09-22.md)。
+历史 worker 使用独立线程有界探测与索引来源。首页区分目录可用、未索引、未登记和来源错误，不将不可用解释成“历史为空”。原生/工作台索引与持久来源登记按 §10 执行，不修改用户历史。
 
 
 ## 10. R6-C 目录与来源的实现契约
 
 `src/history/library` 已接入 Application 的独立后台索引与查询线程。默认读取当前 nativeHome 和有效历史根，可额外登记最多 8 个来源。原生 reader 共享旧 importer 使用的纯分类/结构脱敏函数，并补充当前 typed UserMessage、用户/模型/系统上下文的区分及工作台文字凭证脱敏；不实例化 Importer，不访问 Codex 私有 SQLite。原生身份只使用 `SessionMeta.id`，不使用文件名或根 `session_id` 替代。
 
-目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=2`（C 初始版本为 1，F.1 升级规则见 §14），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
+目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=4`（C 初始版本为 1，F.1 为 2；R7 的 3/4 仅重建派生目录，独立用户归类不变，见[整理契约](codex-native-cli-workbench-session-organization.md)），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
 
 自动重扫间隔从整轮扫描及工作台补全结束后计算，至少等待 30 秒；明确刷新或来源配置变化可提前触发。开始一轮时消费已有刷新请求，避免启动后无故再扫一轮。来源正在更新时保留同一来源身份已发布的 revision，暖启动从已提交目录恢复 revision；只读实例也报告已发布 revision/条目数。原生检查点复用仍推进本轮已整理条目数，不能长时间把有效工作显示为 0。
 
 查询仅访问已提交派生库，不同步扫描源。独立查询队列 16，当前单个查询 worker（包括正文与导入路径预览），SQLite 查询最多 2 秒，接口等待最多 3 秒。默认 50 / 最大 200 条，每个响应正文预留封装余量限制在约 900 KiB；游标绑定来源配置、已提交修订、全部筛选、详情类型和分页长度，并用应用随机密钥校验。正文/详情返回所属 entry 元数据，可带 `sourceRevision` 拒绝不匹配的源版本。变更/撤销后旧游标 409；未知条目及无详情能力 404；非法参数 400；目录/配置/预算暂不可用 503。`projectId=unassigned` 表示未归属项目。
 
-首页空列表若查询仍为 pending 或包含 indexing 覆盖原因，每次查询完成后等待 2 秒，只读重取条目与项目列表；无需依赖短暂的来源状态通知，不发送后台重扫 POST。页面显示已整理条目数，该数字属于所选来源的本轮处理进度，不代表当前筛选命中数或全部历史已覆盖。得到记录、确认空结果、发生请求错误、打开正文或卸载页面后停止该重试；保留当前筛选与分页，已有正文阅读位置不重置。首次全量解析仍可能耗时，规模及 CPU 门槛按 G 验收，不以此反馈修复宣称通过。
+首页空列表若查询仍为 pending 或包含 indexing 覆盖原因，每次查询完成后等待 2 秒，只读重取条目与项目列表；无需依赖短暂的来源状态通知，不发送后台重扫 POST。页面显示已整理条目数，该数字属于所选来源的本轮处理进度，不代表当前筛选命中数或全部历史已覆盖。得到记录、确认空结果、发生请求错误、打开正文或卸载页面后停止该重试；保留当前筛选与分页，已有正文阅读位置不重置。首次全量解析仍可能耗时，资源与 CPU 按 §8 验收，不以轮询反馈推导性能通过。
 
 来源撤销通过查询前后重读有效配置立即阻断缓存访问，后台再回收派生记录；修改同一 sourceId 的位置也会改变来源身份。多个应用共享数据根时只有持锁者更新，其他应用只读匹配自己已授权来源的已提交目录。索引损坏可删除该派生文件重建，未知派生版本拒绝猜测；锁竞争、索引路径不可用和扫描错误不影响 CLI/PTY/代理。原生及 Observer source 均不创建/修复/修改原始文件；外部工作台通过独立只读入口复用 journal 校验，不调用旧历史服务的 index/rebuild。
 
-C 阶段的缓存接口边界保留并明确显示为 partial：每条原生/旧会话最多缓存 2 MiB 脱敏记录，单详情超过 64 KiB 时保留省略标记，搜索摘录最多 64 KiB；工作台源在最多 16 MiB 的已保存材料内校验回放，超限时先提供目录元数据并标明 `run_read_budget`，不声称正文完整。缓存默认 512 MiB，配置范围 64–2048 MiB；为旧/新 generation、页和事务临时空间预留，实际材料预算保守分配，数据库页硬限 1 GiB，另留 1 GiB 给事务空间。历史清理与派生缓存回收是不同操作。G 的规模回归发现正文缓存会挤占目录，现为每来源材料额度保留至少一半给后续元数据，正文/搜索先停止接纳；不变文件检查点复用也可在事务内省略正文/搜索并保留元数据、cwd 与定位信息。目录元数据仍受总额度限制，超限继续明确 partial。这是材料接纳额度，并非 SQLite 文件大小等于配置值；页/索引/定位符及事务空间另受既有保守分配和硬限约束。被省略正文的未变化检查点不会仅因后来增加预算而自动补正文，当前仍需完整派生缓存重建；按需源阅读不受此缓存覆盖限制。按需源正文窗口与连续阅读已在 D 接入（§11）；缓存接口的覆盖范围不等于全部源正文，G 的分项实测见 [规模与故障记录](validation/native-cli-r6-g-scale-2026-09-24.md)，整片状态只看实施计划。
+缓存接口明确显示 partial：每条原生/旧会话最多缓存 2 MiB 脱敏记录，单详情超过 64 KiB 时保留省略标记，搜索摘录最多 64 KiB；工作台源在最多 16 MiB 的已保存材料内校验回放，超限时先提供目录元数据并标明 `run_read_budget`，不声称正文完整。缓存默认 512 MiB，配置范围 64–2048 MiB；为旧/新 generation、页和事务临时空间预留，实际材料预算保守分配，数据库页硬限 1 GiB，另留 1 GiB 给事务空间。历史清理与派生缓存回收是不同操作。为防正文缓存挤占目录，每来源材料额度至少一半保留给后续元数据，正文/搜索先停止接纳；不变文件检查点复用也可在事务内省略正文/搜索并保留元数据、cwd 与定位信息。目录元数据仍受总额度限制，超限继续明确 partial。这是材料接纳额度，并非 SQLite 文件大小等于配置值；页/索引/定位符及事务空间另受既有保守分配和硬限约束。被省略正文的未变化检查点不会仅因后来增加预算而自动补正文，当前仍需完整派生缓存重建；按需源阅读不受此缓存覆盖限制。按需源正文窗口与连续阅读见 §11；缓存接口覆盖范围不等于全部源正文。
 
 Observer 项目/会话/items/上下文采用 A 的 SELECT 白名单，缺字段、来源修订变化及抓取范围均保留说明；没有 nativeHome 映射的旧副本不关联原生入口。只有显式 nativeHome 映射且 thread ID 相同才返回 relatedEntryIds，三类正文不会拼接。新 Run 由记录线程独立写 `project.json`（格式 1、workspaceId、canonical cwd、nativeHome）；失败只导致路径不可用。旧 Run 无 sidecar 时，仅从仍授权的原生目录缓存中按完整 workspace 哈希匹配可信路径；同名、目录不存在或无匹配都不猜。meta/journal 和清理接口不改格式。
 
 已增加 `POST /library/preview`：本机 owner + 同源 CSRF，接受用户明确输入的 `{path}`，只读取最多 64 KiB Observer TOML 并提取 `storage.database`、`storage.blob_dir` 及唯一原生来源的 `codex_home`。相对路径按该配置文件目录解析，无法明确解析的路径拒绝；不读取登录文件或网络设置。网页先展示数据库/附件位置，点击“确认加入待保存来源”只更新草稿，最终保存才登记。直接填写原生目录、工作台目录或旧数据库也使用同一 JSON。
 
-JSON schema 1 加载仍不改写原文件；保存写 schema 2 并保留原备份。源错误可在首页/同页设置诊断。D 的项目/会话/正文导航见下节，E 的网页启动/显式恢复见 §12，F 的已实现多 Run 见 §13。实施状态与验证只看[计划](v2-implementation-plan.md#r6-history-home)。
+JSON schema 1 加载仍不改写原文件；保存写 schema 2 并保留原备份。源错误可在历史页/设置页诊断。项目/会话/正文导航见下节，网页启动/显式恢复见 §12，多 Run 见 §13。
 
-C 的已执行结果见[统一历史目录与来源验证](validation/native-cli-r6-c-library-2026-09-22.md)，实施状态以计划为准。
+
 
 
 ## 11. R6-D 阅读界面与按需正文
 
 ### 11.1 首页交互
 
-`codex-view` 首页提供项目导航、会话列表和同页正文阅读。项目和会话列表每页 30 条；正文是连续滚动阅读。小屏用“项目”展开导航，阅读时收起筛选栏；返回列表保留原筛选。已有 Run 以显式链接进入；新建/恢复动作已由 E 接入，见 §12，点击项目或历史本身仍只读。
+`codex-view` 的 `/history` 页提供项目导航、会话列表和同页正文阅读。项目和会话列表每页 30 条；正文是连续滚动阅读。小屏用“项目”展开导航，阅读时收起筛选栏；返回列表保留原筛选。已有 Run 以显式链接进入；新建/恢复动作已由 E 接入，当前导航到 `/launch` 核验，见 §12，点击项目或历史本身仍只读。
 
-来源、项目、搜索词、子代理分组、所选会话、搜索位置及来源版本进入 URL。浏览器前后退恢复导航；当前标签的 `history.state` 只保存阅读游标/偏移与列表位置，不保存正文、认证 token 或图片。刷新沿用同一应用内的游标；重启/来源改变后旧位置被拒绝，可重新读取。设置在原页展开，草稿与正文不因展开/收起重新挂载。详情关闭/Escape 返回原按钮焦点；加载失败保留已有内容并提供重试或重新读取。来源移除或同 ID 改换配置身份后，旧内容停止展示。
+来源、项目、搜索词、子代理分组、所选会话、搜索位置及来源版本进入 URL。浏览器前后退恢复导航；当前标签的 `history.state` 只保存阅读游标/偏移与列表位置，不保存正文、认证 token 或图片。刷新沿用同一应用内的游标；重启/来源改变后旧位置被拒绝，可重新读取。设置位于独立 `/settings` 页，同标签切换保留未保存草稿；同 Run 功能页导航不卸载终端。详情关闭/Escape 返回原按钮焦点；加载失败保留已有内容并提供重试或重新读取。来源移除或同 ID 改换配置身份后，旧内容停止展示。
 
 用户、模型、工具/命令及其它上下文分别呈现；工具参数不当作执行成功，未知类型保持“未识别记录”。复用当前安全 Markdown 和消息样式，HTML/脚本经过过滤，历史内嵌媒体不自动发出网络请求。单条 Markdown 摘要最多 4,000 字符，用户文本最多 12,000、工具摘要最多 2,000；存在更长内容时明确提示按需详情。未保存的 prompt、模型名称、用量和工具结果均不补造。
 
@@ -389,13 +393,13 @@ Observer 窗口继续使用 A 的零写 VFS/白名单 reader，有界读取 Cont
 
 页面只挂载当前及相邻两个正文块，每块最多 16 条，最多 48 条卡片；最多缓存相邻五块的摘要，离开窗口后可用游标再次获取。占位高度维持连续滚动，加载位置保留在当前标签；单条详情只挂载纯文本，分段展开，不一次创建与源文件大小相当的 DOM。项目/会话分页不无界累积。正文位置元数据最多 2,048 块，极长记录达到边界时用“继续读取后续记录”释放前段位置后继续，不冒充已经读完。
 
-D 的验收覆盖三类合成历史、超出 2 MiB 缓存的原生正文、压缩/镜像/搜索定位/替换/撤销、系统 Chrome 四视口、键盘/返回/刷新/断线与零 CLI。证据见 [R6-D 验证](validation/native-cli-r6-d-reading-2026-09-22.md)。大规模 1 万会话/20 万 item、多 GB 来源的 p95/堆/CPU 及限定旧库抽查已有 G 的独立报告（§8）；压缩定位和工作台回放预算可能限制特别大的单次读取，不能用 D 的小规模通过代替后续分项证据或整片验收。
+阅读验收覆盖三类合成历史、超出 2 MiB 缓存的原生正文、压缩、镜像、搜索定位、替换、撤销、系统 Chrome 四视口、键盘、返回、刷新、断线与零 CLI。大规模会话、item、多 GB 来源的 p95/堆/CPU 与旧库只读能力按 §8 单独验证；压缩定位和工作台回放预算可能限制特别大的读取，小样本通过不代表无界容量。
 
 <a id="r6-e-launch"></a>
 
 ## 12. R6-E：网页启动、恢复与单项目运行
 
-本节记录 E 已实现的契约；验证结论和命令见[R6-E 记录](validation/native-cli-r6-e-launch-2026-09-22.md)，当前状态只看实施计划。E 不修改统一 JSON、JSON Schema、迁移或已有历史格式。
+网页启动使用短期已核验候选与可查询操作，不改变统一 JSON、JSON Schema 或原始历史格式。
 
 ### 12.1 启动与操作恢复
 
@@ -403,7 +407,7 @@ D 的验收覆盖三类合成历史、超出 2 MiB 缓存的原生正文、压�
 
 接纳启动后，HTTP 响应遗失、刷新或短暂网络失败只允许 `GET /workbench/v1/launch-operations/{operationId}` 查询同一操作；客户端不得重新 POST 或生成第二个 ID。operation 在当前 Application 内短期保留，同键同参返回相同状态，异参返回冲突；Application 重启后返回 `operation_unavailable`，不根据旧浏览器状态重建 CLI。target 的 60 秒期限不使已接纳操作失效。
 
-成功创建的新 Run 使用 `?run=<runId>` 进入工作台。运行期 HTTP/SSE/WS 客户端由 `/workbench/v1/runs/{runId}/…` 寻址；Application、历史目录和启动操作仍是 Application 范围。E 曾以无 Run 前缀别名兼容唯一槽位；F 已移除 Application 中这些别名，所有运行接口必须明确 Run。
+成功创建的新 Run 使用 `/runs/{runId}/chat` 进入工作台，旧 `?run=<runId>` 规范化到同一路由。运行期 HTTP/SSE/WS 客户端由 `/workbench/v1/runs/{runId}/…` 寻址；单端口中转在页面与 API 前加 `/g/{gatewayId}`。Application、历史目录和启动操作仍是 Application 范围。E 曾以无 Run 前缀别名兼容唯一槽位；F 已移除 Application 中这些别名，所有运行接口必须明确 Run。此展示变化不修改 wire contract，`WORKBENCH_API_VERSION=1` 保持不变。
 
 启动失败在 operation、首页的最近启动结果及直接启动握手中使用固定错误码。前端共用中文说明，不展示底层错误链、原生配置正文或凭证；未知错误使用固定回退文案。目录/恢复校验的既有错误码保持，CLI 初始化补充以下分类：
 
@@ -433,9 +437,9 @@ E 的 Application 只有一个正在启动或运行的项目。相同 canonical 
 
 停止该 Run 后，Application 和历史首页继续存在，已结束 Run 保持只读阅读；从首页启动新对话会创建新的 Run。停止/重启不会改写原生 rollout、旧 Observer、既有记录或配置。另一个项目在 E 中返回单项目冲突，不能为了切换而停止原项目；F 将其扩展为多个并行项目、新标签、Run 注册表与跨 Run 授权隔离，见 §13。
 
-从一个新页面进入同一 Run 时，既有 R2 终端重连保留策略继续保护原页面的输入 reservation；新页面可能需要用户点击一次“在此输入”才能取得输入权，服务不会隐式接管或重发按键。此交互由 R6-G 试用阶段继续打磨，不作为 E 已验证的即时无缝输入承诺。
+从一个新页面进入同一 Run 时，既有 R2 终端重连保留策略继续保护原页面的输入 reservation；新页面可能需要用户点击一次“在此输入”才能取得输入权，服务不会隐式接管或重发按键。不能把新页面打开成功当作自动获得已有 CLI 的输入权。
 
-首页的已有工作台入口使用紧凑卡片：终端图标、项目名、文字运行状态及新标签页箭头；运行中与已结束使用不同底色/状态，整个卡片可点击。项目路径保留在提示中，无障碍名称说明项目、状态和新标签页行为。悬停及键盘焦点清晰可见，窄屏简化操作文字、长项目名省略，空列表不占据导航空间；不增加动画、额外请求或新 Run。视觉验证见[入口样式记录](validation/native-cli-r6-e-workbench-entry-2026-09-23.md)。
+首页的已有工作台入口使用紧凑卡片：终端图标、项目名、文字运行状态及新标签页箭头；运行中与已结束使用不同底色/状态，整个卡片可点击。项目路径保留在提示中，无障碍名称说明项目、状态和新标签页行为。悬停及键盘焦点清晰可见，窄屏简化操作文字、长项目名省略，空列表不占据导航空间；不增加动画、额外请求或新 Run。
 
 ### 12.4 系统目录窗口与手动输入
 
@@ -443,15 +447,15 @@ E 的 Application 只有一个正在启动或运行的项目。相同 canonical 
 
 成功返回 `{ "path": "/absolute/project" }`，用户取消返回 `{ "path": null }`。前者复用 `launch-targets` 检查与显式启动流程；后者不提交检查或启动。原生窗口每个 Application 最多一个，重复请求返回 409 `picker_busy`。不支持、无法启动、超时或非法结果使用 503 和对应 `picker_*` 错误码；页面提供中文说明与手动输入回退。
 
-macOS 使用构建时编译、嵌入产物的微型 AppKit `NSOpenPanel` 助手，只选现有文件夹，不读取其文件内容或创建目录。运行时在 0700 私有临时目录内创建完整 `Codex Folder Picker.app/Contents/Info.plist` 和 `Contents/MacOS/codex-folder-picker`，声明应用类型、版本和支持的本地化；助手由 `NSApplication.run` 驱动启动与事件循环，在启动完成通知后异步显示目录窗口，再请求激活；完成时主动唤醒并停止事件循环，统一输出选择或取消结果。系统默认按钮与侧栏使用 macOS 语言。单独验证 Mach-O 内嵌 plist 的语言结果不足以验收由系统进程绘制的窗口，现已通过真实产品接口和原生窗口控件验证中文、取消与目录选择，见[实际窗口修正](validation/native-cli-r6-e-picker-bundle-2026-09-23.md)。随后已针对初次响应反馈调整启动顺序并重测真实选择/取消，见[响应改进](validation/native-cli-r6-e-picker-responsiveness-2026-09-23.md)；系统首次启动延迟仍需按实际试用观察，不承诺固定耗时。
+macOS 使用构建时编译、嵌入产物的微型 AppKit `NSOpenPanel` 助手，只选现有文件夹，不读取其文件内容或创建目录。运行时在 0700 私有临时目录内创建完整 `Codex Folder Picker.app/Contents/Info.plist` 和 `Contents/MacOS/codex-folder-picker`，声明应用类型、版本和支持的本地化；助手由 `NSApplication.run` 驱动启动与事件循环，在启动完成通知后异步显示目录窗口，再请求激活；完成时主动唤醒并停止事件循环，统一输出选择或取消结果。系统默认按钮与侧栏使用 macOS 语言。验收须经真实产品接口操作系统窗口的中文、取消与选择；Mach-O 内嵌 plist 或独立语言探针不足以代替实际窗口验证。系统首次启动延迟按实机观察，不承诺固定耗时。
 
 不在运行时编译脚本、调用 shell、强设中文或修改系统偏好。构建继续复用已有 `cc` 与 Apple SDK，助手仍嵌入单个工作台产物；临时应用包用完移除，无需安装或维护应用包缓存。程序配置与历史目录不变。
 
-输出限制 16 KiB、路径限制 4096 字节且拒绝控制字符，等待最多 180 秒，子进程设有 kill-on-drop。网页请求中断不承诺立即关闭系统窗口；用户可在原生窗口取消，服务器超时或运行时销毁会终止该子进程。网页不能指定可执行文件或诊断参数；新实现不增加配置项、数据格式或 migration。语言元数据依据 [Apple CFBundleLocalizations](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundlelocalizations) 与 [CFBundleAllowMixedLocalizations](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleallowmixedlocalizations)，验证见[语言与目录说明修正](validation/native-cli-r6-e-picker-language-2026-09-22.md)。
+输出限制 16 KiB、路径限制 4096 字节且拒绝控制字符，等待最多 180 秒，子进程设有 kill-on-drop。网页请求中断不承诺立即关闭系统窗口；用户可在原生窗口取消，服务器超时或运行时销毁会终止该子进程。网页不能指定可执行文件或诊断参数；新实现不增加配置项、数据格式或 migration。语言元数据依据 [Apple CFBundleLocalizations](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundlelocalizations) 与 [CFBundleAllowMixedLocalizations](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleallowmixedlocalizations)。
 
 新建项目只确认项目目录，不展示“本次使用的原生历史位置”。继续已有会话时可展开“所选会话的 Codex 数据目录”，说明它由官方 Codex CLI 管理，用于继续所选会话；默认是 `~/.codex`，也可能是显式 CODEX_HOME 或登记的原生来源。工作台自身的 JSON、记录、目录索引和实例元数据仍在约定的 `~/.codex-web` 下；本次不将其改名为 `.codex-review`，也不移动或重建原生会话。
 
-手动输入对话框使用 HTML `dialog`：打开后聚焦路径输入框，Enter 检查目录，Escape/取消关闭并恢复网页触发按钮的焦点；启动或选择处理中禁用相关操作。桌面与窄屏共用此覆盖层，不改变历史页面的布局和阅读位置。浏览器目录句柄不能提供服务端所需的绝对路径，因此不使用上传目录或 `showDirectoryPicker` 代替本机选择窗口。参考 [Apple NSOpenPanel](https://developer.apple.com/documentation/appkit/nsopenpanel/canchoosedirectories) 与 [MDN 目录句柄](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemDirectoryHandle)。实际验证范围见[目录入口改进记录](validation/native-cli-r6-e-folder-picker-2026-09-22.md)。
+手动输入对话框使用 HTML `dialog`：打开后聚焦路径输入框，Enter 检查目录，Escape/取消关闭并恢复网页触发按钮的焦点；启动或选择处理中禁用相关操作。桌面与窄屏共用此覆盖层，不改变历史页面的布局和阅读位置。浏览器目录句柄不能提供服务端所需的绝对路径，因此不使用上传目录或 `showDirectoryPicker` 代替本机选择窗口。参考 [Apple NSOpenPanel](https://developer.apple.com/documentation/appkit/nsopenpanel/canchoosedirectories) 与 [MDN 目录句柄](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemDirectoryHandle)。
 
 <a id="r6-f-multi-project"></a>
 
@@ -479,33 +483,21 @@ Application 仅在某个 Run 明确开启手机接入后创建一个 IPv4 设备
 
 停止 Run 同步撤销其设备许可，随后注销该 Run；已停止 Run 不能重开手机接入，电脑仍可读保留内容。关闭/重开接入保留该 Run 的固定配对码，但旧 Cookie、输入权限和重连资格不复活；旧 generation 的延迟清理不能删除新授权。Application 重启生成新身份与配对码，不继承设备状态。
 
-F 不改 JSON/schema、原生配置或历史格式，不执行迁移。安装版 CLI 与合成模型的证据、真实手机未复测的边界及当前状态统一见实施计划和本片验证记录。
+多 Run 不改变原生配置和历史格式，不迁移原始数据。真实手机与网络恢复须单独验收，不从合成模型或桌面手机视口推导。
 
 ## 14. 项目归属纠偏：诊断与实现契约
 
 ### 14.1 用户问题与已确认事实
 
-2026-09-23 用户反馈首页左侧混入不属于项目的会话目录，项目顺序也混乱。初次调查只做只读诊断与方案；以下事实记录的是修复前状态，后续修复见本节契约和实施计划。以下本机统计仅代表当时已发布索引，不能作为全部原生历史的覆盖承诺；不保存用户正文、会话 ID、仓库 URL 或私人 fixture。
+原生 `session_meta.cwd` 可能是会话执行目录而非用户项目。若只把合法 cwd 哈希化，Desktop 临时目录会进入项目导航；旧 Observer 明确 NULL 的 projectKey 也不能重新按 cwd 推成项目。纯分类规则来自 `src/domain/project.rs`，目录 adapter 在派生层独立使用，不读取正文猜项目。
 
-| 事实 | 证据 | 影响 |
-| --- | --- | --- |
-| R6 原生 adapter 将 `session_meta.cwd` 直接交给 `Entry::path`；后者只校验绝对路径/长度/NUL，规范化后生成项目 hash | `src/history/library/native.rs`、`model.rs::project` | 只要有合法 cwd，即使是会话执行目录也进入项目导航 |
-| V1 已有 Desktop 无项目会话兼容判定，R6 未保留 | `src/domain/project.rs::inferred_project_key`；V1 `store/mod.rs` 在 session_meta 写入 project_key | 这是新历史索引的分类回退，不能用隐藏几个名称解决 |
-| R6 旧库 reader 返回 `projectKey`，adapter 却忽略它，重新从 cwd 生成项目 | `legacy_contract.rs`、`legacy_reader.rs`、`library/scan.rs::legacy_step` | 旧库原本 NULL 的归属也可能重新变成项目；本机当前仅启用自动原生/工作台源，此点为代码确认的兼容问题，未声称本次截图来自旧库 |
-| 项目查询按 `ORDER BY project` 排序，project 是 `p_<hash>` | `src/history/library.rs` 项目列表 SQL | 稳定但无用户意义，未沿用 V1 的最近记录排序 |
-| 原生未变文件直接复用旧 checkpoint 和 metadata/project | `library.rs::reuse_checkpoint` | 只修 parser 不足以修复已有用户索引；手动“更新历史”也可能继续复用错误归属 |
+项目按最近记录排序，相同时间以稳定身份打破平局，不能按 opaque `p_<hash>` 排出无用户意义的顺序。归属规则变化须使旧检查点与派生 metadata 失效重建；仅修 parser 或触发重扫不足以纠正仍复用的旧投影。
 
-只读核对派生目录与相关 rollout 的首条元数据发现：当时目录中 150 条来源记录（131 原生、19 工作台），按来源与路径组合为 37 组；其中 **31 条原生记录、19 个不同 cwd** 匹配 `Documents/Codex/YYYY-MM-DD/<name>`，originator 均为 `Codex Desktop`。截图中被指出的短名、URL 转写名与这些 cwd 尾段一致。该 31 条包含 18 个非子代理记录和 13 个子代理记录，无须读取对话正文即可确认误归类链路。所有这类样本均无 Git 元数据，但这不是分类条件：合法非 Git 项目必须保留。
-
-还确认了相邻的亲子关系缺口：13 个子代理样本均在顶层 `payload.parent_thread_id` 有父 ID，R6 索引的 parentThreadId 却均为空；当前 parser 只读 nested `source.subagent.thread_spawn.parent_thread_id`。它们已被 isSubagent 标识，因此本样本不能声称被当成主会话，但父会话导航丢失。修正时同时兼容两种已知形状，不借此按父 cwd 自动改变项目。
-
-官方只读参考仓库本次实际 commit 为 `633ab199cfd724aa78013c006b27a2b3d049fc3b`；其公共 `protocol.rs::SessionMeta` 分开记录 cwd/originator/source 和顶层 parent_thread_id，并未提供“cwd 必然是用户项目”的保证。`Documents/Codex/...` 判定是 V1 已存在、由本机样本支持的兼容启发式，不是官方稳定的 Desktop 项目 API，不能扩大为所有平台/版本的确定事实。
-
-核查命令 `cargo test --offline --bin codex-observerd domain::project::tests -- --nocapture` 的 4 项已有纯函数测试通过，包含 Desktop 目录无归属、同目录普通 CLI 仍归属项目、普通项目不误伤。它只证明 V1 判定仍成立，不证明 R6 已修复。独立只读审查确认了相同分类、旧库、排序与缓存问题。
+官方参考 commit `633ab199cfd724aa78013c006b27a2b3d049fc3b` 的 `SessionMeta` 分开表达 cwd/originator/source 与顶层 parent_thread_id，没有保证 cwd 是用户项目。`Documents/Codex/YYYY-MM-DD/<name>` 是限定 originator 和完整路径的兼容启发式，不是稳定 Desktop 项目 API；无 Git 元数据也不是排除合法项目的条件。父 ID 同时兼容顶层与已知 nested 字段，冲突不建立错误跳转，也不按父 cwd 自动改归属。
 
 ### 14.2 目标、边界与归属规则
 
-目标：左侧展示可理解的项目，无项目会话统一可达；分类变化不删历史、不丢正文/用量、不改变指定会话恢复时的工作目录。沿用现有页面，不新增设置页、项目管理服务或旧 App Server 依赖。
+目标：历史页左侧展示可理解的项目，无项目会话统一可达；分类变化不删历史、不丢正文/用量、不改变指定会话恢复时的工作目录。分类修正不增加项目管理服务或旧 App Server 依赖；独立设置页另按 ADR 0059 提供。
 
 本次先恢复有证据的归属规则，不建设通用“自动识别所有项目”的系统。非目标：名称黑名单、所有非 Git 目录归零、扫描磁盘找仓库、把子目录/工作树自动归并 Git 根、按正文猜所属项目、根据最后打开项目归属、按父会话猜 cwd、人工拖拽分类与私人 Desktop SQLite 接口。
 
@@ -576,7 +568,7 @@ V1 的纯规则已复制为独立、可测试的归属函数，没有引入 Obse
 - `GET /library/projects` 记录只返回有归属项目，包含 `latestRecordedAt`；页面附加 `unassignedRecords` 汇总，与当前 source/group/q 相同过滤范围、独立于项目分页，避免只取一页误算全部。仍保持有界服务端查询。
 - 计数明确为“条记录”，包含原生/工作台/旧来源各自的记录，不承诺来源去重或唯一会话。主/子代理筛选统一作用于计数与列表。
 - 会话行用 projectId 判断归属，不再从 recordedCwd basename 生成项目名。未归属记录显示“未归属项目”；真实工作目录在详情中可查，防止执行目录再次变成项目标签。
-- 无新增独立设置页；不自动删除、隐藏会话，不自动启动任何 CLI。手机仍只访问被授予的 Run，不能借新增导航取得全部历史权限。
+- 分类导航不自动删除、隐藏会话，不自动启动任何 CLI。独立设置页不改变授权：设备配对入口仍只访问被授予的 Run，不能借新增导航取得全部历史或共享设置权限；公网账号的 owner 范围另按中转契约授权。
 
 ### 14.5 验收与后续风险
 
@@ -589,6 +581,4 @@ V1 的纯规则已复制为独立、可测试的归属函数，没有引入 Obse
 5. 顶层/nested/两者相同/冲突/父记录缺失的子代理 fixture 覆盖筛选和父入口；不伪造继承项目。
 6. 最近记录排序、相同时间/无时间与分页稳定；未归属汇总不受项目分页影响，来源/搜索/主子筛选的计数一致。系统无头 Chrome 验证首页、刷新、前后退、键盘及 320px，无桌面鼠标模拟。
 
-风险：可持久化元数据没有完整的 Desktop 私有项目意图，兼容启发式只覆盖已知形态；仍不能宣称所有 App 版本的项目完全一致。发现新形态时新增独立证据与 fixture，不能凭短名称扩大规则。本次不新增人工归类配置；未来若用户要求处理意图不明的少量记录，再设计明确覆盖能力。
-
-分片状态、验收证据和最小下一步见[实施计划 R6-F.1](v2-implementation-plan.md#r6-project-classification)。
+风险：可持久化元数据没有完整的 Desktop 私有项目意图，兼容启发式只覆盖已知形态；仍不能宣称所有 App 版本的项目完全一致。发现新形态时新增独立证据与 fixture，不能凭短名称扩大规则。[项目会话整理](codex-native-cli-workbench-session-organization.md)定义分层展示与单条可撤销覆盖；用户覆盖与自动规则分别保存，不改变原恢复 cwd 与原始数据只读边界。

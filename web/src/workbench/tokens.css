@@ -1,0 +1,61 @@
+/* Design tokens for the workbench UI. The relay portal keeps an identical
+   copy in relay/static/portal.css; both must stay in sync. */
+:root {
+  /* Surfaces: opaque base + alpha overlays for layering */
+  --ui-bg: #0c0e12;
+  --ui-surface-1: #12151b;
+  --ui-surface-2: #171b22;
+  --ui-surface-3: #1d232c;
+  --ui-overlay-hover: rgb(255 255 255 / 0.045);
+  --ui-overlay-active: rgb(255 255 255 / 0.08);
+  --ui-backdrop: rgb(4 6 9 / 0.66);
+
+  /* Borders */
+  --ui-line: rgb(255 255 255 / 0.075);
+  --ui-line-strong: rgb(255 255 255 / 0.14);
+
+  /* Text */
+  --ui-text: #e4e8ee;
+  --ui-text-2: #a3acb9;
+  --ui-text-3: #949eac;
+
+  /* Accent (links, focus, selection, primary actions) */
+  --ui-accent: #7fb0f7;
+  --ui-accent-strong: #2f65c7;
+  --ui-accent-strong-hover: #2760bf;
+  --ui-accent-on-strong: #f4f8ff;
+  --ui-accent-soft: rgb(100 148 236 / 0.16);
+  --ui-accent-soft-hover: rgb(100 148 236 / 0.24);
+  --ui-accent-line: rgb(127 176 247 / 0.38);
+
+  /* Semantic */
+  --ui-success: #83c99a;
+  --ui-success-soft: rgb(88 164 112 / 0.14);
+  --ui-warning: #dcba72;
+  --ui-warning-soft: rgb(197 152 74 / 0.14);
+  --ui-danger: #e89a92;
+  --ui-danger-soft: rgb(197 92 84 / 0.16);
+  --ui-danger-strong: #b34540;
+  --ui-danger-strong-hover: #c7554f;
+
+  /* Radius */
+  --ui-radius-sm: 6px;
+  --ui-radius-md: 8px;
+  --ui-radius-lg: 12px;
+  --ui-radius-xl: 16px;
+
+  /* Elevation */
+  --ui-shadow-1: 0 2px 10px rgb(0 0 0 / 0.3);
+  --ui-shadow-2: 0 10px 32px rgb(0 0 0 / 0.45);
+  --ui-shadow-3: 0 24px 80px rgb(0 0 0 / 0.6);
+
+  /* Motion */
+  --ui-t-fast: 120ms ease;
+  --ui-t-med: 200ms ease;
+
+  /* Focus */
+  --ui-focus: var(--ui-accent);
+
+  /* Type */
+  --ui-font-mono: "SF Mono", Menlo, monospace;
+}

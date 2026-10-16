@@ -1,0 +1,22 @@
+# Legacy two-port fixed-single-workbench listener; new deployments use single-origin template.
+# Mount only the existing IP certificate directory read-only.
+# RELAY_TRIAL_IP is a literal IP; this file never changes the existing Caddy routes.
+{
+    admin 127.0.0.1:2020
+    auto_https off
+    persist_config off
+    default_sni {$RELAY_TRIAL_IP}
+    servers {
+        protocols h1 h2
+    }
+}
+
+https://{$RELAY_TRIAL_IP}:9443, https://{$RELAY_TRIAL_IP}:9444 {
+    tls /certs/{$RELAY_TRIAL_IP}.crt /certs/{$RELAY_TRIAL_IP}.key
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {hostport}
+        header_up -Forwarded
+        header_up -X-Forwarded-*
+        header_up X-Relay-Client-IP {remote_host}
+    }
+}

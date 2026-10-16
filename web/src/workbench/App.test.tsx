@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { readSnapshot, type ReadingView, type RequestView } from './reading';
 import type { ModelItem } from './viewItems';
+import { useRoute } from './navigation';
 
 let reading: ReadingView;
 let reportExit: ((exit: { code: number; signal: string | null }) => void) | undefined;
@@ -48,6 +49,68 @@ beforeEach(() => {
   document.body.append(root); reading = readSnapshot(snapshot('live'), 'live');
 });
 afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); });
+
+it('routes between separate run pages without replacing the native terminal or replaying its draft', async () => {
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  history.replaceState({ unrelated: 'preserved' }, '', `/runs/${epoch}/chat`);
+  const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ({ ok: false, status: 503, json: async () => ({ error: 'unavailable' }) }));
+  vi.stubGlobal('fetch', fetch);
+  function Routed() {
+    const route = useRoute();
+    return <App run={{ ...run, runEpoch: epoch, workspaceRoot: '/synthetic', settingsAvailable: true, accessAvailable: true }} page={route.kind === 'run' ? route.page : 'chat'} />;
+  }
+  await act(async () => render(<Routed />, root));
+  expect(root.querySelector(`.wb-page-nav a[href="/runs/${epoch}/access"]`)?.textContent).toBe('本地局域网接入');
+  const terminal = root.querySelector('textarea')!;
+  terminal.value = 'unsent native draft';
+  for (const page of ['files', 'search', 'git', 'history', 'usage', 'settings', 'access', 'terminal', 'chat']) {
+    await act(async () => (root.querySelector(`.wb-page-nav a[href="/runs/${epoch}/${page}"]`) as HTMLAnchorElement).click());
+    expect(location.pathname).toBe(`/runs/${epoch}/${page}`);
+    expect(root.querySelector('.wb-page-nav a[aria-current="page"]')?.getAttribute('href')).toBe(location.pathname);
+    expect(root.querySelector('textarea')).toBe(terminal);
+    expect(terminal.value).toBe('unsent native draft');
+    expect(history.state.unrelated).toBe('preserved');
+    expect((root.querySelector('.wb-terminal-container') as HTMLElement).hidden).toBe(!['chat', 'terminal'].includes(page));
+    if (['files', 'search', 'git'].includes(page)) {
+      expect((root.querySelector('.wb-message-list') as HTMLElement).hidden).toBe(true);
+      expect(root.querySelector('.wb-workspace-panel')?.getAttribute('aria-label')).toBe({ files: '项目文件', search: '搜索代码', git: 'Git 变更' }[page]);
+    }
+  }
+  history.replaceState(history.state, '', `/runs/${epoch}/files`);
+  await act(async () => { window.dispatchEvent(new PopStateEvent('popstate')); });
+  expect(root.querySelector('.wb-shell')?.classList.contains('wb-route-files')).toBe(true);
+  expect(root.querySelector('textarea')).toBe(terminal);
+  expect(fetch.mock.calls.every(args => !(args[1] as RequestInit | undefined)?.method)).toBe(true);
+  history.replaceState(null, '', '/');
+});
+
+it('restores keyboard focus to the remounted usage entry after closing call records', async () => {
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  history.replaceState(null, '', `/runs/${epoch}/usage`);
+  const fetch = vi.fn().mockResolvedValue(success(detail(epoch, 'chat')));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<App run={{ ...run, runEpoch: epoch }} page="usage" />, root));
+  const native = root.querySelector('textarea')!;
+  native.value = 'unsent native draft';
+  for (const keyboard of [true, false]) {
+    const entry = root.querySelector('.wb-view-calls') as HTMLButtonElement;
+    await click(entry);
+    expect(entry.isConnected).toBe(false);
+    expect(document.activeElement).toBe(button('关闭调用面板'));
+    if (keyboard) {
+      await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    } else await click('关闭调用面板');
+    const replacement = root.querySelector('.wb-view-calls');
+    expect(root.querySelector('.wb-call-inspector')).toBeNull();
+    expect(replacement).not.toBe(entry);
+    expect(document.activeElement).toBe(replacement);
+    expect(location.pathname).toBe(`/runs/${epoch}/usage`);
+    expect(root.querySelector('textarea')).toBe(native);
+    expect(native.value).toBe('unsent native draft');
+  }
+  expect(fetch.mock.calls.every(args => !(args[1] as RequestInit | undefined)?.method)).toBe(true);
+  history.replaceState(null, '', '/');
+});
 
 it('announces CLI exit centrally even with the terminal hidden and keeps records after dismissal', async () => {
   await act(async () => render(<App run={run} applicationHome />, root));

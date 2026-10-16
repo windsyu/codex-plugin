@@ -1,6 +1,6 @@
 # ADR 0048：显式历史清理与统一 JSON 工作台配置
 
-- Status：Accepted（设计决定；实现状态仅见实施计划）
+- Status：Accepted
 - Date：2026-09-20
 
 默认路径部分由 [ADR 0049](0049-workbench-user-directory.md) 更新为用户主目录下 `.codex-web/config` 与 `.codex-web/history`；下文保留原决定，配置/清理契约继续适用。
@@ -35,4 +35,4 @@
 
 增加独立配置写接口和历史删除能力，需要对应的负向/崩溃/并发验收。旧记录自动保留更保守，UI 必须显示跳过原因；暂存失败的内容仍占空间。结束凭证是新增旁路文件，无原生/旧数据库 migration，兼容性必须用既有读者 fixture 核实。共享 JSON 不提供项目覆盖层；任意外部编辑器不遵守工作台锁时仍有竞态，不能承诺完美文件 CAS。
 
-产品、目录、字段、交互、API 及故障契约见[历史与配置详细方案](../codex-native-cli-workbench-history-settings.md)，运行证据见[验收记录](../validation/native-cli-history-settings-2026-09-20.md)，阶段状态统一看[R3.1 实施计划](../v2-implementation-plan.md#r31-history-settings)。
+产品、目录、字段、交互、API 及故障契约见[历史与配置详细方案](../codex-native-cli-workbench-history-settings.md)；持续支持限制见[支持文档](../codex-native-cli-workbench-support.md)。

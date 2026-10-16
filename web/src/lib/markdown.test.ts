@@ -36,4 +36,10 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('position:fixed');
     expect(html).toContain('untrusted content');
   });
+
+  it('treats hostile remote gateway content as untrusted markup', () => {
+    const html = renderMarkdown('<form action="/relay/v1/password"><input name="password" value="stolen"></form><iframe src="/relay/v1/account"></iframe><img src=x onerror="fetch(\'/relay/v1/logout\')"><a href="/g/another/workbench/v1/runs">cross gateway</a><svg><foreignObject><script>alert(1)</script></foreignObject></svg>');
+    expect(html).not.toMatch(/<(?:form|input|iframe|script|svg)|onerror|href="\/g\//i);
+    expect(html).toContain('cross gateway');
+  });
 });

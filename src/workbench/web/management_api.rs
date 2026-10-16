@@ -5,7 +5,7 @@ use crate::workbench::recording::management::{
 
 async fn execute(
     state: &WebState,
-    headers: &HeaderMap,
+    headers: &Auth,
     query: ManagementQuery,
     accepted: bool,
 ) -> Response {
@@ -62,7 +62,7 @@ async fn execute(
         }
     }
 }
-fn write_error(state: &WebState, headers: &HeaderMap) -> Option<Response> {
+fn write_error(state: &WebState, headers: &Auth) -> Option<Response> {
     if !authorised(headers, state) {
         return Some(error(StatusCode::UNAUTHORIZED, "pairing_required"));
     }
@@ -88,7 +88,7 @@ pub(super) struct Page {
 }
 pub(super) async fn usage(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     page: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let cursor = match page {
@@ -104,7 +104,7 @@ struct Current {
 }
 pub(super) async fn refresh(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if let Some(error) = write_error(&state, &headers) {
@@ -128,7 +128,7 @@ struct PreviewRequest {
 }
 pub(super) async fn preview(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if let Some(error) = write_error(&state, &headers) {
@@ -156,7 +156,7 @@ pub(super) async fn preview(
 }
 pub(super) async fn read_preview(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
 ) -> Response {
     execute(&state, &headers, ManagementQuery::ReadPreview { id }, false).await
@@ -172,7 +172,7 @@ struct CreateJob {
 }
 pub(super) async fn create_job(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if let Some(error) = write_error(&state, &headers) {
@@ -201,14 +201,14 @@ pub(super) async fn create_job(
 }
 pub(super) async fn read_job(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
 ) -> Response {
     execute(&state, &headers, ManagementQuery::Job { id }, false).await
 }
 pub(super) async fn jobs(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     page: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let cursor = match page {
@@ -219,7 +219,7 @@ pub(super) async fn jobs(
 }
 pub(super) async fn cancel(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
     body: Bytes,
 ) -> Response {

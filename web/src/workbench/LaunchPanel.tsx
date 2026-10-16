@@ -1,6 +1,7 @@
 import './launch.css';
 import type { JSX } from 'preact';
-import { useLayoutEffect, useRef } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { DirectoryBrowser } from './DirectoryBrowser';
 
 export interface LaunchPreview {
   openInNewTab?: boolean;
@@ -14,6 +15,7 @@ export interface LaunchPreview {
 }
 
 export interface LaunchPanelProps {
+  embedded?: boolean;
   path: string;
   pathEditable: boolean;
   mode: 'new' | 'resume';
@@ -31,15 +33,30 @@ export interface LaunchPanelProps {
   onEnter: (runId: string) => void;
   onPick?: () => void;
   picking?: boolean;
+  browserInstanceId?: string;
+  onDirectorySelect?: (path: string) => void;
 }
 
 export function LaunchPanel({
   path, pathEditable, mode, preview, busy, pending, uncertain, error, readyHref,
-  onPathChange, onValidate, onStart, onCheck, onClose, onEnter, onPick, picking = false,
+  onPathChange, onValidate, onStart, onCheck, onClose, onEnter, onPick, picking = false, embedded = false,
+  browserInstanceId, onDirectorySelect,
 }: LaunchPanelProps) {
+  const [browsing, setBrowsing] = useState(false);
+  const browsingOpen = browsing && !!browserInstanceId && pathEditable && !!onDirectorySelect;
+  useLayoutEffect(() => { if (!browserInstanceId || !pathEditable) setBrowsing(false); }, [browserInstanceId, pathEditable]);
   const dialog = useRef<HTMLDialogElement>(null);
+  const pathInput = useRef<HTMLInputElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
+    if (embedded) {
+      // Native dialog autofocus does not run for a document mounted by routing.
+      // Focus once on entry, without stealing focus when the draft is updated.
+      if (pathInput.current && !pathInput.current.disabled) pathInput.current.focus({ preventScroll: true });
+      else closeButton.current?.focus({ preventScroll: true });
+      return;
+    }
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const element = dialog.current;
     if (element && !element.open) element.showModal?.();
@@ -50,7 +67,7 @@ export function LaunchPanel({
   }, []);
 
   const allowed = !!preview && preview.modes.includes(mode);
-  const locked = busy || pending || uncertain || picking;
+  const locked = busy || pending || uncertain || picking || browsingOpen;
   const existingRun = preview?.existingRun;
   const existingRunning = !!existingRun && existingRun.state === 'running';
   const canStart = allowed && !locked && !existingRunning;
@@ -60,18 +77,19 @@ export function LaunchPanel({
   const validate = () => { if (!locked && path.trim()) onValidate(); };
   const onSubmit: JSX.GenericEventHandler<HTMLFormElement> = event => { event.preventDefault(); validate(); };
 
-  return <dialog ref={dialog} className="wb-launch-panel" aria-labelledby="wb-launch-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+  return <><dialog ref={dialog} open={embedded || undefined} className={`wb-launch-panel${embedded ? ' is-page' : ''}`} aria-labelledby="wb-launch-title" onCancel={event => { event.preventDefault(); onClose(); }}>
     <div className="wb-launch-heading">
       <strong id="wb-launch-title">{title}</strong>
-      <button type="button" className="wb-launch-close" onClick={onClose}>{closeLabel}</button>
+      <button ref={closeButton} type="button" className="wb-launch-close" onClick={onClose}>{closeLabel}</button>
     </div>
 
     <form className="wb-launch-body" onSubmit={onSubmit}>
       {pathEditable && <div className="wb-launch-path-entry">
         <label className="wb-launch-path-label">项目目录
-          <input autoFocus aria-label="项目目录" placeholder="例如 ~/projects/my-project" value={path} onInput={onInput} disabled={locked} />
+          <input ref={pathInput} autoFocus aria-label="项目目录" placeholder="例如 ~/projects/my-project" value={path} onInput={onInput} disabled={locked} />
         </label>
         {onPick && <button type="button" className="wb-launch-pick" onClick={onPick} disabled={locked}>选择文件夹…</button>}
+        {!onPick && browserInstanceId && onDirectorySelect && <button type="button" className="wb-launch-pick" onClick={() => setBrowsing(true)} disabled={locked}>浏览电脑目录</button>}
       </div>}
 
       {pathEditable && <button type="submit" className="wb-launch-validate" disabled={locked || !path.trim()}>检查目录</button>}
@@ -92,5 +110,5 @@ export function LaunchPanel({
         {!allowed && <p className="wb-launch-help">当前检查结果不支持此操作，请重新检查目录。</p>}
       </div>}
     </form>
-  </dialog>;
+  </dialog>{browsingOpen && browserInstanceId && onDirectorySelect && <DirectoryBrowser key={browserInstanceId} instanceId={browserInstanceId} initialPath={path} onClose={() => setBrowsing(false)} onSelect={selectedPath => { setBrowsing(false); onDirectorySelect(selectedPath); }} />}</>;
 }

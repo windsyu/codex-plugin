@@ -9,7 +9,7 @@
 
 只读官方参考仓库的实际 commit 为 `633ab199cfd724aa78013c006b27a2b3d049fc3b`。`protocol/src/items.rs` 定义 `CommandExecutionItem`，`protocol/src/protocol.rs` 定义带显式 thread/turn 的 `ItemCompletedEvent`；`rollout/src/policy.rs` 持久化规范 `item_completed`，目前不持久化 `item_started` 和旧 `exec_command_begin/end`。`core/src/tools/events.rs` 与 `core/src/unified_exec/async_watcher.rs` 使用原始 call ID 和进程 ID 发布最终合并输出、退出码与耗时。
 
-这是当前源码实现，不是跨版本稳定性承诺。安装版 CLI `0.154.0` 的临时 home/合成命令实验实际确认：最后一次模型请求之后仍会写入规范 `CommandExecution` 完成记录。实验与浏览器断言见[验证报告](../validation/native-cli-r2-native-results-2026-09-19.md)。
+这是当前源码实现，不是跨版本稳定性承诺。安装版 CLI `0.154.0` 的临时 home/合成命令实验实际确认：最后一次模型请求之后仍会写入规范 `CommandExecution` 完成记录。对应可执行回归见[专项调试](../development/debugging.md)。
 
 ## Decision
 

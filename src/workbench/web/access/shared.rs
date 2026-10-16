@@ -177,6 +177,11 @@ async fn dispatch(
         .strip_prefix("/workbench/v1/runs/")
         .and_then(|r| r.split_once('/'))
         .and_then(|(id, tail)| Uuid::parse_str(id).ok().map(|id| (id, tail.to_owned())));
+    let document_run = path
+        .strip_prefix("/runs/")
+        .filter(|_| codex_relay_protocol::document_path(path))
+        .and_then(|tail| tail.split_once('/'))
+        .and_then(|(id, _)| Uuid::parse_str(id).ok());
     let static_asset = path == "/" || path.starts_with("/assets/");
     let selected = {
         let guard = shared.listener.lock().await;
@@ -184,7 +189,7 @@ async fn dispatch(
             .as_ref()
             .filter(|l| l.id == listener_id)
             .and_then(|listener| {
-                if let Some((id, _)) = &target {
+                if let Some(id) = target.as_ref().map(|(id, _)| id).or(document_run.as_ref()) {
                     listener
                         .runs
                         .get(id)
@@ -331,6 +336,99 @@ mod tests {
                 notice: None,
             });
         }
+    }
+
+    #[tokio::test]
+    async fn canonical_documents_follow_only_the_selected_enabled_run() {
+        let shared = SharedAccess::new();
+        let (a, _a_stop) = run(shared.clone());
+        let (b, _b_stop) = run(shared.clone());
+        shared.register(&a, 1).await.unwrap();
+        shared.register(&b, 1).await.unwrap();
+        let port = a.access.data.lock().unwrap().port.unwrap();
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        // Documents are a public static shell, including before fragment pairing.
+        // Every subsequent API request still needs the selected Run's cookie.
+        for state in [&a, &b] {
+            for page in codex_relay_protocol::RUN_PAGES {
+                let path = format!("/runs/{}/{page}", state.hub.epoch());
+                for _ in 0..2 {
+                    let response = client.get(format!("{base}{path}")).send().await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK, "{path}");
+                    assert!(
+                        response.headers()[header::CONTENT_TYPE]
+                            .to_str()
+                            .unwrap()
+                            .starts_with("text/html")
+                    );
+                }
+            }
+        }
+        let ca = pair(&client, &base, &a).await;
+        let denied = client
+            .get(format!("{base}/workbench/v1/runs/{}/run", b.hub.epoch()))
+            .header(header::COOKIE, &ca)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        for path in [
+            "/settings".into(),
+            "/launch".into(),
+            "/workbench/v1/unknown".into(),
+            "/assets/missing.js".into(),
+            format!("/runs/{}/unknown", a.hub.epoch()),
+            format!("/runs/{}/chat/extra", a.hub.epoch()),
+            format!("/runs/{}/chat", Uuid::new_v4()),
+        ] {
+            assert_eq!(
+                client
+                    .get(format!("{base}{path}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        // Standalone Run documents have the same whitelist and epoch check.
+        for (id, status) in [
+            (a.hub.epoch(), StatusCode::OK),
+            (b.hub.epoch(), StatusCode::NOT_FOUND),
+        ] {
+            let response = router(a.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/runs/{id}/chat"))
+                        .header(header::HOST, &a.authority)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+        a.access.close();
+        shared.remove(a.hub.epoch(), 1).await;
+        for (state, status) in [(&a, StatusCode::NOT_FOUND), (&b, StatusCode::OK)] {
+            assert_eq!(
+                client
+                    .get(format!("{base}/runs/{}/chat", state.hub.epoch()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+        b.access.close();
+        shared.remove(b.hub.epoch(), 1).await;
     }
 
     #[tokio::test]

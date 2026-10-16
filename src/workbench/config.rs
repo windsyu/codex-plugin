@@ -439,7 +439,22 @@ fn encoded(config: &Config) -> Result<Vec<u8>, ConfigError> {
     }
     Ok(bytes)
 }
-fn lock(dir: &Directory) -> Result<std::fs::File, ConfigError> {
+struct ConfigLock(std::fs::File);
+impl std::ops::Deref for ConfigLock {
+    type Target = std::fs::File;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // PTY startup may fork while another thread holds this descriptor.
+        // Closing only the parent copy leaves flock held until that child
+        // execs; explicitly end the parent's critical section on every exit.
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+fn lock(dir: &Directory) -> Result<ConfigLock, ConfigError> {
     let file = match dir.open("config.lock", true) {
         Ok(f) => {
             dir.sync().map_err(ConfigError::io)?;
@@ -453,7 +468,7 @@ fn lock(dir: &Directory) -> Result<std::fs::File, ConfigError> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
         return Err(ConfigError::field("$", "config_busy"));
     }
-    Ok(file)
+    Ok(ConfigLock(file))
 }
 
 enum Request {

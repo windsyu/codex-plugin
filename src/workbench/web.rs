@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 use super::live::{LiveHub, SubscribeError};
@@ -31,12 +32,14 @@ mod details_api;
 mod history_api;
 #[cfg(unix)]
 mod management_api;
+use super::remote_access as remote;
 #[cfg(unix)]
 mod settings_api;
 #[cfg(unix)]
 mod terminal_api;
 #[cfg(unix)]
 mod workspace_api;
+use remote::{Auth, matches_secret, secret};
 
 #[derive(Default)]
 struct RuntimeOptions {
@@ -55,9 +58,7 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; conn
 // xterm positions its canvas/rows through inline styles. Scripts remain self-only.
 const WORKBENCH_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "web/dist"]
-struct WorkbenchAssets;
+use codex_workbench_assets::WorkbenchAssets;
 
 impl WebState {
     fn has_terminal(&self) -> bool {
@@ -249,8 +250,16 @@ impl Drop for ReadingServer {
     }
 }
 fn router(state: Arc<WebState>) -> Router {
+    routes()
+        .fallback(scoped_api)
+        .layer(middleware::from_fn_with_state(state.clone(), boundary))
+        .with_state(state)
+}
+
+fn routes() -> Router<Arc<WebState>> {
     let app = Router::new()
         .route("/", get(index))
+        .route("/runs/{run}/{page}", get(document))
         .route("/assets/{*path}", get(asset))
         .route(
             "/workbench.js",
@@ -342,31 +351,48 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/workbench/v1/stop", post(terminal_api::stop_run))
         .route("/workbench/v1/run/stop", post(terminal_api::stop_run));
     app.layer(DefaultBodyLimit::max(1024))
-        .layer(middleware::from_fn_with_state(state.clone(), boundary))
-        .with_state(state.clone())
 }
 
-fn secret() -> String {
-    rand::random::<[u8; 32]>()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+async fn scoped_api(
+    State(state): State<Arc<WebState>>,
+    mut request: axum::extract::Request,
+) -> Response {
+    let Some((id, tail)) = request
+        .uri()
+        .path()
+        .strip_prefix("/workbench/v1/runs/")
+        .and_then(|tail| tail.split_once('/'))
+    else {
+        return error(StatusCode::NOT_FOUND, "run_unavailable");
+    };
+    if id != state.hub.epoch().to_string() {
+        return error(StatusCode::NOT_FOUND, "run_unavailable");
+    }
+    let uri = format!(
+        "/workbench/v1/{tail}{}",
+        request
+            .uri()
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    let Ok(uri) = uri.parse() else {
+        return error(StatusCode::BAD_REQUEST, "invalid_run_path");
+    };
+    // The outer boundary has checked the original URI and ingress. Preserve
+    // method, body, headers and permission/upgrade extensions, and dispatch only
+    // through exact routes without this fallback (unknown tails cannot recurse).
+    *request.uri_mut() = uri;
+    routes().with_state(state).oneshot(request).await.unwrap()
 }
-fn matches_secret(value: &str, expected: &str) -> bool {
-    value.len() == expected.len()
-        && value
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-            == 0
-}
-fn authorised(headers: &HeaderMap, state: &WebState) -> bool {
+
+fn authorised(headers: &Auth, state: &WebState) -> bool {
     owner_authorised(headers, state) || remote_permission(headers, state).is_some()
 }
-fn remote_permission(
-    headers: &HeaderMap,
-    state: &WebState,
-) -> Option<super::permission::Permission> {
+fn remote_permission(headers: &Auth, state: &WebState) -> Option<super::permission::Permission> {
+    if let Some(owner) = &headers.remote {
+        return owner.active().then(|| owner.permission());
+    }
     #[cfg(unix)]
     if headers
         .get(header::HOST)
@@ -377,7 +403,10 @@ fn remote_permission(
     }
     None
 }
-fn same_origin(headers: &HeaderMap, state: &WebState) -> bool {
+fn same_origin(headers: &Auth, state: &WebState) -> bool {
+    if headers.remote.is_some() {
+        return headers.remote_origin();
+    }
     if headers.get_all(header::HOST).iter().count() != 1
         || headers.get_all(header::ORIGIN).iter().count() != 1
     {
@@ -393,7 +422,10 @@ fn same_origin(headers: &HeaderMap, state: &WebState) -> bool {
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
             == Some(format!("http://{host}").as_str())
 }
-fn owner_authorised(headers: &HeaderMap, state: &WebState) -> bool {
+fn owner_authorised(headers: &Auth, state: &WebState) -> bool {
+    if let Some(owner) = &headers.remote {
+        return owner.active();
+    }
     if headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(state.authority.as_str()) {
         return false;
     }
@@ -418,21 +450,25 @@ async fn boundary(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let headers = request.headers();
+    let headers = Auth::from_request(&request);
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     #[cfg(unix)]
-    let valid_host = match request.extensions().get::<access::Ingress>() {
-        Some(ingress) => state.access.valid_ingress(ingress.0, host),
-        None => host == state.authority,
+    let valid_host = if let Some(owner) = &headers.remote {
+        owner.active()
+    } else {
+        match request.extensions().get::<access::Ingress>() {
+            Some(ingress) => state.access.valid_ingress(ingress.0, host),
+            None => host == state.authority,
+        }
     };
     #[cfg(not(unix))]
     let valid_host = host == state.authority;
     let valid_host = valid_host && headers.get_all(header::HOST).iter().count() == 1;
-    let valid_origin = !headers.contains_key(header::ORIGIN) || same_origin(headers, &state);
-    let permission = remote_permission(headers, &state);
+    let valid_origin = !headers.contains_key(header::ORIGIN) || same_origin(&headers, &state);
+    let permission = remote_permission(&headers, &state);
     let valid_site = headers
         .get("sec-fetch-site")
         .is_none_or(|site| matches!(site.to_str(), Ok("same-origin" | "none")));
@@ -488,7 +524,7 @@ async fn boundary(
 struct Pair {
     token: String,
 }
-async fn pair(State(state): State<Arc<WebState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn pair(State(state): State<Arc<WebState>>, headers: Auth, body: Bytes) -> Response {
     if !same_origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
     }
@@ -513,7 +549,7 @@ async fn pair(State(state): State<Arc<WebState>>, headers: HeaderMap, body: Byte
     );
     response
 }
-async fn run(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+async fn run(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -543,6 +579,19 @@ async fn run(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response
     #[cfg(not(unix))]
     let workspace_root: Option<&str> = None;
     Json(serde_json::json!({"workspaceRoot":workspace_root,"runEpoch":state.hub.epoch(),"mode":if terminal { "native-workbench" } else { "r0-reading" },"scope":"typed-conversation-items","readingSchemaVersion":super::live::VIEW_SCHEMA_VERSION,"recorder":state.hub.recorder_status().state,"historyAvailable":state.hub.history().is_some(),"historyManagementAvailable":history_management_available,"settingsAvailable":settings_available,"accessAvailable":terminal && owner_authorised(&headers,&state),"terminalAvailable":terminal,"projectName":project_name,"processId":process_id})).into_response()
+}
+
+async fn document(State(state): State<Arc<WebState>>, request: axum::extract::Request) -> Response {
+    let path = request.uri().path();
+    let selected = path
+        .strip_prefix("/runs/")
+        .and_then(|tail| tail.split_once('/'));
+    if !codex_relay_protocol::document_path(path)
+        || selected.is_none_or(|(id, _)| id != state.hub.epoch().to_string())
+    {
+        return error(StatusCode::NOT_FOUND, "page_unavailable");
+    }
+    index(State(state)).await
 }
 
 async fn index(State(state): State<Arc<WebState>>) -> Response {
@@ -582,7 +631,7 @@ async fn asset(Path(path): Path<String>) -> Response {
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-async fn snapshot(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+async fn snapshot(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -604,7 +653,7 @@ struct Cursor {
 }
 async fn events(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(cursor): Query<Cursor>,
 ) -> Response {
     if !authorised(&headers, &state) {

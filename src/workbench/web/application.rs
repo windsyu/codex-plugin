@@ -5,8 +5,11 @@ use crate::workbench::{
     application::{Connect, RunHandle, RunSummary},
     config::{Config, ConfigError, ConfigHandle, LIMIT},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{path::PathBuf, sync::RwLock};
 use tower::ServiceExt;
+mod local_control;
+mod relay_api;
 
 pub(crate) struct Owner {
     pub authority: String,
@@ -26,6 +29,10 @@ struct StateData {
     devices: Arc<access::SharedAccess>,
     launch_error: RwLock<Option<&'static str>>,
     picker: crate::workbench::application::folder_picker::FolderPicker,
+    directories: crate::workbench::application::directories::DirectoryBrowser,
+    shutdown_requested: AtomicBool,
+    service_label: RwLock<Option<String>>,
+    relay: RwLock<Option<crate::workbench::relay::Service>>,
 }
 #[derive(Clone)]
 pub(crate) struct SurfaceHandle(Arc<StateData>);
@@ -66,6 +73,7 @@ pub struct ApplicationServer {
     state: Arc<StateData>,
     stop: watch::Sender<bool>,
     thread: Option<JoinHandle<()>>,
+    _remote: remote::Ingress,
 }
 impl ApplicationServer {
     pub(crate) fn bind(
@@ -74,6 +82,8 @@ impl ApplicationServer {
         runs: RunHandle,
         sources: crate::history::library::LibraryHandle,
         native_home: PathBuf,
+        relay_root: PathBuf,
+        browse_home: PathBuf,
     ) -> Result<Self> {
         anyhow::ensure!(
             WorkbenchAssets::get("workbench.html").is_some(),
@@ -100,13 +110,49 @@ impl ApplicationServer {
             devices: access::SharedAccess::new(),
             launch_error: RwLock::new(None),
             picker: crate::workbench::application::folder_picker::FolderPicker::new(),
+            directories: crate::workbench::application::directories::DirectoryBrowser::new(
+                browse_home,
+            ),
+            shutdown_requested: AtomicBool::new(false),
+            service_label: RwLock::new(None),
+            relay: RwLock::new(None),
         });
         let app = Router::new()
             .route("/", get(home))
+            .route("/history", get(home))
+            .route("/launch", get(home))
+            .route("/settings", get(home))
+            .route("/relay", get(home))
+            .route("/runs/{run}/{page}", get(document))
             .route("/assets/{*path}", get(asset))
             .route("/workbench/v1/pair", post(pair_owner))
             .route("/workbench/v1/application", get(application))
+            .route("/workbench/v1/application/relay", get(relay_api::status))
+            .route(
+                "/workbench/v1/application/relay/bind",
+                post(relay_api::bind),
+            )
+            .route(
+                "/workbench/v1/application/relay/enable",
+                post(relay_api::enable),
+            )
+            .route(
+                "/workbench/v1/application/relay/disable",
+                post(relay_api::disable),
+            )
+            .route(
+                "/workbench/v1/application/relay/forget",
+                post(relay_api::forget),
+            )
             .route("/workbench/v1/application/connect", post(connect))
+            .route(
+                "/workbench/v1/application/control",
+                post(local_control::control),
+            )
+            .route(
+                "/workbench/v1/application/directories",
+                post(local_control::directories),
+            )
             .route("/workbench/v1/launch-targets", post(launch_target))
             .route(
                 "/workbench/v1/application/pick-directory",
@@ -125,7 +171,16 @@ impl ApplicationServer {
             .route("/workbench/v1/library/sources", get(source_status))
             .route("/workbench/v1/library/projects", get(library_projects))
             .route("/workbench/v1/library/entries", get(library_entries))
+            .route("/workbench/v1/library/session-groups", get(library_groups))
+            .route(
+                "/workbench/v1/library/session-groups/{id}",
+                get(library_group),
+            )
             .route("/workbench/v1/library/entries/{entry}", get(library_body))
+            .route(
+                "/workbench/v1/library/entries/{entry}/organization",
+                get(library_organization).put(library_organization_save),
+            )
             .route(
                 "/workbench/v1/library/entries/{entry}/details",
                 get(library_details),
@@ -136,6 +191,13 @@ impl ApplicationServer {
             .layer(DefaultBodyLimit::max(LIMIT))
             .layer(middleware::from_fn_with_state(state.clone(), boundary))
             .with_state(state.clone());
+        let remote = remote::Ingress::start(app.clone(), id)?;
+        match crate::workbench::relay::Service::start(relay_root, id, remote.handle()) {
+            Ok(relay) => *state.relay.write().unwrap() = Some(relay),
+            Err(_) => eprintln!(
+                "codex-view: relay_unavailable; private relay state failed validation; local workbench remains available"
+            ),
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -147,7 +209,12 @@ impl ApplicationServer {
             state,
             stop,
             thread: Some(thread),
+            _remote: remote,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn relay_for_test(&self) -> crate::workbench::relay::Service {
+        self.state.relay.read().unwrap().clone().unwrap()
     }
     #[cfg(test)]
     pub(crate) fn set_picker_program_for_test(&self, program: PathBuf) {
@@ -158,6 +225,15 @@ impl ApplicationServer {
     }
     pub fn origin(&self) -> String {
         self.state.owner.origin.clone()
+    }
+    pub fn shutdown_requested(&self) -> bool {
+        self.state.shutdown_requested.load(Ordering::Acquire)
+    }
+    pub fn begin_shutdown(&self) {
+        self.state.shutdown_requested.store(true, Ordering::Release);
+    }
+    pub fn set_service_label(&self, label: String) {
+        *self.state.service_label.write().unwrap() = Some(label);
     }
     pub fn bootstrap_url(&self, run: Option<Uuid>) -> String {
         format!(
@@ -173,13 +249,17 @@ impl ApplicationServer {
 }
 impl Drop for ApplicationServer {
     fn drop(&mut self) {
+        self.state.relay.write().unwrap().take();
         let _ = self.stop.send(true);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
-fn authorised(headers: &HeaderMap, state: &StateData) -> bool {
+fn authorised(headers: &Auth, state: &StateData) -> bool {
+    if let Some(owner) = &headers.remote {
+        return owner.instance_id() == state.id && owner.active();
+    }
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -190,7 +270,10 @@ fn authorised(headers: &HeaderMap, state: &StateData) -> bool {
             key == state.owner.cookie_name && matches_secret(value, &state.owner.session)
         })
 }
-fn origin(headers: &HeaderMap, state: &StateData) -> bool {
+fn origin(headers: &Auth, state: &StateData) -> bool {
+    if headers.remote.is_some() {
+        return headers.remote_origin();
+    }
     headers.get_all(header::ORIGIN).iter().count() == 1
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(&state.owner.origin)
 }
@@ -199,16 +282,32 @@ async fn boundary(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let headers = request.headers();
-    let valid = headers.get_all(header::HOST).iter().count() == 1
-        && headers.get(header::HOST).and_then(|v| v.to_str().ok()) == Some(&state.owner.authority)
-        && (!headers.contains_key(header::ORIGIN) || origin(headers, &state))
-        && headers
-            .get("sec-fetch-site")
-            .is_none_or(|v| matches!(v.to_str(), Ok("same-origin" | "none")))
-        && request.uri().scheme().is_none();
+    let headers = Auth::from_request(&request);
+    let valid = if let Some(owner) = &headers.remote {
+        owner.instance_id() == state.id
+            && owner.active()
+            && (!headers.contains_key(header::ORIGIN) || origin(&headers, &state))
+    } else {
+        headers.get_all(header::HOST).iter().count() == 1
+            && headers.get(header::HOST).and_then(|v| v.to_str().ok())
+                == Some(&state.owner.authority)
+            && (!headers.contains_key(header::ORIGIN) || origin(&headers, &state))
+            && headers
+                .get("sec-fetch-site")
+                .is_none_or(|v| matches!(v.to_str(), Ok("same-origin" | "none")))
+            && request.uri().scheme().is_none()
+    };
+    let permission = headers.remote.as_ref().map(|owner| owner.permission());
     let mut response = if valid {
-        next.run(request).await
+        if let Some(permission) = permission {
+            let response = tokio::select! { biased; _ = permission.revoked() => error(StatusCode::UNAUTHORIZED, "access_revoked"), response = next.run(request) => response };
+            let (parts, body) = response.into_parts();
+            let mut body = body.into_data_stream();
+            let stream = async_stream::stream! { loop { let chunk = tokio::select! { biased; _ = permission.revoked() => break, chunk = body.next() => chunk }; let Some(chunk) = chunk else { break; }; yield chunk; } };
+            Response::from_parts(parts, Body::from_stream(stream))
+        } else {
+            next.run(request).await
+        }
     } else {
         error(StatusCode::FORBIDDEN, "invalid_origin_or_host")
     };
@@ -234,11 +333,13 @@ async fn home() -> Response {
         None => error(StatusCode::SERVICE_UNAVAILABLE, "frontend_unavailable"),
     }
 }
-async fn pair_owner(
-    State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn document(request: axum::extract::Request) -> Response {
+    if !codex_relay_protocol::document_path(request.uri().path()) {
+        return error(StatusCode::NOT_FOUND, "page_unavailable");
+    }
+    home().await
+}
+async fn pair_owner(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes) -> Response {
     if !origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
     }
@@ -262,7 +363,7 @@ async fn pair_owner(
     );
     response
 }
-async fn application(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+async fn application(State(state): State<Arc<StateData>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -273,7 +374,7 @@ async fn application(State(state): State<Arc<StateData>>, headers: HeaderMap) ->
         .iter()
         .map(|r| r.0.clone())
         .collect();
-    Json(serde_json::json!({"instanceId":state.id,"mode":"history-home","settingsAvailable":true,"libraryAvailable":true,"launchAvailable":true,"directoryPickerAvailable":crate::workbench::application::folder_picker::FolderPicker::supported(),"runs":runs,"sources":state.sources.statuses(),"launchError":*state.launch_error.read().unwrap()})).into_response()
+    Json(serde_json::json!({"instanceId":state.id,"remoteOwner":headers.remote.is_some(),"mode":"history-home","settingsAvailable":true,"libraryAvailable":true,"launchAvailable":!state.shutdown_requested.load(Ordering::Acquire),"directoryBrowserAvailable":true,"directoryPickerAvailable":headers.remote.is_none() && crate::workbench::application::folder_picker::FolderPicker::supported(),"runs":runs,"sources":state.sources.statuses(),"launchError":*state.launch_error.read().unwrap()})).into_response()
 }
 fn launch_result(
     result: std::result::Result<serde_json::Value, &'static str>,
@@ -291,6 +392,7 @@ fn launch_result(
             .into_response(),
         Err(code) => error(
             match code {
+                "access_revoked" => StatusCode::UNAUTHORIZED,
                 "operation_unavailable" | "entry_unavailable" => StatusCode::NOT_FOUND,
                 "launch_busy" | "run_capacity" | "launch_unavailable" | "library_busy"
                 | "library_timeout" => StatusCode::SERVICE_UNAVAILABLE,
@@ -308,7 +410,7 @@ fn launch_result(
     }
 }
 fn launch_owner(
-    headers: &HeaderMap,
+    headers: &Auth,
     state: &StateData,
 ) -> std::result::Result<(), (StatusCode, &'static str)> {
     if !authorised(headers, state) {
@@ -316,6 +418,9 @@ fn launch_owner(
     }
     if !origin(headers, state) {
         return Err((StatusCode::FORBIDDEN, "origin_required"));
+    }
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "application_stopping"));
     }
     if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
         || headers
@@ -335,7 +440,7 @@ struct PickDirectory {
 }
 async fn pick_directory(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if let Err((status, code)) = launch_owner(&headers, &state) {
@@ -362,7 +467,7 @@ async fn pick_directory(
 
 async fn launch_target(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if let Err((status, code)) = launch_owner(&headers, &state) {
@@ -373,11 +478,7 @@ async fn launch_target(
     };
     launch_result(state.runs.prepare(request).await, false)
 }
-async fn start_run(
-    State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn start_run(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes) -> Response {
     if let Err((status, code)) = launch_owner(&headers, &state) {
         return error(status, code);
     }
@@ -387,11 +488,16 @@ async fn start_run(
     if request.instance_id != state.id {
         return error(StatusCode::CONFLICT, "invalid_instance");
     }
-    launch_result(state.runs.begin(request), true)
+    let result = if let Some(owner) = &headers.remote {
+        state.runs.begin_authorized(request, owner.permission())
+    } else {
+        state.runs.begin(request)
+    };
+    launch_result(result, true)
 }
 async fn launch_operation(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -399,7 +505,7 @@ async fn launch_operation(
     }
     launch_result(state.runs.operation(id), false)
 }
-async fn list_runs(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+async fn list_runs(State(state): State<Arc<StateData>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -407,7 +513,7 @@ async fn list_runs(State(state): State<Arc<StateData>>, headers: HeaderMap) -> R
 }
 async fn run_summary(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(id): Path<Uuid>,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -418,13 +524,16 @@ async fn run_summary(
         None => error(StatusCode::NOT_FOUND, "run_unavailable"),
     }
 }
-async fn source_status(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+async fn source_status(State(state): State<Arc<StateData>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
     library_result(state.sources.sources().await)
 }
-async fn connect(State(state): State<Arc<StateData>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn connect(State(state): State<Arc<StateData>>, headers: Auth, body: Bytes) -> Response {
+    if headers.remote.is_some() {
+        return error(StatusCode::FORBIDDEN, "local_management_required");
+    }
     if !origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "origin_required");
     }
@@ -436,6 +545,9 @@ async fn connect(State(state): State<Arc<StateData>>, headers: HeaderMap, body: 
     }
     if !matches_secret(&request.token, &state.owner.pairing) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "application_stopping");
     }
     let settings = match state.settings.read().await {
         Ok(s) => s,
@@ -488,7 +600,7 @@ async fn dispatch(
         // Direct owner bootstrap URLs contain a Run ID before the owner Cookie
         // exists. Only the scoped pairing handler is public; it validates token
         // and same-origin independently.
-        if tail != "pair" && !authorised(request.headers(), &state) {
+        if tail != "pair" && !authorised(&Auth::from_request(&request), &state) {
             return error(StatusCode::UNAUTHORIZED, "pairing_required");
         }
         let Ok(id) = Uuid::parse_str(id) else {
@@ -544,7 +656,7 @@ fn settings_result(
             .into_response(),
     }
 }
-async fn settings_read(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+async fn settings_read(State(state): State<Arc<StateData>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -558,7 +670,7 @@ struct Save {
 }
 async fn settings_save(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -611,8 +723,17 @@ fn library_result(result: std::result::Result<serde_json::Value, &'static str>) 
                 "stale_cursor"
                 | "source_revoked"
                 | "source_revision_changed"
+                | "group_changed"
+                | "organization_changed"
+                | "organization_identity_unconfirmed"
                 | "search_position_unavailable" => StatusCode::CONFLICT,
-                "entry_unavailable" | "details_unavailable" => StatusCode::NOT_FOUND,
+                "entry_unavailable"
+                | "details_unavailable"
+                | "group_unavailable"
+                | "project_unavailable" => StatusCode::NOT_FOUND,
+                "query_budget_exceeded" | "organization_budget_exceeded" => {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                }
                 "invalid_cursor" | "invalid_query" => StatusCode::BAD_REQUEST,
                 _ => StatusCode::SERVICE_UNAVAILABLE,
             },
@@ -620,9 +741,117 @@ fn library_result(result: std::result::Result<serde_json::Value, &'static str>) 
         ),
     }
 }
+fn organization_result(result: std::result::Result<serde_json::Value, &'static str>) -> Response {
+    match result {
+        Ok(value) => {
+            let etag = format!(
+                "\"{}\"",
+                value["organizationRevision"].as_str().unwrap_or("")
+            );
+            let mut response = Json(value).into_response();
+            if let Ok(etag) = HeaderValue::from_str(&etag) {
+                response.headers_mut().insert(header::ETAG, etag);
+            }
+            response
+        }
+        Err(code) => library_result(Err(code)),
+    }
+}
+async fn library_organization(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(entry): Path<String>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    organization_result(state.sources.organization(entry).await)
+}
+async fn library_organization_save(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(entry): Path<String>,
+    body: Bytes,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    if !origin(&headers, &state) {
+        return error(StatusCode::FORBIDDEN, "origin_required");
+    }
+    if body.len() > 16 * 1024 {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "organization_body_limit");
+    }
+    if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+        || headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(';').next())
+            != Some("application/json")
+    {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "json_required");
+    }
+    let Ok(request) = serde_json::from_slice::<crate::history::library::OrganizationWrite>(&body)
+    else {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_request");
+    };
+    if request.instance_id != state.id {
+        return error(StatusCode::CONFLICT, "stale_instance");
+    }
+    if !headers.contains_key(header::IF_MATCH) {
+        return error(
+            StatusCode::PRECONDITION_REQUIRED,
+            "organization_revision_required",
+        );
+    }
+    if headers.get_all(header::IF_MATCH).iter().count() != 1 {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_revision");
+    }
+    let Some(revision) = headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix('"'))
+        .and_then(|s| s.strip_suffix('"'))
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-:".contains(&b))
+        })
+    else {
+        return error(StatusCode::BAD_REQUEST, "invalid_organization_revision");
+    };
+    organization_result(
+        state
+            .sources
+            .save_organization(entry, revision.into(), request)
+            .await,
+    )
+}
+async fn library_groups(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Query(query): Query<crate::history::library::GroupQuery>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    library_result(state.sources.groups(query).await)
+}
+async fn library_group(
+    State(state): State<Arc<StateData>>,
+    headers: Auth,
+    Path(id): Path<String>,
+    Query(query): Query<crate::history::library::GroupAnchorQuery>,
+) -> Response {
+    if !authorised(&headers, &state) {
+        return error(StatusCode::UNAUTHORIZED, "pairing_required");
+    }
+    library_result(state.sources.group(id, query).await)
+}
 async fn library_projects(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(query): Query<crate::history::library::Query>,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -632,7 +861,7 @@ async fn library_projects(
 }
 async fn library_entries(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Query(query): Query<crate::history::library::Query>,
 ) -> Response {
     if !authorised(&headers, &state) {
@@ -642,7 +871,7 @@ async fn library_entries(
 }
 async fn library_body(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(entry): Path<String>,
     Query(query): Query<crate::history::library::Query>,
 ) -> Response {
@@ -651,7 +880,7 @@ async fn library_body(
     }
     library_result(state.sources.body(entry, query).await)
 }
-async fn library_refresh(State(state): State<Arc<StateData>>, headers: HeaderMap) -> Response {
+async fn library_refresh(State(state): State<Arc<StateData>>, headers: Auth) -> Response {
     if !authorised(&headers, &state) || !origin(&headers, &state) {
         return error(StatusCode::FORBIDDEN, "owner_required");
     }
@@ -662,7 +891,7 @@ async fn library_refresh(State(state): State<Arc<StateData>>, headers: HeaderMap
 }
 async fn library_preview(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if !authorised(&headers, &state) || !origin(&headers, &state) {
@@ -681,7 +910,7 @@ async fn library_preview(
 
 async fn library_details(
     State(state): State<Arc<StateData>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(entry): Path<String>,
     Query(query): Query<crate::history::library::Query>,
 ) -> Response {
@@ -689,4 +918,19 @@ async fn library_details(
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
     library_result(state.sources.details(entry, query).await)
+}
+
+#[cfg(test)]
+mod group_error_tests {
+    use super::*;
+    #[test]
+    fn group_errors_preserve_http_contract() {
+        for (code, status) in [
+            ("group_unavailable", StatusCode::NOT_FOUND),
+            ("query_budget_exceeded", StatusCode::PAYLOAD_TOO_LARGE),
+            ("group_changed", StatusCode::CONFLICT),
+        ] {
+            assert_eq!(library_result(Err(code)).status(), status);
+        }
+    }
 }

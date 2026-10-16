@@ -11,6 +11,7 @@ pub mod decode;
 pub mod framing;
 #[cfg(unix)]
 pub mod launch;
+pub(crate) mod lease_clock;
 pub mod live;
 pub mod observe;
 pub mod paths;
@@ -24,6 +25,8 @@ pub mod rollout;
 #[cfg(unix)]
 pub mod terminal;
 // Shared VT utilities have no legacy control or storage dependency.
+pub(crate) mod relay;
+pub(crate) mod remote_access;
 #[path = "../terminal/mod.rs"]
 mod terminal_screen;
 pub mod web;

@@ -399,6 +399,56 @@ fn concurrent_writer_lock_and_expired_requests_do_not_change_settings() {
     );
     assert_eq!(prepared.read().unwrap().0, Config::default());
 }
+
+#[test]
+fn releasing_config_lock_does_not_wait_for_an_unrelated_fork_to_exec() {
+    let (_temp, prepared) = fixture();
+    let guard = lock(&prepared.directory).unwrap();
+    let mut pipe = [0; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        // A concurrent PTY spawn inherits all descriptors until exec. Only
+        // async-signal-safe calls are allowed in this multithreaded child.
+        unsafe {
+            libc::close(pipe[1]);
+            let mut byte = 0u8;
+            libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    unsafe {
+        libc::close(pipe[0]);
+    }
+    drop(guard);
+    let reacquired = lock(&prepared.directory);
+    // Release/reap the synthetic child before asserting so a failure cannot
+    // leave a child blocked on the inherited descriptors.
+    let wake = 1u8;
+    // A different concurrent fork may inherit the writer too. Wake with data,
+    // rather than depending on EOF from every duplicated writer closing.
+    unsafe {
+        libc::write(pipe[1], (&wake as *const u8).cast(), 1);
+    }
+    unsafe {
+        libc::close(pipe[1]);
+    }
+    loop {
+        let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        if waited == pid {
+            break;
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
+    assert!(
+        reacquired.is_ok(),
+        "parent release must end its critical section even before a concurrent child execs"
+    );
+}
 #[tokio::test]
 async fn worker_reads_external_edits_and_fails_closed_without_changing_launch_values() {
     let (_temp, prepared) = fixture();

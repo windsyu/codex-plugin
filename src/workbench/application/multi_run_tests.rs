@@ -718,9 +718,31 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
             401,
         ),
         (reqwest::Method::GET, "/workbench/v1/library/entries", 401),
+        (reqwest::Method::GET,"/workbench/v1/library/entries/e_fake/organization",401),
+        (reqwest::Method::PUT,"/workbench/v1/library/entries/e_fake/organization",401),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/library/session-groups",
+            401,
+        ),
+        (
+            reqwest::Method::GET,
+            "/workbench/v1/library/session-groups/g_fake?anchorEntryId=e_fake&revision=r_fake",
+            401,
+        ),
         (reqwest::Method::GET, "/workbench/v1/library/sources", 401),
         (reqwest::Method::POST, "/workbench/v1/launch-targets", 401),
         (reqwest::Method::POST, "/workbench/v1/runs", 401),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/directories",
+            401,
+        ),
+        (
+            reqwest::Method::POST,
+            "/workbench/v1/application/control",
+            401,
+        ),
         (
             reqwest::Method::POST,
             "/workbench/v1/application/pick-directory",
@@ -739,7 +761,7 @@ async fn paired_device_cookie_cannot_authorize_local_application_or_mutate_setti
             .header("Cookie", &device)
             .header("Origin", &app.entry.address)
             .header("Content-Type", "application/json")
-            .body("{}")
+            .body(json!({"instanceId":app.instance_id,"action":"status","token":"wrong"}).to_string())
             .send()
             .await
             .unwrap();

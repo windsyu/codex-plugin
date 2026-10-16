@@ -12,14 +12,14 @@ const preview: LaunchPreview = {
   modes: ['new'], nativeHome: '/synthetic/.codex', expiresInSeconds: 30,
 };
 
-function Harness({ enter = vi.fn(), resumeEntry }: { enter?: (runId: string) => void; resumeEntry?: LibraryEntry }) {
+function Harness({ enter = vi.fn(), resumeEntry, directoryBrowser = false }: { enter?: (runId: string) => void; resumeEntry?: LibraryEntry; directoryBrowser?: boolean }) {
   const launch = useLaunch('instance-1', enter);
   return <>
     <button type="button" className="choose-folder" onClick={() => void launch.pickDirectory()}>选择目录</button>
     <button type="button" onClick={() => launch.openProject('project-a')}>project-a</button>
     <button type="button" onClick={() => launch.openProject('project-b')}>project-b</button>
     {resumeEntry && <button type="button" className="resume-entry" onClick={() => launch.openResume(resumeEntry)}>继续记录</button>}
-    <LaunchPanel {...launch.panel} />
+    <LaunchPanel {...launch.panel} onPick={directoryBrowser ? undefined : launch.panel.onPick} browserInstanceId={directoryBrowser ? 'instance-1' : undefined} />
   </>;
 }
 
@@ -154,7 +154,7 @@ it('restores only the saved operation after remount and offers a link without na
 
   expect(fetch.mock.calls.every(([url, init]) => url === `/workbench/v1/launch-operations/${operationId}` && init?.method === 'GET')).toBe(true);
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-new');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-new/chat');
   expect(sessionStorage.getItem('wb-launch:instance-1')).toBe(operationId);
 });
 
@@ -261,6 +261,27 @@ it('opens one native picker, checks its exact path, and never starts a CLI autom
   });
 });
 
+it('validates the exact browsed directory, invalidates the previous target, and waits for explicit Start', async () => {
+  const validation = deferred<ReturnType<typeof ok>>();
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/application/directories')) return ok({ instanceId: 'instance-1', currentPath: '/synthetic/新项目 with spaces', parentPath: '/synthetic', homePath: '/synthetic', roots: [], entries: [], canSelect: true, truncated: false });
+    if (url.endsWith('/launch-targets') && JSON.parse(String(init?.body)).path === '/synthetic/新项目 with spaces') return validation.promise;
+    if (url.endsWith('/launch-targets')) return ok(preview);
+    throw new Error(`unexpected request ${url}`);
+  }); vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<Harness directoryBrowser />, root));
+  await validatePath(); expect(button('.wb-launch-start').disabled).toBe(false);
+  await act(async () => button('.wb-launch-pick').click()); await flush();
+  await act(async () => (root.querySelector('.wb-directory-select') as HTMLButtonElement).click()); await flush();
+  expect(root.querySelector('.wb-directory-browser')).toBeNull();
+  expect(root.querySelector('.wb-launch-start')).toBeNull();
+  expect((root.querySelector('[aria-label="项目目录"]') as HTMLInputElement).value).toBe('/synthetic/新项目 with spaces');
+  expect(JSON.parse(String(fetch.mock.calls.at(-1)?.[1]?.body))).toEqual({ path: '/synthetic/新项目 with spaces' });
+  await act(async () => validation.resolve(ok({ ...preview, targetId: 'browsed-target', canonicalPath: '/synthetic/新项目 with spaces' }))); await flush();
+  expect(button('.wb-launch-start').disabled).toBe(false);
+  expect(fetch.mock.calls.some(([url]) => url === '/workbench/v1/runs')).toBe(false);
+});
+
 it('cancelling the native dialog preserves the selected directory without validation or startup', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(ok(preview)).mockResolvedValueOnce(ok({ path: null }));
   vi.stubGlobal('fetch', fetch);
@@ -326,7 +347,7 @@ it.each([true, false])('opens a reserved tab or offers a link when popup blocked
   await flush();
   expect(open).toHaveBeenCalledWith('about:blank', '_blank');
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-b');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-b/chat');
   expect(replace).toHaveBeenCalledTimes(blocked ? 0 : 1);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith('/runs'))).toHaveLength(1);
   expect(root.querySelector('.wb-launch-start')).toBeNull();
@@ -350,7 +371,7 @@ it('uses the reserved tab even when other runs end before the launch result', as
   await validatePath();
   await act(async () => button('.wb-launch-start').click());
   await flush();
-  expect(replace).toHaveBeenCalledWith('/?run=run-b');
+  expect(replace).toHaveBeenCalledWith('/runs/run-b/chat');
   expect(enter).not.toHaveBeenCalled();
 });
 
@@ -362,9 +383,9 @@ it.each([true, false])('opens an existing run in a new tab without spawning, wit
   await act(async () => render(<Harness enter={enter} />, root));
   await validatePath();
   await act(async () => { Array.from(root.querySelectorAll('button')).find(item => item.textContent === '进入工作台')!.click(); });
-  expect(open).toHaveBeenCalledWith('/?run=run-b', '_blank', 'noopener');
+  expect(open).toHaveBeenCalledWith('/runs/run-b/chat', '_blank', 'noopener');
   expect(enter).not.toHaveBeenCalled();
-  expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-b');
+  expect(root.querySelector('a')?.getAttribute('href')).toBe('/runs/run-b/chat');
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(fetch.mock.calls[0][0]).toBe('/workbench/v1/launch-targets');
   expect(root.querySelector('.wb-launch-start')).toBeNull();

@@ -8,7 +8,7 @@ pub(super) struct Page {
     before: Option<u64>,
 }
 
-async fn query(state: Arc<WebState>, headers: HeaderMap, query: HistoryQuery) -> Response {
+async fn query(state: Arc<WebState>, headers: Auth, query: HistoryQuery) -> Response {
     if !authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -52,14 +52,14 @@ fn page(
 }
 pub(super) async fn status(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(epoch): Path<Uuid>,
 ) -> Response {
     query(state, headers, HistoryQuery::Status { epoch }).await
 }
 pub(super) async fn list(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     params: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let params = match page(params) {
@@ -80,7 +80,7 @@ pub(super) async fn list(
 }
 pub(super) async fn read(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path(epoch): Path<Uuid>,
     params: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
@@ -103,7 +103,7 @@ pub(super) async fn read(
 }
 pub(super) async fn details(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     Path((epoch, request)): Path<(Uuid, Uuid)>,
     params: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
