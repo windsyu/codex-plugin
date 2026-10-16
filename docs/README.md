@@ -14,9 +14,9 @@
 - [Release 包装与发布](development/releasing.md)：许可收集、来源与校验和、正式发布门槛。
 - [合成调试与专项测试](development/debugging.md)：安装版 CLI、Chrome 与合成模型的显式验证。
 
-## 产品计划与设计
+## 产品设计与技术契约
 
-[V2 实施计划](v2-implementation-plan.md)是唯一实施状态、需求追踪和逐片验收来源。下列文档负责契约和理由，不维护另一套进度表。
+仓库保留持续维护的设计、技术契约、操作指南和支持限制。任务进度、测试输出、截图及部署现场记录放在 Issue/PR、CI 或受管产物中；旧记录可通过 Git 历史追溯。
 
 ### 两个组件的维护入口
 
@@ -25,7 +25,7 @@
 | 本机工作台 `workbench` | [模块、运行与数据边界](architecture/workbench.md) | [页面、原生终端与接入流程](interactions/workbench.md) | [本机部署](guides/local-workbench-deployment.md) |
 | 公网中转 `relay` | [依赖、身份、安全与 schema](architecture/relay.md) | [账号、电脑认证与固定页面 API](interactions/relay.md) | [Linux / 单 IP / 历史兼容](guides/public-relay-deployment.md) |
 
-AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和交互；跨端协议或认证变更两组都读。下列专题是更细契约，ADR 是理由，验证是带日期证据；不把旧报告当成当前行为。原混合中转契约和试部署指南已由上述正式文档完整替代，不维护重复入口。
+AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和交互；跨端协议或认证变更两组都读。下列专题提供更细契约，ADR 记录理由，支持文档明确受测范围；不把历史检查结果当成当前行为保证。
 
 ### 专题契约与依据
 
@@ -40,12 +40,10 @@ AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和
 | [设备接入](codex-native-cli-workbench-device-access.md) | 显式监听、配对、撤销和设备作用域 |
 | [ADR 索引](decisions/README.md) | 已记录架构决定及历史背景 |
 | [独立功能页面与中转断线恢复](decisions/0059-workbench-routes-and-relay-recovery.md) | 本机/中转路由、同 Run 终端保活与不重放输入；不代替部署验收 |
-| [验证报告索引](validation/README.md) | 每次实测的环境、证据、限制与图片 |
-| [原型说明](prototypes/README.md) | 合成交互与视觉参考，不是运行时验收 |
+| [旧 Observer 兼容](architecture/observer-compatibility.md) | 旧只读 API、覆盖语义、脱敏与清理保护 |
 
-## 研究与归档
+## 参考研究
 
-- [cc-viewer 功能与实现](cc-viewer-function-and-implementation.md)、[实际试用](cc-viewer-hands-on-2026-09-18.md)：独立参考研究，不直接成为本项目要求。
-- [V2 旧设计索引](archive/v2-before-cc-viewer.md)、[V1 开发历史](archive/v1-development-history.md)：非规范性历史，通过固定 Git 基线追溯。
+- [cc-viewer 功能与实现](cc-viewer-function-and-implementation.md)：固定源码基线的实现分析，不直接成为本项目要求。
 
 新增文档应归入相应索引；通用链接使用相对路径，外部源码引用固定 commit。移动文件时同时更新入站链接、图片与中文锚点，并运行 `node scripts/dev.mjs docs`。

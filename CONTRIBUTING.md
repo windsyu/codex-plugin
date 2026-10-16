@@ -1,6 +1,6 @@
 # 参与贡献
 
-欢迎提交可复现的问题、文档修正和小而完整的改动。开始前阅读[文档导航](docs/README.md)、[支持范围](docs/codex-native-cli-workbench-support.md)和 [AGENTS.md](AGENTS.md)。产品实施状态只在 [V2 实施计划](docs/v2-implementation-plan.md)维护。
+欢迎提交可复现的问题、文档修正和小而完整的改动。开始前阅读[文档导航](docs/README.md)、[支持范围](docs/codex-native-cli-workbench-support.md)和 [AGENTS.md](AGENTS.md)。任务范围、进度和验收结果记录在对应 Issue/PR；持续支持边界在技术文档中维护。
 
 ## 准备环境
 

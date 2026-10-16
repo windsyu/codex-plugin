@@ -24,4 +24,4 @@ catalog 投影 4 重读旧缓存，不迁移原始 rollout、Observer 或 Run；
 
 默认页面更易认出任务，完整核查仍可达。封闭识别保守：未知注入形状可能仍显示为对话，不能以减少噪音为由放宽判断。有限读取下预览只表示当前来源已观察交流。升级须重启当前新产物才能获得内嵌页面和投影更新；旧 binary 回退不删除组织意图，但较旧 catalog reader 的降级范围仍按既有契约。
 
-实现是否通过以[实施计划](../v2-implementation-plan.md#r7-session-organization)和实际验证记录为准，不从本 ADR 推导浏览器验收或发布完成。
+实现须满足[项目会话整理契约](../codex-native-cli-workbench-session-organization.md)的可执行验收要求，不从本 ADR 推导浏览器验收或发布完成。

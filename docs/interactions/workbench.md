@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [架构与安全](../architecture/workbench.md) · [部署与接入](../guides/local-workbench-deployment.md) · [中转交互](relay.md)
 
-本文按用户操作追踪 Application、Run、阅读与终端接口，供开发和维护定位。身份、存储及安全不变量见架构手册；完整字段/错误契约继续由[详细设计](../codex-native-cli-workbench-detailed-design.md)、[历史首页与启动](../codex-native-cli-workbench-history-home.md)、[设置与历史管理](../codex-native-cli-workbench-history-settings.md)、[设备接入](../codex-native-cli-workbench-device-access.md)负责。实施与验收状态只在 [V2 实施计划](../v2-implementation-plan.md)，本文不另建状态表。
+本文按用户操作追踪 Application、Run、阅读与终端接口，供开发和维护定位。身份、存储及安全不变量见架构手册；完整字段/错误契约继续由[详细设计](../codex-native-cli-workbench-detailed-design.md)、[历史首页与启动](../codex-native-cli-workbench-history-home.md)、[设置与历史管理](../codex-native-cli-workbench-history-settings.md)、[设备接入](../codex-native-cli-workbench-device-access.md)负责。受测环境与剩余限制见[支持范围](../codex-native-cli-workbench-support.md)。
 
 ## 1. 页面、接口与作用域
 

@@ -1,6 +1,6 @@
 # 项目会话整理：明确归属、分层展示与可撤销纠偏
 
-> 设计日期：2026-10-08。用户明确要求解决“会话按照项目分组不够明确、有杂乱数据”，不关注 worktree。本文件描述 R7 实现契约；任务、状态和通过条件只在[实施计划 R7](v2-implementation-plan.md#r7-session-organization)维护，实际检查与限制见[验证报告](validation/native-cli-r7-project-organization-2026-10-08.md)。持久化与兼容决定见 [ADR 0055](decisions/0055-project-session-organization.md)。
+> 本文件定义项目分组、会话分层、可撤销归属与任务呈现的实现契约。持久化与兼容决定见 [ADR 0055](decisions/0055-project-session-organization.md)与 [ADR 0064](decisions/0064-human-conversation-presentation.md)。
 
 ## 1. 用户价值与成功标准
 
@@ -183,17 +183,13 @@ interface SessionGroup {
 
 先增加能复现首页标题、混列/副本和覆盖丢失的合成回归，再实现；真实 CLI 使用临时 HOME/USERPROFILE/CODEX_HOME。每片运行相关 Rust/Web 测试、formatter/Clippy/类型检查、先 Web 后 Rust 的标准 build；文档执行 `node scripts/dev.mjs docs`。浏览器只复用系统 Chrome。完整跨源分组、持久化和权限新增须独立审查，不能用 token-monitor 的测试替代本项目验收。
 
-## 9. 实施准备与剩余风险
+## 9. 剩余风险
 
-按 R7-A 项目上下文 → R7-B 分层/来源展示 → R7-C 单条覆盖 → R7-D 集成验证依次形成可试用结果；具体文件边界、状态与门槛只在[实施计划](v2-implementation-plan.md#r7-session-organization)。第一片无需新持久库或原生协议适配，可以先验证导航是否更清晰。
-
-2026-10-08 用户在设计准备后进一步授权完成 R7 及测试验证；这不包含清理真实历史、替换用户正在使用的实例、提交/推送、创建 Issue/PR 或发布。GitHub Issue 的背景、范围、验收和风险已在计划准备，得到远程授权后再登记，不把本地任务当作已创建的 Issue。
-
-风险保留：原生元数据不能表达全部用户项目意图；新增 guardian 字段受兼容证据门槛；明确关系只能折叠一部分来源副本；单条操作可能不足以整理大量记录，但不能据此提前加入批量重归类。人工覆盖和默认视图是本次产品选择，存储/权限/恢复经独立复核与逐片实测后ADR接受；验证只覆盖报告列明的环境、合成场景和公开no-daemon CLI profile，不宣称默认daemon、物理故障或所有用户历史均已验证。后续先用户试用，不自动修改真实历史或扩充新整理范围。
+原生元数据不能表达全部用户项目意图；新增 guardian 字段须有公共协议或受测 rollout 证据。明确关系只能折叠部分来源副本，单条操作也可能不足以整理大量记录，但不能据此自动扩大为批量重归类。存储、权限与恢复需独立复核，并针对合成故障、跨应用并发和真实 CLI 单独验证；no-daemon profile 的结果不能外推默认 daemon、物理故障或全部用户历史。
 
 ## 10. 试用改进：任务识别与人类对话优先
 
-2026-10-08 用户试用指出页面过多暴露技术信息、缺少人能辨认的任务内容，确认四项改造：有意义标题、正文对话优先、任务/交流预览/时间列表、当前项目主标题。第五项为空，不推导新范围。决定见 [ADR 0064](decisions/0064-human-conversation-presentation.md)，状态只在[实施计划 R7-E](v2-implementation-plan.md#r7-session-organization)维护。
+任务呈现优先提供有意义标题、正文对话、任务/交流预览/时间列表和当前项目主标题。决定见 [ADR 0064](decisions/0064-human-conversation-presentation.md)。
 
 ### 10.1 标题与交流预览
 

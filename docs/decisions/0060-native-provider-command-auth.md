@@ -7,7 +7,7 @@
 
 公网门户登录只证明浏览器可访问所属电脑和工作台，不提供模型服务凭证。现有 `unmanaged-custom` 适配器仅接受静态 bearer，并将命令认证及原生登录存储一并拒绝，阻止使用原生 provider `auth.command` 的配置启动。命令凭证的生成、缓存和失效重取属于安装版官方 Codex CLI，不应在工作台重复实现。
 
-本决定是项目接入边界，不据此宣称任意 CLI 版本、provider 或真实模型已验证。实现和分项证据见[验证记录](../validation/native-cli-command-auth-2026-10-14.md)。
+本决定是项目接入边界，不据此宣称任意 CLI 版本、provider 或真实模型已验证。支持范围见[支持文档](../codex-native-cli-workbench-support.md)。
 
 ## Decision
 

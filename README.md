@@ -23,7 +23,7 @@
 
 已有 CLI `0.154.0`、`0.155.1`、`0.156.1`、`0.159.2` 的受测记录，命令认证专项使用 `0.162.1`；未知版本提示后继续检查配置，不自动升级、降级或修改 CLI。Intel macOS、Linux、Windows 完整工作台运行尚未验收。具体能力与验证边界见[支持范围](docs/codex-native-cli-workbench-support.md)。
 
-源码新增默认关闭的可信公网中转：本机登录并开启后，手机通过同账号门户访问自己的多台电脑，服务器独立部署。新单 IP/单 HTTPS 端口已有 Linux/TLS 测试部署和本地三电脑回归；域名模式及真实手机完整公网验收另列，见[部署指南](docs/guides/public-relay-deployment.md)与[阶段状态](docs/v2-implementation-plan.md)。现有 `0.3.0` 发布包不包含这项源码增量。
+源码新增默认关闭的可信公网中转：本机登录并开启后，手机通过同账号门户访问自己的多台电脑，服务器独立部署。新单 IP/单 HTTPS 端口已有 Linux/TLS 测试部署和本地三电脑回归；域名模式及真实手机完整公网验收另列，见[部署指南](docs/guides/public-relay-deployment.md)与[支持范围](docs/codex-native-cli-workbench-support.md)。现有 `0.3.0` 发布包不包含这项源码增量。
 
 本仓库有两个独立编译/部署单元：电脑上的 **workbench**（`codex-view` / `codex-observerd`）与服务器上的 **relay**（`relay/` 中的 `codex-relayd`）。本机独立使用不需中转；服务器不需 Codex CLI、PTY 或本机历史。组件能力、部署顺序和供 AI agent 使用的操作入口见[组件指南](docs/guides/component-deployment.md)、[本机部署](docs/guides/local-workbench-deployment.md)和[中转部署](docs/guides/public-relay-deployment.md)。
 
@@ -122,7 +122,7 @@ node scripts/dev.mjs build --component workbench
 - [组件与部署指南](docs/guides/component-deployment.md)：本机后端与公网中转分别编译、部署，以及 AI agent 操作边界。
 - 本机维护：[架构](docs/architecture/workbench.md)与[交互](docs/interactions/workbench.md)；中转维护：[架构](docs/architecture/relay.md)与[交互](docs/interactions/relay.md)。
 - [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布。
-- [文档总索引](docs/README.md)：设计契约、ADR、验证报告与历史归档；阶段状态以 [V2 实施计划](docs/v2-implementation-plan.md)为准。
+- [文档总索引](docs/README.md)：设计契约、ADR、操作指南与支持限制。
 - [贡献指南](CONTRIBUTING.md)、[项目执行规范](AGENTS.md)、[安全报告](SECURITY.md)、[第三方许可](THIRD_PARTY_NOTICES.md)与[变更日志](CHANGELOG.md)。
 
 项目使用 [MIT 许可证](LICENSE)。分发包附带依赖的原许可与修改说明。

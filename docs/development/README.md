@@ -96,7 +96,7 @@
 
 常规检查包含前端 TypeScript、单元测试和构建，以及整个 workspace 的 Rust fmt、Clippy、常规测试和三个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
 
-真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，[验证索引](../validation/README.md)保存当时范围和限制。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
+真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，每次执行的环境、版本、命令、结果和未验证项保存在 PR、CI 或受管产物中；持续限制同步到[支持范围](../codex-native-cli-workbench-support.md)，不新增带日期的阶段报告。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
 
 账号删除门户专项可在标准构建后执行 `node web/e2e/relay-account-probe.cjs`：脚本自行启动隔离合成中转、系统 Chrome 手机视口，登记受管结果，并只清理自己的运行目录/进程，不操作真实部署账号。
 

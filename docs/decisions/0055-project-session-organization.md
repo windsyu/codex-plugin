@@ -11,7 +11,7 @@ token-monitor 提供“路径身份、元数据补全、明确来源的辅助会
 
 ## Decision
 
-实现采用以下方案，详见[项目会话整理契约](../codex-native-cli-workbench-session-organization.md)，实际验证与限制只据[报告](../validation/native-cli-r7-project-organization-2026-10-08.md)：
+实现采用以下方案，详见[项目会话整理契约](../codex-native-cli-workbench-session-organization.md)，支持限制见[支持文档](../codex-native-cli-workbench-support.md)：
 
 1. 保留完整路径项目身份和既有自动归属。项目导航独立于会话搜索/来源/类别，选中项目摘要不依赖分页。未归类记录说明证据原因，不将不确定性伪装成无项目。
 2. 展示分为主要会话、明确辅助会话、工作台运行记录；unknown 默认可见。有可信同 nativeHome/thread 且有效项目/类型一致的来源可以折叠成展示组，每个成员保留正文、Token、coverage 和能力；组不是新可恢复会话。
@@ -19,7 +19,7 @@ token-monitor 提供“路径身份、元数据补全、明确来源的辅助会
 4. 给 owner 单条记录的显式项目覆盖、未归类和恢复自动规则；不自动跟随父/子/其他来源。覆盖是展示偏好，不改变 recordedCwd、源身份、恢复、运行互斥、文件根或设备授权。
 5. 覆盖是不可派生的用户状态，存于有效 dataDir 的 `organization/state.sqlite`，自有 schema 1；与可重建 `library/catalog.sqlite` 分开。统一 JSON 配置不增加第二份副本，原始来源不迁移。事务内 CAS、store_id + 单调修订及每次查询核验共享状态，保证不同 config 共享 dataDir 时不依赖进程内锁。首次意图在私有 pending 库 FULL 事务提交后不覆盖发布并同步目录；失败孤儿保留诊断，不成为正式空库；ACK 前获取当前提交快照。自己的经身份/权限核验状态库允许无 CREATE 读写连接做 hot-journal恢复，随后query_only；catalog及原始来源仍只读。
 6. 新组查询/单条覆盖接口仅 Application owner 使用，复用 Origin、instanceId、来源撤销、强引用 If-Match 和修订校验。目录游标绑定 catalog、规则、覆盖和查询；正文窗口游标只绑定源修订以保留锚点。状态故障明确不可用，不误用自动或旧覆盖，独立来源正文/原cwd恢复可降级继续；新项目启动不绕过校验。
-7. 不做 Git/worktree、按名字/正文猜归属、跨路径自动合并、批量整理或删除。按 R7-A–D 小片验证，状态只在[实施计划 R7](../v2-implementation-plan.md#r7-session-organization)维护。
+7. 不做 Git/worktree、按名字/正文猜归属、跨路径自动合并、批量整理或删除。每项变更均需验证读写隔离、冲突处理与可撤销行为。
 
 本决定采用新整理视图和单条本机覆盖；R6 §14 的归属/只读/恢复安全规则仍适用。原“无人工归类配置”是 F.1 当时范围，不阻止本次新增独立状态存储和owner写入口，不修改历史只读来源的语义。
 

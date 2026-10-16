@@ -3,7 +3,7 @@
 > 研究日期：2026-09-18
 > 研究对象：cc-viewer 1.8.18 的 CLI/PTY 模式与本地 Web 界面
 > 源码基线：`5b544c6ee112bb14a80670480d3c4c900b17d307`
-> 源码目录：`/Users/windsyu/magicproject/cc-viewer`
+> 本文保留固定版本的机制研究，不作为本项目支持或验收结论。
 
 ## 1. 文档范围与证据
 
@@ -19,7 +19,7 @@
 | 本地源码 | 上述 commit，`packages/app/package.json` 为 1.8.18 |
 | 产品介绍页 | [cc-viewer 网站](https://weiesky.github.io/cc-viewer/)，此前访问时显示 1.6.341，与安装版不同 |
 
-行为证据来自安装版，技术说明固定于研究 commit；没有逐文件证明安装包与源码完全相同。实际模型连接也不能视为官方 Anthropic 服务兼容性验证。原始操作和清理记录见[本次试用记录](cc-viewer-hands-on-2026-09-18.md)。
+行为证据来自安装版，技术说明固定于研究 commit；没有逐文件证明安装包与源码完全相同。实际模型连接也不能视为官方 Anthropic 服务兼容性验证。原始操作可通过[清理前固定 Git 版本](https://github.com/windsyu/codex-plugin/blob/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/cc-viewer-hands-on-2026-09-18.md)追溯。
 
 试用使用独立的 Claude 配置目录与日志目录，并显式设置 `CCV_HOST=127.0.0.1`。仅在合成目录完成信任操作；试用服务已停止，临时凭证与原始请求日志已清理，未把私人配置或原始流量加入仓库。
 
