@@ -20,7 +20,7 @@
 
 | 验证 | 结果与受管任务 |
 | --- | --- |
-| 标准完整检查 | `node scripts/dev.mjs check --offline`，`d1ec87e5-41d6-435c-be27-5ddbc47e7e07` 整体成功：维护工具99、Web376/41文件、类型检查、fmt、Clippy `-D warnings`、完整 workspace Rust 测试及 debug/release 构建通过；root library478、Observer95、中转53+1。ignored 不计入常规通过；最终新增文档另跑142项检查、暂存区24个文本blob检查通过 |
+| 标准完整检查 | `node scripts/dev.mjs check --offline`，`d1ec87e5-41d6-435c-be27-5ddbc47e7e07` 整体成功：维护工具99、Web376/41文件、类型检查、fmt、Clippy `-D warnings`、完整 workspace Rust 测试及 debug/release 构建通过；root library478、Observer94、中转53+1。Observer另1项ignored，其他ignored亦不计入常规通过；最终新增文档另跑142项检查、暂存区24个文本blob检查通过 |
 | 既有 v4 catalog 重开 | 新回归验证 generation/元数据保留、raw 与 organization 精确字节不变；纳入 Rust 常规测试 |
 | 阅读器单元回归 | 11 项通过，新增焦点、点击前后滚动和迟到响应四项；迟到响应回归在修复前准确失败 |
 | 三来源历史 Chrome | `3c729e73-62b4-4e73-b8a7-52dbc01e8a22` 通过；分组、单条归类及撤销、128 条前缀预算、搜索/unknown/缺口、模式锚点、详情焦点、320/390/736/1024/1440px、最多48条挂载；无外部请求/页面异常/隐式 WebSocket |
