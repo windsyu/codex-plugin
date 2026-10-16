@@ -23,7 +23,71 @@ async function mount(match = '') {
 async function expand() {
   await act(async () => { const fold = root.querySelector<HTMLDetailsElement>('.wb-library-record-fold')!; fold.open = true; fold.dispatchEvent(new Event('toggle')); }); await flush();
 }
-afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); });
+afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it('moves detail focus without scrolling the virtual reader and restores it after closing', async () => {
+  mock(() => ({ records: [user], nextCursor: null })); await mount();
+  const opener = root.querySelector<HTMLButtonElement>('[data-role=user] button')!;
+  const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+  await act(async () => opener.click()); await flush();
+  const close = root.querySelector<HTMLButtonElement>('.wb-library-detail header button')!;
+  expect(document.activeElement).toBe(close);
+  expect(focus.mock.calls[0]).toEqual([{ preventScroll: true }]);
+  focus.mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+    expect(root.querySelector('.wb-library-detail')).toBeNull();
+    expect(this).toBe(opener);
+    expect(options).toEqual({ preventScroll: true });
+  });
+  await act(async () => close.click());
+  expect(focus).toHaveBeenCalledTimes(2);
+});
+it('keeps the inspected window mounted when a click scroll event arrives after opening details', async () => {
+  mock(n => n < 3 ? { records: [context(n)], nextCursor: String(n + 1) } : { records: [user], nextCursor: null });
+  await mount();
+  const opener = root.querySelector<HTMLButtonElement>('[data-role=user] button')!;
+  await act(async () => opener.click()); await flush();
+  const area = root.querySelector<HTMLElement>('.wb-library-body-scroll')!;
+  await act(async () => { area.scrollTop = 0; area.dispatchEvent(new Event('scroll')); }); await flush();
+  expect(opener.isConnected).toBe(true);
+  const close = root.querySelector<HTMLButtonElement>('.wb-library-detail header button')!;
+  await act(async () => close.click());
+  expect(document.activeElement).toBe(opener);
+});
+it('keeps visible short windows mounted when scrolling happens before a record click', async () => {
+  mock(n => n < 3 ? { records: [context(n)], nextCursor: String(n + 1) } : { records: [user], nextCursor: null });
+  await mount();
+  const area = root.querySelector<HTMLElement>('.wb-library-body-scroll')!;
+  vi.spyOn(area, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 463 } as DOMRect);
+  for (const node of area.querySelectorAll<HTMLElement>('[data-library-block]')) {
+    vi.spyOn(node, 'getBoundingClientRect').mockReturnValue({ top: 110, bottom: 170, height: 60 } as DOMRect);
+  }
+  const opener = root.querySelector<HTMLButtonElement>('[data-role=user] button')!;
+  await act(async () => { area.scrollTop = 0; area.dispatchEvent(new Event('scroll')); }); await flush();
+  expect(opener.isConnected).toBe(true);
+  await act(async () => opener.click()); await flush();
+  expect(root.querySelector('.wb-library-detail')).not.toBeNull();
+});
+it('does not let a delayed scrollback response evict the currently inspected window', async () => {
+  let firstLoads = 0, release: (() => void) | undefined;
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    const u = new URL(url, location.href), index = Number(u.searchParams.get('cursor') || 0);
+    if (!u.pathname.endsWith('/details') && index === 0 && ++firstLoads === 2) await new Promise<void>(resolve => { release = resolve; });
+    return { ok: true, text: async () => JSON.stringify({ records: [user], nextCursor: index < 20 ? String(index + 1) : null, entry, revision: 'v1', coverage: entry.coverage }) };
+  }));
+  await mount();
+  const area = root.querySelector<HTMLElement>('.wb-library-body-scroll')!;
+  const move = async (top: number) => { await act(async () => { area.scrollTop = top; area.dispatchEvent(new Event('scroll')); }); await flush(); };
+  for (let index = 1; index <= 4; index++) await move(index * 700 + 1);
+  expect(root.querySelector('[data-library-block="4"] [data-role=user]')).not.toBeNull();
+  await move(0); expect(release).toBeTypeOf('function');
+  await move(2801);
+  const opener = root.querySelector<HTMLButtonElement>('[data-library-block="4"] [data-role=user] button')!;
+  await act(async () => opener.click()); await flush();
+  await act(async () => release!()); await flush();
+  expect(opener.isConnected).toBe(true);
+  await act(async () => root.querySelector<HTMLButtonElement>('.wb-library-detail header button')!.click());
+  expect(document.activeElement).toBe(opener);
+});
 
 it('seeks past a long confirmed injected prefix without parsing keywords or losing its entry', async () => {
   const fetch = mock(n => n < 3 ? { records: Array.from({ length: 16 }, (_, i) => context(n * 16 + i)), nextCursor: String(n + 1) } : { records: [user], nextCursor: null });

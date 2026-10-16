@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn prefix_lookalikes_do_not_enter_the_slow_path_per_character() {
+    // The history budget/window fixtures contain long runs of `x`. Although
+    // `x` can start `xoxb-`, `xx` cannot; scanning every byte through drain()
+    // makes a small cold index depend on the runner's debug-build CPU speed.
+    let policy = RedactionPolicy::new(vec![]).unwrap();
+    let text = "x".repeat(4096);
+    let mut stream = TextRedactor::new(policy);
+    let mut output = stream.push(&text).0;
+    output.push_str(stream.finish().as_str());
+    assert_eq!(output, text);
+    assert!(
+        stream.slow_path_steps <= 8,
+        "prefix lookalikes took {} slow-path steps",
+        stream.slow_path_steps
+    );
+}
+
+#[test]
+fn pair_filter_preserves_case_collisions_short_secrets_and_chunk_state() {
+    let empty = RedactionPolicy::new(vec![]).unwrap();
+    for (prefix, _) in PREFIXES {
+        for case in 0..4 {
+            let mut prefix = prefix.as_bytes().to_vec();
+            for (index, byte) in prefix.iter_mut().take(2).enumerate() {
+                if case & (1 << index) != 0 {
+                    byte.make_ascii_uppercase();
+                }
+            }
+            let prefix = String::from_utf8(prefix).unwrap();
+            let input = format!("xx中文{prefix}synthetic-value! END");
+            for split in input
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain([input.len()])
+            {
+                for tool in [false, true] {
+                    compare(&empty, tool, &[&input[..split], "", &input[split..]]);
+                }
+            }
+        }
+    }
+    // A real generic prefix after many lookalikes must still be masked.
+    let input = format!("{}xoxb-synthetic!", "x".repeat(4096));
+    assert_eq!(
+        empty.scrub(&input).as_str(),
+        format!("{}{OMITTED}!", "x".repeat(4096))
+    );
+    for split in [0, 1, 4096, 4097, 4098, 4100, input.len()] {
+        compare(&empty, false, &[&input[..split], &input[split..]]);
+    }
+    let single = RedactionPolicy::new(vec!["x".into(), "xy".into()]).unwrap();
+    assert_eq!(single.possible_second[b'x' as usize], u64::MAX);
+    let collision = RedactionPolicy::new(vec!["qa".into()]).unwrap();
+    assert_eq!(b'a' & 63, b'!' & 63);
+    assert_eq!(collision.scrub("q! qa").as_str(), format!("q! {OMITTED}"));
+    let unicode = RedactionPolicy::new(vec!["中文秘密".into(), "𐀀secret".into()]).unwrap();
+    for (policy, input) in [
+        (&single, "x xy xx xoxb-synthetic! 中文"),
+        (&collision, "q! qa qA q 中文"),
+        (&unicode, "中仿文秘密 中文秘密 🔑𐀀secret xoxb-synthetic! 中"),
+    ] {
+        for split in input
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([input.len()])
+        {
+            for tool in [false, true] {
+                compare(policy, tool, &[&input[..split], "", &input[split..]]);
+                compare(policy, tool, &[&input[..split]]);
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "synthetic CPU benchmark; run explicitly with --nocapture"]
 fn synthetic_large_text_benchmark() {
     let policy = RedactionPolicy::new(vec!["synthetic-private-value".into()]).unwrap();

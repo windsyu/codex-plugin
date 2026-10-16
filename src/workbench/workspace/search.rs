@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
+use std::os::fd::AsRawFd;
 
 impl Reader {
     fn rg(
@@ -44,8 +45,9 @@ impl Reader {
         args.push("--".into());
         // Validate the expression even in an empty/ignored workspace.
         let mut probe = args.clone();
-        probe.push("/dev/fd/64".into());
-        let validation = self.rg(&probe, &[process::snapshot(b"")?], budget)?;
+        let empty = process::snapshot(b"")?;
+        probe.push(process::snapshot_path(&empty));
+        let validation = self.rg(&probe, &[empty], budget)?;
         if !matches!(validation.code, Some(0 | 1)) {
             return Err(Fault("invalid_regex"));
         }
@@ -120,8 +122,8 @@ impl Reader {
                 continue;
             }
             let mut command = args.clone();
-            for i in 0..files.len() {
-                command.push(format!("/dev/fd/{}", 64 + i));
+            for file in &files {
+                command.push(process::snapshot_path(file));
             }
             let output = match self.rg(&command, &files, budget) {
                 Ok(out) => out,
@@ -142,11 +144,15 @@ impl Reader {
                 let Some(fd) = data["path"]["text"]
                     .as_str()
                     .and_then(|s| s.strip_prefix("/dev/fd/"))
-                    .and_then(|s| s.parse::<usize>().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
                 else {
                     continue;
                 };
-                let Some(path) = fd.checked_sub(64).and_then(|n| paths.get(n)) else {
+                let Some(path) = files
+                    .iter()
+                    .position(|file| file.as_raw_fd() == fd)
+                    .and_then(|n| paths.get(n))
+                else {
                     continue;
                 };
                 if hits.len() >= PAGE {

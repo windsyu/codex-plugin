@@ -55,7 +55,9 @@ setTimeout(() => { process.stdout.write(JSON.stringify({stage:'failed',check:sta
     await route.fulfill({json:{revision:'pending',records:[],nextCursor:null,coverage:{state:'partial',reasons:['indexing']}}});
   });
   await page.goto(process.env.WORKBENCH_PROBE_URL);
-  await page.getByRole('link',{name:'全部历史',exact:true}).click();
+  await expect(page.getByRole('link',{name:'全部历史',exact:true})).toBeVisible();
+  const recordsHome=new URL(page.url());recordsHome.pathname='/history';recordsHome.searchParams.set('view','records');
+  await page.goto(recordsHome.toString());
   await expect(page.getByRole('heading',{name:'全部历史',exact:true})).toBeVisible();
   await expect(page.getByRole('heading',{name:'正在整理历史',exact:true})).toBeVisible();
   assert.equal(emptyPendingServed,true);

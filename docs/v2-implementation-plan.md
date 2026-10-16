@@ -573,3 +573,5 @@ R0–R5 的历史基线为 `a1f96e5`，该提交时无参数启动直接进入 C
 **GitHub Issue 准备（未创建）。** 建议标题 `feat: clarify project session organization`。背景：现有首页混列、注入上下文冒充任务标题和事件流优先；价值：快速找到明确项目的主要任务并阅读人类对话。范围为 R7-A–E，非目标为 worktree/Git 聚合、模型主题生成、批量整理、原始数据清理和权限扩大。验收以 RQ23/RQ24 和上表为准；安全/兼容风险为新增 owner 状态写入、catalog 4 派生重建、有界呈现识别、计数/URL 变化与原 cwd 恢复不变；依赖 R6 已有三来源身份、只读 reader 和授权边界。关联整理方案、ADR 0055/0064 及两份实际验证报告。当前请求未授权远端 mutation，先保留本地任务，创建 Issue/PR、提交/推送或发布需另行授权。
 
 **设计准备与实施记录。** A–D 方案与实现完成独立复核，修正跨应用修订、组摘要、类型冲突、存储恢复/首次发布、DTO降级与预算诊断。实际 Rust/Web/Chrome、性能、真实CLI及负向权限证据见[逐片报告](validation/native-cli-r7-project-organization-2026-10-08.md)；后续试用与 E 增量改造见[人类对话报告](validation/native-cli-r7-human-conversation-2026-10-08.md)，不从文档检查或未执行ignored测试推导通过。物理断电/设备故障、双OS进程压力及新CLI默认daemon仍不作实测保证；原始历史未改，试用实例重启不启动 CLI，没有远端 mutation。
+
+2026-10-16 用户要求公网分支以 main 为祖先并同步新版历史；完整整合 R7、保留公网/后台/目录能力，UI/API 配套升至2。既有 catalog4 沿用，不通过删除数据解决版本不兼容；同步修复短折叠块与迟到响应导致详情目标卸载的问题。增量证据与尚未验证范围见[整合记录](validation/main-history-public-relay-2026-10-16.md)，真实中转部署单列，不以旧 R7 验收替代。

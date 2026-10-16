@@ -765,7 +765,9 @@ R4 实现为独立 WorkspaceReader 线程、8 项有界队列和每请求 5 秒�
 
 逐组件 `openat(O_NOFOLLOW)` 阻止路径穿越与替换为 symlink；根内 symlink、普通文件硬链接、设备/FIFO 也拒绝。`.git`、常见凭证目录/文件名和私钥名按统一规则排除；这不是对任意源码内秘密的检测。目录扫描和文件读取检查前后元数据，异常明确返回。目录名称按 UTF-8 展示，不可编码名称省略。
 
-rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安全读取并以最多 16 个匿名文件描述符一批交给 rg，不执行 shell/preprocess，不让 rg 重新打开项目正文路径。Git 固定 cwd/argv、`-z` 路径、当前目录 pathspec/prefix 双重范围，禁用 pager、external diff/textconv、fsmonitor、hooks、可选锁、子模块递归、签名与远程抓取。Diff 从验证过的 HEAD/index blob 与安全读取的当前文本生成匿名快照后比较；因此模式/rename 看左侧状态，冲突不伪造单一版本。决定、边界与替代方案见 [ADR 0050](decisions/0050-read-only-workspace.md)。
+rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安全读取并以最多 16 个匿名文件描述符一批交给 rg，不执行 shell/preprocess，不让 rg 重新打开项目正文路径。Git 固定 cwd/argv、`-z` 路径、当前目录 pathspec/prefix 双重范围，禁用 pager、external diff/textconv、fsmonitor、hooks、可选锁、子模块递归、签名与远程抓取。Diff 从验证过的 HEAD/index blob 与安全读取的当前文本生成私有内容快照后比较；因此模式/rename 看左侧状态，冲突不伪造单一版本。决定、边界与替代方案见 [ADR 0050](decisions/0050-read-only-workspace.md)。
+
+快照写入后 rewind，在父进程中提前持有实际 CLOEXEC FD；子进程只清除相应 CLOEXEC，不覆盖固定 FD，父进程仍禁止其它 exec 继承。rg 使用实际 `/dev/fd/N`，按请求一次性消费共享偏移。Git 为避开 macOS 同号 `/dev/fd` 并发 stat 异常，改为只重开请求自有 0700 临时目录中的 0600 before/after 文件，不重新打开原项目路径。查询正常结束、错误和取消后清理；强制终止或清理失败可能遗留私有临时正文，不自动扫描删除未知目录。可选 `CODEX_WORKSPACE_DIAGNOSTICS=1` 将长度、偏移、FD 元数据、启动 errno、退出码/信号及 stderr 字节数/静态类别输出为本机 stderr JSONL，不进入 HTTP/历史，不记录正文、摘要、路径、argv 或环境。诊断不读正文或重置偏移，默认关闭，详见[调试指南](development/debugging.md#工作区-fd-诊断)及 [Issue #9 调查](validation/workspace-fd-issue-9-2026-10-09.md)。
 
 只刷新当前可见查询，每次完成后至少等待 5 秒；文件树保留展开项但只轮询最后选中的目录。其他展开项保留上次结果，重新选中或“刷新文件”可更新。首版使用有界轮询而不增加递归 watcher，外部文件变化与已确认工具结果由下一轮读取反映，不把通知当作 Git 状态。切换/收起取消未完成查询，取消/超时回收查询子进程，已进入内核的磁盘 I/O 不能保证立即终止。
 
