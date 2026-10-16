@@ -1,6 +1,6 @@
 # ADR 0051：同一工作台的多地址访问与配对
 
-- Status：Accepted（用户要求按计划实现；共用接入已落地，真机结果按实施计划单列）
+- Status：Accepted；真机支持边界见支持文档。
 - Date：2026-09-21
 
 ## Context
@@ -36,4 +36,4 @@
 
 LAN HTTP 存在同网监听/篡改风险；Tailscale 地址的 HTTP 页面也不自动成为浏览器安全上下文，需兼容受限 API。不同主机 Cookie/草稿不自动迁移。wildcard 覆盖本机 IPv4 网卡，不能宣称仅某一 Wi-Fi 可达；显式开启和配对仍必需。
 
-实现已加入可选设备监听、共用浏览器授权、二维码面板及 access.port；默认关闭，不修改 Tailscale、防火墙或迁移历史。自动化与 Chrome 证据见[初版接入验证](../validation/native-cli-device-access-2026-09-21.md)及[固定码验证](../validation/native-cli-fixed-pairing-2026-09-21.md)。支持范围与真机结果归[唯一实施计划](../v2-implementation-plan.md#device-access-slices)。
+实现已加入可选设备监听、共用浏览器授权、二维码面板及 access.port；默认关闭，不修改 Tailscale、防火墙或迁移历史。支持范围与真机限制见[支持文档](../codex-native-cli-workbench-support.md)。

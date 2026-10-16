@@ -16,7 +16,7 @@
 
 ## 2. 项目目标与版本边界
 
-当前 V2 目标是本机原生 Codex 工作台。2026-09-18 用户明确允许完全重构，要求体验与实现机理向 cc-viewer 靠拢：当前目录启动普通官方 CLI、PTY 直接交互、模型 HTTP/SSE/WS 代理、网页内容直推、后台异步记录。见工作台方案、详细设计与 ADR 0039；实施顺序、验收与状态只在 `docs/v2-implementation-plan.md` 维护。
+当前 V2 目标是本机原生 Codex 工作台。2026-09-18 用户明确允许完全重构，要求体验与实现机理向 cc-viewer 靠拢：当前目录启动普通官方 CLI、PTY 直接交互、模型 HTTP/SSE/WS 代理、网页内容直推、后台异步记录。见工作台方案、详细设计与 ADR 0039；持续支持边界见支持文档，任务进度与验收结果记录在 Issue/PR、CI 或受管产物中。
 
 V1 Observer、v0.2.0 Controller 与 Session Kernel Slice 1–9 是已有历史实现/验证基线，不是新架构必须复用的前提。允许替换 Worker-owned App Server、remote TUI、持久 Thread/InputLease/TurnOwner、command ledger/CAS 和 raw-first 转发。新路径不承诺旧 `/v2` 控制契约；旧数据库/audit 原样保留，`/v1` 继续只读，可由独立兼容层提供历史读取。
 
@@ -26,11 +26,10 @@ V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再�
 
 从[文档总索引](docs/README.md)选择任务相关材料，按职责使用权威来源：
 
-- [V2 实施计划](docs/v2-implementation-plan.md)：唯一需求追踪、逐片任务、验收和状态来源；
 - [核心约束](docs/codex-local-gateway-v2-development-constraints.md)、[产品方案](docs/codex-native-cli-workbench.md)与[详细设计](docs/codex-native-cli-workbench-detailed-design.md)：目标和实现契约，专题设计由总索引定位；
 - [支持范围](docs/codex-native-cli-workbench-support.md)：实际受测环境、能力与限制；
-- [ADR 索引](docs/decisions/README.md)：架构和兼容选择；[验证索引](docs/validation/README.md)：当时的版本、结果和限制；
-- [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布；参考研究、合成原型与历史归档是非规范性依据，不能替代新运行时验收。
+- [ADR 索引](docs/decisions/README.md)：架构和兼容选择；[旧 Observer 兼容](docs/architecture/observer-compatibility.md)：旧只读接口和数据保护契约；
+- [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布；参考研究与历史记录不能替代当前运行时验收。
 - 组件维护入口：[本机架构](docs/architecture/workbench.md)/[交互](docs/interactions/workbench.md)、[中转架构](docs/architecture/relay.md)/[交互](docs/interactions/relay.md)；跨端变更同时核对两组，分端部署见[组件指南](docs/guides/component-deployment.md)。
 
 需要研究官方源码时，使用自行配置的只读 checkout（可用 `CODEX_SOURCE_DIR` 指向该目录）；不把维护者机器路径作为其他贡献者的前提。该变量仅用于研究命令，不是产品运行配置。
@@ -155,7 +154,7 @@ ADR 至少包含：Context、Decision、Alternatives、Consequences、Status、D
 
 ### 7.1 推荐切片
 
-只按 `docs/v2-implementation-plan.md` 的状态表与逐片通过条件推进。先证明普通 CLI + 模型代理 + 网页中间态，再扩展；前片通过才能以下片为主线，不维持多个长期未集成分支。旧 Controller、Session Kernel Slice 1–12、W0–W6、N1–N5 不再作为当前任务清单，不能从历史文字恢复未经当前方案接纳的范围。
+按当前用户要求和设计契约拆分可验证切片，并在 Issue/PR 中明确通过条件。先证明普通 CLI + 模型代理 + 网页中间态，再扩展；前片通过才能以下片为主线，不维持多个长期未集成分支。旧 Controller、Session Kernel Slice 1–12、W0–W6、N1–N5 不再作为当前任务清单，不能从历史文字恢复未经当前方案接纳的范围。
 
 ### 7.2 编码要求
 
@@ -338,7 +337,7 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 ## 12. 权威决策与标准维护流程
 
-当前架构以 [ADR 0039](docs/decisions/0039-cc-viewer-style-runtime.md)为准。原生 CLI 保持唯一对话/审批入口；记录失败不得阻断转发，不得把模型响应完成当作整轮完成，不恢复旧控制内核。CLI 版本、用量、调用详情、历史清理、独立用户目录、文件阅读、设备访问和历史首页的决定集中在 [ADR 索引](docs/decisions/README.md)；具体设计通过[文档总索引](docs/README.md)查找，阶段状态只在 [V2 实施计划](docs/v2-implementation-plan.md)维护。研究、原型与旧验收不能替代当前运行时验收。
+当前架构以 [ADR 0039](docs/decisions/0039-cc-viewer-style-runtime.md)为准。原生 CLI 保持唯一对话/审批入口；记录失败不得阻断转发，不得把模型响应完成当作整轮完成，不恢复旧控制内核。CLI 版本、用量、调用详情、历史清理、独立用户目录、文件阅读、设备访问和历史首页的决定集中在 [ADR 索引](docs/decisions/README.md)；具体设计通过[文档总索引](docs/README.md)查找。任务状态与验证证据保存在 Issue/PR、CI 或受管产物中，研究与旧验收不能替代当前运行时验收。
 
 每次工作遵循：**检查工作树和任务归属 → 判断模块边界 → 使用标准构建及产物管理入口 → 同步权威文档 → 执行验证和二进制检查 → 审查差异、许可与敏感资料 → 报告结果与未验证项。**
 
@@ -346,7 +345,7 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 - 本机保持单 package、library 加两个 binary；中转为独立 `relay/` package，按 [ADR 0062](docs/decisions/0062-independent-component-builds.md) 分别构建/部署，仅共享协议与静态资源。电脑连接器属于本机，不搬到服务器；正常/构建依赖不得跨产品运行边界。模块默认私有，按消费者选择 `pub(crate)` / `pub`，binary 负责启动编排，不新增依赖环或跨目录实现复用。
 - 大文件按职责和维护难度拆分，不设机械行数门槛。workspace 拆分须有独立复用、平台隔离或实测构建收益，先解决依赖环并形成 ADR；当前双向引用和公开面改善点见[开发指南](docs/development/README.md)。
-- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，组件维护契约放 `docs/architecture/` 和 `docs/interactions/`，细分专题保持现有路径。替代中间态文档须完整迁移内容及入站链接，ADR 与有效验证证据保留并更新索引；不得复制第二套阶段状态表。
+- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，组件维护契约放 `docs/architecture/` 和 `docs/interactions/`，细分专题保持现有路径。仓库保留详细设计、ADR 和后续仍需参考的技术文档；阶段计划、测试报告、截图及部署现场记录不再作为长期文档维护。清理时把仍有效的契约、限制与复现方法迁入对应技术文档并更新入站链接，历史证据通过 Git、Issue/PR、CI 或受管产物追溯。
 - 文档使用可移植相对链接；外部源码用仓库和固定 commit。历史现场绝对路径只能作为带时间和上下文的证据，不能作为通用操作要求。文档修改运行 `node scripts/dev.mjs docs`。
 
 ### 12.2 构建、产物和验证

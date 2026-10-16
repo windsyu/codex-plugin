@@ -25,4 +25,4 @@
 
 用户升级后可以直接尝试运行；未测版本可能有尚未发现的参数或观察格式变化，须针对实际失败处理，不承诺全部未来版本兼容。回归使用安装版 `0.155.1`、临时 home、合成模型与本机 Chrome，覆盖正式启动、对话、审批/追问、重连、resume 和历史。另用未来版本 fixture 证明无需增加版本白名单。
 
-此次不改变模型路由支持范围，不涉及数据 migration、全局配置、旧 `/v1` 或旧服务切换。属于 R3 试用修复；[验收证据](../validation/native-cli-version-compatibility-2026-09-20.md)与阶段状态分别在验证报告和[唯一实施计划](../v2-implementation-plan.md)维护。
+此次不改变模型路由支持范围，不涉及数据 migration、全局配置、旧 `/v1` 或旧服务切换。受测版本与限制在[支持文档](../codex-native-cli-workbench-support.md)维护。

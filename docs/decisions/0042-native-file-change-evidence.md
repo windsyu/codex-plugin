@@ -10,7 +10,7 @@
 
 只读官方参考仓库实际 commit 为 `633ab199cfd724aa78013c006b27a2b3d049fc3b`。`protocol/src/items.rs` 的 FileChangeItem 有显式 id、changes、status、stdout/stderr；`core/src/tools/events.rs` 发布完成记录，`rollout/src/policy.rs` 持久化规范 item_completed。这是当前源码事实，不是跨版本保证。
 
-安装版 CLI `0.154.0` 的合成实测确认：成功修改和执行阶段的 I/O 失败分别写入 `FileChange.status=completed/failed`，thread/turn/call 与模型请求明确对应。缺失文件的前置校验错误没有该完成记录。在修改审批中按 Esc 则中断轮次并记录 turn_aborted，没有 FileChange 终态；TUI 的取消选项不能当作规范 declined。见[验证记录](../validation/native-cli-r2-file-results-2026-09-19.md)。
+安装版 CLI `0.154.0` 的合成实测确认：成功修改和执行阶段的 I/O 失败分别写入 `FileChange.status=completed/failed`，thread/turn/call 与模型请求明确对应。缺失文件的前置校验错误没有该完成记录。在修改审批中按 Esc 则中断轮次并记录 turn_aborted，没有 FileChange 终态；TUI 的取消选项不能当作规范 declined。复现方法见[专项调试](../development/debugging.md)。
 
 ## Decision
 

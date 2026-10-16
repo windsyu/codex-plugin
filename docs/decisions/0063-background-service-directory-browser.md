@@ -26,4 +26,4 @@
 
 工作台与中转仍独立构建，目录读取和 CLI 留在电脑。完整 owner 能看到电脑路径和目录名，必须保持现有账号归属、固定页面授权及撤销检查；中转仍为可信方，不是端到端加密。目录扫描不得反压 PTY/模型转发。launchd 不保证注销后、睡眠期间或关机时在线，真实登录自启及睡眠恢复须单独实测，不能由单元测试推导。
 
-用户命令见[使用指南](../guides/usage.md)，字段与预算见[本机交互契约](../interactions/workbench.md)，唯一实施状态见[V2 实施计划](../v2-implementation-plan.md)。
+用户命令见[使用指南](../guides/usage.md)，字段与预算见[本机交互契约](../interactions/workbench.md)，受测范围及系统自启/睡眠限制见[支持文档](../codex-native-cli-workbench-support.md)。

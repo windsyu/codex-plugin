@@ -1,6 +1,6 @@
 # Linux 公网中继部署与运维
 
-本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。实施状态以 [V2 实施计划](../v2-implementation-plan.md)为准；[2026-10-14 测试部署](../validation/public-relay-single-origin-deploy-2026-10-14.md)已覆盖受限 Linux 中转、公网 TLS 登录、旧库恢复及加密备份副本恢复，不等于真实手机或多电脑完整公网验收。
+本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。受测 Linux/TLS 环境、真实手机及多电脑限制见[支持范围](../codex-native-cli-workbench-support.md)；本指南提供操作方法，不代表任意部署已通过验收。
 
 ## 构建与服务隔离
 
@@ -66,7 +66,7 @@ TLS 进程环境设置同一个 `RELAY_PUBLIC_ADDRESS=<公网IP>:9443` 和 `RELA
 
 [ADR 0057](../decisions/0057-single-workbench-ip-trial.md)的历史双端口固定单机显式使用 `--portal-origin https://<公网IP>:9443 --workbench-origin https://<公网IP>:9444 --fixed-gateway-id <UUID>`，与 `--single-origin` 互斥，仅支持一台工作台，第二次绑定前须撤销已有登记。使用[历史服务模板](../../deploy/relay/codex-relayd-ip-trial.service)和 [Caddy 模板](../../deploy/relay/Caddyfile.ip-trial.example)，不能误认为新模式需要开放 9444。
 
-历史配置 `/etc/codex-relay-trial.env` 使用 `RELAY_PORTAL_ORIGIN`、`RELAY_WORKBENCH_ORIGIN`、`RELAY_GATEWAY_ID`；Caddy 使用 `RELAY_TRIAL_IP`。账号流程仍升级为管理员创建和首次改密，不恢复邀请 CLI。现场原配置、资源和停止方式见其[历史验证](../validation/public-relay-ip-trial-2026-10-13.md)，新部署不照搬端口规划。
+历史配置 `/etc/codex-relay-trial.env` 使用 `RELAY_PORTAL_ORIGIN`、`RELAY_WORKBENCH_ORIGIN`、`RELAY_GATEWAY_ID`；Caddy 使用 `RELAY_TRIAL_IP`。账号流程仍升级为管理员创建和首次改密，不恢复邀请 CLI。升级已有部署前核对实际服务、端口、数据目录及停止方式，新部署不照搬旧端口规划。
 
 ## 账号与电脑登录
 
@@ -111,6 +111,6 @@ SQL
 
 ## 验收与停止
 
-电脑通过“登录并开启公网接入”确认并自动连接，手机登录同一门户并选择自己的在线电脑。至少同账号两台电脑、异账号一台，验证多电脑并行、首次改密、管理员操作、固定 grant、退出/改密后旧页拒绝、SSE/终端撤销、慢流/断网不重放、跨账号和跨 origin 拒绝、版本不兼容，以及本机 CLI 继续运行。逐项比较原服务健康与资源状态，实测只代表当时观察。Linux、证书续签、真实手机与停机恢复的实际结果记录到[验证索引](../validation/README.md)，桌面手机视口不能替代真实网络验收。
+电脑通过“登录并开启公网接入”确认并自动连接，手机登录同一门户并选择自己的在线电脑。至少同账号两台电脑、异账号一台，验证多电脑并行、首次改密、管理员操作、固定 grant、退出/改密后旧页拒绝、SSE/终端撤销、慢流/断网不重放、跨账号和跨 origin 拒绝、版本不兼容，以及本机 CLI 继续运行。逐项比较原服务健康与资源状态，实测只代表当时观察。Linux、证书续签、真实手机与停机恢复的实际结果记录到对应 PR 或私有受管产物，持续限制同步到支持文档；桌面手机视口不能替代真实网络验收。
 
 停止时只停止本次新建的 relay 服务、证书刷新任务和专用 TLS 容器，不停止已有业务入口；共享入口部署只撤下本次新增路由。停用不删除账号库、本机历史或证书，私有数据不进入 Git。任何 schema 3 回退/恢复仍遵守上节规则，不自动恢复旧库复活权限。

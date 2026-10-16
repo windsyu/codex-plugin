@@ -2,9 +2,9 @@
 
 ## Status
 
-Adopted design under user-authorized full refactor；实施进度与验收证据统一见 [V2 实施计划](../v2-implementation-plan.md)。设计被采纳不代表真实 provider 兼容和性能假设已经通过。
+Accepted。用户授权的完整重构设计已采用；具体受测范围见[支持文档](../codex-native-cli-workbench-support.md)。设计被采纳不代表任意 provider 兼容和性能假设已经通过。
 
-取代已撤回 ADR 0038 的增量实现路线，以及 ADR 0020/0022 对新运行路径的外部 App Server、持久所有权、raw-first 转发和控制审计要求。旧设计文件已按用户要求清理，必要结论和 Git 追溯见[旧 V2 历史索引](../archive/v2-before-cc-viewer.md)；删除文档不表示删除代码、数据或否认已有验证。
+取代已撤回 ADR 0038 的增量实现路线，以及 ADR 0020/0022 对新运行路径的外部 App Server、持久所有权、raw-first 转发和控制审计要求。旧设计文件已按用户要求清理，旧决策通过 Git 历史追溯；文档清理不授权删除用户数据。
 
 ## Date
 
@@ -49,6 +49,6 @@ cc-viewer 的主路线是目录启动、PTY 原生 CLI、模型请求拦截、�
 
 ## Validation and follow-up
 
-[V2 实施计划](../v2-implementation-plan.md)统一维护交付顺序、逐片验收和状态；[详细设计](../codex-native-cli-workbench-detailed-design.md)给出配置、转发、输入、记录、API 和性能测量契约。R0 先验证当前必要 profile，提供普通 CLI、真实中间态、配置/认证无污染和慢记录器不阻塞转发的证据；现有 ccv 试用不替代此验收。旧 Controller、Session Kernel、W0–W6 与 N1–N5 不再构成新实现待办。
+[详细设计](../codex-native-cli-workbench-detailed-design.md)给出配置、转发、输入、记录、API 和性能测量契约。R0 先验证当前必要 profile，提供普通 CLI、真实中间态、配置/认证无污染和慢记录器不阻塞转发的证据；现有 ccv 试用不替代此验收。旧 Controller、Session Kernel、W0–W6 与 N1–N5 不再构成新实现待办。
 
-2026-09-21 实施：用户确认保留模型请求/prompt 阅读后，再次授权拆除旧 Session/App Server 内核；代码、`/v2` 和旧网页控制入口已按本决策退役，V1 历史/schema/audit 保留。结果见[退役验证](../validation/native-cli-r5-kernel-retirement-2026-09-21.md)。
+2026-09-21 实施：用户确认保留模型请求/prompt 阅读后，再次授权拆除旧 Session/App Server 内核；代码、`/v2` 和旧网页控制入口已按本决策退役，V1 历史/schema/audit 保留。只读兼容边界见[旧 Observer 契约](../architecture/observer-compatibility.md)。

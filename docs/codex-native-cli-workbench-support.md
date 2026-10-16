@@ -1,75 +1,84 @@
 # 原生 CLI 工作台：支持范围与使用边界
 
-本页汇总当前可试用范围。开发阶段状态只在 [V2 实施计划](v2-implementation-plan.md)维护；对应版本、测试命令和逐项证据见 [R5 收尾验收](validation/native-cli-r5-acceptance-2026-09-22.md)与 [R6-D 阅读验收](validation/native-cli-r6-d-reading-2026-09-22.md)。网页启动见 [R6-E 记录](validation/native-cli-r6-e-launch-2026-09-22.md)，多项目与手机隔离见 [R6-F 记录](validation/native-cli-r6-f-multi-project-2026-09-23.md)。历史验收报告记录当时事实，不作为当前待办列表。
+本页汇总实际验证过的环境、产品限制及尚未实测的组合，范围记录截至 2026-10-16。当前实现契约见[本机架构](architecture/workbench.md)、[本机交互](interactions/workbench.md)和[中转架构](architecture/relay.md)；构建通过不等于新平台、provider 或真实设备已经支持。历史逐次验证可从[清理前固定版本](https://github.com/windsyu/codex-plugin/tree/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/validation)追溯。
 
-## 1. 运行环境与接入
-
-目录窗口使用嵌入的 AppKit 助手，以完整临时应用包运行。已通过真实产品接口与原生控件验证中文按钮/侧栏、取消及目录选择，见[实际窗口修正](validation/native-cli-r6-e-picker-bundle-2026-09-23.md)；启动时序已进一步改为标准事件循环、异步显示后激活，见[响应改进与实测限制](validation/native-cli-r6-e-picker-responsiveness-2026-09-23.md)。不能只用此前中/英/法语言探针代替窗口验收。新建项目不展示官方 CLI 数据目录，恢复时明确标为会话来源；程序自有数据仍为此前约定的 `~/.codex-web`。
-
-首页的“打开其他目录”已接入 macOS 系统文件夹窗口，旁边“输入路径”保留手动输入；选择后仍需确认启动，取消不影响已有历史。手动表单使用居中小对话框，支持 Enter 检查、Escape 关闭与焦点恢复。Windows 原生工作台支持尚未接入，不能把目录约定或 UI 适配视为 Windows 运行验收。初次网页流程记录见[目录入口改进验证](validation/native-cli-r6-e-folder-picker-2026-09-22.md)，后续原生验证以上述最新记录为准。
-
-源码新增 macOS 用户级后台 `start/status/open/stop/autostart`、首次交互注册引导和 owner 网页目录浏览，使用见[后台服务](guides/usage.md#后台开启远程注册和退出)。网页浏览只读当前层目录元信息，允许访问当前系统用户可读路径，项目启动与 Run 文件阅读仍按原有准入/固定根规则。旧后端无能力字段时保留手动输入。后台服务限登录会话，睡眠、注销或关机时不保证在线，系统重启不自动恢复项目；登录自启与睡眠恢复的实际验收需单列，不能由现有平台通过记录继承。新功能当前实现与验证状态只见[实施计划](v2-implementation-plan.md)。
+## 1. 运行环境与模型接入
 
 | 项目 | 当前范围 |
 | --- | --- |
-| 电脑端 | macOS 26.5.2 / Apple Silicon 已验证；Linux、Windows 尚未完成运行验收。Windows 的 `.codex-web` 路径约定不等于平台已支持 |
-| 官方 CLI | 受测版本 0.154.0、0.155.1、0.156.1、0.159.2；最新 [0.159.2 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)通过 24 项安装版 CLI/合成模型综合测试，覆盖审批/追问/取消、工具、历史恢复、多项目/手机隔离与退出。版本号不是启动白名单，其他版本提示后继续尝试，真实配置/路由不兼容会说明原因；不自动升降级 |
-| 模型路由 | `unmanaged-custom`：原生 `custom` provider、Responses、显式上游、静态 bearer；`requires_openai_auth=true/false` 均可，保留 File API Key。当前配置的 HTTPS/SSE 已有真实模型证据；true 与独立 API Key 的新增组合见[安装版合成回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。保留原模型、权限与认证，不自动改全局配置 |
-| 命令认证接入 | `unmanaged-custom` 新增原生 `auth.command` 路径：Responses、显式 upstream、`requires_openai_auth=false`；命令及 token 完全由本机 CLI 执行/缓存/刷新。为排除原生登录触发的 cloud-managed 路由补值，工作台仍要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`；不从中取得命令 token。与静态 bearer、env key/header、AWS、true 互斥，系统/managed 路由仍拒绝。安装版 CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过；真实 provider/公网发送仍待验，见[专项记录](validation/native-cli-command-auth-2026-10-14.md)与 [ADR 0060](decisions/0060-native-provider-command-auth.md) |
-| 其他路由 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不代表这些真实接入已验证 |
-| 网页 | 系统 Chrome 153 系列已有验证；[R6-G3](validation/native-cli-r6-g3-compatibility-2026-09-29.md)及 [G4 回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)使用 154.0.8037.58/59，覆盖原生交互、历史、手机 QR 和 1024/736/390/320 等宽度。Safari/Firefox 没有完整验收 |
-| 手机 | 用户已实际确认接入和输入成功。LAN IP 与 Tailscale MagicDNS 是同一服务的多个 URL，使用同一码和业务；真机系统、锁屏恢复及双网络组合未逐项确认，此前单 Run 真机输入已确认；R6-F 多 Run 授权通过合成自动化验证，真手机尚未复测，进一步体验优化按用户要求暂缓 |
-| 网络默认 | 默认只监听本机；本次运行显式开启“本地局域网接入”后增加设备监听。配对码本次启动固定，下次启动更换；局域网 HTTP 不加密，Tailscale 网络策略与设备可达性由用户环境决定；公网中转是另一套账号流程 |
+| 本机工作台 | macOS 26.5.2 / Apple Silicon 已验证；Linux、Windows 尚未完成本机工作台运行验收。Windows 的 `.codex-web` 路径约定不等于平台已支持 |
+| 公网中转 | 静态 `x86_64-unknown-linux-musl` 产物已在现有 Linux 服务验证，包含 TLS 门户、电脑出站连接与目录浏览；该结果不代表 Linux 本机 CLI/PTY 工作台已支持 |
+| 官方 CLI | 0.154.0、0.155.1、0.156.1、0.159.2 有原生交互及历史相关验证；0.159.2 综合回归覆盖审批、追问、取消、工具、恢复、多项目隔离与退出。版本号不是启动白名单，其他版本提示后继续检查实际配置和路由；不自动升降级 |
+| 静态凭据接入 | `unmanaged-custom`：原生 `custom` provider、Responses、显式 upstream、静态 bearer；支持 `requires_openai_auth=true/false`，保留 File API Key。现有 HTTPS/SSE 配置已有真实模型证据，独立 API Key 等新增组合另有合成 provider 验证；不自动改模型、权限或全局配置 |
+| 命令认证接入 | 原生 `auth.command`：Responses、显式 upstream、`requires_openai_auth=false`；命令和 token 由本机 CLI 执行、缓存及刷新。工作台要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`，以排除 cloud-managed 路由补值；不从中取得命令 token。与静态 bearer、env key/header、AWS、`requires_openai_auth=true` 互斥。CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过，真实 provider/公网发送仍待验，见 [ADR 0060](decisions/0060-native-provider-command-auth.md) |
+| 未纳入的模型路由 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不能替代真实接入验证 |
+| 浏览器 | 系统 Chrome 153/154 系列已有验证，覆盖原生交互、历史、二维码和桌面/窄屏布局；Safari、Firefox 没有完整验收 |
+| 手机 | 用户已确认单 Run 局域网接入和输入成功；多 Run 授权与窄屏布局有合成验证，真手机尚未复测。具体系统、锁屏恢复、双网络及移动网络组合未逐项确认，进一步体验优化暂缓 |
 
-R7 另测当前安装版0.161.0的公开 no-daemon profile（`--no-daemon` / `[features].daemon_auto_start=false`）：跨展示项目整理后仍恢复原线程/原cwd，实际工具与无自动重放通过。该专项不代替0.159.2全矩阵，也不宣称0.161默认共享daemon模式、其他路由或完整新版本兼容已支持；详见[R7验证边界](validation/native-cli-r7-project-organization-2026-10-08.md#9-验证限制与交付边界)。
+CLI 0.161.0 另有公开 no-daemon profile（`--no-daemon` / `[features].daemon_auto_start=false`）验证：跨展示项目整理后仍恢复原线程、原 cwd，工具与零自动重放通过。这不代替 0.159.2 综合回归，也不承诺 0.161 默认共享 daemon 模式或完整新版本兼容。
 
-## 2. 已交付的日常操作
+中转账号登录只保护网页和网关访问，不为模型服务登录。本机官方 CLI 按 provider 配置提供模型认证，代理透明转发 `Authorization`，认证头不进入观察、页面或 journal。工作台不读取动态命令 token，无法保证按精确值脱敏任意正文主动回显的 token；不要要求模型或工具输出凭据。
 
-中转账号登录只保护网页和网关访问，不为模型服务登录。本机官方 CLI 按原 provider 配置提供模型认证，代理透明转发 `Authorization`，认证头不进入观察、页面或 journal。命令认证不读取动态 token，不能保证按精确值脱敏任意正文主动回显的 token；请勿要求模型/工具输出凭证。
+## 2. 项目、目录与日常操作
 
-- `codex-view` 默认打开零 CLI 的全部历史首页，同配置/数据根复用应用。首页可对已有项目或用户输入的本机目录做只读检查，再明确开始新对话；同项目已运行时进入已有工作台。用 `--project .` 仍可从当前项目目录直接启动一个普通官方 CLI；右侧原生终端处理对话、Slash、初始化、审批与追问。
-- 中央区分用户输入、模型正文、工具参数和执行结果；流式正文中间态可见，取消/缺失不会伪装为完整。
-- 从对话“调用详情”或用量中的调用记录阅读捕获并脱敏的请求提示词、工具定义和响应，用量区分输入/输出/缓存/推理及未知项。超限或策略省略会标明，不承诺无限保留原始上下文。
-- 同一 CLI 下刷新、切换文件/历史、展开设置；多页面只有一个输入者，冲突时点击“在此输入”。未确认输入不会自动重发。
-- 当前项目文件、搜索与 Git 均只读；文件/Diff 单页连续滚动、全文查找、行号跳转、跨屏复制与长行横向阅读。只渲染视口附近内容，关闭即释放文档实例。
-- 历史异步保存，可查看占用、按运行/批量删除和可选保留期限；手动删除与自动清理默认关闭。活动运行、其他项目、旧 Observer 和原生 Codex 记录受保护。
-- 设置使用独立 `/settings` 或 Run 设置页与 `.codex-web/config/config.json`；默认历史位于 `.codex-web/history`。更改只对界面明确标注的范围生效。
-- 本地源码的 R7 历史首页使用独立项目搜索与稳定路径摘要，主要/辅助/运行记录分层，未确认类型不隐藏；有明确身份的来源折叠展示，正文/用量仍独立。owner 可单条归入已有项目、设为未归类或恢复自动，未发布也未替换用户实例；检查与限制见 [R7 记录](validation/native-cli-r7-project-organization-2026-10-08.md)。
-- 原生图片本地路径粘贴、手动提交和真实模型识图在 macOS 已验证。图片剪贴板、拖入上传、手机相册不在当前已验收范围。
+- `codex-view` 无参数打开零 CLI 的项目概览，全部历史在 `/history`；同配置/数据根复用应用。已有项目或输入的目录先做只读检查，再明确新建或恢复；同项目已运行时进入已有工作台。`--project .` 可直接从当前项目启动普通官方 CLI；右侧原生终端处理对话、Slash、初始化、审批与追问。
+- 本机支持 macOS 原生文件夹窗口，并保留手动输入；远端完整 owner 可通过网页浏览电脑当前系统用户可读的目录。选择后填回规范路径并校验，不直接启动 CLI；浏览权限不等于项目启动资格，也不扩大 Run 文件访问范围。旧后端缺少目录能力字段时保留手动输入。
+- 目录窗口使用完整临时 AppKit 应用包，中文侧栏、取消、选择和键盘操作已有实际验证。启动采用标准事件循环、异步显示后激活；首次冷启动的焦点延迟尚未稳定复现，不能保证全部系统状态下均已消除。
+- 中央区分用户输入、模型正文、工具参数和执行结果；流式中间态可见，取消或缺失不会伪装为完整。调用详情和用量展示脱敏后的请求、工具定义、响应及覆盖范围，不承诺无限保留原始上下文。
+- 刷新、切换文件或历史、打开设置不另启 CLI。每个 Run 同时只有一个终端输入者，重复页面可能需要点击“在此输入”；未确认输入不自动重发，不承诺无缝自动接管。
+- 当前项目的文件、搜索和 Git 均只读；文件/Diff 支持连续滚动、全文查找、行号跳转、跨屏复制及长行横向阅读，只渲染视口附近内容，关闭后释放文档实例。
+- 历史首页提供项目搜索、稳定路径摘要及主要/辅助/运行记录分层，未确认类型不隐藏；有明确身份的来源可折叠展示，正文与用量仍独立。完整 owner 可单条归入已有项目、设为未归类或恢复自动；展示归属不改变原 cwd 或恢复身份。
+- 历史异步保存，支持占用统计、按运行/批量删除及可选保留期限；手动删除和自动清理默认关闭。活动运行、其他项目、旧 Observer 和原生 Codex 记录受保护。
+- 设置位于独立 `/settings` 或 Run 设置页；配置为 `.codex-web/config/config.json`，默认历史为 `.codex-web/history`。生效范围以界面说明为准。
+- macOS 已验证原生图片本地路径粘贴、手动提交及真实模型识图；图片剪贴板、拖入上传和手机相册不在已验收范围。
 
-## 3. 阅读、保存与进程边界
+最多同时运行 4 个活动项目；另项目可开新标签，同项目复用 Run，恢复该项目另一会话前需先停止原运行。每个 Run 的终端、文件、用量与保存独立；最多保留 4 个已结束 Run 的内存阅读，退役后从历史读取已保存内容。具体契约见[历史首页与启动](codex-native-cli-workbench-history-home.md)和[项目会话整理](codex-native-cli-workbench-session-organization.md)。
+
+## 3. 后台运行与远程访问
+
+macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后台服务使用](guides/usage.md#后台开启远程注册和退出)。服务启动不自动创建项目；已有有效登记按原接入开关恢复连接，不重复要求登录。首次交互启动或授权明确失效时引导打开本机注册页；非交互和系统自启不弹浏览器，注册未完成不影响本机服务启动。暂时断网按重连处理，不当作授权失效。
+
+真实 LaunchAgent 的手动/重复启动、异常限频重启、前台冲突及完整停止已有验证。异常恢复只重启工作台，不恢复项目或重放输入；`stop` 完整结束所属项目、代理和连接，保留下次登录的自启偏好。真实注销/重新登录自启与睡眠/唤醒恢复仍待实测；用户服务不保证注销、睡眠或关机期间在线。
+
+默认只监听 loopback。显式开启某个 Run 的“本地局域网接入”后增加设备监听；LAN IP 与 Tailscale MagicDNS 是同一服务的多个 URL，同 Run 共用固定配对码，应用重启后更换。码、许可和撤销按 Run 隔离，共享设置与全局历史仅完整 owner 可用。LAN HTTP 不加密，Tailscale 策略和设备可达性由用户环境决定。
+
+公网中转使用独立账号流程，可信服务器可读取并操作传输中的工作台内容，不是端到端加密的盲转发。当前工作台 UI/API 为 2、传输为 2，中转 schema 为 3；旧 API 1 页面需从门户重新打开，账号和电脑登记沿用。版本不匹配时配套升级，不删除用户数据或手改版本规避检查，见[中转部署运维](guides/public-relay-deployment.md)。
+
+真实公网目录浏览与本机已有历史正文阅读已完成；截至上述范围记录，真实远端已有历史正文尚未完成专门的浏览器验收。完整公网模型消息与恢复仍需独立 Chrome 验证：明确启动 CLI、发送一次低风险消息、确认输入一次和流式回复，并在刷新、新标签接管、短断网及中转重启后核对同一 Run/CLI 和零输入重放。三电脑完整公网业务、真实手机/移动网络与证书续签仍待实际验收。窄屏 Chrome 和合成 provider 结果不代替这些场景。
+
+## 4. 阅读、保存与进程边界
 
 | 边界 | 用户可见行为 |
 | --- | --- |
-| 单文件 / Git 输出 | 最大 1 MiB；超限明确提示。正文没有 200 行分页，也不按 4000 字符截断长行 |
+| 单文件 / Git 输出 | 最大 1 MiB；超限明确提示。正文没有 200 行分页，也不按 4000 字符截断长行；该上限不等于整个浏览器进程的内存上限 |
 | 项目搜索 | 最多 200 处命中、2048 文件 / 32 MiB 扫描和 5 秒预算，截断原因可见；需要已安装 `rg` |
-| Git | 需要已安装 `git`；暂存/未暂存 Diff 是当前文件内容对比，模式/重命名看左侧状态；不提供暂存、提交、回滚或 push |
-| 文件访问 | 固定启动目录、安全打开，拒绝路径越界、链接和常见凭证文件；不是任意源码中嵌入秘密的自动识别器 |
-| 保存失败 / 慢页面 | CLI 转发和终端继续运行，网页提示保存异常或观察缺口。实时显示不等于已落盘，响应结束也不等于整个任务完成 |
-| 重启 | 历史只恢复可信保存前缀，未保存尾部明确标为不确定；不自动 resume，不重发原生输入。历史详情中的明确恢复会在启动前核对原生文件、`SessionMeta.id`、cwd 和来源身份；非空 `history_base` 的继承历史暂不恢复，仍可阅读。CLI 0.156.1/0.159.2 的受测 fork 属于这一形式，工作台直接 `--resume` 同样拒绝 |
-| 关闭浏览器 | 不等于停止 CLI；重新打开当前入口可继续使用 |
-| 停止运行 / 退出启动器 | 网页“停止当前运行”停止当前 CLI，内存阅读仍可查看；启动器正常退出、SIGINT/SIGTERM/SIGHUP 会回收所属 CLI、监听与入口。SIGKILL、断电或工具自行脱离进程组不在同步回收保证内 |
-| 回到普通 CLI | 先结束当前 `codex-view` 并确认运行已退出，再从项目目录启动 `codex`，避免两个入口操作同一原生会话 |
+| Git | 需要已安装 `git`；暂存/未暂存 Diff 是当前文件内容对比，模式/重命名看状态；不提供暂存、提交、回滚或 push |
+| 文件访问 | 固定启动目录、安全打开，拒绝路径越界、链接和常见凭证文件；不会自动识别任意源码中嵌入的秘密 |
+| 保存失败 / 慢页面 | CLI 转发和终端继续运行，网页提示保存异常或观察缺口。实时显示不等于已落盘，模型响应结束不等于整个任务完成 |
+| 重启与恢复 | 只恢复可信保存前缀，未保存尾部标为不确定；不自动 resume，不重发输入。显式恢复重查原生文件、`SessionMeta.id`、原 cwd 和来源身份；非空 `history_base` 的继承历史只读不恢复，直接 `--resume` 同样拒绝 |
+| 关闭浏览器 | 不等于停止 CLI；重新打开有效入口可继续使用 |
+| 停止与退出 | 网页停止仅结束对应 Run。后台 `stop` 或前台启动器正常退出、SIGINT/SIGTERM/SIGHUP 回收全部所属 CLI、监听与入口；SIGKILL、断电或工具自行脱离进程组不在同步回收保证内 |
+| 回到普通 CLI | 先结束对应工作台运行并确认 CLI 已退出，再从项目目录启动 `codex`，避免两个入口操作同一原生会话 |
 
-内存边界由有界捕获、文档和队列共同控制，1 MiB 是文件输入上限，不是整个浏览器进程内存上限。性能和文件内存实测见 [R5 桌面测量](validation/native-cli-r5-desktop-2026-09-21.md#4-正式页面性能与故障)与[连续阅读测量](validation/native-cli-continuous-files-2026-09-22.md#资源实测)，其中样本、故障条件和测点均有明确限制。
+全局历史的目录、正文缓存和搜索覆盖分别报告。每会话搜索摘录有限，即使正文缓存完整也可能只搜索部分内容。缓存不足时仍可按需读源正文；仅增大预算不会自动补回未变化会话的省略缓存，目前没有网页重建或自动补全操作。活动来源文件变化可能返回 `409 source_revision_changed`，需重新取得匹配来源修订，不能绕过检查读取旧缓存。
 
-全局历史的目录、正文缓存和搜索范围各自有边界：目录完整不代表所有正文都进入搜索；每会话搜索摘录有限，即使正文缓存完整也可能显示部分覆盖。缓存预算不足时仍可按需读取源正文；之后仅增大预算不会自动补回未变化会话的省略缓存。全新派生缓存的补全行为与 macOS release 下 10k 会话/纯正文资源测量见 [G1 资源验证](validation/native-cli-r6-g1-resources-2026-09-30.md)，没有新增自动补全或网页重建操作。
+整理视图在筛选前核验全部授权候选，最多 100,000 条、metadata+locator 累计 64 MiB；超限 413 并提示切换“全部来源记录”，缩小筛选不能绕过全域核验。每组最多 10 个来源，默认 30 / 最多 200 组一页，响应小于 1 MiB。本机 10k 合成目录的 release 暖查询曾测得分组 p95 56.77ms、搜索 63.66ms；debug 分组 534.64ms 未达 200ms 目标。这些样本不代表冷扫描、浏览器端到端延迟或所有负载的性能保证。
 
-整理视图在筛选前核验全部授权候选，最多 100,000 条、metadata+locator 累计 64 MiB；超限 413 并提示切换“全部来源记录”，缩小项目/来源/搜索筛选不能绕过全域核验。每组最多 10 个来源成员，默认30/最多200组一页，响应小于1 MiB。R7 release 的 10k 新查询 p95见专项报告，debug 未达200ms门槛，不将其算作 production 性能通过。
+单条归类覆盖最多 1,024 条 / 8 MiB 快照，位于有效 dataDir 的 `organization/state.sqlite`（schema 1）；catalog 投影 4 可重建，JSON 配置仍为 schema 2，原始 rollout、旧 Observer 和 Run 不迁移。归类库损坏、缺失、替换、版本或锁异常时明确不可用，不自动清空；独立正文和原 cwd 恢复可降级继续，新项目启动不绕过验证。首次保存失败可能保留私有 pending 诊断文件，不自动删除；旧 binary 不应用覆盖，回退不保证相同整理视图。物理断电、设备 fsync 故障及双 OS 进程 CAS 压力未作实际保证。
 
-单条覆盖最多1,024条/8 MiB快照，存于有效 dataDir 的 `organization/state.sqlite`（自有schema1），catalog投影4可重建，配置仍schema2；原始rollout、旧Observer及Run不迁移。目录损坏/缺失/替换/版本/锁异常明确显示用户归类不可用，不自动清空；独立正文与原cwd恢复可降级继续，新项目启动不绕过验证。首次保存失败可能保留私有pending诊断文件，系统不自动删除。旧binary不应用覆盖；回退保留状态但不承诺相同整理视图。
+任务标题优先有效已有名称，否则使用真实用户请求；交流预览最多 240 个 Unicode 字符，仅代表当前来源已观察范围，Observer/Workbench 未读取尾部不保证最新。只识别已确认完整上下文包装，未知或畸形内容保守保留。正文默认突出对话，技术记录可展开、错误和缺口可见；首个对话最多自动定位 8 个窗口 / 128 条，超限保留继续阅读入口，搜索命中窗口自动展开。详情保留原始脱敏字段，不推断任务完成。
 
-任务标题优先有效已有名称，否则采用真实用户请求；交流预览最多240个Unicode字符，只代表当前来源已观察范围，Observer/Workbench仍受原读取预算限制，不保证未读取尾部最新。只识别已确认完整上下文包装，未知/畸形内容保守保留。默认正文突出对话，技术记录可展开、错误与缺口仍可见；首个对话最多自动定位8个窗口/128条，超限给出继续阅读入口，搜索命中窗口自动展开。详情保留原始脱敏字段，不推断任务完成，不改变恢复身份或工作目录。
+历史清理预览曾单次出现 `Stale`，后续回归未复现，根因尚未确认；后来测试通过不代表该诊断已经结案。
 
-## 4. 构建产物与旧历史
+## 5. 构建产物与旧历史兼容
 
-2026-10-14 的展示入口按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 更新：`/` 为项目概览，全部历史在 `/history`，启动在 `/launch`，共享设置在 `/settings`，仅本机提供 `/relay`；Run 使用 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单端口中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 保持兼容并规范化，同 Run 功能切换保留终端实例、不启动 CLI、不重放输入。本段仅说明当前路由契约，不扩大下述版本/平台支持或替代既有与新公网验收；旧报告的同页设置结论保留当时范围。
+应用页为 `/`、`/history`、`/launch`、`/settings` 和仅本机提供的 `/relay`；Run 页为 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单 origin 中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 兼容并规范化，同 Run 页面切换保留终端，不启动 CLI 或重放输入。
 
-`0.3.0` 提供 macOS / Apple Silicon release 安装包与 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 首页。安装流程见[安装指南](guides/installation.md)，正式发行资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准。此包装不扩展上述平台、provider 或 CLI 兼容边界；本地打包输出不代表已经正式发布。
+`0.3.0` 提供 macOS / Apple Silicon 安装包及 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](guides/installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准；后续源码能力不自动进入既有发行包。
 
-`codex-view` 已接入原生、工作台及 Observer 20/25 的统一后台目录/搜索 API 和同页来源登记，项目/会话导航与按需正文阅读已由 R6-D 接入；规模与资源证据见上述 G1 记录，当前交付和自动回归结果见 [G4 报告](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)，用户整片试用状态只看实施计划。独立 `codex-observerd serve/import` 仍只允许迁移至 schema 20，不能用它直接打开 schema 25；新目录使用 A 的零写 reader，不调用该旧装配。2026-09-29 已完成实际 schema 25 的限定正文只读抽查，范围及零写证据见 [G3 阶段记录](validation/native-cli-r6-g3-compatibility-2026-09-29.md)，不代表全库完整性验证；缺必要 WAL/SHM 或需修复时返回来源不可用。
+`codex-view` 统一读取原生、工作台及 Observer schema 20/25 的目录、搜索和正文。旧库使用独立零写 reader，不调用迁移；实际 schema 25 只做过限定正文抽查，不代表全库完整性验证，缺必要 WAL/SHM 或需修复时返回来源不可用。独立 `codex-observerd serve/import` 的迁移上限仍为 20，不能直接打开 schema 25，见[旧 Observer 兼容参考](architecture/observer-compatibility.md)。
 
-先构建 Web，再构建 Rust；debug/release 都内嵌对应前端。源码或磁盘上的 `web/dist` 更新不会改变已经运行的实例，试用新版需要重新启动新二进制。
+先构建 Web，再构建 Rust；debug/release 各自内嵌前端，服务器中央前端也内嵌于 relay binary。仅更新磁盘 `web/dist` 不会改变运行实例，试用新版需重启新二进制。两组件分别构建、部署和核验，见[组件指南](guides/component-deployment.md)。
 
 ```sh
 node scripts/dev.mjs build --release --offline
@@ -78,11 +87,5 @@ node scripts/dev.mjs build --release --offline
 ```
 
 - `codex-view`：原生工作台，也是 `cargo run` 的默认入口。
-- `codex-observerd`：V1 只读历史网页/API、导入/导出与显式维护；旧 schema 1–20 与 audit 保留。
-- 旧 `/v2` 控制 API、Session/App Server 内核和 remote TUI 已移除。旧控制客户端不会被静默转接到新内核。
-
-本轮没有切换用户服务、迁移/删除旧数据库、修改原版 CLI 或创建发布 tag。优化构建是本地验收产物；GitHub 提交、PR、发布仍按项目 Git 工作流单独进行。
-
-R6-B 已接入无 CLI 首页、同页设置、entry v2 与实例复用；缺失原生目录或 CLI 不影响首页。R6-C/D 已提供目录/搜索/来源登记和全部历史阅读：项目/来源/子代理筛选、三类正文、逐条详情、连续滚动与位置保留。R6-E 已实现网页项目启动、原生历史的显式恢复、操作查询和 Run 范围客户端路由；F 扩展为最多 4 个活动项目，另项目打开新标签；同项目复用已有 Run，恢复另一会话前须停止该项目。首页可逐项停止；每 Run 的终端、文件、用量和保存独立。最多保留 4 个已结束 Run 的内存阅读，退役后从全部历史读取已保存内容。手机共用 listener 与地址，但码和许可按 Run 隔离，共享设置仅电脑 owner 可用。规模、隔离和综合兼容已有 G1–G4 证据，用户验收记录见 [G4 报告](validation/native-cli-r6-g4-cli-01592-2026-09-30.md#7-用户验收与完成核对)，实施状态仍以计划为准。参见 [R6-E 契约](codex-native-cli-workbench-history-home.md#r6-e-launch)及[验证报告](validation/native-cli-r6-e-launch-2026-09-22.md)。
-
-从新页面进入已有 Run 时，终端输入仍遵循既有单写权：旧页面保留输入 reservation，新页面可能需要点一次“在此输入”。该交互只发生于同一 Run 的重复页面，不影响其它项目输入；不承诺当前已实现无缝自动接管。
+- `codex-observerd`：V1 只读历史网页/API、导入/导出与显式维护；schema 1–20 migration 和既有 audit 保留。
+- 旧 `/v2` 控制 API、Session/App Server 内核和 remote TUI 已移除；旧控制客户端不转接到新内核。

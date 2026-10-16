@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [交互与 API](../interactions/workbench.md) · [部署与接入](../guides/local-workbench-deployment.md) · [中转架构](relay.md)
 
-本文是电脑端组件的维护入口：先确定责任模块、运行身份和正确性不变量，再进入专题契约与测试。产品目标见[工作台方案](../codex-native-cli-workbench.md)，细节见[详细设计](../codex-native-cli-workbench-detailed-design.md)；实施状态只在 [V2 实施计划](../v2-implementation-plan.md)维护。本文描述当前实现，不将源码检查当作真实 CLI、模型、手机或部署验收；受测范围见[支持范围](../codex-native-cli-workbench-support.md)和[验证索引](../validation/README.md)。
+本文是电脑端组件的维护入口：先确定责任模块、运行身份和正确性不变量，再进入专题契约与测试。产品目标见[工作台方案](../codex-native-cli-workbench.md)，细节见[详细设计](../codex-native-cli-workbench-detailed-design.md)。本文描述当前实现，不将源码检查当作真实 CLI、模型、手机或部署验收；受测范围见[支持范围](../codex-native-cli-workbench-support.md)。
 
 ## 1. 组件边界与非目标
 

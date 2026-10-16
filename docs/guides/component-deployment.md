@@ -2,7 +2,7 @@
 
 [本机部署](local-workbench-deployment.md) · [中转运维](public-relay-deployment.md) · [开发指南](../development/README.md) · [支持范围](../codex-native-cli-workbench-support.md)
 
-本仓库交付两个独立运行组件：用户电脑上的 codex-plugin 本机工作台，以及服务器上的 `codex-relayd` 中转。它们可以分别编译、升级和部署，不必同时安装或启动。手机只有浏览器，不需要安装这两个组件。阶段状态以 [V2 实施计划](../v2-implementation-plan.md)为准；本指南不增加新的平台支持承诺。
+本仓库交付两个独立运行组件：用户电脑上的 codex-plugin 本机工作台，以及服务器上的 `codex-relayd` 中转。它们可以分别编译、升级和部署，不必同时安装或启动。手机只有浏览器，不需要安装这两个组件。支持边界见[支持范围](../codex-native-cli-workbench-support.md)；本指南不增加新的平台支持承诺。
 
 ## 选择要部署的组件
 
@@ -100,7 +100,7 @@ codex-relayd --data-dir /var/lib/codex-relay \
 
 本机配置/历史/出站登录与 relay 账号库是独立数据，分别备份，不能相互复制或迁移：本机路径见[本机部署](local-workbench-deployment.md)，服务器 `--data-dir`、SQLite 一致性备份、schema 迁移与恢复见[中转运维](public-relay-deployment.md)。两端版本可以分别升级，但共享协议/资源须兼容；门户的“版本不兼容”不是离线，不能绕过后强行打开。升级中转不应停止本机 CLI；升级本机应用则会停止其所属 CLI，必须征得运行所有者同意。
 
-部署后应分别验证本机历史/明确启动、模型中间态与保存状态，服务器 TLS/账号/权限，电脑出站连接，最后验证手机门户/跨电脑及撤销。现有[支持范围](../codex-native-cli-workbench-support.md)和[验证索引](../validation/README.md)记录特定版本证据，不能用于宣称后来构建、真实手机、多电脑或新环境已经通过。本指南给出操作流程，不是本次部署成功记录。
+部署后应分别验证本机历史/明确启动、模型中间态与保存状态，服务器 TLS/账号/权限，电脑出站连接，最后验证手机门户/跨电脑及撤销。[支持范围](../codex-native-cli-workbench-support.md)记录受测环境与限制，不能用于宣称后来构建、真实手机、多电脑或新环境已经通过。本指南给出操作流程，不是本次部署成功记录。
 
 ## 交给其他 AI agent 的执行边界
 

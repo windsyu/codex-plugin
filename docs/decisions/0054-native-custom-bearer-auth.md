@@ -7,7 +7,7 @@
 
 R6-E 从首页选择新项目后，启动器把 `requires_openai_auth=true` 一律当作未验证的 OpenAI 登录而拒绝，网页又将不同错误统一显示为“Codex 未能启动”。目录核验通过仍不能进入 V2；问题来自适配器的认证假设。
 
-只读参考官方仓库 commit `633ab199cfd724aa78013c006b27a2b3d049fc3b`：`model-provider/src/auth.rs` 的 `resolve_provider_auth` 优先使用显式 provider bearer，再考虑原生认证；同文件的解析顺序为 env key、静态 bearer、原生 auth。配置 schema 对 `requires_openai_auth` 的说明包含 API Key 与 ChatGPT。`core/tests/suite/external_auth.rs` 已覆盖 bearer 优先于原生认证，但该官方测试本身不能证明 true 的安装版行为。实际安装版 0.155.1 用独立本机合成服务验证，见[验证记录](../validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。
+只读参考官方仓库 commit `633ab199cfd724aa78013c006b27a2b3d049fc3b`：`model-provider/src/auth.rs` 的 `resolve_provider_auth` 优先使用显式 provider bearer，再考虑原生认证；同文件的解析顺序为 env key、静态 bearer、原生 auth。配置 schema 对 `requires_openai_auth` 的说明包含 API Key 与 ChatGPT。`core/tests/suite/external_auth.rs` 已覆盖 bearer 优先于原生认证，但该官方测试本身不能证明 true 的安装版行为。实际安装版 0.155.1 用独立本机合成服务验证；这不构成任意版本或 provider 的支持承诺。
 
 ## Decision
 
