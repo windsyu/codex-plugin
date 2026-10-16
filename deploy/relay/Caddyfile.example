@@ -1,0 +1,11 @@
+# Legacy domain mode: requires certificates covering portal and wildcard workbench domain.
+# For automated wildcard certificates, build Caddy with the DNS-01 plugin for your DNS provider.
+app.example.com, *.wb.example.com {
+    tls /etc/codex-relay/tls/fullchain.pem /etc/codex-relay/tls/privkey.pem
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host {host}
+        header_up -Forwarded
+        header_up -X-Forwarded-*
+        header_up X-Relay-Client-IP {remote_host}
+    }
+}

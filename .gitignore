@@ -11,6 +11,7 @@ codex-view
 code-view
 !scripts/release/code-view
 codex-observerd
+codex-relayd
 codex-folder-picker
 *.exe
 *.dll
@@ -56,9 +57,15 @@ observer.toml
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
 *.bundle
 *.pdf
 *.mp3

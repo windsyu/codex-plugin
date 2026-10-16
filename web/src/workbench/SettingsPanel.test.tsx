@@ -30,6 +30,8 @@ it('loads only when expanded and preserves unsaved fields across collapse withou
   const fetch = vi.fn().mockResolvedValue(ok()); vi.stubGlobal('fetch', fetch); await show();
   expect(fetch).not.toHaveBeenCalled(); const native = input('native');
   await click('设置'); expect(input('允许清理历史记录').disabled).toBe(true); expect(input('保留天数').disabled).toBe(true);
+  expect(input('本地局域网接入端口').value).toBe('0');
+  expect(root.textContent).toContain('下次开启本地局域网接入生效');
   await type('Codex 启动配置', 'future'); expect(root.querySelector('[data-dirty]')!.textContent).toBe('true');
   await click('收起'); expect((root.querySelector('#wb-settings-panel') as HTMLElement).hidden).toBe(true);
   await click('设置'); expect(input('Codex 启动配置').value).toBe('future'); expect(input('native')).toBe(native);

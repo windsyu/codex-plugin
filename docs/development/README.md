@@ -14,9 +14,11 @@
 | --- | --- |
 | `doctor` | 检查工具与环境 |
 | `bootstrap` | 按锁文件安装前端依赖 |
-| `build` / `build --release` | 先构建 Web，再构建两个 Rust binary |
+| `build` / `build --release` | 先构建 Web，再构建工作台两个 binary 和独立中转 binary |
+| `build --component workbench` / `relay` | 先构建共享 Web，再仅构建选定产品；可加 `--release` / `--offline` |
 | `package` / `package --offline` | 构建并生成当前受测 macOS arm64 安装包、许可与校验和，见[发布指南](releasing.md) |
 | `check` | 文档、待提交二进制、维护工具、前端和 Rust 常规质量检查 |
+| `check --component workbench` / `relay` | 共用质量检查加所选产品及共享包的 Rust 检查，完整检查用 `all` |
 | `check --ci` | CI 检查提交树，不把空暂存区当成完成二进制检查 |
 | `docs` | 本地文档链接、锚点及结构检查 |
 | `test-tools` | 使用合成临时目录运行维护工具测试 |
@@ -31,7 +33,15 @@
 
 前端资源嵌入 Rust debug/release 产物。前端变更后必须重新构建 Rust 并启动新产物；不能让旧后端读取另一版页面。标准命令不下载浏览器、不自动启动私人 CLI 任务、不修改 GitHub 状态。
 
+独立部署的产品与 AI agent 操作入口见[组件指南](../guides/component-deployment.md)、[本机部署](../guides/local-workbench-deployment.md)和[中转部署](../guides/public-relay-deployment.md)。`build/check` 未指定组件保持 `all`；全量 Rust 命令显式 `--workspace`，直接 Cargo 默认只选择本机根 package。`package` 默认且仅支持 `workbench`，只编译/分发本机 macOS 包，不再顺带构建中转。组件检查仍执行共享 Web/工具/文档与全库格式检查；本机测试的 relay dev fixture 保留跨端安全回归，不等于生产或部署依赖。
+
+本机与中转通过 `crates/workbench-assets` 共享静态前端，不引入中转对本机运行模块的依赖。即使只构建 `codex-relayd`，也要先 `npm ci --prefix web`、`npm run build --prefix web`；共享 crate 检查两份 HTML 入口及前端源文件时效。中转单独分发亦须保留 npm 运行依赖/Codicons 的许可，见 [ADR 0058](../decisions/0058-admin-accounts-single-origin-relay.md)。
+
+静态 Linux 目标还须收集实际 sysroot/链接工具链运行库的原始许可通知；Cargo/npm 索引不覆盖 musl、libunwind、compiler runtime 或 Rust 标准库。目标专用包装可向 `writeLicenses` 显式提供 `runtimeLicenses`，缺失、路径逃逸、符号链接和非文本通知均拒绝；最终索引和校验和必须覆盖这些通知。具体来源随构建报告记录，不能以“静态 ELF 校验通过”推导分发许可完整。
+
 ## 模块组织：现状与标准
+
+维护前按组件阅读[本机架构](../architecture/workbench.md)/[交互](../interactions/workbench.md)或[中转架构](../architecture/relay.md)/[交互](../interactions/relay.md)。跨端协议、访问身份、前端或资源变更同时核对两组。正式组件文档取代旧混合中转契约，IP 操作已并入中转运维指南；不删除 ADR 或已验证的历史证据来“整理进度”。
 
 2026-09-27 在 `df4e64c` 审计：单 Cargo package `codex-local-observer`，有 `src/lib.rs`、默认工作台 `src/bin/codex-view.rs` 和兼容入口 `src/main.rs`。`examples/` 提供合成调试，`tests/` 提供集成测试，`vendor/vt100` 是带修改说明的补丁依赖。该布局符合 [Cargo package 约定](https://doc.rust-lang.org/cargo/guide/project-layout.html)。[Workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)用于组织多个 package，并非 Rust 工程化的必选结构。
 
@@ -41,6 +51,9 @@
 | `history` | 原生/工作台/旧库历史目录和只读 reader，不启动 Observer writer 或 migration |
 | 旧 binary 的 `domain`、`store`、`http`、`ingest` 等 | V1 导入与只读兼容服务；不得重新成为新运行热路径依赖 |
 | `web` | Preact/Vite 工作台与兼容页面，内嵌资源随 Rust 产物交付 |
+| `relay` | 独立中转 package：账号/门户/归属/流，不链接本机运行代码；服务器只部署 `codex-relayd` |
+| `workbench::relay` | 电脑端出站连接器，属于本机产品，不部署到服务器 |
+| `crates/relay-protocol` / `crates/workbench-assets` | 共享有界传输协议与可信静态资源，不反向依赖本机/中转运行模块；按 [ADR 0056](../decisions/0056-public-workbench-relay.md)、[ADR 0062](../decisions/0062-independent-component-builds.md) 管理 workspace |
 
 当前需要改善的是依赖边界：`workbench::application` / `config` 使用 `history::library`，而 `history::library` 使用工作台配置、记录目录、读取与脱敏能力；两者形成模块级双向引用。`workbench/mod.rs` 广泛暴露 `pub mod`；`history` 通过 `#[path]` 复用 `domain/redact.rs`、`domain/classify.rs`，工作台复用 `terminal/mod.rs`。它们在当前 package 内可编译，但增加了未来拆分和接口收敛成本。
 
@@ -51,7 +64,7 @@
 - 转发、观察、持久化分离；新运行时不依赖旧 Observer 写入、迁移或控制账本。文件大小仅作为审阅信号，按职责、变更耦合和测试边界拆分，不设机械行数门槛。
 - workspace 只在独立复用、平台隔离或实测构建收益成立后考虑；先解决依赖环并写 ADR，不把机械拆 crate 当成质量提升。
 
-本次只固化规范，以上模块收敛是后续独立重构，不宣称已经完成，也不改变 R6 验收状态。
+以上历史模块收敛仍是独立重构，不宣称已完成；公网中继按 ADR 0056 增加独立部署 package，共享远程许可和私有 ingress 归属 `workbench::remote_access`，连接器与 Web 共同使用它，避免新增双向依赖。不改变 R6 验收状态。
 
 ## 构建产物生命周期
 
@@ -81,9 +94,11 @@
 
 ## 测试与交付
 
-常规检查包含前端 TypeScript、单元测试和构建，以及 Rust fmt、Clippy、常规测试和两个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
+常规检查包含前端 TypeScript、单元测试和构建，以及整个 workspace 的 Rust fmt、Clippy、常规测试和三个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
 
-真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，[验证索引](../validation/README.md)保存当时范围和限制。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
+真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，每次执行的环境、版本、命令、结果和未验证项保存在 PR、CI 或受管产物中；持续限制同步到[支持范围](../codex-native-cli-workbench-support.md)，不新增带日期的阶段报告。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
+
+账号删除门户专项可在标准构建后执行 `node web/e2e/relay-account-probe.cjs`：脚本自行启动隔离合成中转、系统 Chrome 手机视口，登记受管结果，并只清理自己的运行目录/进程，不操作真实部署账号。
 
 Git 允许真实图片和文本 SVG；禁止其他二进制（含可执行文件、库、字体、压缩包、数据库、bundle），不得改扩展名或 Base64 编码绕过。默认检查暂存区，CI 检查提交树，历史审计检查全部已知分支可达对象；发现历史问题先列明受影响 refs 和迁移方案，历史改写、远端 push 仍须符合当前明确授权。
 

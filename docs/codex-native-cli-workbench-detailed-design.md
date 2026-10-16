@@ -1,18 +1,18 @@
 # 原生 CLI 实时工作台详细设计
 
-> 日期：2026-09-18；按用户完全重构授权改写。进度与逐片验收统一见 [V2 实施计划](v2-implementation-plan.md)。
+> 本文定义原生 CLI 工作台的模块、协议、安全、保存和验收契约。
 > 上位方案：[工作台方案](codex-native-cli-workbench.md)；决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)。
-> 本文包含目标契约与已验证的实现说明；本地交付验收与用户确认以实施计划为准，只有明确链接验收证据的部分才表示已接入；不据此扩大支持范围或宣称正式版本已发布。
+> 当前环境和兼容边界见[支持范围](codex-native-cli-workbench-support.md)；设计与验收标准不代表所有平台、provider 或发行产物均已验证。
 
-2026-09-22 新增的 [R6 历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。其中 A–D 已实现独立只读 reader、无 CLI 首页、目录/搜索/来源登记及三类历史阅读；E 已实现网页目录启动、显式原生恢复、操作查询与 Run 范围客户端路由。生产入口按 Application 身份配对，F 已实现最多 4 个活动 Run；每 Run 明确寻址，手机共用设备 listener 与地址目录而不共享授权，F.1 已修正项目归属与恢复校验的混用。本文件下述 Run 数据契约继续适用，默认启动与认证见 [R6-B 验证](validation/native-cli-r6-b-application-2026-09-22.md)，网页启动见[R6-E 验证](validation/native-cli-r6-e-launch-2026-09-22.md)。schema 25 可显式登记为只读来源；G1 的[规模与故障](validation/native-cli-r6-g-scale-2026-09-24.md)及[资源补充](validation/native-cli-r6-g1-resources-2026-09-30.md)、G2 的[隔离验证](validation/native-cli-r6-g2-isolation-2026-09-25.md)与 G3 的[限定旧库抽查及兼容回归](validation/native-cli-r6-g3-compatibility-2026-09-29.md)已有分项证据，完整 R6 交付和用户试用仍以实施计划为准。
+[历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。Application 先提供零 CLI 首页，只有明确新建或恢复才创建 Run；最多 4 个活动项目，每 Run 明确寻址。手机共用设备 listener 和地址目录，但授权、终端输入、文件根与保存均按 Run 隔离。项目展示归属与原生恢复 cwd 独立，旧 Observer schema 20/25 通过只读 adapter 读取；详见[兼容契约](architecture/observer-compatibility.md)。下述 Run 数据契约继续适用。
 
-前端视觉与交互基准见[方案 §1.1–1.4](codex-native-cli-workbench.md#ui-prototype)及[交互原型](prototypes/native-cli-workbench.html)。原型使用合成数据；聊天角色、内容类型、原生终端生命周期、数据来源与异常状态仍以下述契约为准。
+前端视觉与交互基准见[方案 §1.1–1.4](codex-native-cli-workbench.md#ui-prototype)。聊天角色、内容类型、原生终端生命周期、数据来源与异常状态以下述契约为准，示例内容不作为运行事实。
 
 ## 1. 运行单元与模块
 
 一个 Run 对应一次目录启动，一个官方交互 CLI、一套 PTY、一组模型连接和一份观察记录。Run 不是 Codex Thread：原生 resume/fork、子代理和多轮任务可关联多个 Thread/Response。新服务不启动外部 `codex app-server`，不发 `turn/start`，不管理 Codex 的原生交互协议。
 
-| 模块（拟定） | 职责 | 不依赖 |
+| 模块 | 职责 | 不依赖 |
 | --- | --- | --- |
 | Launcher | cwd、安装版检查、provider profile、启动/退出与浏览器入口 | 旧 SourceSupervisor/SessionIntent/DbWriter |
 | PtyHost | 官方 CLI 进程组、输入、resize、输出和屏幕恢复 | ThreadLease/TurnOwner/command ledger |
@@ -23,9 +23,9 @@
 | RolloutReader | 后台读取已确认关联的 Codex 历史，补足用户消息和本机工具结果 | Web 请求内扫描 store |
 | WorkspaceReader | cwd 文件、rg、Git 阅读 | 任意 shell 或旧 Gateway command |
 
-新代码可放独立 `src/workbench/` 和 `web/src/workbench/`。Rust/Tokio、Preact/xterm、安全渲染组件可保留；这是技术选择，不是复用旧控制契约。旧 `src/session/`、Controller 与 App Server 启动链已在 R5 退役，只有原生工作台可启动交互 CLI；兼容 Observer 只提供历史读取与显式维护。
+新代码可放独立 `src/workbench/` 和 `web/src/workbench/`。Rust/Tokio、Preact/xterm、安全渲染组件可保留；这是技术选择，不是复用旧控制契约。旧 `src/session/`、Controller 与 App Server 启动链已退役，只有原生工作台可启动交互 CLI；兼容 Observer 只提供历史读取与显式维护。
 
-2026-09-21 已将通用 VT 快照/过滤工具移至 `src/terminal/`，主题、终端配置和写入协调器移至 `web/src/terminal/`。新工作台不再通过旧 Session 目录引用它们；旧入口暂时引用同一份工具，迁移不改变终端行为。依赖检查、双入口测试及退役前仍缺少的验收见[终端工具独立化记录](validation/native-cli-r5-terminal-extraction-2026-09-21.md)。
+通用 VT 快照/过滤工具位于 `src/terminal/`，主题、终端配置和写入协调器位于 `web/src/terminal/`，不通过旧 Session 目录引用。旧 Observer 兼容入口可复用这些底层工具，不依赖或恢复已退役控制内核。
 
 ## 2. 启动与 provider 配置
 
@@ -43,19 +43,19 @@ codex-view --project . --codex-bin <installed-cli> --resume <explicit-thread-uui
 codex-view open <private-entry-file>
 ```
 
-命令已在独立 [binary](../src/bin/codex-view.rs) 和 [Launcher](../src/workbench/launch.rs)实现，[正式入口验收](validation/native-cli-r1-launcher-2026-09-19.md)覆盖合成模型、本机 Chrome 和安装版 CLI。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。R3 在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
+命令由独立 [binary](../src/bin/codex-view.rs) 和 [Launcher](../src/workbench/launch.rs)实现。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。记录器在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
 
-R3.1 已接入独立工作台 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](codex-native-cli-workbench-history-settings.md#2-配置目录与文件契约)；增量验证与后续清理任务见实施计划。
+工作台使用独立 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](codex-native-cli-workbench-history-settings.md#2-配置目录与文件契约)。
 
-生命周期分别处理：返回首页或关闭网页不停止 CLI；原生 CLI 退出或 `POST /workbench/v1/runs/{runId}/stop` 停止本次子进程后，终端显示已结束，电脑保留有界内存阅读，该 Run 的设备许可撤销且不能重新开启。某个 Run 的代理或关键运行线程故障只回收该 Run；启动失败只清理本次部分资源，其余 Run 和首页继续可用。启动器收到 SIGINT/SIGTERM/SIGHUP，或 Application 本身关键线程异常退出时，才回收全部自有 Run、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell；应用重启不自动恢复 Run。首版不做 daemon 脱离和 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。[R5 退出增量](validation/native-cli-r5-process-cleanup-2026-09-21.md)与[R6-F 验证](validation/native-cli-r6-f-multi-project-2026-09-23.md)记录实际信号和多 Run 退出范围。
+生命周期分别处理：返回首页或关闭网页不停止 CLI；原生 CLI 退出或 `POST /workbench/v1/runs/{runId}/stop` 停止本次子进程后，终端显示已结束，电脑保留有界内存阅读，该 Run 的设备许可撤销且不能重新开启。某个 Run 的代理或关键运行线程故障只回收该 Run；启动失败只清理本次部分资源，其余 Run 和首页继续可用。启动器收到 SIGINT/SIGTERM/SIGHUP，或 Application 本身关键线程异常退出时，才回收全部自有 Run、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell；应用重启不自动恢复 Run。macOS 后台运行通过用户级 LaunchAgent 管理，`code-view start` 不自动启动项目，`stop` 完整回收所属 Run；已有前台实例不自动接管，详见 [ADR 0063](decisions/0063-background-service-directory-browser.md)与[本机架构](architecture/workbench.md)。不提供 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。
 
 默认私有入口为 `~/.codex-web/runtime/<scope>/instance.json`，scope 绑定有效配置目录和数据根；目录 0700、文件 0600。Application entry v2 使用 instanceId 和可选目标 runId，首页不携带旧格式的 runEpoch/cliPid；`--entry-file` 可将同一入口另写到用户指定的尚不存在文件，不替换实例发现文件。配对 capability 仅写私有入口，经系统浏览器打开；普通首页 ready 输出只有安全地址、instanceId 与文件位置，明确项目就绪后才另输出 Run/PID/cliVersion。`open` 同时接受 v1/v2，只读当前 OS 用户拥有、无组/其他权限的普通文件，拒绝符号链接、超限文件和非 loopback/非法配对 URL；可选 runId 必须与 URL 一致。清理仅删除仍匹配原 inode/device 的自有入口及空的自有目录，instance.lock 保留相同文件身份；异常被杀后的残留文件不是持久历史或服务存活证据。同配置/数据根重复启动通过锁和实例握手复用应用，不根据 PID 杀进程。
 
-按 [ADR 0045](decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。当前诊断的受测版本为 0.154.0、0.155.1、0.156.1 和 0.159.2，后两者分别有[R6-F](validation/native-cli-r6-f-multi-project-2026-09-23.md)及[G4 版本回归](validation/native-cli-r6-g4-cli-01592-2026-09-30.md)证据，均不作为准入锁。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
+按 [ADR 0045](decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。诊断中的受测版本只用于兼容提示，不作为准入锁；当前范围见[支持说明](codex-native-cli-workbench-support.md)。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
 
 目录就是 workspace 根。网页打开目录不改变 CLI cwd，原生导航也不自动扩大文件读取根。需要其他目录时新建一次运行。浏览器刷新、切面板或重新获得输入权不重新 spawn。
 
-### 2.2 Profile 契约与 R0 门槛
+### 2.2 Profile 契约与接入门槛
 
 ```ts
 interface CaptureProfile {
@@ -70,23 +70,30 @@ interface CaptureProfile {
 }
 ```
 
-这里只记录已确认的模型路由，不复制 credential、不重写官方配置合并器。R0 必须找到并验证 profile 与 CLI 最终生效 provider/config 的核对方法，覆盖命令参数/profile/管理配置的优先级；无法证明时拒绝该 profile，要求显式配置原 upstream，不猜默认地址。[安装版实验](validation/native-cli-r0-progress-2026-09-18.md#26-安装版的配置层验证)已覆盖命名 profile、本次路由覆盖和项目层：项目允许的推理设置生效，但 `model_provider`/`model_providers` 等路由认证字段被原生过滤。当前必要 unmanaged custom profile 增加了启动前来源检查：检测到系统/管理层、非 File 认证存储或可能的云管理时拒绝；只输出存在性，不覆盖策略。R1 Launcher 必须复用该边界并保持原 home，不能用通用 TOML 合并推导 provider，也不能将合成配置实验扩为全 profile 支持。
+这里只记录已确认的模型路由，不复制 credential、不重写官方配置合并器。接入适配器必须验证 profile 与 CLI 最终生效 provider/config 的核对方法，覆盖命令参数/profile/管理配置的优先级；无法证明时拒绝该 profile，要求显式配置原 upstream，不猜默认地址。配置核对覆盖命名 profile、本次路由覆盖和项目层：项目允许的推理设置生效，但 `model_provider`/`model_providers` 等路由认证字段被原生过滤。当前必要 unmanaged custom profile 增加了启动前来源检查：检测到系统/管理层、非 File 认证存储或可能的云管理时拒绝；只输出存在性，不覆盖策略。Launcher 必须复用该边界并保持原 home，不能用通用 TOML 合并推导 provider，也不能将合成配置实验扩为全 profile 支持。
 
-已实现的适配器为 macOS 的 `unmanaged-custom`，CLI `0.154.0` 是初始基线，`0.155.1` 的[升级回归](validation/native-cli-version-compatibility-2026-09-20.md)覆盖正式入口与合成模型交互；这些版本不是启动白名单。适配器只从原 `config.toml` 与可选 `<name>.config.toml` 选择受测的标量路由字段，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL 与非空静态 `experimental_bearer_token`；`requires_openai_auth=true` 也允许原生 API Key，不能据此推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏；不覆盖模型、推理、权限或重试。`env_key`、`env_http_headers`、命令认证、AWS、managed/cloud/ChatGPT tokens/非 File 存储及 `supports_websockets=true` 均须另行验证，当前明确拒绝，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置和 `auth.json` 未改变，这不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。认证边界修正见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)及[新目录启动回归](validation/native-cli-r6-e-native-auth-launch-2026-09-23.md)。
+macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
 
-项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；项目层的认证存储覆盖尚未验证则拒绝。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。正式 binary 的普通启动、命名 profile、两轮聊天及退出已实测；[显式 resume 验收](validation/native-cli-r1-native-interactions-2026-09-19.md#4-正式-binary-显式-resume)另验证新 Run 复用明确原生 Thread、终端恢复旧历史、新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；R3 的“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
+- 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。取舍见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)。
+- 命令认证：非空 `model_providers.custom.auth.command`，可选 `args` 为字符串数组，要求 `requires_openai_auth=false`；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表按原生递归覆盖语义检查，args 数组替换而非拼接。工作台只校验配置形状和路由/冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
+
+两条路径都拒绝 `env_key`、`env_http_headers`、AWS、系统/managed 路由来源及 `supports_websockets=true`，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置及认证快照未改变。检查不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。命令 token 不被工作台读取，不能按精确值脱敏上游/工具主动回显到正文的凭证；认证头始终排除观察、调用详情与 journal。
+
+项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；两条认证路径都拒绝未验证的项目层认证存储覆盖。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。显式 resume 的新 Run 复用所选原生 Thread，终端恢复旧历史，新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
 
 只为本次子进程使用版本支持的覆盖参数/环境。保留真实用户 `CODEX_HOME`、原模型、权限、sandbox、OAuth 刷新和重试。自动化测试使用临时 home。API key 与 ChatGPT 登录的 URL、路径、WS upgrade 和辅助路由各有 fixture；保留 URL 后缀对官方 capability 判定的影响。安装版与研究源码不一致时以实测支持矩阵为准。
 
-2026-09-19 按用户要求确定显示策略：正式 launcher 与 R1 调试入口均设置 `TERM=xterm-256color`、`COLORTERM=truecolor`，清除 CLI 子进程继承的 `NO_COLOR`，并追加 `-c tui.animations=false`。`NO_COLOR=1` 曾来自调试启动环境，使原生色彩检测降级；这不是 ANSI 转发过滤造成的。关闭动画使用[官方配置项](https://learn.chatgpt.com/docs/config-file/config-reference)，涵盖欢迎页、微光和旋转提示，工作台不通过匹配字符图案或删帧实现。只影响新启动的本次 CLI；不写回配置，不改模型/权限/输入行为。安装版与 Chrome 证据见[显示验证](validation/native-cli-terminal-display-2026-09-19.md)。
+显示策略：正式 launcher 与调试入口均设置 `TERM=xterm-256color`、`COLORTERM=truecolor`，清除 CLI 子进程继承的 `NO_COLOR`，并追加 `-c tui.animations=false`。`NO_COLOR=1` 曾来自调试启动环境，使原生色彩检测降级；这不是 ANSI 转发过滤造成的。关闭动画使用[官方配置项](https://learn.chatgpt.com/docs/config-file/config-reference)，涵盖欢迎页、微光和旋转提示，工作台不通过匹配字符图案或删帧实现。只影响新启动的本次 CLI；不写回配置，不改模型/权限/输入行为。
 
 模型代理是显式 base URL 路由，不安装根证书、不劫持系统 TLS。上游仍验证 TLS。代理只转发 CLI 提供的认证，不成为 token 刷新器；不把 header/body 认证材料存入浏览器或 journal。URL 映射、重定向与跨 origin 转发不允许把凭证带往另一个域名。
 
 浏览器认证与模型代理分离。Web 使用运行期配对 Cookie、严格 Host/Origin 和 CSRF 防护；模型代理使用本次运行的不可猜路由能力，固定 upstream，拒绝浏览器 Origin/CORS、CONNECT 和任意转发目标。路由能力不进入日志或页面，可经 base URL 前缀注入，出站前剥离并保留原上游路径；它是本机临时能力，不替代模型 Authorization。若该版本支持安全的独立环境 header，可在同一契约下替代路由能力。不能静默降低为开放代理。首版信任同 OS 用户，不声称能抵御该用户读取本次进程参数/内存。
 
-上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。自动化和 Chrome 结果见[接入验证](validation/native-cli-device-access-2026-09-21.md)，真机仍按 R5/P14 单独验收。
+公网中转账号同样只保护网页/网关访问，不给 CLI 登录模型服务，不向本机下发模型凭证。模型认证继续由本机官方 CLI 和原生 provider 配置完成；中转 Cookie/账号状态不能作为模型凭证可用或请求成功的证据。
 
-R0 先验证当前必要 profile：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
+上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。真实手机按 §9.2 的 P14 单独验收，桌面视口不能代替实际设备。
+
+每个受支持 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
 
 ## 3. 转发与观察分离
 
@@ -112,7 +119,7 @@ R0 先验证当前必要 profile：配置不污染、实际认证、CLI 会用�
 
 ### 3.2 初始资源预算
 
-以下为待 R0 压测调整的初值：转发每连接 1MiB 有界 buffer，观察队列每 Run 8MiB，重放 ring 16MiB，活跃正文单 Item 1MiB、Run 展示缓存 32MiB，单客户端待发 2MiB。连接/活跃请求数量另设上限。达到网络连接上限明确拒绝；不能接受后丢转发字节。
+资源预算须通过压测校验，默认值为：转发每连接 1MiB 有界 buffer，观察队列每 Run 8MiB，重放 ring 16MiB，活跃正文单 Item 1MiB、Run 展示缓存 32MiB，单客户端待发 2MiB。连接/活跃请求数量另设上限。达到网络连接上限明确拒绝；不能接受后丢转发字节。
 
 观察超限丢的是副本；大正文保留有界预览并标 `truncated`，完整内容只有确实已记录时才给详情入口。慢网页断开后重新快照；不能无限复制请求上下文。Recorder 使用独立线程/执行池，磁盘卡顿不可占住转发任务。CPU 密集解码、脱敏与渲染同样必须有界，不能用“异步函数”当作已隔离性能的证明。
 
@@ -166,7 +173,7 @@ HTTP 请求分别编号；WS 每次 create 的 metadata、response 身份独立�
 
 ### 4.3 聊天角色与类型契约
 
-按 [ADR 0043](decisions/0043-unified-reading-items.md)，2026-09-20 已将用户、模型正文、工具和安全提示收敛到统一 DTO；[契约实现](../src/workbench/live/view.rs)、[前端封闭类型](../web/src/workbench/viewItems.ts)和[验证记录](validation/native-cli-r2-view-items-2026-09-20.md)对应本节。后端的来源聚合仍分类型维护各自预算，但快照只有一个 `items` 数组，浏览器也只保存这一份阅读项目；渲染选择器没有第二份长期状态。该变更不涉及旧数据库 migration。
+按 [ADR 0043](decisions/0043-unified-reading-items.md)，用户、模型正文、工具和安全提示使用统一 DTO；见[契约实现](../src/workbench/live/view.rs)与[前端封闭类型](../web/src/workbench/viewItems.ts)。后端的来源聚合仍分类型维护各自预算，但快照只有一个 `items` 数组，浏览器也只保存这一份阅读项目；渲染选择器没有第二份长期状态。该变更不涉及旧数据库 migration。
 
 ```ts
 interface ViewBase {
@@ -206,15 +213,15 @@ type ViewItem = MessageItem | ToolCallItem | NoticeItem;
 
 `MessageItem` 的内部 `assistant` 角色在页面明确显示为“模型”，不得只有固定的“Codex”标志。模型名取 author 中的已确认 requestedModel/reportedModels；只有请求值时注明“请求模型”，响应报告值有差异时保留两者来源；未知显示“名称未确认”，不得采用静态原型模型名。用户气泡标“用户”，不凭连接输入权猜具体发送者。`streamState=ended` 只表示这条消息正文结束，不表示工具或整个任务完成。
 
-请求用途由版本受测的 metadata/adapter 结构或明确原生历史事实确认，并保留分类依据。标题、摘要等辅助请求进入请求列表，不混入聊天正文；不能因为文本短、JSON 含 `title` 或看到 `role:user` 就断定用途/人工来源。用途或作者来源不明时保留请求级内容与“来源未确认”提示；R1 尚无完整请求面板时使用只读折叠上下文，不能把它冒充用户消息。
+请求用途由版本受测的 metadata/adapter 结构或明确原生历史事实确认，并保留分类依据。标题、摘要等辅助请求进入请求列表，不混入聊天正文；不能因为文本短、JSON 含 `title` 或看到 `role:user` 就断定用途/人工来源。用途或作者来源不明时保留请求级内容与“来源未确认”提示；请求面板不可用时使用只读折叠上下文，不能把它冒充用户消息。
 
 工具类别通过已识别的工具定义和参数 schema 映射：结构化 shell 调用才能显示命令卡；Code Mode `custom_tool_call` 的 `exec` 默认显示代码工具卡。不得通过正则扫描 JavaScript 内的 `tools.exec_command(...)` 生成声称已经执行的子命令。普通模型 Markdown 中的 shell 代码块仍属于模型文字。命令预览仅表示所请求的命令；有执行证据后才显示执行状态。未识别工具名可用 `category=other` 保留安全参数预览；未知 wire 类型走 notice。
 
-R2 请求上下文适配须覆盖两种受测形态：标准请求顶层 `tools`，以及 Responses Lite 在 `input[]` 内的 `type=additional_tools`、`role=developer`、`tools`。后者可含 `type=namespace` 的分组；保留定义所在位置、namespace 与名称，不能按短名称跨 namespace 合并，也不能把开发者工具定义当用户气泡。安装版 0.154.0 的 `gpt-6-astra` 请求已实际出现该形态，协议/schema/测试核对见[证据](validation/native-cli-r1-native-interactions-2026-09-19.md#5-r2-必须覆盖的实际工具定义形态)。未知结构只保留脱敏且有界的请求说明，不默认解释成可执行命令。
+请求上下文适配须覆盖两种受测形态：标准请求顶层 `tools`，以及 Responses Lite 在 `input[]` 内的 `type=additional_tools`、`role=developer`、`tools`。后者可含 `type=namespace` 的分组；保留定义所在位置、namespace 与名称，不能按短名称跨 namespace 合并，也不能把开发者工具定义当用户气泡。该形态来自受测安装版请求，适配时须核对协议/schema 与 fixture，不按模型名推断结构。未知结构只保留脱敏且有界的请求说明，不默认解释成可执行命令。
 
 #### 4.3.1 已实现的请求与模型身份
 
-2026-09-19 [阶段证据](validation/native-cli-r1-chat-metadata-2026-09-19.md)验证以下封闭字段；2026-09-20 消息中同时保留已确认的模型来源，通过同一 itemKey 的 replace 更新。请求/响应 metadata 继续作为独立上下文事实。
+消息保留已确认的模型来源，通过同一 itemKey 的 replace 更新；请求/响应 metadata 继续作为独立上下文事实。封闭字段如下：
 
 ```ts
 interface RequestView {
@@ -255,7 +262,7 @@ interface ResponseUsage {
 
 ### 4.4 用户提取、顺序与流式更新
 
-1. **确认提交和作者。** 从已验证的请求输入结构或明确关联的 rollout 用户事件提取消息；Enter、PTY 回显、草稿和本地发送按钮都不是提交证据。系统/开发者指令、工具输出及框架注入的 `user` 上下文不生成用户气泡。请求结构无法区分人工输入时，R1 先接最小后台用户事件读取，不能以“以后 R2 再做”通过基础聊天验收；仍无证据时显示未知并记录能力限制。
+1. **确认提交和作者。** 从已验证的请求输入结构或明确关联的 rollout 用户事件提取消息；Enter、PTY 回显、草稿和本地发送按钮都不是提交证据。系统/开发者指令、工具输出及框架注入的 `user` 上下文不生成用户气泡。请求结构无法区分人工输入时，必须从后台原生用户事件中取得证据；仍无证据时显示未知并记录能力限制，不通过基础聊天验收。
 2. **稳定身份与去重。** 网络正文沿用 request/response/wire Item/content index；用户事件优先用原生事件身份，否则仅采用 §4.1 已证实上下文链中的位置。相同历史在后续请求重复携带不新建消息，相同文字被用户再次提交仍是两条。重试 attempt、compact/fork、续传缺口或跨来源身份无法证明时不按文本/时间合并。缺少身份的内容留在请求级未归属区。
 3. **保留交错顺序。** 已关联上下文和输出序号确定“用户 → 模型说明 → 工具 → 模型后续正文”；并发请求无法证明全序时按首次观察顺序分请求展示，标注“按观察顺序”，不猜 Turn。晚到用户/工具证据只有明确关联才插入对应位置。当前用户按已确认 turn 归组，模型/工具按首次观察 orderIndex 穿插；同轮多条用户提交标注与模型片段的精确先后未确认。内容补齐增加 revision、保持 itemKey 与阅读锚点，不把整段对话重新追加。时间戳只作说明。
 4. **原位更新。** 首条带类型的 `item.replace` 创建卡片；`item.patch` 指明 `itemKey`、正文的 `contentKey` 或工具参数字段、baseRevision/revision 和 append，payload 使用封闭 union。工具结果、状态、模型名、来源补齐和最终全文均用 `item.replace` 原位替换。不同正文片段不能无序拼接；只含增补字段的来源事件先在 reducer 合并，不能擦除已捕获内容。
@@ -265,7 +272,7 @@ interface ResponseUsage {
 
 安装版 CLI 0.154.0 的隔离实验已证实：规范用户记录是 rollout JSONL 的 `event_msg` → `item_completed` → `item.type=UserMessage`，含显式 `thread_id`、`turn_id`、`item.id` 和 `content`；同一句话提交两次有两个不同 turn/item，分别对应模型请求 metadata。该版本并未在实验中输出旧 `event_msg.user_message`。`response_item` 中的 `role:user` 可含框架注入上下文，不能作为用户气泡来源。
 
-最小 reader 已按以下边界接入 R1 调试运行，C01–C03 的基本 HTTP 对话与本机 Chrome 证据见[聊天验收](validation/native-cli-r1-user-chat-2026-09-19.md)：
+原生用户 reader 遵守以下边界：
 
 - 在独立后台任务中读取 launcher 明确指定的 Codex home，只读操作；Web handler 和网络/PTY 转发不访问历史文件，也不等待 reader。
 - 仅为本 Run 已观察、用途为 conversation 的明确 thread/turn 查找候选；文件名可作检索提示，但必须核验 `session_meta.id` 和事件自身 thread/turn。不能按 cwd/mtime 或“最近文件”绑定，不向页面输出真实路径。
@@ -294,15 +301,15 @@ interface UserCapture {
 }
 ```
 
-只有本 Run 已观察的 conversation thread/turn 才发布气泡，不展示该文件中的旧 turn 历史。未来用户事件早于 metadata 时仅留在有界待关联区。按轮次插入迟到气泡、稳定 DOM key 和可见卡片锚点，已通过延迟 reader 4 秒的浏览器检查。每条模型回复都可显示“尚未取得本轮原生用户提交记录”。同一 turn 多条用户事件能分别阅读，但与模型片段的跨来源精确先后未确认，界面明确标“按来源归组，先后尚未确认”；不得把分组冒充完整全序。
+只有本 Run 已观察的 conversation thread/turn 才发布气泡，不展示该文件中的旧 turn 历史。未来用户事件早于 metadata 时仅留在有界待关联区。迟到气泡按明确轮次插入，保持稳定 DOM key 与可见卡片锚点。每条模型回复都可显示“尚未取得本轮原生用户提交记录”。同一 turn 多条用户事件能分别阅读，但与模型片段的跨来源精确先后未确认，界面明确标“按来源归组，先后尚未确认”；不得把分组冒充完整全序。
 
-#### 4.4.2 已验证的复杂上下文边界
+#### 4.4.2 复杂上下文边界
 
-2026-09-20 的[安装版 CLI/Chrome 证据](validation/native-cli-r2-contexts-2026-09-20.md#native-context)补齐 compact、fork 和显式 resume：摘要保留在后续模型 input，按 compaction 用途留在请求上下文；同文四次原生提交分别有新的 item 身份。fork 改变原生 thread，显式 resume 保留 fork 后 thread、更新 Run epoch；恢复本身不生成新请求或用户气泡。新 Run 中的新提交才进入当前阅读。
+compact、fork 与显式 resume 按以下规则处理：摘要保留在后续模型 input，按 compaction 用途留在请求上下文；相同文本的多次原生提交分别有独立 item 身份。fork 改变原生 thread，显式 resume 保留 fork 后 thread、更新 Run epoch；恢复本身不生成新请求或用户气泡。新 Run 中的新提交才进入当前阅读。
 
-同轮 steering 的两次模型请求共享明确 thread/turn，原生 UserMessage item 不同；终端草稿不产生气泡，提交后分别显示。该验证保留上述顺序未确认说明。合成 WS create 与响应并发时只按明确 response ID 更新内容，previous_response_id 作为请求参数可读，不据此为当前 create 猜新响应或跨请求挂接工具结果。详见[并发与用量验证](validation/native-cli-r2-contexts-2026-09-20.md#concurrency)。
+同轮 steering 的两次模型请求共享明确 thread/turn，原生 UserMessage item 不同；终端草稿不产生气泡，提交后分别显示。仍保留上述跨来源顺序未确认说明。合成 WS create 与响应并发时只按明确 response ID 更新内容，previous_response_id 作为请求参数可读，不据此为当前 create 猜新响应或跨请求挂接工具结果。
 
-合成测试覆盖半行/坏行/超长行、同文不同提交、注入上下文排除、冲突身份、重读/截断/替换、符号链接/FIFO 拒绝、脱敏、缓存上限及 SSE 快照游标；安装版 CLI＋本机 Chrome 覆盖真实角色数量、基本双轮顺序、草稿排除、刷新不重复及焦点/锚点。当前仅适配受测 CLI 的规范 `UserMessage`、`source=cli/thread_source=user`，后台只读 `sessions` 与 `archived_sessions`。R3 支持按原文件身份识别归档移动，继续使用原偏移且不重复用户记录；退出时残留半行标 `partial_line`。reader 的退出等待上限为 1 秒，超时让线程分离，不阻塞 CLI 退出；系统调用本身不可强制取消。旧 schema、无法验证的文件替换和任意旧 turn 的全库导入不属于当前能力。
+验收须覆盖半行/坏行/超长行、同文不同提交、注入上下文排除、冲突身份、重读/截断/替换、符号链接/FIFO 拒绝、脱敏、缓存上限及 SSE 快照游标；安装版 CLI＋本机 Chrome 另核验真实角色数量、基本双轮顺序、草稿排除、刷新不重复及焦点/锚点。当前仅适配受测 CLI 的规范 `UserMessage`、`source=cli/thread_source=user`，后台只读 `sessions` 与 `archived_sessions`。R3 支持按原文件身份识别归档移动，继续使用原偏移且不重复用户记录；退出时残留半行标 `partial_line`。reader 的退出等待上限为 1 秒，超时让线程分离，不阻塞 CLI 退出；系统调用本身不可强制取消。旧 schema、无法验证的文件替换和任意旧 turn 的全库导入不属于当前能力。
 
 ### 4.5 工具、命令与结果状态
 
@@ -327,7 +334,7 @@ interface UserCapture {
 
 #### 4.5.1 已实现的工具流与结果增量契约
 
-2026-09-19 [工具阶段证据](validation/native-cli-r2-tools-2026-09-19.md)覆盖安装版 CLI 经正式 binary 的 Code Mode 与直接命令路径，[原生结果增量](validation/native-cli-r2-native-results-2026-09-19.md)补充迟到退出与长输出。2026-09-20 起快照中工具属于 `items: ViewItem[]`，独立 `toolContexts: ToolContext[]`、`nativeCommands: NativeCommand[]` 继续保留；具体字段见[前端封闭类型](../web/src/workbench/toolTypes.ts)、[后端工具视图](../src/workbench/live/tools.rs)和[上下文提取](../src/workbench/decode/tool_context.rs)。统一 union 保留以下实际工具字段，不引入 file/search/cancelled 等没有当前事实来源的类别或状态。
+快照中的工具属于 `items: ViewItem[]`，独立 `toolContexts: ToolContext[]`、`nativeCommands: NativeCommand[]` 继续保留；具体字段见[前端封闭类型](../web/src/workbench/toolTypes.ts)、[后端工具视图](../src/workbench/live/tools.rs)和[上下文提取](../src/workbench/decode/tool_context.rs)。统一 union 保留以下实际工具字段，不引入 file/search/cancelled 等没有当前事实来源的类别或状态。
 
 ```ts
 interface ToolCall {
@@ -360,16 +367,16 @@ interface ToolCall {
 - **类别与参数。** 顶层 `tools`、developer `additional_tools` 与 namespace 均有安全元信息提取。原生 `exec_command` 的 function/object schema/string cmd 才映射命令；原生 grammar `exec` 映射代码、`apply_patch` 映射拟议修改，其余保留普通工具。缺 namespace 时仅允许无歧义定义匹配，外部 namespace 的同名工具不冒充原生命令。仅完整、未截断且无身份冲突的安全 JSON 提取 cmd/workdir，cwd 未给就显示未捕获。
 - **结果关联。** 只接受已确认用途、同一原生 thread 的 HTTP 请求域。后续请求必须含唯一的同 call ID、同工具类型/名称/namespace 的伴随调用，并与已观察调用的原始完整参数指纹一致；本 Run 中候选也必须唯一。指纹、原始参数和内部解析事实不随 DTO 输出。缺伴随调用、WS 或身份不明时，结果保留在对应请求上下文。先到结果可在调用补齐后关联；后续重复历史不新增卡片或重复 revision。
 - **执行依据。** 后续请求中的直接命令结果只识别已验证且从输出首部开始的原生 `Wall time` / `Process exited with code` 或 `Process running with session ID` / `Output:` 格式；正文中出现相同字样不作为退出事实。Code Mode 返回的 JSON/文本不递归解析成子命令状态，只标 result_observed。运行中 envelope 保留进程 ID 供原生结果匹配；`write_stdin` 卡保留自身 call ID，原命令通过规范完成记录取得最终结果，不拼接两个不同调用的文本。
-- **原生补齐。** 按 [ADR 0041](decisions/0041-native-command-result-evidence.md)，独立 RolloutReader 读取规范 `event_msg/item_completed/CommandExecution`。只接受明确 thread/turn/native item ID 和已知 source/status；同一 HTTP conversation 的 thread + turn + call ID 唯一匹配，已有进程 ID 时还须一致。已验证安装版命令在最后一次模型请求之后退出，原卡能取得最终合并输出、退出码、耗时和 cwd。未匹配子命令在同轮调用详情独立保留，不按 Code Mode 代码或 ID 前缀猜归属。`completed/failed/declined` 有封闭映射，受测原生流程未取得 declined 或可靠 started；规范支持不等于实际捕获。[原生策略拒绝、参数错误与中断](validation/native-cli-r2-contexts-2026-09-20.md#native-lifecycle)实测没有相应逐工具终态，UI 保持 result_observed/unobserved，turn_aborted/EOF 不生成工具取消。底层 declined 也可能来自运行准备拒绝，不默认标成“用户拒绝”。
+- **原生补齐。** 按 [ADR 0041](decisions/0041-native-command-result-evidence.md)，独立 RolloutReader 读取规范 `event_msg/item_completed/CommandExecution`。只接受明确 thread/turn/native item ID 和已知 source/status；同一 HTTP conversation 的 thread + turn + call ID 唯一匹配，已有进程 ID 时还须一致。已验证安装版命令在最后一次模型请求之后退出，原卡能取得最终合并输出、退出码、耗时和 cwd。未匹配子命令在同轮调用详情独立保留，不按 Code Mode 代码或 ID 前缀猜归属。`completed/failed/declined` 有封闭映射，受测原生流程未取得 declined 或可靠 started；规范支持不等于实际捕获。原生策略拒绝、参数错误与中断未必具有逐工具终态，UI 保持 result_observed/unobserved，turn_aborted/EOF 不生成工具取消。底层 declined 也可能来自运行准备拒绝，不默认标成“用户拒绝”。
 - **原生去重与冲突。** 原生结果同键同内容指纹不重复发布；相异最终记录保留各自 sourceRef/byteOffset，标冲突并撤销明确成败。网络旧运行中证据、重放或迟到 started 不降级已有最终状态；网络最终退出码与原生退出码矛盾、重复候选或进程不一致均不能静默覆盖。
-- **稳定阅读身份。** 同一 response 中明确同时出现 output_index 与正式 item ID 时建立有界别名，保留首次 key；`TextKey.wireItemId` 可以继续为 `@output:N`，不为了补协议 ID 更换 DOM 身份。之后仅带 ID/位置的事件原位更新，最终替换不追加。别名表共用 decoder 的 256 项预算且计入缓冲总量；SSE、并发 WS、正文与工具及实际 Chrome 节点/焦点/刷新检查见[身份增量证据](validation/native-cli-r2-content-identity-2026-09-19.md)。没有显式关联时不凭最近项或 call 名称猜配。
+- **稳定阅读身份。** 同一 response 中明确同时出现 output_index 与正式 item ID 时建立有界别名，保留首次 key；`TextKey.wireItemId` 可以继续为 `@output:N`，不为了补协议 ID 更换 DOM 身份。之后仅带 ID/位置的事件原位更新，最终替换不追加。别名表共用 decoder 的 256 项预算且计入缓冲总量；验收须覆盖 SSE、并发 WS、正文/工具身份和浏览器节点、焦点、刷新。没有显式关联时不凭最近项或 call 名称猜配。
 - **冲突。** 同键身份变化、同调用不同参数、重复 call ID 候选或相异结果明确标冲突并撤销成功状态，已有参数/结果保留，其他输出仍可在调用详情的上下文查看。位置/正式 ID 一对多、类别变化或两张已独立发布卡片事后出现矛盾桥接，保留原内容并发身份诊断，不静默合并。显式无效/敏感 ID 不退回位置编号；HTTP 显式 response ID 与已确认 ID 不同也拒绝更新。最终工具身份缺失或被脱敏拒绝时，不允许用旧参数指纹为新内容背书。
 - **预算与安全。** 工具参数、单结果预览各限 64KiB；工具与模型正文共享 512 项/32MiB 缓存。每请求扫描最多 4096 个 input，工具定义最多 256、结果最多 128；工具上下文最多 64 请求项/4MiB。原生命令待关联区 128 条/1MiB，LiveHub 原生记录 128 条/4MiB；原生 argv 另限 64KiB/128 项，cwd 4096 字节，源行最大 1MiB。淘汰标 partial 并要求重新快照。先脱敏再裁剪：已知凭证跨分片隐藏，常见敏感字段支持无引号、空白、camelCase 与 ASCII Unicode/hex 转义及嵌套引号，识别后保守省略后文，非文本结果以 omitted 提示。不是代码解释器，不能识别任意计算生成或未知编码的秘密。
-- **截断。** 原生 `... N bytes omitted ...` 整行、`…N tokens truncated…` / `…N chars truncated…` 和受测 warning 首行进入 truncated 提示；普通 token count 不算截断。这些文本也能由工具主动打印，因此文案为“输出预览超限或来源含截断标记”，只降低完整性声明，不推断执行成败。超过 64KiB 的原生结果已通过 CLI/Chrome 有界显示检查，C10 的 R2 受测范围与后续 provider/设备边界见[整片验收](validation/native-cli-r2-acceptance-2026-09-20.md)。
+- **截断。** 原生 `... N bytes omitted ...` 整行、`…N tokens truncated…` / `…N chars truncated…` 和受测 warning 首行进入 truncated 提示；普通 token count 不算截断。这些文本也能由工具主动打印，因此文案为“输出预览超限或来源含截断标记”，只降低完整性声明，不推断执行成败。超过 64KiB 的原生结果仍须有界显示并保留截断提示，不能因大输出耗尽页面内存。
 
 `NativeCommand` 使用 UserKey/UserSource 的明确来源字段，另有 `status/processId/commandSource/command/cwd/output/exitCode/durationMs/truncated/omitted`；原始指纹不序列化。原生事件顶层 requestId 为空、captureSeq 为 0，不把源文件事件伪装成网络观察序号。文件变化/非法记录等诊断沿用 `userCapture` 通道并新增 `unsupported_tool_evidence`，页面按“原生来源”显示来源位置，后台覆盖用户提交、命令与文件修改记录。
 
-UI 使用不同布局、图标和文字标签呈现用户、模型及工具，代码块不会制造命令卡。调用参数与结果分别展开；失败/拒绝结果默认展开，未分流输出明确说明 stdout/stderr 未区分。可键盘展开，普通更新/面板切换保持已展开详情，刷新恢复同一 Run 的卡片与状态；R3 持久化已有安全预览；来源或预览本来就截断时，仍明确完整参数/日志未保存在工作台。schema、系统/消息上下文与响应用量已按 §5.1.1 接入按需阅读，结构化拟议 Diff 见 §4.5.2。受测工具事实和复杂对话关联见 [R2 验收](validation/native-cli-r2-acceptance-2026-09-20.md)，没有可靠证据的终态继续保持未知。
+UI 使用不同布局、图标和文字标签呈现用户、模型及工具，代码块不会制造命令卡。调用参数与结果分别展开；失败/拒绝结果默认展开，未分流输出明确说明 stdout/stderr 未区分。可键盘展开，普通更新/面板切换保持已展开详情，刷新恢复同一 Run 的卡片与状态；记录器持久化已有安全预览；来源或预览本来就截断时，仍明确完整参数/日志未保存在工作台。schema、系统/消息上下文与响应用量已按 §5.1.1 接入按需阅读，结构化拟议 Diff 见 §4.5.2。没有可靠证据的终态继续保持未知。
 
 #### 4.5.2 结构化拟议 Diff（已实现）
 
@@ -392,9 +399,9 @@ interface ProposedFile {
 
 生成中的参数继续按文本阅读，`proposedPatch=null`。`ready` 仅代表完整预览：保留显式增删行，即使两行文字相同也不合并；`@@` 仅是上下文锚点，不伪造文件行号。支持新增空文件、修改、移动并修改、整文件删除、EOF、环境 ID、CRLF 与常见 literal heredoc。整文件删除不带旧内容，`removedLines=null`，页面显示“删除行数未知”。超限、未知格式或脱敏省略导致无法解析时不展示局部 Diff，保留捕获参数入口。
 
-上限为参数 64KiB、输入 4096 行、64 文件、256 片段、2000 个增删/上下文行；路径 4096 字节、环境 ID 128 字节。结构化内容的内存估算计入工具与正文共享预算，淘汰继续使用原有缺口/重新快照机制。路径、锚点、内容均作为字面文本，不提供执行、打开文件或跳转链接；文件阅读属于 R4。
+上限为参数 64KiB、输入 4096 行、64 文件、256 片段、2000 个增删/上下文行；路径 4096 字节、环境 ID 128 字节。结构化内容的内存估算计入工具与正文共享预算，淘汰继续使用原有缺口/重新快照机制。路径、锚点、内容均作为字面文本，不提供执行、打开文件或跳转链接；文件阅读另按 §8 的只读边界提供。
 
-[Diff 组件](../web/src/workbench/ProposedDiff.tsx)使用操作名称、增删符号、计数和颜色共同区分，首文件默认展开，其余可键盘展开；长内容在有界区域滚动。参数完成、迟到结果和面板切换不重建原卡及已展开节点，不抢焦点。[安装版 CLI / Chrome 验收](validation/native-cli-r2-proposed-diff-2026-09-19.md)核对了临时文件四种操作及缺失文件失败。规范 FileChange 状态已按 §4.5.3 补齐；只有 output 正文时继续标 `result_observed`，不得把预览或输出中的“Success”当作已验证的执行状态转换。
+[Diff 组件](../web/src/workbench/ProposedDiff.tsx)使用操作名称、增删符号、计数和颜色共同区分，首文件默认展开，其余可键盘展开；长内容在有界区域滚动。参数完成、迟到结果和面板切换不重建原卡及已展开节点，不抢焦点。验收应覆盖临时文件的增、删、改、移动和缺失文件失败。规范 FileChange 状态已按 §4.5.3 补齐；只有 output 正文时继续标 `result_observed`，不得把预览或输出中的“Success”当作已验证的执行状态转换。
 
 #### 4.5.3 原生文件修改结果（已实现）
 
@@ -411,7 +418,7 @@ interface NativeFileChange {
 }
 ```
 
-当前安装版 CLI 已验证成功与执行阶段失败的规范记录；前置校验错误只有后续 output，仍为 `result_observed`。修改审批的 Esc 已验证为 turn_aborted 且没有工具完成记录，不能推断 declined/cancelled；规范 declined 有 fixture 映射，实际来源继续受支持矩阵限制。证据见[文件结果验收](validation/native-cli-r2-file-results-2026-09-19.md)。
+当前安装版 CLI 已验证成功与执行阶段失败的规范记录；前置校验错误只有后续 output，仍为 `result_observed`。修改审批的 Esc 已验证为 turn_aborted 且没有工具完成记录，不能推断 declined/cancelled；规范 declined 有 fixture 映射，实际来源继续受支持矩阵限制。
 
 同键同内容指纹去重；相异终态保留各自 sourceRef/byteOffset，原卡变为冲突/执行状态未确认。定义变化使原生工具类别失去证明时同样撤销确定状态，保留结果。结果早到或迟到不改变卡片 key、拟议 Diff 和展开状态；已有原生结果不会被后续请求中的旧输出替换。未匹配记录在同轮调用详情单独可读。
 
@@ -435,7 +442,7 @@ WS   /workbench/v1/runs/{runId}/terminal?epoch=<runEpoch>
 POST /workbench/v1/runs/{runId}/stop
 ```
 
-运行接口明确绑定 URL 中的 Run；其中 history 读取该项目的已保存 Run。Application 不再提供无 Run 前缀的运行路径，即使只有一个项目也返回 404；内部独立 ReadingServer 的测试/兼容路径不作为产品公开别名。网页项目启动与显式恢复通过 Application 的 launch-targets/runs/launch-operations，具体契约见[R6 启动接口](codex-native-cli-workbench-history-home.md#62-启动接口与同源-run-寻址)，没有通用 shell 或 JSON-RPC 透传。当前 mutation 包括目录核验后的明确启动、输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验对应作用域的配对身份、Origin/CSRF 和实例/Run 身份，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。R3.1 已接入工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，其[管理 API](codex-native-cli-workbench-history-settings.md#62-管理接口契约)在产品中同样置于 Run 前缀，共享设置仅电脑 owner 可用，全局 library 保持只读。
+运行接口明确绑定 URL 中的 Run；其中 history 读取该项目的已保存 Run。Application 不再提供无 Run 前缀的运行路径，即使只有一个项目也返回 404；内部独立 ReadingServer 的测试/兼容路径不作为产品公开别名。网页项目启动与显式恢复通过 Application 的 launch-targets/runs/launch-operations，具体契约见[R6 启动接口](codex-native-cli-workbench-history-home.md#62-启动接口与同源-run-寻址)，没有通用 shell 或 JSON-RPC 透传。当前 mutation 包括目录核验后的明确启动、输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验对应作用域的配对身份、Origin/CSRF 和实例/Run 身份，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。管理接口提供工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，其[管理 API](codex-native-cli-workbench-history-settings.md#62-管理接口契约)在产品中同样置于 Run 前缀，共享设置仅电脑 owner 可用，全局 library 保持只读。
 
 终端接入时将原草案的 claim/release/takeover 三个 POST 收敛为上述 WebSocket 内的类型化消息，原因是操作必须绑定实际终端连接，私有 grant 也只应回给该连接；不增加用于跨 HTTP 请求认领连接的第二套 token。尚未发布的 POST 草案没有兼容消费者；旧 `/v1` 仍只读，旧 `/v2` 已退役并返回 404。运行停止仍为 HTTP POST，JSON body 为 `{ "epoch": "<runEpoch>" }`。
 
@@ -474,9 +481,9 @@ interface ViewEnvelope {
 
 Recorder 健康与保存水位作为同一连接的独立 `recorder.status` 控制消息发送，不分配内容 viewSeq、不再次写 journal；否则“保存成功”通知会不断制造新的未保存内容。重连时以快照和当前 recorder 状态为准。
 
-正式 Launcher 已接入 R3 Recorder。底栏优先显示 §5.1.2 的用户用量与简短保存状态，保存异常/历史缺失不被折叠；水位与技术故障说明位于“诊断详情”。`saved` 只表示已观察副本已确认保存，不代表捕获完整或整个任务结束。未安装记录器的旧 R0/R1 合成演示仍为 `disabled`。恢复后连续水位与新分段水位分开，底栏显示“历史有缺失”，诊断中保留原“已保存 · 曾有缺口”。上下文文档也参与待保存判断，即使 viewSeq 没有增加也不能提前显示已保存。
+正式 Launcher 接入异步 Recorder。底栏优先显示 §5.1.2 的用户用量与简短保存状态，保存异常/历史缺失不被折叠；水位与技术故障说明位于“诊断详情”。`saved` 只表示已观察副本已确认保存，不代表捕获完整或整个任务结束。未安装记录器的合成演示必须标为 `disabled`。恢复后连续水位与新分段水位分开，底栏显示“历史有缺失”，诊断中保留原“已保存 · 曾有缺口”。上下文文档也参与待保存判断，即使 viewSeq 没有增加也不能提前显示已保存。
 
-当前快照的 `schemaVersion=2`，`items: ViewItem[]` 是唯一消息/工具/notice 列表；另含 requests、responses、diagnostics、userCapture、toolContexts、nativeCommands、nativeFileChanges 这些来源和状态数据。旧 tools/userMessages 数组已移除。`/workbench/v1/runs/{runId}/run` 的 scope 为 typed-conversation-items，并返回 readingSchemaVersion=2 及 `historyAvailable`。未发布的 R1/R2 阅读契约在本次同步升级，旧 `/v1` 不受影响；旧页面应刷新加载新脚本。
+当前快照的 `schemaVersion=2`，`items: ViewItem[]` 是唯一消息/工具/notice 列表；另含 requests、responses、diagnostics、userCapture、toolContexts、nativeCommands、nativeFileChanges 这些来源和状态数据。旧 tools/userMessages 数组已移除。`/workbench/v1/runs/{runId}/run` 的 scope 为 typed-conversation-items，并返回 readingSchemaVersion=2 及 `historyAvailable`。未发布的旧版阅读契约同步升级，旧 `/v1` 不受影响；旧页面应刷新加载新脚本。
 
 SSE 的 view envelope 保留 runEpoch/viewSeq/requestId/captureSeq。项目内容只使用以下封闭变体：
 
@@ -546,13 +553,13 @@ interface RequestDetailsPage {
 
 缓存最多 64 个请求/连接 bundle，总估算 16MiB，每 bundle 2MiB/128 份文档；淘汰保留最多 256 个 tombstone，再出现时说明截断。每页最多 16 项/128KiB，与 snapshot 共用 2 个读取配额，响应 body 消费或丢弃后才释放。没有文档但仍接收的已知响应返回 pending；存在诊断或已无法取得的已知文档返回 unavailable；有部分文档时返回 captured，并分别说明 request/response、省略、截断与诊断。unknown 为 404、已知淘汰为 410、非法 cursor 为 400、epoch 或文档版本变化为 409、读取繁忙为 503。cursor 绑定 epoch/request/revision/offset，不能跨来源或拼接不同版本。
 
-文档不进入 snapshot 或 live ring，不分配 viewSeq；先放入详情缓存，再发布 request metadata / response 终态，因此客户端看到终态后可读取对应文档。观察解析和缓存仍在独立后台路径，网络/PTY 不等待它们；R3 记录器另外保存安全文档并分配 recordSeq，仍不分配 viewSeq；详情缓存本身不冒充已保存历史。
+文档不进入 snapshot 或 live ring，不分配 viewSeq；先放入详情缓存，再发布 request metadata / response 终态，因此客户端看到终态后可读取对应文档。观察解析和缓存仍在独立后台路径，网络/PTY 不等待它们；记录器另外保存安全文档并分配 recordSeq，仍不分配 viewSeq；详情缓存本身不冒充已保存历史。
 
 页面通过模型回复/工具卡的“调用详情”直接读取，或从“用量概览 → 查看调用记录”选择请求。独立“模型请求/网络”页面与重复导航已移除，列表不复制对话正文/工具卡；仅辅助及未归属内容在详情折叠保留。中央侧面板同一时间保留一个请求的详情，原终端持续可用；单次模型调用只有工具卡时同样可进入。普通 token 更新不触发 GET，新响应状态提示手动刷新；失效分页保留旧内容并提示刷新，不混入新版本。前端每组最多 256 项/2MiB，达到上限可替换当前组继续阅读后续页。关闭详情/换请求释放内容并取消在途请求；旧 epoch/request 的返回不得覆盖当前选择。
 
 usage 仅来自可归属 response 的终态报告，各响应独立，重复事件不累加、缺字段不清空已知值、冲突保留首份并提示核对。缺失为 null，零保留为零；负数、非整数、超 JavaScript 安全整数或明显自相矛盾的计数标 invalid。缓存命中/推理是明细，不重复加到总量；没有价格估算或任务总量。`observedDurationMs` 使用同响应 created 到首个终态的 monotonic 观察时间，缺 created/身份则未知，不能冒充模型计算、TTFT、工具执行或整个任务耗时。官方源码依据为研究基线 `633ab199...` 的 `codex-api/src/sse/responses.rs` usage 解码；保留缺失和冲突是本项目的阅读选择。
 
-API、合成 Chrome 与安装版 CLI 的范围和结果见[请求详情增量验证](validation/native-cli-r2-request-details-2026-09-19.md)。复杂对话关系及整片 R2 仍按实施计划验收。
+请求详情验收分别验证 API、合成浏览器与安装版 CLI 的真实来源关联，不能用字段渲染成功推断复杂请求关系已确认。
 
 #### 5.1.2 本次运行用量概览
 
@@ -606,7 +613,7 @@ Browser 只在完整应用事件后推进 cursor；重复事件按 epoch/seq 忽
 
 TerminalPanel 保持挂载，隐藏/折叠只影响布局，切换阅读 Thread 不控制 CLI。原生快捷键、IME、多行、Slash/picker 由 CLI 解释；浏览器只解决键盘传递、焦点和终端尺寸。终端 escape sequence 不自动写本机剪贴板、下载文件或打开 URL。
 
-当前阶段已实现独立 [PTY actor](../src/workbench/terminal.rs)，将输入仲裁与写入串行处理，并以有界 VT 快照/输出订阅隔离慢消费者。原生输入缓冲区写满时，单次传递约 100ms 后返回可诊断失败；可能已有部分字节到达，输入序号已消费，页面须提示检查原生草稿，不能重放或自动补写。已接入 [WebSocket 路由](../src/workbench/web/terminal_api.rs)和独立工作台 xterm；具体检查结果及未验收范围统一见[R1 阶段证据](validation/native-cli-r1-progress-2026-09-18.md)。
+独立 [PTY actor](../src/workbench/terminal.rs) 将输入仲裁与写入串行处理，并以有界 VT 快照/输出订阅隔离慢消费者。原生输入缓冲区写满时，单次传递约 100ms 后返回可诊断失败；可能已有部分字节到达，输入序号已消费，页面须提示检查原生草稿，不能重放或自动补写。已接入 [WebSocket 路由](../src/workbench/web/terminal_api.rs)和独立工作台 xterm；完整退出、真实 IME 与设备输入须分别验证。
 
 屏幕重建按 [ADR 0040](decisions/0040-vt-screen-failure-isolation.md)与 CLI 生命周期隔离。已修复 `vt100` 宽字符 resize 缺陷；其他解析 unwind 会丢弃损坏状态，发出带 outputSeq 的 `screen_state_unavailable`，已连接页面继续收实时输出，输入和 resize 继续。此时重新附着只能得到不完整空快照及后续输出，页面持久提示屏幕恢复不可用；没有可靠光标时不合成 CPR。不能吞异常后假装成功恢复，也不能为了重建屏幕自动重启 CLI。
 
@@ -643,7 +650,7 @@ interface TerminalClientFrame {
 
 网页以本标签页的 sessionStorage 保存当前 runEpoch 下的重连凭证，仅页面 reload 自动恢复；新开/复制页面不使用复制来的凭证，只在终端空闲时自动 claim，已有其他页面时保持只读，避免静默接管。同页短断线可凭内存 secret 续接，成功后轮换；接管、释放和结束及时清除失效凭证。重连凭证过期时只在已确认空闲的终端上尝试 claim。浏览器未确认输入不重放，页面收到更高 generation 后立即禁用旧输入。协议保留 `release`，当前界面不提供常驻释放按钮；`takeover.confirmed` 由明确点击“在此输入”产生。
 
-输入送达不确定与临时连接错误分开保存为 `inputUncertain`；未确认输入遇到断线、或 PTY 部分写入失败时置位，后续 `grant`、重连成功和 reload 不自动清除。sessionStorage 的 `workbench-pending-input:<epoch>` 仅存 `"1"`，绝不存输入正文或重放队列；新开/复制页面首次导航清除复制记号。用户点击“已检查终端”只清除本地提醒，不发终端帧；若另有待 ACK 输入仍保留记号。丢 ACK 后原草稿只出现一次、提醒跨重连/刷新保持的真实 Chrome 回归见[验收](validation/native-cli-r1-native-interactions-2026-09-19.md#3-已修复的不确定输入提醒)。
+输入送达不确定与临时连接错误分开保存为 `inputUncertain`；未确认输入遇到断线、或 PTY 部分写入失败时置位，后续 `grant`、重连成功和 reload 不自动清除。sessionStorage 的 `workbench-pending-input:<epoch>` 仅存 `"1"`，绝不存输入正文或重放队列；新开/复制页面首次导航清除复制记号。用户点击“已检查终端”只清除本地提醒，不发终端帧；若另有待 ACK 输入仍保留记号。丢 ACK 的浏览器回归须核验草稿只出现一次，提醒跨重连与刷新保持。
 
 xterm 只在工作台挂载一次；快照恢复和 resize 都排在已有解析之后，丢弃已被快照覆盖的旧待写片段。浏览器待渲染输出有界，超过 2MiB 后重新同步；Socket 写入超过 2 秒即断开，心跳最长约 45 秒检测失联。HTTP/SSE 和模型转发不等待终端页 ACK。
 
@@ -670,7 +677,7 @@ interface WorkbenchViewState {
 }
 ```
 
-上例包含 R4 文件/Git 的规划状态；当前实现仅提供对话、历史与调用侧面板。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
+上例是早期布局示意；文件/Git 已实现，当前独立功能路径与导航以 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)及[本机交互](interactions/workbench.md)为准。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
 
 该状态只表达页面阅读选择，不授予输入权，也不替代 Run、request/response 或 controller generation。`path` 仍由服务端按 §8 验证。折叠和导航仅影响展示，TerminalPanel/连接保留；隐藏后的尺寸恢复遵守本节 controller resize 规则，不通过重新 spawn 修复画面。浏览器若记忆阅读位置，恢复时只恢复可用的阅读选择，不自动执行 claim/takeover、输入或模型请求。
 
@@ -682,7 +689,7 @@ interface WorkbenchViewState {
 
 ### 7.1 文件布局与保存语义
 
-本节是 R3 实现契约；关键决定见 [ADR 0044](decisions/0044-workbench-asynchronous-history.md)。默认目录按 [ADR 0049](decisions/0049-workbench-user-directory.md) 更新为 `~/.codex-web/history`，Windows 对应 `%USERPROFILE%\.codex-web\history`，独立于原生 `CODEX_HOME`。`--data-dir` 可指定其他私有目录，其父目录须已存在；默认根可由异步记录器创建。旧目录不搬迁、合并或自动选取，需显式指定后继续读取。
+本节定义异步历史契约；关键决定见 [ADR 0044](decisions/0044-workbench-asynchronous-history.md)。默认目录按 [ADR 0049](decisions/0049-workbench-user-directory.md) 更新为 `~/.codex-web/history`，Windows 对应 `%USERPROFILE%\.codex-web\history`，独立于原生 `CODEX_HOME`。`--data-dir` 可指定其他私有目录，其父目录须已存在；默认根可由异步记录器创建。旧目录不搬迁、合并或自动选取，需显式指定后继续读取。
 
 ```text
 <workbench-data>/runs/<runEpoch>/
@@ -710,7 +717,7 @@ Recorder 独立线程接收最多 256 包/8MiB 的队列，生产者只用 `try_
 
 列表返回 `{ currentRunEpoch, runs, nextCursor, diagnostics, indexState }`。游标绑定当前有序运行集合，新增/删除运行时旧游标返回 409，非法游标返回 400。列表与读取按 canonical cwd 摘要隔离，其他项目的 Run 按 404 处理。运行状态由 `lock` 的 flock 加已提交结束标记判断，不依据 PID 猜服务存活。
 
-单次读取返回 `{ run, snapshot, gaps, issues, uncertainTail, detailsPartial, before, previousBefore, source: "saved_workbench", currentRunEpoch }`。`snapshot` 复用 schemaVersion 2，连续水位取提交元数据与实际验证前缀的较小值。`previousBefore` 只在存在更早阅读窗口时提供；`before` 读取该位置之前（含该位置）的保存状态。上下文同样绑定历史 Run、request、recordSeq 和可选 before，每页最多 16 项/128KiB；缺失、策略省略、截断和保存缺口分别返回。无配对返回 401，未保存/跨项目返回 404，繁忙或记录不可读返回 503；均保留既有 Host/Origin 保护，历史正文不可编辑。R3.1 的管理写接口、读取失效/410 和游标冲突处理另见 §7.4。
+单次读取返回 `{ run, snapshot, gaps, issues, uncertainTail, detailsPartial, before, previousBefore, source: "saved_workbench", currentRunEpoch }`。`snapshot` 复用 schemaVersion 2，连续水位取提交元数据与实际验证前缀的较小值。`previousBefore` 只在存在更早阅读窗口时提供；`before` 读取该位置之前（含该位置）的保存状态。上下文同样绑定历史 Run、request、recordSeq 和可选 before，每页最多 16 项/128KiB；缺失、策略省略、截断和保存缺口分别返回。无配对返回 401，未保存/跨项目返回 404，繁忙或记录不可读返回 503；均保留既有 Host/Origin 保护，历史正文不可编辑。管理写接口、读取失效/410 和游标冲突处理另见 §7.4。
 
 历史页面复用角色气泡、工具结果、Markdown 与调用详情，提供“查看此历史的调用记录”，详情始终携带选中的 runEpoch/before。历史面板不再复制第二份网络对话，并显示“保存时”状态、观察缺口、损坏位置和异常退出尾部不确定性。更早窗口/更多运行按需读取；失败保留现有阅读选择。切历史保留同一当前 TerminalPanel；返回实时阅读保留此前面板、展开与滚动位置。不自动 resume、不重发旧输入，也不合并旧 Run 到当前聊天。
 
@@ -718,15 +725,15 @@ RolloutReader 后台只读 `sessions` 和 `archived_sessions`，以明确 thread
 
 ### 7.3 旧项目迁移
 
-旧 schema 20、raw/audit 数据原样保留，不作为新数据库 migration 的前提。独立历史 adapter 可读取旧 `/v1` 或脱敏导出；旧 eventSeq 不重编号成新 captureSeq。新 `/workbench/v1` 不承诺兼容旧 `/v2` mutation。R5 已先验证导出/历史能力和新运行闭环，再按用户授权删除旧控制路由与代码；`/v2` 返回 404，旧控制恢复和图片清理不再运行。V1 网页更新使用 `/v1/stream` 的 `afterEventSeq`，过期后重取快照水位。未修改用户服务配置或数据库。
+旧 schema 20、raw/audit 数据原样保留，不作为新数据库 migration 的前提。独立历史 adapter 可读取旧 `/v1` 或脱敏导出；旧 eventSeq 不重编号成新 captureSeq。新 `/workbench/v1` 不承诺兼容旧 `/v2` mutation。旧控制路由与代码已退役；`/v2` 返回 404，旧控制恢复和图片清理不再运行。V1 网页更新使用 `/v1/stream` 的 `afterEventSeq`，过期后重取快照水位。未修改用户服务配置或数据库。
 
 ### 7.4 历史管理与统一配置扩展
 
-2026-09-20 用户要求加入占用、按运行删除、批量清理、可选保留期限及 JSON/网页配置。详细契约独立在[历史与配置方案](codex-native-cli-workbench-history-settings.md)，为本文组成部分；此处不重复维护接口/字段，实施与验收归 R3.1。
+工作台支持占用统计、按运行删除、批量清理、可选保留期限及 JSON/网页配置。详细契约与验收要求统一维护在[历史与配置方案](codex-native-cli-workbench-history-settings.md)，为本文组成部分；此处不重复维护接口或字段。
 
 核心边界：后台扫描逻辑字节数并表达 partial；默认不允许手动或自动删除；精确 UUID 预览后确认，执行前复核当前项目、配置和运行 flock；整次运行移入同数据根暂存后可恢复地删除。新管理路径不等待/阻塞转发，也不修改原生会话、旧库或当前 Token/保存水位。仅移入暂存不表示空间已释放。
 
-现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。网页只在当前工作台点击展开配置面板，保留阅读选择与终端；没有独立设置页或前端路由，settings 仅为数据 API。决定与兼容取舍见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md) 及其默认路径补充 [ADR 0049](decisions/0049-workbench-user-directory.md)。
+现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。2026-10-14 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板：网页设置位于 `/settings` 或 `/runs/{runId}/settings`，单端口中转加 `/g/{gatewayId}` 前缀；同 Run 切换保留终端实例，不重放输入。设置数据 API 仍为 `/workbench/v1/application/settings` 或 `/workbench/v1/runs/{runId}/settings`，展示路由不修改 wire contract。配置与兼容取舍仍见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md) 及默认路径补充 [ADR 0049](decisions/0049-workbench-user-directory.md)，其历史验收不替代新路由验收。
 
 ## 8. 文件、搜索与 Git 阅读
 
@@ -739,7 +746,7 @@ GET /workbench/v1/runs/{runId}/workspace/git/diff?scope=working|staged&path=<rel
 GET /workbench/v1/runs/{runId}/workspace/git/log?cursor=<opaque>
 ```
 
-R4 实现为独立 WorkspaceReader 线程、8 项有界队列和每请求 5 秒预算（含排队），不与代理、PTY 或历史查询共用工作队列。只读根取 Launcher 确认的 canonical cwd，绑定启动时目录描述符；浏览器不能传 executable/env/root。`/run.workspaceRoot` 只供当前本机工具路径归属判断，根外及远程环境路径不生成文件打开动作。
+WorkspaceReader 使用独立线程、8 项有界队列和每请求 5 秒预算（含排队），不与代理、PTY 或历史查询共用工作队列。只读根取 Launcher 确认的 canonical cwd，绑定启动时目录描述符；浏览器不能传 executable/env/root。`/run.workspaceRoot` 只供当前本机工具路径归属判断，根外及远程环境路径不生成文件打开动作。
 
 冻结预算：目录每页 200 项，最多扫描 10,000 项/1 MiB 文件名；文件最多 1 MiB；搜索最多 200 命中、2048 文件/32 MiB 安全文本，5 秒截止；Git stdout 最多 1 MiB、5 秒，log 每页 20 条。前端文件/Diff 使用单文档连续滚动和视口虚拟渲染，长行横向滚动，不再按行数或字符切段；Git 变更列表每组每页 200 项，超限明确提示。UTF-8/NUL 检测拒绝二进制文件。
 
@@ -760,48 +767,65 @@ R4 实现为独立 WorkspaceReader 线程、8 项有界队列和每请求 5 秒�
 
 rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安全读取并以最多 16 个匿名文件描述符一批交给 rg，不执行 shell/preprocess，不让 rg 重新打开项目正文路径。Git 固定 cwd/argv、`-z` 路径、当前目录 pathspec/prefix 双重范围，禁用 pager、external diff/textconv、fsmonitor、hooks、可选锁、子模块递归、签名与远程抓取。Diff 从验证过的 HEAD/index blob 与安全读取的当前文本生成私有内容快照后比较；因此模式/rename 看左侧状态，冲突不伪造单一版本。决定、边界与替代方案见 [ADR 0050](decisions/0050-read-only-workspace.md)。
 
-快照写入后 rewind，在父进程中提前持有实际 CLOEXEC FD；子进程只清除相应 CLOEXEC，不覆盖固定 FD，父进程仍禁止其它 exec 继承。rg 使用实际 `/dev/fd/N`，按请求一次性消费共享偏移。Git 为避开 macOS 同号 `/dev/fd` 并发 stat 异常，改为只重开请求自有 0700 临时目录中的 0600 before/after 文件，不重新打开原项目路径。查询正常结束、错误和取消后清理；强制终止或清理失败可能遗留私有临时正文，不自动扫描删除未知目录。可选 `CODEX_WORKSPACE_DIAGNOSTICS=1` 将长度、偏移、FD 元数据、启动 errno、退出码/信号及 stderr 字节数/静态类别输出为本机 stderr JSONL，不进入 HTTP/历史，不记录正文、摘要、路径、argv 或环境。诊断不读正文或重置偏移，默认关闭，详见[调试指南](development/debugging.md#工作区-fd-诊断)及 [Issue #9 调查](validation/workspace-fd-issue-9-2026-10-09.md)。
+快照写入后 rewind，在父进程中提前持有实际 CLOEXEC FD；子进程只清除相应 CLOEXEC，不覆盖固定 FD，父进程仍禁止其它 exec 继承。rg 使用实际 `/dev/fd/N`，按请求一次性消费共享偏移。Git 为避开 macOS 同号 `/dev/fd` 并发 stat 异常，改为只重开请求自有 0700 临时目录中的 0600 before/after 文件，不重新打开原项目路径。查询正常结束、错误和取消后清理；强制终止或清理失败可能遗留私有临时正文，不自动扫描删除未知目录。可选 `CODEX_WORKSPACE_DIAGNOSTICS=1` 将长度、偏移、FD 元数据、启动 errno、退出码/信号及 stderr 字节数/静态类别输出为本机 stderr JSONL，不进入 HTTP/历史，不记录正文、摘要、路径、argv 或环境。诊断不读正文或重置偏移，默认关闭，详见[调试指南](development/debugging.md#工作区-fd-诊断)及 [ADR 0050](decisions/0050-read-only-workspace.md)。
 
 只刷新当前可见查询，每次完成后至少等待 5 秒；文件树保留展开项但只轮询最后选中的目录。其他展开项保留上次结果，重新选中或“刷新文件”可更新。首版使用有界轮询而不增加递归 watcher，外部文件变化与已确认工具结果由下一轮读取反映，不把通知当作 Git 状态。切换/收起取消未完成查询，取消/超时回收查询子进程，已进入内核的磁盘 I/O 不能保证立即终止。
 
-文件树、搜索、Git 面板只改变左侧，中央可继续显示对话/历史。打开文件、搜索命中或有来源的工具路径才改变中央内容；代码行号、Diff 区分和读取时间保留，历史工具链接标明阅读当前文件。关闭文件回到此前中央选择。没有文件写、Git 写、命令执行或切换 CLI 的浏览器接口，也不增加 Git 锁与工作区独占承诺。实际结果见 [R4 验收](validation/native-cli-r4-acceptance-2026-09-20.md)。
+文件树、搜索、Git 面板只改变左侧，中央可继续显示对话/历史。打开文件、搜索命中或有来源的工具路径才改变中央内容；代码行号、Diff 区分和读取时间保留，历史工具链接标明阅读当前文件。关闭文件回到此前中央选择。没有文件写、Git 写、命令执行或切换 CLI 的浏览器接口，也不增加 Git 锁与工作区独占承诺。
 
-2026-09-22 文件阅读按 [ADR 0052](decisions/0052-continuous-file-reading.md) 改为按需加载的 CodeMirror 6 只读视图：行号、滚动条、跨视口选区复制、全文查找与行号跳转共用完整的当前文档；Diff 保留源行按钮和颜色。一个中央文档实例，关闭/切换即销毁，不建逐文件缓存。相同 revision 不重置模型/选区/滚动，变化时按公共前后缀替换差异并映射位置。视口附近的行才创建 DOM，Diff 另有每行 4 字节的源行映射；1 MiB 输入边界不等同于整个浏览器堆上限，实际测量见[连续阅读验证](validation/native-cli-continuous-files-2026-09-22.md)。不加入编辑、保存、语言服务或自动加载外部资源。
+2026-09-22 文件阅读按 [ADR 0052](decisions/0052-continuous-file-reading.md) 改为按需加载的 CodeMirror 6 只读视图：行号、滚动条、跨视口选区复制、全文查找与行号跳转共用完整的当前文档；Diff 保留源行按钮和颜色。一个中央文档实例，关闭/切换即销毁，不建逐文件缓存。相同 revision 不重置模型/选区/滚动，变化时按公共前后缀替换差异并映射位置。视口附近的行才创建 DOM，Diff 另有每行 4 字节的源行映射；1 MiB 输入边界不等同于整个浏览器堆上限。不加入编辑、保存、语言服务或自动加载外部资源。
 
-侧栏展示按 [2026-09-21 试用反馈](validation/native-cli-r4-ui-2026-09-21.md)调整：活动栏统一静态 SVG 和中文短标签；文件树用目录/文件类型图标、缩进引导线、单行省略及当前文件选中态；Git 文件名、目录、原路径和中文状态分别展示，变更按 `path + scope` 高亮，保留完整路径的可访问名称和悬停提示。只将中央实际打开的 `FileSelection` 传给侧栏，不另建选中数据源或新增读取请求。选中目录的 `readAt/truncated` 移至树外底部，其他目录仍保留各自上次结果；Git 同样保留读取时刻和截断，解释文字折叠。已有结果的刷新不插入加载行，失败在结果上方说明仍是上次成功读取的内容。显示调整不改变查询、轮询、取消、分页或终端生命周期。
+侧栏展示采用以下约定：活动栏统一静态 SVG 和中文短标签；文件树用目录/文件类型图标、缩进引导线、单行省略及当前文件选中态；Git 文件名、目录、原路径和中文状态分别展示，变更按 `path + scope` 高亮，保留完整路径的可访问名称和悬停提示。只将中央实际打开的 `FileSelection` 传给侧栏，不另建选中数据源或新增读取请求。选中目录的 `readAt/truncated` 移至树外底部，其他目录仍保留各自上次结果；Git 同样保留读取时刻和截断，解释文字折叠。已有结果的刷新不插入加载行，失败在结果上方说明仍是上次成功读取的内容。显示调整不改变查询、轮询、取消、分页或终端生命周期。
 
-图标进一步按用户要求采用 Microsoft Codicons 固定提交的 20 项本地 SVG 子集，映射、来源和许可见 [icons/README](../web/src/workbench/icons/README.md)。原始 `viewBox` 和路径保留，由 Preact 创建受控 SVG 节点；不注入 SVG 字符串、不加载字体或远程资源。中文名称、键盘焦点与树状态仍由原控件提供，装饰图标对辅助技术隐藏。[图标验收](validation/native-cli-r4-codicons-2026-09-21.md)单独记录此次展示变更。
+图标进一步按用户要求采用 Microsoft Codicons 固定提交的 20 项本地 SVG 子集，映射、来源和许可见 [icons/README](../web/src/workbench/icons/README.md)。原始 `viewBox` 和路径保留，由 Preact 创建受控 SVG 节点；不注入 SVG 字符串、不加载字体或远程资源。中文名称、键盘焦点与树状态仍由原控件提供，装饰图标对辅助技术隐藏。
 
 ## 9. 性能测量与验收
 
 ### 9.1 对比方法
 
-优先比较普通 CLI 直连与新模型代理，固定同一官方 CLI、合成流内容/频率/大小和本机环境。main 旧代理只作可选参照，不为取得旧指标扩展旧内核。捕获层不同，模型 chunk 到 CLI 的阶段与 App Server frame 阶段必须分别标注，不能将不相同的测点直接相减。
+优先比较普通 CLI 直连与新模型代理，固定同一官方 CLI、合成流内容/频率/大小和本机环境。历史代理指标只作可选参照，不为取得旧指标扩展旧内核。捕获层不同，模型 chunk 到 CLI 的阶段与 App Server frame 阶段必须分别标注，不能将不相同的测点直接相减。
 
 网络记录 monotonic 时间：接收片段、转发提交、对端收到、进入 reducer、发送 Web、页面应用及前台 paint。服务端不能直接减浏览器的 `performance.now()`；本机联合探针建立时钟映射并报告误差，或以同一探针观测两端。DOM commit 与首次实际可见也应分开。若测旧 writer，须包含 enqueue/凑批等待，不能只报告事务耗时。
 
-初始目标：额外转发 p95 ≤ 5ms，接收至前台页面可见 p95 ≤ 100ms，非全场景承诺。已有[合成 HTTP 客户端与 Chrome DOM/Paint 测量](validation/native-cli-r0-progress-2026-09-18.md#25-合成转发dom-和主帧-paint-测量)及[普通 CLI 对照](validation/native-cli-r0-progress-2026-09-18.md#28-普通-cli-的固定流直连代理对照)。正常案例代理接收→合成客户端 p95 ≤0.129ms、接收→Chrome 主帧 Paint p95 ≤74.092ms；CLI 对照覆盖 100Hz 短/长输出和观察暂停，PTY 测点包含原生渲染，不当作网络开销。R3 另验证 Recorder 停顿 5 秒、满队列、保存错误和 Chrome 故障恢复；测得的 HTTP 客户端往返不是额外代理开销。完整 Web 阶段分解和产品资源矩阵仍由 R5 验收。至少覆盖短文本、100Hz 小片段、长输出、并发子请求、慢网页、Recorder 阻塞 5 秒和磁盘错误。报告 p50/p95/p99、样本数、机器/CLI/browser/profile、丢观察数、内存峰值、CPU、TTFT 与整轮时间。真实模型只作联合行为验证，不能靠随机网络耗时下结论。
+验收目标：额外转发 p95 ≤ 5ms，接收至前台页面可见 p95 ≤ 100ms，不作为全场景承诺。至少覆盖短文本、100Hz 小片段、长输出、并发子请求、慢网页、Recorder 阻塞 5 秒、满队列、磁盘错误和页面故障恢复。报告 p50/p95/p99、样本数、机器/CLI/browser/profile、观察缺口、内存峰值、CPU、TTFT 与整轮时间。PTY 测点包含原生渲染，HTTP 客户端往返也不是额外代理开销；完整 Web 阶段须分别测量。真实模型只作联合行为验证，不能靠随机网络耗时下结论。
 
 ### 9.2 必测矩阵
 
-| 组 | 验收结果 | 切片 |
-| --- | --- | --- |
-| P01 接入 | 普通 CLI 进程、无本项目外部 App Server；配置/认证不污染，支持 profile 明确 | R0 |
-| P02 转发 | SSE/WS、多轮/取消/断线、压缩/UTF-8/未知事件；应用字节一致，无额外重试 | R0/R1 |
-| P03 终端 | 中文/多行/picker/信任/原生审批；双页面单写、接管、resize 不循环、切面板不 spawn | R1 |
-| P04 语义 | 按 §4.3–4.5 区分用户/模型、请求用途与工具类型；request/response/stream/call 不串联；工具生成不等于执行、response 完成不等于 Turn 完成；逐项见[聊天验收](v2-implementation-plan.md#chat-acceptance) | R1 角色与用途 / R2 工具与复杂上下文 |
-| P05 阅读 | 首片可见、最终替换、重复/乱序/旧 revision、上滚不抢焦点；稳定气泡/工具卡原位更新，历史上下文不重复、相同新输入不丢失 | R1/R2 |
-| P06 历史 | snapshot/replay 无竞态；缺口、重启未保存尾部、磁盘满与索引重建均可诊断 | R3 |
-| P07 隔离 | 慢 recorder/viewer/解析异常不阻塞 CLI；有界内存，观察丢失不丢网络字节 | R0/R3 |
-| P08 安全 | 错误 Origin/Host、开放代理、重定向、secret、HTML/ANSI 和路径越界负向测试 | 各相关片 |
-| P09 工作区 | 特殊路径/嵌套目录/无 Git/rg、取消与并发文件变化 | R4 |
-| P10 实机与退役 | 系统 Chrome + 官方安装版 + 实际模型，图片/真机结果、旧历史保留和旧控制退役 | R5 |
-| P11 前端原型对照 | 按[实施计划 §4.1](v2-implementation-plan.md#prototype-acceptance)及[§4.2 聊天验收](v2-implementation-plan.md#chat-acceptance)逐条操作；对照方案 §1 的深色布局、角色标签、用户/模型气泡、工具/命令/结果卡和请求入口；左侧 Git 与中央对话共存；折叠/导航保持终端，历史不切换 CLI，捕获/保存/覆盖与接管分别呈现；键盘可达、窄屏无横向溢出 | R1–R4，真机归 P10 |
-| P12 历史管理 | 占用/partial/分页、精确候选、默认关闭删除、活动锁/跨项目/链接/路径替换负向、批量/幂等/读删并发、各删除崩溃点及暂存恢复；按可靠结束时间保留，旧/异常记录不自动删除；慢 I/O 与原生/旧数据不变 | R3.1，详见[验证契约](codex-native-cli-workbench-history-settings.md#7-验证限制与后续落点) |
-| P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；点击展开/收起及草稿保留、文件往返、焦点/终端/阅读位置保留，无独立设置页或前端路由 | R3.1，同上 |
-| P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve | R5，见[设备接入设计](codex-native-cli-workbench-device-access.md)与[实施顺序](v2-implementation-plan.md#device-access-slices) |
-| P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 | R6-A/C/D/G |
-| P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容 | R6-B/D/E/G；E 实现已完成本片验证，见本片验证报告 |
-| P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI | R6-E/F/G；已有[F 多 Run 分片验证](validation/native-cli-r6-f-multi-project-2026-09-23.md)及[G2 压力隔离](validation/native-cli-r6-g2-isolation-2026-09-25.md)证据，整片验收以实施计划为准 |
+| 组 | 验收条件 |
+| --- | --- |
+| P01 接入 | 普通 CLI 进程、无本项目外部 App Server；配置/认证不污染，支持 profile 明确 |
+| P02 转发 | SSE/WS、多轮/取消/断线、压缩/UTF-8/未知事件；应用字节一致，无额外重试 |
+| P03 终端 | 中文/多行/picker/信任/原生审批；双页面单写、接管、resize 不循环、切面板不 spawn |
+| P04 语义 | 按 §4.3–4.5 区分用户/模型、请求用途与工具类型；request/response/stream/call 不串联；工具生成不等于执行，response 完成不等于 Turn 完成；聊天用例见 §9.3 |
+| P05 阅读 | 首片可见、最终替换、重复/乱序/旧 revision、上滚不抢焦点；稳定气泡/工具卡原位更新，历史上下文不重复、相同新输入不丢失 |
+| P06 历史 | snapshot/replay 无竞态；缺口、重启未保存尾部、磁盘满与索引重建均可诊断 |
+| P07 隔离 | 慢 recorder/viewer/解析异常不阻塞 CLI；有界内存，观察丢失不丢网络字节 |
+| P08 安全 | 错误 Origin/Host、开放代理、重定向、secret、HTML/ANSI 和路径越界负向测试 |
+| P09 工作区 | 特殊路径/嵌套目录/无 Git/rg、取消与并发文件变化 |
+| P10 实机与退役 | 系统 Chrome + 官方安装版 + 实际模型，图片/真机结果、旧历史保留和旧控制退役 |
+| P11 前端交互 | 对照方案 §1 和 §9.3：深色布局、角色标签、用户/模型气泡、工具/命令/结果卡、调用入口；左侧 Git 与中央对话共存；导航与折叠保持终端和草稿；历史不切换 CLI；上滚保持锚点、显式跟随最新；捕获/保存/覆盖与接管分别呈现；键盘可达，1024/736/320px 无整页横向溢出 |
+| P12 历史管理 | 占用/partial/分页、精确候选、默认关闭删除、活动锁/跨项目/链接/路径替换负向、批量/幂等/读删并发、各删除崩溃点及暂存恢复；按可靠结束时间保留，旧/异常记录不自动删除；慢 I/O 与原生/旧数据不变 |
+| P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；独立设置路由直达/前后退、同标签草稿保留、文件往返、同 Run 终端保活与不重放输入 |
+| P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve；详见[设备接入设计](codex-native-cli-workbench-device-access.md) |
+| P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 |
+| P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容；后台重复启停、前台冲突、首次注册和完整退出按 ADR 0063 验证 |
+| P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI |
 
-所有 fixture 合成或脱敏，不写真实用户 home。没有性能测量、安装版接入成功和 P07 故障证据，不能把本设计标为已实现；cc-viewer 的 T01–T13 不能替代本项目验收。
+所有 fixture 合成或脱敏，同时隔离 HOME/USERPROFILE/CODEX_HOME，不写真实用户目录。性能、安装版接入和 P07 故障隔离必须有实际证据；参考产品试用与设计文本不能替代本项目验收。
+
+### 9.3 聊天角色、工具与命令验收
+
+| 用例 | 操作与必须验证的结果 |
+| --- | --- |
+| C01 基础聊天 | 原生 CLI 提交中文多行；一条右侧“用户”气泡，左侧“模型 · 模型名”流式增长，最终全文替换不重复；未知模型名明确标记，无第二套输入框 |
+| C02 提交证据 | 输入并取消草稿后真正提交；仅有来源证据的提交进入聊天，Enter 和回显不生成乐观气泡 |
+| C03 上下文与同文输入 | 多轮请求携带旧消息，再提交相同文字；旧上下文不重复，新提交独立；system/developer、注入上下文和工具输出不标为用户 |
+| C04 辅助请求 | 普通回复、标题/摘要和用途不明请求并发；辅助不冒充聊天，用途不明保留请求级说明，不按 title 或文本长短猜用途 |
+| C05 调用无结果 | 流式生成 function/custom 参数直至完整调用；工具卡显示生成状态，执行仍未观察，不出现虚假成功或执行中 |
+| C06 命令结果 | 退出 0、非零、无可靠退出码分别覆盖；命令/cwd 与输出分区，状态有证据；只有来源明确才拆 stdout/stderr、退出码与耗时 |
+| C07 代码与文字 | Markdown shell、Code Mode 内嵌 exec_command、结构化 shell 分别呈现代码块、代码工具卡、命令卡，不扫描代码制造已执行子命令 |
+| C08 交错与并发 | 用户、模型、两工具和后续回复交错，结果逆序/重复后刷新；不串 call、不重复卡片，保持展开状态、节点与上滚锚点 |
+| C09 缺口与未知 | 缺 call ID、身份冲突、未知类型、截断/取消、仅 response.completed；明确缺失，不补成功/取消，不将 response 结束当任务结束 |
+| C10 安全与可用性 | HTML/ANSI/secret、长输出、键盘展开、窄屏和接收时上滚；转义脱敏、有界截断、文字标签、焦点与终端节点均保持 |
+
+每个适用用例须有 decoder/reducer 合成 fixture 与实际浏览器断言；安装版 CLI 的用户消息和至少一次工具调用还须核验来源关联。复用系统 Chrome，不下载浏览器。截图只辅助检查视觉，不能代替消息数量、角色、状态、顺序、焦点及原始数据零写断言。

@@ -1,0 +1,35 @@
+[Unit]
+Description=Codex relay single HTTPS origin
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=codex-relay
+Group=codex-relay
+EnvironmentFile=/etc/codex-relay-single-origin.env
+Environment=TOKIO_WORKER_THREADS=1
+WorkingDirectory=/var/lib/codex-relay
+# First start only: prepare an owner-owned 0600 password file in the private data directory.
+# After windsyu administrator initialization, remove --bootstrap-password-file and securely remove that file.
+ExecStart=/usr/local/bin/codex-relayd --data-dir /var/lib/codex-relay --portal-origin ${RELAY_PORTAL_ORIGIN} --single-origin --password-workers 1 --trusted-client-ip-header x-relay-client-ip serve --bind 127.0.0.1:8787 --bootstrap-password-file /var/lib/codex-relay/bootstrap-password
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/codex-relay
+PrivateTmp=true
+CPUAccounting=true
+CPUQuota=35%
+MemoryAccounting=true
+# Compatible with systemd 239 / cgroup v1; verify actual limits on the target host.
+MemoryLimit=384M
+TasksAccounting=true
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

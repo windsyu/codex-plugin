@@ -5,6 +5,23 @@ import { HistoryHome, type ApplicationInfo } from './HistoryHome';
 const root = document.createElement('div');
 afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const initial: ApplicationInfo = { instanceId: 'application', runs: [], launchError: null, sources: [{ id: 'native', kind: 'native', state: 'unavailable', message: '原生目录不存在 <script>unsafe</script>' }] };
+it('separates the overview, history and inline launch pages with real document links', async () => {
+  const info = { ...initial, launchAvailable: true };
+  const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => info, text: async () => JSON.stringify({ revision: 'r', records: [], nextCursor: null, coverage: { state: 'complete_for_source', reasons: [] } }) }));
+  vi.stubGlobal('fetch', fetch);
+  document.body.append(root);
+  await act(async () => render(<HistoryHome initial={info} page="overview" />, root));
+  expect(root.querySelector('h1')?.textContent).toBe('从这里，继续创作。');
+  expect(root.querySelector('.wb-library')).toBeNull();
+  expect(fetch.mock.calls.some(([url]) => url.includes('/library/'))).toBe(false);
+  expect([...root.querySelectorAll('.wb-page-nav a')].map(a => a.getAttribute('href'))).toEqual(['/', '/history', '/launch', '/settings', '/relay']);
+  await act(async () => render(<HistoryHome initial={info} page="history" />, root));
+  expect(root.querySelector('.wb-overview-heading')).toBeNull();
+  expect(root.querySelector('.wb-library')).not.toBeNull();
+  await act(async () => render(<HistoryHome initial={info} page="launch" />, root));
+  expect(root.querySelector('.wb-library')).toBeNull();
+  expect(root.querySelector('dialog.is-page[open] input[aria-label="项目目录"]')).not.toBeNull();
+});
 it('shows truthful source state with no terminal or run polling and escapes source text', async () => {
   const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => initial, text: async () => JSON.stringify({revision:'r', records:[], nextCursor:null, coverage:{state:'partial',reasons:['source_unavailable']}}) })); vi.stubGlobal('fetch', fetch);
   document.body.append(root); await act(async () => render(<HistoryHome initial={initial} />, root));
@@ -19,6 +36,27 @@ it('opens existing runs without a launch mutation and isolates failure from home
   document.body.append(root); await act(async () => render(<HistoryHome initial={info} />, root));
   expect(root.querySelector('a')?.getAttribute('href')).toBe('/?run=run-a');
   expect(root.textContent).toContain('Codex 未能启动'); expect(root.textContent).toContain('全部历史');
+});
+
+it('hides local relay binding from a remote owner and uses path input when folder picking is unavailable', async () => {
+  const info = { ...initial, remoteOwner: true, launchAvailable: true, directoryPickerAvailable: false };
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => info, text: async () => JSON.stringify({revision:'r',records:[],nextCursor:null,coverage:{state:'complete_for_source',reasons:[]}}) });
+  vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryHome initial={info} />, root));
+  expect(root.textContent).not.toContain('公网接入');
+  const open = [...root.querySelectorAll('button')].find(button => button.textContent === '打开其他目录')!;
+  await act(async () => open.click());
+  expect(root.querySelector('input[aria-label="项目目录"]')).not.toBeNull();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes('pick-directory'))).toBe(false);
+});
+
+it('offers computer directory browsing to capable remote owners and uses no native picker', async () => {
+  const info = { ...initial, remoteOwner: true, launchAvailable: true, directoryPickerAvailable: false, directoryBrowserAvailable: true };
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => info }); vi.stubGlobal('fetch', fetch);
+  document.body.append(root); await act(async () => render(<HistoryHome initial={info} page="launch" />, root));
+  expect(root.querySelector('.wb-launch-pick')?.textContent).toBe('浏览电脑目录');
+  expect(root.textContent).not.toContain('选择文件夹…');
+  expect(fetch.mock.calls.some(([url]) => String(url).includes('pick-directory'))).toBe(false);
 });
 
 it.each([

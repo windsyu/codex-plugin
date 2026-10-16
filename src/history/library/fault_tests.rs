@@ -2,6 +2,70 @@
 use super::*;
 
 #[test]
+fn r7_failed_revision_read_is_not_successful_scan_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("native");
+    std::fs::create_dir(&home).unwrap();
+    let source = Source::Native {
+        id: "default-native".into(),
+        codex_home: home.clone(),
+    };
+    let shared = Shared {
+        home,
+        organization: organization::Store::new(temp.path().join("history")),
+        data: temp.path().join("history"),
+        policy: Arc::new(|| Ok(LibraryConfig::default())),
+        status: RwLock::new(vec![]),
+        stop: AtomicBool::new(false),
+        refresh: AtomicBool::new(false),
+        refresh_status: RwLock::new(RefreshStatus {
+            requested: 1,
+            ..Default::default()
+        }),
+        key: [0; 32],
+    };
+    shared.set(status(&source, "indexing", "publishing", 0, None));
+    // A real SQLite prepare error at the revision-read stage, not a mocked status.
+    let mut db = Connection::open_in_memory().unwrap();
+    assert!(
+        db.prepare("SELECT metadata,search FROM catalog_entries")
+            .is_err()
+    );
+    publish(
+        &mut db,
+        &shared,
+        Job {
+            scan: Scan::open(source.clone()).unwrap(),
+            generation: "staged".into(),
+            count: 0,
+            bytes: 0,
+            partial: false,
+            checkpoint: None,
+            backfill_after: String::new(),
+        },
+    );
+    let states = shared.states(std::slice::from_ref(&source));
+    assert_eq!(states[0].state, "unavailable");
+    assert_eq!(states[0].error.as_deref(), Some("cache_revision_failed"));
+    shared.finish_scan_refresh(1, std::slice::from_ref(&source));
+    assert_eq!(shared.refresh_status.read().unwrap().completed, 1);
+    assert!(shared.refresh_status.read().unwrap().failed);
+    // Queue exhaustion alone also cannot turn an unterminated source into success.
+    shared.set(status(&source, "indexing", "not terminal", 0, None));
+    shared.finish_scan_refresh(2, std::slice::from_ref(&source));
+    assert!(shared.refresh_status.read().unwrap().failed);
+    shared.set(status(
+        &source,
+        "ready",
+        "published",
+        0,
+        Some("revision".into()),
+    ));
+    shared.finish_scan_refresh(3, &[source]);
+    assert!(!shared.refresh_status.read().unwrap().failed);
+}
+
+#[test]
 fn sqlite_full_rolls_back_document_without_publishing_staging_or_changing_source() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("synthetic-native");
@@ -18,11 +82,13 @@ fn sqlite_full_rolls_back_document_without_publishing_staging_or_changing_source
     let source_signature = crate::history::files::signature(&std::fs::metadata(&file).unwrap());
     let shared = Shared {
         home: home.clone(),
+        organization: organization::Store::new(data.clone()),
         data,
         policy: Arc::new(|| Ok(LibraryConfig::default())),
         status: RwLock::new(vec![]),
         stop: AtomicBool::new(false),
         refresh: AtomicBool::new(false),
+        refresh_status: RwLock::new(RefreshStatus::default()),
         key: [7; 32],
     };
     let source = Source::Native {

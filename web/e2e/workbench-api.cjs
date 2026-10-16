@@ -1,7 +1,12 @@
 // Acceptance probes support both Application Run URLs and standalone readers.
 function runApiPath(url, tail) {
   if (!tail.startsWith('/') || tail.startsWith('//')) throw new Error('invalid probe API tail');
-  const id = new URL(url).searchParams.get('run');
+  const target = new URL(url);
+  const route = target.pathname.match(/^\/runs\/([^/]+)\/(chat|terminal|files|search|git|history|usage|settings|access)$/);
+  if (target.pathname.startsWith('/runs/') && !route) throw new Error('invalid probe Run route');
+  const legacy = target.searchParams.get('run');
+  if (route && legacy !== null && legacy !== route[1]) throw new Error('conflicting probe Run identity');
+  const id = route?.[1] ?? legacy;
   if (id !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
     throw new Error('invalid probe Run identity');
   }

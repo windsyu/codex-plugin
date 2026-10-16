@@ -1,3 +1,4 @@
+import { workbenchFetch } from './context';
 import { useRef, useState } from 'preact/hooks';
 export type HistorySource = { id: string; kind: 'native'; codexHome: string } | { id: string; kind: 'workbench'; dataDirectory: string } | { id: string; kind: 'observer'; database: string; blobDirectory?: string | null; nativeHome?: string | null };
 export interface LibraryConfig { enabled: boolean; cacheLimitMiB: number; sources: HistorySource[] }
@@ -19,7 +20,7 @@ export function HistorySources({ value, onChange }: { value: LibraryConfig; onCh
   async function loadPreview() {
     const sequence = ++previewSequence.current; setBusy(true); setError(''); setPreview(null);
     try {
-      const response = await fetch('/workbench/v1/library/preview', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: configPath }) });
+      const response = await workbenchFetch('/workbench/v1/library/preview', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: configPath }) });
       const body = await response.json();
       if (!response.ok || body.source?.kind !== 'observer' || typeof body.source.database !== 'string') throw new Error('无法读取这份旧配置中的历史路径。请检查完整路径，或直接填写历史数据库位置。');
       if (sequence === previewSequence.current) setPreview(body.source);

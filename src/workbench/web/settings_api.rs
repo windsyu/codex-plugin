@@ -32,7 +32,7 @@ fn result(state: &WebState, value: Result<Settings, ConfigError>) -> Response {
         }
     }
 }
-pub(super) async fn read(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+pub(super) async fn read(State(state): State<Arc<WebState>>, headers: Auth) -> Response {
     if !owner_authorised(&headers, &state) {
         return error(StatusCode::UNAUTHORIZED, "pairing_required");
     }
@@ -50,7 +50,7 @@ struct Save {
 
 pub(super) async fn save(
     State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
+    headers: Auth,
     body: Bytes,
 ) -> Response {
     if !owner_authorised(&headers, &state) {

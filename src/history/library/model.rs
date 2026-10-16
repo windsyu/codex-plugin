@@ -185,6 +185,12 @@ pub struct Capabilities {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExchangePreview {
+    pub text: String,
+    pub role: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub entry_id: String,
     pub source_id: String,
@@ -199,6 +205,8 @@ pub struct Entry {
     #[serde(default)]
     pub project_basis: String,
     pub title: String,
+    #[serde(default)]
+    pub preview: Option<ExchangePreview>,
     pub recorded_at: Option<String>,
     pub native_thread_id: Option<String>,
     pub run_id: Option<String>,
@@ -217,6 +225,12 @@ pub struct Entry {
     pub parent_entry_id: Option<String>,
     #[serde(default)]
     pub is_subagent: bool,
+    #[serde(default = "unknown_conversation_kind")]
+    pub conversation_kind: String,
+    #[serde(default = "missing_kind_basis")]
+    pub kind_basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<Value>,
 }
 impl Entry {
     pub fn new(source: &Source, key: &str) -> Self {
@@ -231,6 +245,7 @@ impl Entry {
             recorded_cwd: None,
             project_basis: "unknown".into(),
             title: "未命名会话".into(),
+            preview: None,
             recorded_at: None,
             native_thread_id: None,
             run_id: None,
@@ -251,6 +266,13 @@ impl Entry {
             agent_name: None,
             parent_entry_id: None,
             is_subagent: false,
+            conversation_kind: unknown_conversation_kind(),
+            organization: None,
+            kind_basis: if source.kind() == "workbench" {
+                "workbench_run_v1".into()
+            } else {
+                missing_kind_basis()
+            },
         }
     }
     pub fn record_cwd(&mut self, cwd: Option<&str>) {
@@ -331,6 +353,142 @@ impl Entry {
         }
     }
 }
+
+fn unknown_conversation_kind() -> String {
+    "unknown".into()
+}
+fn missing_kind_basis() -> String {
+    "source_missing_v1".into()
+}
+
+/// Closed evidence adapter, not a claim about every official source variant.
+pub(super) fn native_conversation_kind(payload: &Value) -> (&'static str, &'static str) {
+    let source = payload.get("source").filter(|v| !v.is_null());
+    let spawn = source
+        .and_then(|s| s.get("subagent"))
+        .and_then(|s| s.get("thread_spawn"));
+    let top = payload.get("parent_thread_id").filter(|v| !v.is_null());
+    let nested = spawn
+        .and_then(|s| s.get("parent_thread_id"))
+        .filter(|v| !v.is_null());
+    if top.is_some() && nested.is_some() && top != nested {
+        return ("unknown", "metadata_conflict_v1");
+    }
+    let parent = top.or(nested);
+    if parent.is_some_and(|v| !reliable_parent(v)) {
+        return ("unknown", "metadata_invalid_v1");
+    }
+    match source {
+        Some(Value::String(s)) if s == "cli" => {
+            if parent.is_some() {
+                ("unknown", "metadata_conflict_v1")
+            } else {
+                ("ordinary", "native_source_cli_v1")
+            }
+        }
+        None | Some(Value::String(_))
+            if source.is_none() || source.and_then(Value::as_str) == Some("sub_agent") =>
+        {
+            if parent.is_some() {
+                ("subagent", "native_parent_thread_v1")
+            } else {
+                ("unknown", "source_missing_v1")
+            }
+        }
+        Some(Value::Object(s)) => {
+            if s.len() == 1
+                && s.get("subagent")
+                    .and_then(Value::as_object)
+                    .is_some_and(|a| a.len() == 1 && a.contains_key("thread_spawn"))
+            {
+                if spawn.is_some_and(Value::is_object) {
+                    ("subagent", "native_source_thread_spawn_v1")
+                } else {
+                    ("unknown", "metadata_invalid_v1")
+                }
+            } else {
+                ("unknown", "source_unknown_v1")
+            }
+        }
+        Some(Value::String(_)) => ("unknown", "source_unknown_v1"),
+        _ => ("unknown", "metadata_invalid_v1"),
+    }
+}
+
+fn reliable_parent(value: &Value) -> bool {
+    value
+        .as_str()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .is_some_and(|id| !id.is_nil())
+}
+
+pub(super) fn observer_conversation_kind(
+    fields: &Value,
+    issues: &[String],
+) -> (&'static str, &'static str) {
+    if issues.iter().any(|s| {
+        s.contains("parentThreadId")
+            || s.contains("parentThreadKey")
+            || s.contains("identity")
+            || s.contains("source_changed")
+            || s.contains("source_revision_changed")
+    }) {
+        return ("unknown", "metadata_invalid_v1");
+    }
+    let parent = fields.get("parentThreadId").filter(|v| !v.is_null());
+    let key = fields.get("parentThreadKey").filter(|v| !v.is_null());
+    if parent.is_some_and(|v| !reliable_parent(v))
+        || key.is_some_and(|v| {
+            v.as_str()
+                .is_none_or(|s| s.is_empty() || s.len() > 4096 || s.contains('\0'))
+        })
+    {
+        return ("unknown", "metadata_invalid_v1");
+    }
+    if parent.is_some() || key.is_some() {
+        ("subagent", "observer_parent_relation_v1")
+    } else {
+        ("unknown", "observer_kind_unconfirmed_v1")
+    }
+}
+
+/// Explain absent display ownership without changing the original source metadata.
+pub(super) fn unassigned_reason(entry: &Value) -> Option<&'static str> {
+    if !entry["projectId"].is_null() {
+        return None;
+    }
+    let reasons = entry["coverage"]["reasons"].as_array();
+    let has = |code: &str| reasons.is_some_and(|r| r.iter().any(|v| v.as_str() == Some(code)));
+    if [
+        "conflicting_session_identity",
+        "event_identity_conflict",
+        "conflicting_parent_identity",
+    ]
+    .iter()
+    .any(|s| has(s))
+    {
+        Some("identity_conflict")
+    } else if entry["projectBasis"] == "user_unassigned" {
+        Some("user_unassigned")
+    } else if entry["projectBasis"] == "desktop_generated" {
+        Some("desktop_generated")
+    } else if entry["projectBasis"] == "legacy_recorded" {
+        Some("source_unassigned")
+    } else if [
+        "project_cwd_invalid",
+        "legacy_project_invalid",
+        "legacy_project_unavailable",
+    ]
+    .iter()
+    .any(|s| has(s))
+    {
+        Some("invalid_metadata")
+    } else if entry["recordedCwd"].is_null() {
+        Some("missing_cwd")
+    } else {
+        Some("unknown")
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceStatus {
@@ -354,6 +512,7 @@ pub struct Query {
     pub window: bool,
     pub record: Option<u64>,
     pub q: Option<String>,
+    pub project_q: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub source_revision: Option<String>,

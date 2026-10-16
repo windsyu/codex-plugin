@@ -31,7 +31,8 @@ async function input(page, label) {
   await terminal(page).press('Enter');
 }
 async function prepare(page, path) {
-  await page.getByRole('button', { name: '输入路径', exact: true }).click();
+  await page.getByRole('link', { name: '启动项目', exact: true }).click();
+  assert.equal(new URL(page.url()).pathname, '/launch');
   await page.getByLabel('项目目录', { exact: true }).fill(path);
   const result = page.waitForResponse(r => r.url().endsWith('/workbench/v1/launch-targets') && r.request().method() === 'POST');
   await page.getByLabel('项目目录', { exact: true }).press('Enter');
@@ -54,7 +55,8 @@ async function accessQr(page) {
 async function phoneAccess(browser, a, b, runA, runB) {
   const phones = []; let phoneErrors = 0;
   async function enable(page, run) {
-    await page.getByRole('button', { name: '手机接入', exact: true }).click();
+    await page.getByRole('link', { name: '本地局域网接入', exact: true }).click();
+    assert.equal(new URL(page.url()).pathname, `/runs/${run.runId}/access`);
     await page.getByRole('button', { name: '开启设备访问', exact: true }).click();
     await expect(page.locator('.wb-access-qr canvas')).toBeVisible();
     const url = await accessQr(page);
@@ -70,10 +72,11 @@ async function phoneAccess(browser, a, b, runA, runB) {
     await page.goto(url);
     await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready', 'true');
     assert.equal(new URL(page.url()).hash, '');
+    assert.equal(new URL(page.url()).pathname, `/runs/${run.runId}/chat`, 'legacy QR selectors must become canonical document routes');
     const info = await page.evaluate(async id => (await fetch(`/workbench/v1/runs/${id}/run`)).json(), run.runId);
     assert.equal(info.runEpoch, run.runId); assert.equal(info.processId, run.cliPid);
-    await expect(page.getByRole('button', { name: '手机接入', exact: true })).toHaveCount(0);
-    await expect(page.locator('#wb-settings-button')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: '本地局域网接入', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: '设置', exact: true })).toHaveCount(0);
     await expect(page.getByRole('link', { name: '返回首页', exact: true })).toHaveCount(0);
     return { page, context };
   }
@@ -125,7 +128,7 @@ async function phoneAccess(browser, a, b, runA, runB) {
   let errors = 0, starts = 0, takeovers = 0; const scoped = [];
   context.on('page', page => {
     page.setDefaultTimeout(15000); page.on('pageerror', () => errors++);
-    page.on('request', r => { const path = new URL(r.url()).pathname; if (path === '/workbench/v1/runs' && r.method() === 'POST') starts++; if (/\/(live|terminal|requests|workspace|history|settings)(\/|$)/.test(path) && !path.includes('/library/') && !path.includes('/application/')) scoped.push(path); });
+    page.on('request', r => { const path = new URL(r.url()).pathname; if (path === '/workbench/v1/runs' && r.method() === 'POST') starts++; if (path.startsWith('/workbench/v1/') && /\/(live|terminal|requests|workspace|history|settings)(\/|$)/.test(path) && !path.includes('/library/') && !path.includes('/application/')) scoped.push(path); });
     page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
       if (JSON.parse(payload).command?.type === 'takeover') takeovers++;
     }));
@@ -150,8 +153,8 @@ async function phoneAccess(browser, a, b, runA, runB) {
   const runB = runs.find(r => r.runId !== runA.runId);
   assert.equal(runB.projectPath, process.env.WORKBENCH_PROBE_PROJECT_B);
   assert.notEqual(runA.cliPid, runB.cliPid); assert.equal(runs.find(r => r.runId === runA.runId).cliPid, runA.cliPid);
-  assert.equal(new URL(a.url()).searchParams.get('run'), runA.runId);
-  assert.equal(new URL(b.url()).searchParams.get('run'), runB.runId);
+  assert.equal(new URL(a.url()).pathname, `/runs/${runA.runId}/chat`);
+  assert.equal(new URL(b.url()).pathname, `/runs/${runB.runId}/chat`);
   await phoneAccess(browser, a, b, runA, runB);
   stage = 'parallel-native-streams';
   await expect(a.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
@@ -180,7 +183,8 @@ async function phoneAccess(browser, a, b, runA, runB) {
     await expect(output.locator('pre')).toBeVisible();
     if (process.env.WORKBENCH_PROBE_SCREENSHOT) await page.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.${label}.png` });
     stage = `files-and-usage-${label}`;
-    await page.getByRole('button', { name: '文件', exact: true }).click();
+    await page.getByRole('link', { name: '文件', exact: true }).click();
+    assert.equal(new URL(page.url()).pathname, `/runs/${run.runId}/files`);
     await page.getByRole('treeitem').filter({ hasText: 'R6-check.txt' }).click();
     await expect(page.getByRole('region', { name: '代码内容', exact: true })).toContainText(`R6_F_${label}_FILE`);
     await expect.poll(async () => (await snapshot(page, run.runId)).usageSummary.totalTokens.tokens).toBe(total);
@@ -188,6 +192,7 @@ async function phoneAccess(browser, a, b, runA, runB) {
     const saved = await page.evaluate(async id => (await fetch(`/workbench/v1/runs/${id}/history/${id}`)).json(), run.runId);
     assert.equal(saved.snapshot.usageSummary.totalTokens.tokens, total);
     assert.ok(!JSON.stringify(saved).includes(`R6_F_${label === 'A' ? 'B' : 'A'}_`));
+    await page.getByRole('link', { name: '实时对话', exact: true }).click();
   }
   stage = 'history-refresh-completed-with-runs-isolated';
   await expect.poll(async () => {
@@ -201,14 +206,14 @@ async function phoneAccess(browser, a, b, runA, runB) {
   const deniedHistory = await a.evaluate(async ({ a, b }) => (await fetch(`/workbench/v1/runs/${a}/history/${b}`)).status, { a: runA.runId, b: runB.runId });
   assert.equal(deniedHistory, 404);
   stage = 'same-project-reuse';
-  await home.keyboard.press('Escape'); const existing = await prepare(home, process.env.WORKBENCH_PROBE_PROJECT_A);
+  await home.locator('.wb-page-nav a[href="/"]').click(); const existing = await prepare(home, process.env.WORKBENCH_PROBE_PROJECT_A);
   stage = 'same-project-preview'; assert.equal(existing.existingRun.runId, runA.runId);
   assert.equal(existing.openInNewTab, true);
   const reusedPopup = home.waitForEvent('popup');
   await home.getByRole('button', { name: '进入工作台', exact: true }).click();
   stage = 'same-project-popup'; const reused = await reusedPopup;
   await expect(reused.locator('.wb-terminal')).toHaveAttribute('data-ready', 'true');
-  assert.equal(new URL(reused.url()).searchParams.get('run'), runA.runId);
+  assert.equal(new URL(reused.url()).pathname, `/runs/${runA.runId}/chat`);
   await expect(reused.locator('.wb-terminal')).toHaveAttribute('data-owned', 'false');
   await expect(reused.locator('.wb-terminal')).toContainText('同一工作台的另一页面');
   await expect(a.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
@@ -234,11 +239,11 @@ async function phoneAccess(browser, a, b, runA, runB) {
   assert.equal(takeovers, 2, 'only explicit same-Run switches may take over input');
   await reused.close();
   assert.equal((await app(home)).runs.length, 2); assert.equal(starts, 2);
-  await home.keyboard.press('Escape');
+  await home.locator('.wb-page-nav a[href="/"]').click();
   await expect(a.locator('.wb-terminal')).toHaveAttribute('data-owned', 'true');
   if (process.env.WORKBENCH_PROBE_SCREENSHOT) await home.screenshot({ path: `${process.env.WORKBENCH_PROBE_SCREENSHOT}.home.png` });
   stage = 'targeted-stop';
-  await b.getByRole('button', { name: '终端', exact: true }).click();
+  await b.getByRole('button', { name: '并排终端', exact: true }).click();
   home.once('dialog', dialog => dialog.accept());
   await home.getByRole('button', { name: `停止项目 ${runB.projectName}`, exact: true }).click();
   await expect.poll(async () => (await app(home)).runs.find(r => r.runId === runB.runId)?.state).toBe('stopped');
@@ -253,7 +258,7 @@ async function phoneAccess(browser, a, b, runA, runB) {
   stage = 'exit-dismiss-and-focus';
   await expect(notice).toHaveCount(0);
   stage = 'exit-restored-focus';
-  await expect(b.getByRole('button', { name: '终端', exact: true })).toBeFocused();
+  await expect(b.getByRole('button', { name: '并排终端', exact: true })).toBeFocused();
   stage = 'exit-retained-records';
   await expect(b.locator('.wb-message-list')).toContainText('R6_F_B_DONE');
   // A fresh page of an ended Run receives its exit in the terminal snapshot.
@@ -285,11 +290,11 @@ async function phoneAccess(browser, a, b, runA, runB) {
   stage = 'exit-return-home';
   await expect(notice).toBeVisible();
   await notice.getByRole('link', { name: '返回首页' }).click();
-  await expect(b.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
+  await expect(b.getByRole('heading', { name: '从这里，继续创作。', exact: true })).toBeVisible();
   assert.equal(starts, 2, 'viewing or dismissing exit notices never starts another CLI');
   assert.equal((await app(home)).runs.find(r => r.runId === runA.runId).cliPid, runA.cliPid);
   stage = 'survivor-input'; await input(a, 'A'); await expect.poll(() => screen(a)).toContain('R6_F_A_DONE_4');
-  await home.reload(); await expect(home.getByRole('heading', { name: '全部历史', exact: true })).toBeVisible();
+  await home.reload(); await expect(home.getByRole('heading', { name: '从这里，继续创作。', exact: true })).toBeVisible();
   assert.equal(errors, 0); assert.ok(scoped.length > 5); assert.ok(scoped.every(path => /^\/workbench\/v1\/runs\/[a-f0-9-]+\//.test(path)));
   require('node:fs').writeFileSync(process.env.WORKBENCH_PROBE_RESULT, JSON.stringify({ pids: [runA.cliPid, runB.cliPid] }));
   console.log(JSON.stringify({ stage: 'passed', starts, projects: 2, deviceQrScopedPairing: true, deviceRepeatRefresh: true, deviceRunIsolation: true, deviceCloseKeepsOtherRun: true, parallelStreams: true, historyRefreshDuringParallelStreams: true, simultaneousInputOwners: true, crossProjectTakeovers: 0, sameRunTakeoverIsolated: true, reloadKeepsOtherInput: true, filesAndUsageIsolated: true, nativeToolOutputsIsolated: true, journalsSaved: true, targetStopIsolated: true, centeredExitNotice: true, exitViewports: [1440, 390, 320], exitKeyboardAndRecords: true, runScopedClients: true, pageErrors: errors, browser: browser.version(), cliVersion: runA.cliVersion })); await close(0);

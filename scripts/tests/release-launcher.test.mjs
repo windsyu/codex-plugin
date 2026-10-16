@@ -20,7 +20,17 @@ function fixture(t) {
   fs.copyFileSync(path.join(scripts, 'code-view'), path.join(release, 'bin/code-view'));
   fs.copyFileSync(path.join(scripts, 'install.sh'), path.join(release, 'install.sh'));
   fs.chmodSync(path.join(release, 'bin/code-view'), 0o755);
-  const backend = `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.CAPTURE, JSON.stringify({cwd:process.cwd(), argv:process.argv.slice(2)}));\n`;
+  const backend = `#!${process.execPath}
+const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2);
+if(args[0]==='--version'){console.log('codex-view 0.3.0');process.exit(0);}
+if(args[0]==='service-maintenance'){
+  const lock=path.join(path.dirname(path.dirname(process.argv[1])),'.code-view-install-lock');
+  if(process.env.MOCK_REQUIRE_INSTALL_LOCK==='1'&&(!fs.existsSync(lock)||!fs.lstatSync(lock).isDirectory()))process.exit(78);
+  if(process.env.MOCK_REPLACE_INSTALL_LOCK==='1'){fs.renameSync(lock,lock+'.original');fs.mkdirSync(lock);}
+  fs.appendFileSync(process.env.SERVICE_GUARD_LOG,JSON.stringify(args)+'\\n');process.exit(Number(process.env.MOCK_SERVICE_STATUS||0));
+}
+fs.writeFileSync(process.env.CAPTURE,JSON.stringify({cwd:process.cwd(),argv:args}));
+`;
   for (const name of ['codex-view', 'codex-observerd']) fs.writeFileSync(path.join(release, 'bin', name), backend, { mode: 0o755 });
   for (const name of [...resources, 'licenses/nested/LICENSE']) {
     fs.mkdirSync(path.dirname(path.join(release, name)), { recursive: true });
@@ -29,7 +39,7 @@ function fixture(t) {
   const checksumFiles = ['bin/code-view', 'bin/codex-view', 'bin/codex-observerd', 'install.sh', ...resources, 'licenses/nested/LICENSE'];
   fs.writeFileSync(path.join(release, 'CHECKSUMS.sha256'), checksumFiles.map(name => `${createHash('sha256').update(fs.readFileSync(path.join(release, name))).digest('hex')}  ${name}\n`).join(''));
   const capture = path.join(temporary, 'capture.json');
-  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), CAPTURE: capture };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), CAPTURE: capture, SERVICE_GUARD_LOG: path.join(temporary, 'service-guard.jsonl') };
   const uname = (system = 'Darwin', arch = 'arm64') => fs.writeFileSync(path.join(tools, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo '${system}';; -m) echo '${arch}';; *) exit 1;; esac\n`, { mode: 0o755 });
   const install = (args = []) => spawnSync('/bin/sh', [path.join(release, 'install.sh'), ...args], { env: { ...env, PATH: `${tools}:${process.env.PATH}` }, cwd: project, encoding: 'utf8' });
   const launch = (args, executable = path.join(release, 'bin/code-view')) => {
@@ -49,9 +59,16 @@ test('launcher preserves cwd and passes arguments exactly', t => {
     [['other 中文', '--profile', "a ' quoted"], ['--project', 'other 中文', '--profile', "a ' quoted"]],
     [['--history', '--no-open'], ['--no-open']],
     [['open', '/tmp/private entry'], ['open', '/tmp/private entry']],
-    [['--version'], ['--version']],
+    [['start'], ['start']],
+    [['status', '--json'], ['status', '--json']],
+    [['stop'], ['stop']],
+    [['open', '--relay'], ['open', '--relay']],
+    [['autostart', 'on'], ['autostart', 'on']],
+    [['autostart', 'off'], ['autostart', 'off']],
+    [['./start'], ['--project', './start']],
     [['-V'], ['-V']],
-    [['version'], ['--version']],
+    [['--config-dir', '/tmp/config 中文', '--data-dir=/tmp/data', 'start', '--profile', 'a b'], ['--config-dir', '/tmp/config 中文', '--data-dir=/tmp/data', 'start', '--profile', 'a b']],
+    [['--profile', 'start', '--provider-profile', 'status'], ['--project', '.', '--profile', 'start', '--provider-profile', 'status']],
     [['--no-open', '--project', 'explicit'], ['--no-open', '--project', 'explicit']],
     [['--project=explicit'], ['--project=explicit']],
   ];
@@ -60,12 +77,73 @@ test('launcher preserves cwd and passes arguments exactly', t => {
     assert.equal(result.cwd, f.project);
     assert.deepEqual(result.argv, expected);
   }
+  for (const flag of ['version', '--version']) {
+    const result = spawnSync(path.join(f.release, 'bin/code-view'), [flag], { cwd: f.project, env: f.env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /codex-view 0\.3\.0/);
+  }
   for (const flag of ['help', '--help', '-h']) {
     const result = f.launch([flag]);
     assert.deepEqual(result.argv, ['--help']);
     assert.match(result.stdout, /Usage: code-view/);
     assert.match(result.stdout, /--history/);
   }
+});
+
+test('release reinstall refuses active or unverifiable services before replacing files', t => {
+  const f = fixture(t);
+  assert.equal(f.install().status, 0);
+  const prefix = path.join(f.home, '.codex-view');
+  const backend = path.join(prefix, 'bin/codex-view');
+  const before = fs.readFileSync(backend);
+  const resource = path.join(prefix, 'share/code-view/LICENSE');
+  for (const status of ['1', '77']) {
+    f.env.MOCK_SERVICE_STATUS = status;
+    const result = f.install(['--force']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /code-view stop/);
+    assert.deepEqual(fs.readFileSync(backend), before);
+    assert.equal(fs.readFileSync(resource, 'utf8'), 'LICENSE');
+  }
+  f.env.MOCK_SERVICE_STATUS = '2';
+  const legacy = f.install(['--force']);
+  assert.equal(legacy.status, 0, legacy.stderr);
+  assert.match(legacy.stderr, /Older backend/);
+});
+
+test('release install reserves the prefix through service guard and removes only its own lock', t => {
+  const f = fixture(t);
+  assert.equal(f.install().status, 0);
+  const prefix = path.join(f.home, '.codex-view');
+  const lock = path.join(prefix, '.code-view-install-lock');
+  f.env.MOCK_REQUIRE_INSTALL_LOCK = '1';
+  const success = f.install(['--force']);
+  assert.equal(success.status, 0, success.stderr);
+  assert.equal(fs.existsSync(lock), false);
+  f.env.MOCK_SERVICE_STATUS = '1';
+  const failure = f.install(['--force']);
+  assert.notEqual(failure.status, 0);
+  assert.match(failure.stderr, /code-view stop/);
+  assert.equal(fs.existsSync(lock), false);
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'sentinel'), 'stale reservation');
+  const stale = f.install(['--force']);
+  assert.notEqual(stale.status, 0);
+  assert.match(stale.stderr, /stale lock/);
+  assert.equal(fs.readFileSync(path.join(lock, 'sentinel'), 'utf8'), 'stale reservation');
+});
+
+test('release install preserves a replacement reservation instead of deleting an unrelated directory', t => {
+  const f = fixture(t);
+  assert.equal(f.install().status, 0);
+  f.env.MOCK_REPLACE_INSTALL_LOCK = '1';
+  f.env.MOCK_SERVICE_STATUS = '1';
+  const result = f.install(['--force']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /lock changed/);
+  const lock = path.join(f.home, '.codex-view', '.code-view-install-lock');
+  assert.equal(fs.statSync(lock).isDirectory(), true);
+  assert.equal(fs.statSync(`${lock}.original`).isDirectory(), true);
 });
 
 test('installation uses isolated default prefix, installs resources and supports explicit reinstall', t => {
@@ -139,6 +217,26 @@ test('installer refuses destination, ancestor and nested resource symbolic links
   assert.notEqual(f.install(['--prefix', prefix, '--force']).status, 0);
   assert.equal(fs.existsSync(path.join(prefix, 'bin/code-view')), false);
   assert.equal(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8'), 'untouched');
+});
+
+test('installer refuses hard linked binary destinations and preserves the other link contents', t => {
+  const f = fixture(t);
+  for (const name of ['code-view', 'codex-view', 'codex-observerd']) {
+    const prefix = path.join(f.temporary, `hardlink-${name}`);
+    const outside = path.join(f.temporary, `outside-${name}`);
+    const original = '#!/bin/sh\nprintf "%s\\n" "original external executable"\n';
+    fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
+    fs.writeFileSync(outside, original, { mode: 0o755 });
+    fs.linkSync(outside, path.join(prefix, 'bin', name));
+    const result = f.install(['--prefix', prefix, '--force']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /hard linked executable/);
+    assert.equal(fs.readFileSync(outside, 'utf8'), original);
+    assert.equal(fs.readFileSync(path.join(prefix, 'bin', name), 'utf8'), original);
+    assert.equal(fs.existsSync(path.join(prefix, '.code-view-install-lock')), false);
+    assert.equal(fs.existsSync(f.env.SERVICE_GUARD_LOG), false);
+    assert.equal(fs.existsSync(path.join(prefix, 'share')), false);
+  }
 });
 
 test('recursive license file/directory conflicts are rejected before writing binaries', t => {

@@ -33,6 +33,17 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher);
 });
 afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.clearAllMocks(); vi.useRealTimers(); });
+it('identifies local network access separately from the public relay without enabling it', async () => {
+  info.state = 'off';
+  await show();
+  const panel = root.querySelector('#wb-access-panel')!;
+  expect(panel.getAttribute('aria-label')).toBe('本地局域网接入');
+  expect(panel.querySelector('.wb-panel-heading strong')?.textContent).toBe('本地局域网接入');
+  expect(panel.textContent).toContain('直接访问本机工作台');
+  expect(panel.textContent).toContain('不经过公网中转站');
+  expect(panel.textContent).toContain('Tailscale');
+  expect(fetcher.mock.calls.every(([, options]) => !options?.method)).toBe(true);
+});
 it.each(['/', scopedPath])('selects a QR and copies its full URL without changing the code or mounted terminal (%s)', async path => {
   pairPath = path; history.replaceState(null, '', path);
   await show(); await vi.waitFor(() => expect(root.querySelector('canvas')).not.toBeNull()); const native = root.querySelector('textarea')!; native.value = '中文草稿';
