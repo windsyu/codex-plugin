@@ -675,24 +675,24 @@ test('a linked previous receipt also refuses a default install before downloadin
   assert.deepEqual(f.calls(), []);
 });
 
-test('the first README shell block downloads to an explicit file and installs without GitHub CLI', t => {
+test('the first installation guide shell block downloads to an explicit file and installs without GitHub CLI', t => {
   const f = fixture(t);
-  const readme = fs.readFileSync(fileURLToPath(new URL('../../README.md', import.meta.url)), 'utf8');
-  const match = readme.match(/```(?:sh|bash)\n([\s\S]*?)```/);
-  assert.ok(match, 'README must provide a runnable initial shell block');
+  const guide = fs.readFileSync(new URL('../../docs/guides/installation.md', import.meta.url), 'utf8');
+  const match = guide.match(/```(?:sh|bash)\n([\s\S]*?)```/);
+  assert.ok(match, 'installation guide must provide a runnable initial shell block');
   succeeds(command('/bin/bash', ['-c', match[1]], { cwd: f.root, env: f.env }));
   assert.equal(fs.existsSync(path.join(f.home, '.codex-view/bin/code-view')), true);
   const raw = f.calls().find(args => args.some(arg => arg.startsWith('https://raw.githubusercontent.com/windsyu/codex-plugin/')));
-  assert.ok(raw, 'README must download the repository installer');
+  assert.ok(raw, 'installation guide must download the repository installer');
   assert.ok(raw.includes('--output'), 'curl must write the installer into the named temporary file');
-  assert.equal(fs.existsSync(raw[raw.indexOf('--output') + 1]), false, 'README must remove its temporary installer');
+  assert.equal(fs.existsSync(raw[raw.indexOf('--output') + 1]), false, 'installation guide must remove its temporary installer');
   succeeds(f.run(['uninstall']));
 });
 
-test('README bootstrap stops failed downloads and temp creation, cleans up and exports PATH only on success', t => {
+test('installation guide bootstrap stops failed downloads and temp creation, cleans up and exports PATH only on success', t => {
   const f = fixture(t);
-  const readme = fs.readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
-  const snippet = readme.match(/```sh\n([\s\S]*?)\n```/)[1];
+  const guide = fs.readFileSync(new URL('../../docs/guides/installation.md', import.meta.url), 'utf8');
+  const snippet = guide.match(/```sh\n([\s\S]*?)\n```/)[1];
   fs.writeFileSync(path.join(f.tools, 'curl'), '#!/bin/sh\noutput=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in --output) output=$2; shift 2 ;; *) shift ;; esac\ndone\n[ -n "$output" ] || exit 70\ncat > "$output" <<\'INSTALLER\'\n#!/bin/bash\nprintf "executed\\n" > "$HOME/installer-ran"\nexit "${BOOTSTRAP_INSTALL_EXIT:-0}"\nINSTALLER\n[ "$BOOTSTRAP_MODE" != download-failure ] || exit 5\n', { mode: 0o755 });
   fs.writeFileSync(path.join(f.tools, 'mktemp'), '#!/bin/sh\n[ "$BOOTSTRAP_MODE" != mktemp-failure ] || exit 6\nexec /usr/bin/mktemp "$@"\n', { mode: 0o755 });
   const initialPath = `${f.tools}:/usr/bin:/bin`;
