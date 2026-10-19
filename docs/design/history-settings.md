@@ -1,10 +1,10 @@
 # 工作台历史管理与统一 JSON 配置设计
 
-> 本文件定义工作台历史管理、统一配置、删除权限和故障恢复的产品与技术契约。关键决定见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md)。
+> 本文件定义工作台历史管理、统一配置、删除权限和故障恢复的产品与技术契约。关键决定见 [ADR 0048](../decisions/0048-history-cleanup-and-json-settings.md)。
 
-> 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)，设置使用独立功能页面；配置格式、保存与清理作用域不随展示路由变化。
+> 按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md)，设置使用独立功能页面；配置格式、保存与清理作用域不随展示路由变化。
 
-R6-C 已在同一配置增加 `history.library` 来源与索引设置，当前设置页提供“接入旧历史”。当前写入 schema 2，schema 1 加载不改文件、保存时升级并备份。损坏配置保持首页可用并显示修复提示；全局历史只读，不扩大当前项目删除/保留期限的作用域。详见 [R6 方案 §10](codex-native-cli-workbench-history-home.md#10-r6-c-目录与来源的实现契约)。
+R6-C 已在同一配置增加 `history.library` 来源与索引设置，当前设置页提供“接入旧历史”。当前写入 schema 2，schema 1 加载不改文件、保存时升级并备份。损坏配置保持首页可用并显示修复提示；全局历史只读，不扩大当前项目删除/保留期限的作用域。详见 [R6 方案 §10](history-home.md#10-r6-c-目录与来源的实现契约)。
 
 ## 1. 用户价值、事实与范围
 
@@ -26,7 +26,7 @@ R6-C 已在同一配置增加 `history.library` 来源与索引设置，当前�
 
 ### 2.1 固定目录结构
 
-按 [ADR 0049](decisions/0049-workbench-user-directory.md)，macOS/Linux 默认根目录为 `$HOME/.codex-web`，Windows 约定为 `%USERPROFILE%\.codex-web`，内部共用 `config/` 与 `history/`。工作台默认位置独立于原生 `CODEX_HOME`；后者仍只用于原生 CLI 的配置、认证和会话。当前运行时依赖 Unix，Windows 路径选择逻辑通过独立测试，完整 Windows 运行尚未验收。
+按 [ADR 0049](../decisions/0049-workbench-user-directory.md)，macOS/Linux 默认根目录为 `$HOME/.codex-web`，Windows 约定为 `%USERPROFILE%\.codex-web`，内部共用 `config/` 与 `history/`。工作台默认位置独立于原生 `CODEX_HOME`；后者仍只用于原生 CLI 的配置、认证和会话。当前运行时依赖 Unix，Windows 路径选择逻辑通过独立测试，完整 Windows 运行尚未验收。
 
 `codex-view --config-dir <directory>` 只用于选择配置目录。未指定时使用根目录下的 `config/`；相对路径以本次启动 cwd 解析，随后固定 canonical 路径。`--data-dir` 和 JSON `storage.dataDir` 继续覆盖历史位置。配置目录不能由其中的 JSON 再次指定，不增加项目配置叠加或新的环境变量设置。
 
@@ -55,7 +55,7 @@ R6-C 已在同一配置增加 `history.library` 来源与索引设置，当前�
 
 工作台配置目录不得与数据目录、运行目录或原生会话目录重叠；自定义数据目录沿用 R3 独占/权限约束，不能使用原生 home、项目根或旧数据库目录。默认缺配置时以不覆盖方式创建默认文件；明确指定的目录须安全可创建，否则给出路径与原因，不静默换目录。默认根和配置目录建立为私有目录；仅默认历史需要新根时在记录线程中创建，失败按保存降级处理。正式入口支持 `--config-dir`；默认值、覆盖和网页表单须按 §7 核验。
 
-初始内容见[配置示例](configuration/workbench.config.example.json)和[JSON Schema](configuration/workbench.config.schema.json)：
+初始内容见[配置示例](../configuration/workbench.config.example.json)和[JSON Schema](../configuration/workbench.config.schema.json)：
 
 ```json
 {

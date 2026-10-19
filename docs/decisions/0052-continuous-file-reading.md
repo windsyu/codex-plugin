@@ -35,4 +35,4 @@
 
 新增四项直接依赖及锁定的传递依赖，代码许可证沿用各包 MIT。阅读引擎独立打包，不进入初始工作台主 JS；首次打开文件需要加载该资源，失败可重试。界面保留目录列表、Git 记录的原有分页，仅移除文件正文分页。
 
-ADR 0050 的读取/安全约束继续有效，其前端 200 行/4000 字符限制由本决定替代。实现位置：`FileReading.tsx`、`FileDocument.tsx`、`fileView.ts`。读取预算与受测边界见[支持文档](../codex-native-cli-workbench-support.md)。
+ADR 0050 的读取/安全约束继续有效，其前端 200 行/4000 字符限制由本决定替代。实现位置：`FileReading.tsx`、`FileDocument.tsx`、`fileView.ts`。读取预算与受测边界见[支持文档](../guides/support.md)。

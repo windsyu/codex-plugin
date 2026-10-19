@@ -1,12 +1,26 @@
 # 安装与快速启动
 
-[使用指南](usage.md) · [支持范围](../codex-native-cli-workbench-support.md) · [发布维护](../development/releasing.md)
+[使用指南](usage.md) · [支持范围](support.md) · [发布维护](../development/releasing.md)
 
 `0.3.0` 发布包面向已验证的 macOS / Apple Silicon。网页和原生目录选择助手已嵌入程序，运行时不需要源码、Rust 或 Node.js。启动项目仍需自行安装并配置官方 Codex CLI；当前模型接入限 `unmanaged-custom` Responses 静态 bearer。代码搜索需要 `rg`，Git 阅读需要 `git`。
 
 ## 快速安装与 PATH
 
-[README 的复制脚本](../../README.md#macos-快速安装与卸载)通过系统 `curl` 匿名下载本仓库的最新稳定 release，无需 GitHub 账号、GitHub CLI 或编译环境。脚本先解析公开的 latest 重定向并固定版本，再下载同一版本的归档与校验文件；校验归档和包内文件后调用包安装器。下载只使用 HTTPS，忽略用户 curl 配置；下载、版本解析或校验失败不会修改安装文件和 shell 配置。
+复制执行以下命令：先下载脚本，再用 Bash 执行，成功后让当前终端立即找到命令。稳定发布包见 [GitHub Releases](https://github.com/windsyu/codex-plugin/releases/latest)。
+
+```sh
+(
+  installer_file=$(mktemp) || exit
+  trap 'rm -f "$installer_file"' EXIT
+  curl --disable --fail --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' \
+    --output "$installer_file" \
+    'https://raw.githubusercontent.com/windsyu/codex-plugin/main/scripts/install-macos.sh' || exit
+  bash "$installer_file"
+) && export PATH="$HOME/.codex-view/bin:$PATH"
+```
+
+[安装脚本](../../scripts/install-macos.sh)通过系统 `curl` 匿名下载本仓库的最新稳定 release，无需 GitHub 账号、GitHub CLI 或编译环境。脚本先解析公开的 latest 重定向并固定版本，再下载同一版本的归档与校验文件；校验归档和包内文件后调用包安装器。下载只使用 HTTPS，忽略用户 curl 配置；下载、版本解析或校验失败不会修改安装文件和 shell 配置。
 
 已有源码 checkout 时，从仓库根目录运行同一个脚本，无需构建：
 
@@ -33,7 +47,7 @@ code-view --version
 
 ## 从旧安装目录切换
 
-曾用旧快速脚本安装到 `~/.local` 时，先退出工作台，再运行 `"$HOME/.local/bin/code-view-uninstall"`，然后执行当前 README 的安装命令。新默认安装发现旧清单时会提示停止，避免留下两套命令和 PATH 区块；不自动迁移或删除旧文件。已有自定义前缀仍可通过 `--prefix` 明确管理。
+曾用旧快速脚本安装到 `~/.local` 时，先退出工作台，再运行 `"$HOME/.local/bin/code-view-uninstall"`，然后执行上面的快速安装命令。新默认安装发现旧清单时会提示停止，避免留下两套命令和 PATH 区块；不自动迁移或删除旧文件。已有自定义前缀仍可通过 `--prefix` 明确管理。
 
 旧手动包安装没有快速卸载清单；如需纳入管理，先用 `bash scripts/install-macos.sh --prefix "$HOME/.local" --force --version v0.3.0` 登记，再运行该前缀的卸载器。用户配置和历史无需搬迁，仍在 `~/.codex-web` 与原生 `CODEX_HOME`。
 
@@ -55,7 +69,7 @@ code-view-uninstall
 
 旧 `v0.3.0` 包直接运行 `install.sh` 的安装没有这份快速安装清单；运行快速安装脚本并明确 `--force --version v0.3.0` 重装后，即可使用卸载命令。脚本不改写已发布资产，原 binary 和用户数据格式保持不变。
 
-已登记的快速安装保留原来的 PATH 管理对象；若早期辅助脚本曾新建 `.bash_profile` 并遮蔽你的 `.bash_login` / `.profile`，先运行其 `code-view-uninstall`，再执行当前 README 的安装命令。卸载会移除仅由安装器创建且未添加个人内容的 `.bash_profile`，新安装按上述优先级选择，不自动迁移个人 shell 配置。
+已登记的快速安装保留原来的 PATH 管理对象；若早期辅助脚本曾新建 `.bash_profile` 并遮蔽你的 `.bash_login` / `.profile`，先运行其 `code-view-uninstall`，再执行上面的快速安装命令。卸载会移除仅由安装器创建且未添加个人内容的 `.bash_profile`，新安装按上述优先级选择，不自动迁移个人 shell 配置。
 
 ## 手动安装发布包
 

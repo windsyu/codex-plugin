@@ -11,7 +11,7 @@ token-monitor 提供“路径身份、元数据补全、明确来源的辅助会
 
 ## Decision
 
-实现采用以下方案，详见[项目会话整理契约](../codex-native-cli-workbench-session-organization.md)，支持限制见[支持文档](../codex-native-cli-workbench-support.md)：
+实现采用以下方案，详见[项目会话整理契约](../design/session-organization.md)，支持限制见[支持文档](../guides/support.md)：
 
 1. 保留完整路径项目身份和既有自动归属。项目导航独立于会话搜索/来源/类别，选中项目摘要不依赖分页。未归类记录说明证据原因，不将不确定性伪装成无项目。
 2. 展示分为主要会话、明确辅助会话、工作台运行记录；unknown 默认可见。有可信同 nativeHome/thread 且有效项目/类型一致的来源可以折叠成展示组，每个成员保留正文、Token、coverage 和能力；组不是新可恢复会话。
