@@ -1,6 +1,6 @@
 # Changelog
 
-本文件记录面向使用者和贡献者的变化，不代替 GitHub Release 或[支持范围](docs/codex-native-cli-workbench-support.md)。未发布内容不表示已经部署。
+本文件记录面向使用者和贡献者的变化，不代替 GitHub Release 或[支持范围](docs/guides/support.md)。未发布内容不表示已经部署。
 
 ## Unreleased
 

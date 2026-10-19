@@ -1,6 +1,6 @@
 # 用户电脑上的本机工作台部署
 
-[组件选择与独立构建](component-deployment.md) · [安装指南](installation.md) · [使用指南](usage.md) · [支持范围](../codex-native-cli-workbench-support.md)
+[组件选择与独立构建](component-deployment.md) · [安装指南](installation.md) · [使用指南](usage.md) · [支持范围](support.md)
 
 本指南部署用户电脑上的 codex-plugin 工作台。它打开本机网页，在用户明确选择项目后运行已安装的普通官方 Codex CLI，通过 PTY 保留原生输入/审批，代理本次模型连接并异步保存脱敏阅读副本。历史、文件、搜索和 Git 阅读在电脑上完成；公网中转只是可选接入方式。本机不需要安装或运行 `codex-relayd`。
 
@@ -36,7 +36,7 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
 - 非空静态 bearer，`requires_openai_auth=true` 或 `false`；保留原生 File API Key。
 - 原生 `auth.command`，`requires_openai_auth=false`，可选字符串数组 `args`；命令/token 由官方 CLI 执行、缓存与刷新，工作台不执行命令或读取输出。与静态 bearer、env key/header、AWS 和 `true` 互斥。
 
-工作台检查缺失或 API-key 形状的 `auth.json` 以排除 cloud-managed 路由变化，不从中取得命令 token。managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 未纳入支持。无法确认路由时项目启动拒绝并说明原因，历史首页保留；不要修改模型/权限、关证书校验或改全局配置绕过。新增命令认证有安装版 CLI 0.162.1/合成 provider 证据，真实 provider 和公网发送仍待验，见[支持范围](../codex-native-cli-workbench-support.md)与 [ADR 0060](../decisions/0060-native-provider-command-auth.md)。
+工作台检查缺失或 API-key 形状的 `auth.json` 以排除 cloud-managed 路由变化，不从中取得命令 token。managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 未纳入支持。无法确认路由时项目启动拒绝并说明原因，历史首页保留；不要修改模型/权限、关证书校验或改全局配置绕过。新增命令认证有安装版 CLI 0.162.1/合成 provider 证据，真实 provider 和公网发送仍待验，见[支持范围](support.md)与 [ADR 0060](../decisions/0060-native-provider-command-auth.md)。
 
 模型 Authorization 只在电脑上的原生模型路径透明转发，不进入观察、页面或 journal；中转账号登录不为模型登录。工作台不读取动态 token，不能保证按精确值脱敏正文主动回显的动态凭据，勿让模型/工具输出凭据。
 
@@ -100,4 +100,4 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
 
 部署验收至少检查：正确版本/产物；零 CLI 首页；明确启动正确 cwd/CLI；原生目录信任/审批；模型响应结束前的中间内容；保存与缺口状态；关页面 CLI 保活；正常退出回收。开启可选入口时另验 LAN 或门户登录/电脑归属/终端输入/撤销/断线。测试应使用合成模型及临时 HOME/USERPROFILE、CODEX_HOME；真实模型请求、真实项目操作和真机输入要用户明确授权，不能为“冒烟”自动发送。
 
-`--help`、构建、常规测试只能证明各自检查范围，不证明真实模型、手机、多电脑或新平台成功。此指南未声明本次已执行部署验收；实际结果应包含环境、版本、命令、失败和未验证项，记录到对应 PR、CI 或受管产物；持续影响支持范围的限制应更新[支持文档](../codex-native-cli-workbench-support.md)。其他 agent 执行前还须遵守[组件指南的授权边界](component-deployment.md#交给其他-ai-agent-的执行边界)，不得停止已有应用、删除锁/历史、读取私人认证或覆盖用户配置。
+`--help`、构建、常规测试只能证明各自检查范围，不证明真实模型、手机、多电脑或新平台成功。此指南未声明本次已执行部署验收；实际结果应包含环境、版本、命令、失败和未验证项，记录到对应 PR、CI 或受管产物；持续影响支持范围的限制应更新[支持文档](support.md)。其他 agent 执行前还须遵守[组件指南的授权边界](component-deployment.md#交给其他-ai-agent-的执行边界)，不得停止已有应用、删除锁/历史、读取私人认证或覆盖用户配置。

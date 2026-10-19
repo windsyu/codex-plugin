@@ -35,4 +35,4 @@
 
 增加独立配置写接口和历史删除能力，需要对应的负向/崩溃/并发验收。旧记录自动保留更保守，UI 必须显示跳过原因；暂存失败的内容仍占空间。结束凭证是新增旁路文件，无原生/旧数据库 migration，兼容性必须用既有读者 fixture 核实。共享 JSON 不提供项目覆盖层；任意外部编辑器不遵守工作台锁时仍有竞态，不能承诺完美文件 CAS。
 
-产品、目录、字段、交互、API 及故障契约见[历史与配置详细方案](../codex-native-cli-workbench-history-settings.md)；持续支持限制见[支持文档](../codex-native-cli-workbench-support.md)。
+产品、目录、字段、交互、API 及故障契约见[历史与配置详细方案](../design/history-settings.md)；持续支持限制见[支持文档](../guides/support.md)。

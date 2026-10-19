@@ -1,6 +1,6 @@
 # 原生 CLI 工作台：支持范围与使用边界
 
-本页汇总实际验证过的环境、产品限制及尚未实测的组合，范围记录截至 2026-10-16。当前实现契约见[本机架构](architecture/workbench.md)、[本机交互](interactions/workbench.md)和[中转架构](architecture/relay.md)；构建通过不等于新平台、provider 或真实设备已经支持。历史逐次验证可从[清理前固定版本](https://github.com/windsyu/codex-plugin/tree/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/validation)追溯。
+本页汇总实际验证过的环境、产品限制及尚未实测的组合，范围记录截至 2026-10-16。当前实现契约见[本机架构](../architecture/workbench.md)、[本机交互](../interactions/workbench.md)和[中转架构](../architecture/relay.md)；构建通过不等于新平台、provider 或真实设备已经支持。历史逐次验证可从[清理前固定版本](https://github.com/windsyu/codex-plugin/tree/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/validation)追溯。
 
 ## 1. 运行环境与模型接入
 
@@ -10,7 +10,7 @@
 | 公网中转 | 静态 `x86_64-unknown-linux-musl` 产物已在现有 Linux 服务验证，包含 TLS 门户、电脑出站连接与目录浏览；该结果不代表 Linux 本机 CLI/PTY 工作台已支持 |
 | 官方 CLI | 0.154.0、0.155.1、0.156.1、0.159.2 有原生交互及历史相关验证；0.159.2 综合回归覆盖审批、追问、取消、工具、恢复、多项目隔离与退出。版本号不是启动白名单，其他版本提示后继续检查实际配置和路由；不自动升降级 |
 | 静态凭据接入 | `unmanaged-custom`：原生 `custom` provider、Responses、显式 upstream、静态 bearer；支持 `requires_openai_auth=true/false`，保留 File API Key。现有 HTTPS/SSE 配置已有真实模型证据，独立 API Key 等新增组合另有合成 provider 验证；不自动改模型、权限或全局配置 |
-| 命令认证接入 | 原生 `auth.command`：Responses、显式 upstream、`requires_openai_auth=false`；命令和 token 由本机 CLI 执行、缓存及刷新。工作台要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`，以排除 cloud-managed 路由补值；不从中取得命令 token。与静态 bearer、env key/header、AWS、`requires_openai_auth=true` 互斥。CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过，真实 provider/公网发送仍待验，见 [ADR 0060](decisions/0060-native-provider-command-auth.md) |
+| 命令认证接入 | 原生 `auth.command`：Responses、显式 upstream、`requires_openai_auth=false`；命令和 token 由本机 CLI 执行、缓存及刷新。工作台要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`，以排除 cloud-managed 路由补值；不从中取得命令 token。与静态 bearer、env key/header、AWS、`requires_openai_auth=true` 互斥。CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过，真实 provider/公网发送仍待验，见 [ADR 0060](../decisions/0060-native-provider-command-auth.md) |
 | 未纳入的模型路由 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不能替代真实接入验证 |
 | 浏览器 | 系统 Chrome 153/154 系列已有验证，覆盖原生交互、历史、二维码和桌面/窄屏布局；Safari、Firefox 没有完整验收 |
 | 手机 | 用户已确认单 Run 局域网接入和输入成功；多 Run 授权与窄屏布局有合成验证，真手机尚未复测。具体系统、锁屏恢复、双网络及移动网络组合未逐项确认，进一步体验优化暂缓 |
@@ -32,17 +32,17 @@ CLI 0.161.0 另有公开 no-daemon profile（`--no-daemon` / `[features].daemon_
 - 设置位于独立 `/settings` 或 Run 设置页；配置为 `.codex-web/config/config.json`，默认历史为 `.codex-web/history`。生效范围以界面说明为准。
 - macOS 已验证原生图片本地路径粘贴、手动提交及真实模型识图；图片剪贴板、拖入上传和手机相册不在已验收范围。
 
-最多同时运行 4 个活动项目；另项目可开新标签，同项目复用 Run，恢复该项目另一会话前需先停止原运行。每个 Run 的终端、文件、用量与保存独立；最多保留 4 个已结束 Run 的内存阅读，退役后从历史读取已保存内容。具体契约见[历史首页与启动](codex-native-cli-workbench-history-home.md)和[项目会话整理](codex-native-cli-workbench-session-organization.md)。
+最多同时运行 4 个活动项目；另项目可开新标签，同项目复用 Run，恢复该项目另一会话前需先停止原运行。每个 Run 的终端、文件、用量与保存独立；最多保留 4 个已结束 Run 的内存阅读，退役后从历史读取已保存内容。具体契约见[历史首页与启动](../design/history-home.md)和[项目会话整理](../design/session-organization.md)。
 
 ## 3. 后台运行与远程访问
 
-macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后台服务使用](guides/usage.md#后台开启远程注册和退出)。服务启动不自动创建项目；已有有效登记按原接入开关恢复连接，不重复要求登录。首次交互启动或授权明确失效时引导打开本机注册页；非交互和系统自启不弹浏览器，注册未完成不影响本机服务启动。暂时断网按重连处理，不当作授权失效。
+macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后台服务使用](usage.md#后台开启远程注册和退出)。服务启动不自动创建项目；已有有效登记按原接入开关恢复连接，不重复要求登录。首次交互启动或授权明确失效时引导打开本机注册页；非交互和系统自启不弹浏览器，注册未完成不影响本机服务启动。暂时断网按重连处理，不当作授权失效。
 
 真实 LaunchAgent 的手动/重复启动、异常限频重启、前台冲突及完整停止已有验证。异常恢复只重启工作台，不恢复项目或重放输入；`stop` 完整结束所属项目、代理和连接，保留下次登录的自启偏好。真实注销/重新登录自启与睡眠/唤醒恢复仍待实测；用户服务不保证注销、睡眠或关机期间在线。
 
 默认只监听 loopback。显式开启某个 Run 的“本地局域网接入”后增加设备监听；LAN IP 与 Tailscale MagicDNS 是同一服务的多个 URL，同 Run 共用固定配对码，应用重启后更换。码、许可和撤销按 Run 隔离，共享设置与全局历史仅完整 owner 可用。LAN HTTP 不加密，Tailscale 策略和设备可达性由用户环境决定。
 
-公网中转使用独立账号流程，可信服务器可读取并操作传输中的工作台内容，不是端到端加密的盲转发。当前工作台 UI/API 为 2、传输为 2，中转 schema 为 3；旧 API 1 页面需从门户重新打开，账号和电脑登记沿用。版本不匹配时配套升级，不删除用户数据或手改版本规避检查，见[中转部署运维](guides/public-relay-deployment.md)。
+公网中转使用独立账号流程，可信服务器可读取并操作传输中的工作台内容，不是端到端加密的盲转发。当前工作台 UI/API 为 2、传输为 2，中转 schema 为 3；旧 API 1 页面需从门户重新打开，账号和电脑登记沿用。版本不匹配时配套升级，不删除用户数据或手改版本规避检查，见[中转部署运维](public-relay-deployment.md)。
 
 真实公网目录浏览与本机已有历史正文阅读已完成；截至上述范围记录，真实远端已有历史正文尚未完成专门的浏览器验收。完整公网模型消息与恢复仍需独立 Chrome 验证：明确启动 CLI、发送一次低风险消息、确认输入一次和流式回复，并在刷新、新标签接管、短断网及中转重启后核对同一 Run/CLI 和零输入重放。三电脑完整公网业务、真实手机/移动网络与证书续签仍待实际验收。窄屏 Chrome 和合成 provider 结果不代替这些场景。
 
@@ -74,11 +74,11 @@ macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后�
 
 应用页为 `/`、`/history`、`/launch`、`/settings` 和仅本机提供的 `/relay`；Run 页为 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单 origin 中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 兼容并规范化，同 Run 页面切换保留终端，不启动 CLI 或重放输入。
 
-`0.3.0` 提供 macOS / Apple Silicon 安装包及 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](guides/installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准；后续源码能力不自动进入既有发行包。
+`0.3.0` 提供 macOS / Apple Silicon 安装包及 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准；后续源码能力不自动进入既有发行包。
 
-`codex-view` 统一读取原生、工作台及 Observer schema 20/25 的目录、搜索和正文。旧库使用独立零写 reader，不调用迁移；实际 schema 25 只做过限定正文抽查，不代表全库完整性验证，缺必要 WAL/SHM 或需修复时返回来源不可用。独立 `codex-observerd serve/import` 的迁移上限仍为 20，不能直接打开 schema 25，见[旧 Observer 兼容参考](architecture/observer-compatibility.md)。
+`codex-view` 统一读取原生、工作台及 Observer schema 20/25 的目录、搜索和正文。旧库使用独立零写 reader，不调用迁移；实际 schema 25 只做过限定正文抽查，不代表全库完整性验证，缺必要 WAL/SHM 或需修复时返回来源不可用。独立 `codex-observerd serve/import` 的迁移上限仍为 20，不能直接打开 schema 25，见[旧 Observer 兼容参考](../architecture/observer-compatibility.md)。
 
-先构建 Web，再构建 Rust；debug/release 各自内嵌前端，服务器中央前端也内嵌于 relay binary。仅更新磁盘 `web/dist` 不会改变运行实例，试用新版需重启新二进制。两组件分别构建、部署和核验，见[组件指南](guides/component-deployment.md)。
+先构建 Web，再构建 Rust；debug/release 各自内嵌前端，服务器中央前端也内嵌于 relay binary。仅更新磁盘 `web/dist` 不会改变运行实例，试用新版需重启新二进制。两组件分别构建、部署和核验，见[组件指南](component-deployment.md)。
 
 ```sh
 node scripts/dev.mjs build --release --offline

@@ -26,8 +26,8 @@ V3 IM 保持未来范围，既有多主体控制方案需适配新架构后再�
 
 从[文档总索引](docs/README.md)选择任务相关材料，按职责使用权威来源：
 
-- [核心约束](docs/codex-local-gateway-v2-development-constraints.md)、[产品方案](docs/codex-native-cli-workbench.md)与[详细设计](docs/codex-native-cli-workbench-detailed-design.md)：目标和实现契约，专题设计由总索引定位；
-- [支持范围](docs/codex-native-cli-workbench-support.md)：实际受测环境、能力与限制；
+- [核心约束](docs/design/development-constraints.md)、[产品方案](docs/design/workbench.md)与[详细设计](docs/design/workbench-detailed-design.md)：目标和实现契约，专题设计由总索引定位；
+- [支持范围](docs/guides/support.md)：实际受测环境、能力与限制；
 - [ADR 索引](docs/decisions/README.md)：架构和兼容选择；[旧 Observer 兼容](docs/architecture/observer-compatibility.md)：旧只读接口和数据保护契约；
 - [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布；参考研究与历史记录不能替代当前运行时验收。
 - 组件维护入口：[本机架构](docs/architecture/workbench.md)/[交互](docs/interactions/workbench.md)、[中转架构](docs/architecture/relay.md)/[交互](docs/interactions/relay.md)；跨端变更同时核对两组，分端部署见[组件指南](docs/guides/component-deployment.md)。
@@ -345,7 +345,7 @@ PR 应保持小而完整。优先提交可运行纵向切片，不提交长期�
 
 - 本机保持单 package、library 加两个 binary；中转为独立 `relay/` package，按 [ADR 0062](docs/decisions/0062-independent-component-builds.md) 分别构建/部署，仅共享协议与静态资源。电脑连接器属于本机，不搬到服务器；正常/构建依赖不得跨产品运行边界。模块默认私有，按消费者选择 `pub(crate)` / `pub`，binary 负责启动编排，不新增依赖环或跨目录实现复用。
 - 大文件按职责和维护难度拆分，不设机械行数门槛。workspace 拆分须有独立复用、平台隔离或实测构建收益，先解决依赖环并形成 ADR；当前双向引用和公开面改善点见[开发指南](docs/development/README.md)。
-- README 只保留定位、支持范围、最短启动与导航；用户操作放 `docs/guides/`，工程维护放 `docs/development/`，组件维护契约放 `docs/architecture/` 和 `docs/interactions/`，细分专题保持现有路径。仓库保留详细设计、ADR 和后续仍需参考的技术文档；阶段计划、测试报告、截图及部署现场记录不再作为长期文档维护。清理时把仍有效的契约、限制与复现方法迁入对应技术文档并更新入站链接，历史证据通过 Git、Issue/PR、CI 或受管产物追溯。
+- README 聚焦 Codex View 与 Codex Relay 的功能、架构概览、支持范围、最短启动与目录导航；详细文档统一放 `docs/`：用户操作与支持范围放 `guides/`，工程维护放 `development/`，组件维护契约放 `architecture/` 和 `interactions/`，产品与专题设计放 `design/`，架构决策放 `decisions/`，外部研究放 `references/`。根目录保留贡献、安全、变更与许可等仓库级文档，源码目录仅保留简短导航或分发所需的第三方来源、修改及许可说明。阶段计划、测试报告、截图及部署现场记录不再作为长期文档维护。清理时把仍有效的契约、限制与复现方法迁入对应技术文档并更新入站链接，历史证据通过 Git、Issue/PR、CI 或受管产物追溯。
 - 文档使用可移植相对链接；外部源码用仓库和固定 commit。历史现场绝对路径只能作为带时间和上下文的证据，不能作为通用操作要求。文档修改运行 `node scripts/dev.mjs docs`。
 
 ### 12.2 构建、产物和验证
