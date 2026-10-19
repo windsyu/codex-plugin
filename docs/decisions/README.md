@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md)
 
-ADR 记录决定及其理由；适用边界以当前架构、专题契约和[支持范围](../codex-native-cli-workbench-support.md)为准。编号空缺的旧决策可通过 Git 历史追溯，不得据历史内容恢复已退役范围。
+ADR 记录决定及其理由；适用边界以当前架构、专题契约和[支持范围](../guides/support.md)为准。编号空缺的旧决策可通过 Git 历史追溯，不得据历史内容恢复已退役范围。
 
 - [ADR 0039: 按 cc-viewer 重构为普通 CLI、模型代理与异步观察](0039-cc-viewer-style-runtime.md)
 - [ADR 0040: 修复宽字符 resize 并隔离屏幕重建故障](0040-vt-screen-failure-isolation.md)

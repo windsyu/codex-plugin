@@ -1,13 +1,13 @@
 # V2 方案：按 cc-viewer 机理重构原生 CLI 工作台
 
-> 本文描述原生 CLI 工作台的产品目标与架构；当前环境和功能边界见[支持范围](codex-native-cli-workbench-support.md)。
-> 决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)，取代 ADR 0038 的增量改造路线。
+> 本文描述原生 CLI 工作台的产品目标与架构；当前环境和功能边界见[支持范围](../guides/support.md)。
+> 决策：[ADR 0039](../decisions/0039-cc-viewer-style-runtime.md)，取代 ADR 0038 的增量改造路线。
 
-参考：[cc-viewer 独立功能与实现说明](cc-viewer-function-and-implementation.md)、[详细设计](codex-native-cli-workbench-detailed-design.md)。
+参考：[cc-viewer 独立功能与实现说明](../references/cc-viewer.md)、[详细设计](workbench-detailed-design.md)。
 
 ## 1. 产品目标与成功标准
 
-产品围绕当前目录运行普通官方 Codex CLI。`codex-view` 默认打开项目概览，不创建 CLI；用户可阅读全部历史，选择已有项目或指定目录后明确开始新对话，也可显式恢复原生会话。每个项目工作台提供真实终端、用户/模型对话、工具结果与拟议 Diff、请求上下文、用量及异步历史；左侧支持当前目录的文件、搜索和 Git 只读阅读。初始化、信任、输入、审批和 Slash 均由原生 CLI 处理。启动方式见[使用指南](guides/usage.md#从项目目录启动-v2-工作台)。
+产品围绕当前目录运行普通官方 Codex CLI。`codex-view` 默认打开项目概览，不创建 CLI；用户可阅读全部历史，选择已有项目或指定目录后明确开始新对话，也可显式恢复原生会话。每个项目工作台提供真实终端、用户/模型对话、工具结果与拟议 Diff、请求上下文、用量及异步历史；左侧支持当前目录的文件、搜索和 Git 只读阅读。初始化、信任、输入、审批和 Slash 均由原生 CLI 处理。启动方式见[使用指南](../guides/usage.md#从项目目录启动-v2-工作台)。
 
 新实现不以兼容旧 Gateway 控制内核为前提。启动普通官方 `codex`，在其模型网络请求前放本地流式代理；PTY、实时展示、历史保存分开。移除专属外部 App Server、`codex --remote`、持久化 Worker/ThreadLease/InputLease/TurnOwner、逐命令 CAS/audit 对新运行路径的要求。Codex 自身可能使用进程内 App Server，这是官方 CLI 的内部实现，不由本项目管理。
 
@@ -21,7 +21,7 @@
 6. 慢磁盘、慢阅读者及展示解析错误不拖住原生对话；缺失和未保存状态明确可见。
 7. 前端保持紧凑工作台、消息卡片和原生终端的同屏关系；视觉评审使用一致的合成任务内容，并按真实状态验证交互。
 
-每个应用最多同时运行 4 个明确项目，每 Run 一个普通 CLI。各 Run 可有多个阅读页面，同 Run 仅一个页面持有终端输入权。历史阅读、显式启动/恢复与项目并行共享一套 Application；默认仅本机访问，设备配对和可信公网接入须另行开启。远程授权见[中转架构](architecture/relay.md)，后台服务与目录浏览见 [ADR 0063](decisions/0063-background-service-directory-browser.md)。外部进程接管、V3 IM、网页 Composer、文件编辑、Git 写入和任意 Shell 不进入当前范围。
+每个应用最多同时运行 4 个明确项目，每 Run 一个普通 CLI。各 Run 可有多个阅读页面，同 Run 仅一个页面持有终端输入权。历史阅读、显式启动/恢复与项目并行共享一套 Application；默认仅本机访问，设备配对和可信公网接入须另行开启。远程授权见[中转架构](../architecture/relay.md)，后台服务与目录浏览见 [ADR 0063](../decisions/0063-background-service-directory-browser.md)。外部进程接管、V3 IM、网页 Composer、文件编辑、Git 写入和任意 Shell 不进入当前范围。
 
 同一使用者的手机可通过本机 IP/Tailscale MagicDNS 与二维码配对访问，见 §1.8；默认仅本机，显式开启设备监听后可访问。LAN 配对与公网账号接入分别鉴权，不相互继承授权。
 
@@ -63,7 +63,7 @@
 
 文件、Git 与导航展示采用以下约定：参考 cc-viewer 的紧凑文件行、统一文件图标和状态对齐，用静态线条图标配“对话 / 历史 / 文件 / 搜索 / Git / 用量”短标签替代字符符号。文件树显示目录展开图标、缩进引导线和当前阅读文件高亮；长名称单行省略，悬停可看完整路径。Git 保留已暂存/未暂存分组，文件名为主、目录为辅，中文颜色标签与分组数量独立对齐；重命名保留原路径，当前 Diff 同步高亮，提交记录整理为简洁纵向列表。读取时间移至侧栏底部，说明点击展开；后台刷新已有内容不推挤列表，失败保留上次结果并明确提示。仅调整现有前端展示，没有新增依赖、配置、写操作或动画。
 
-图标使用[官方 Codicons 的本地子集](../web/src/workbench/icons/README.md)：24px 导航图标、双页文件入口、Git 分支、开合文件夹、代码/花括号/Markdown/图片等文件图形，保留中文短标签及现有布局。颜色适度加强区分；不引入全套图标字体、运行时联网或新交互。
+图标使用[官方 Codicons 的本地子集](../../web/src/workbench/icons/README.md)：24px 导航图标、双页文件入口、Git 分支、开合文件夹、代码/花括号/Markdown/图片等文件图形，保留中文短标签及现有布局。颜色适度加强区分；不引入全套图标字体、运行时联网或新交互。
 
 ### 1.3 状态与退化边界
 
@@ -88,13 +88,13 @@
 
 | 核对项 | 来源与更新要求 | 信息边界 |
 | --- | --- | --- |
-| 模型正文 | [decoder](../src/workbench/decode.rs)按正文 delta/done 更新同一 revision 卡片 | 最终全文替换，不重复追加 |
-| 用户消息 | [后台 reader](../src/workbench/rollout.rs)验证原生 thread/turn/item；[用户气泡](../web/src/workbench/UserMessage.tsx)右对齐标“用户” | 草稿、请求历史和注入上下文不生成气泡；相同文字再次提交仍为独立消息 |
+| 模型正文 | [decoder](../../src/workbench/decode.rs)按正文 delta/done 更新同一 revision 卡片 | 最终全文替换，不重复追加 |
+| 用户消息 | [后台 reader](../../src/workbench/rollout.rs)验证原生 thread/turn/item；[用户气泡](../../web/src/workbench/UserMessage.tsx)右对齐标“用户” | 草稿、请求历史和注入上下文不生成气泡；相同文字再次提交仍为独立消息 |
 | 请求用途 | conversation/auxiliary/unknown 依明确原生 metadata 分类；辅助/未知在调用详情折叠阅读 | WS create 与新 response 无明确对应时只作请求级阅读，不按到达顺序配对 |
-| 工具与拟议修改 | [工具卡](../web/src/workbench/ToolCard.tsx)区分命令、代码工具、拟议 patch 和普通调用；参数与输出分区 | 拟议 Diff 不代表修改已执行；工作区 Diff 独立读取 |
-| 执行结果 | [后续请求](../src/workbench/live/tools.rs)要求明确调用 ID、参数指纹和唯一候选；[原生记录](../src/workbench/live/native_tools.rs)另需 thread/turn/call/进程关联 | 缺 started/declined 或取消证据时保持未知；不以 Code Mode 的 ID 前缀或代码猜父子调用 |
+| 工具与拟议修改 | [工具卡](../../web/src/workbench/ToolCard.tsx)区分命令、代码工具、拟议 patch 和普通调用；参数与输出分区 | 拟议 Diff 不代表修改已执行；工作区 Diff 独立读取 |
+| 执行结果 | [后续请求](../../src/workbench/live/tools.rs)要求明确调用 ID、参数指纹和唯一候选；[原生记录](../../src/workbench/live/native_tools.rs)另需 thread/turn/call/进程关联 | 缺 started/declined 或取消证据时保持未知；不以 Code Mode 的 ID 前缀或代码猜父子调用 |
 
-数据与更新契约见[详细设计 §4.3–4.5](codex-native-cli-workbench-detailed-design.md#chat-item-contract)。以下规则适用于实时与历史阅读，不依赖演示数据或模型的文字自述。
+数据与更新契约见[详细设计 §4.3–4.5](workbench-detailed-design.md#chat-item-contract)。以下规则适用于实时与历史阅读，不依赖演示数据或模型的文字自述。
 
 | 内容 | 默认展示 | 必须表达的事实 |
 | --- | --- | --- |
@@ -111,7 +111,7 @@
 
 ### 1.5 用量概览与用户状态
 
-底栏以用量和保存状态为主。按 [ADR 0046](decisions/0046-user-facing-run-usage.md)：
+底栏以用量和保存状态为主。按 [ADR 0046](../decisions/0046-user-facing-run-usage.md)：
 
 - **收起时**：`Token 21K · 输入 16K · 输出 5K · 缓存 9K`，旁边显示“已保存 / 正在保存 / 保存异常 / 历史有缺失”。数字是示例，产品始终使用实际已知数据；部分用量另作短标记。
 - **展开时**：标题“用量概览”，标“本次运行”和模型响应数量；大号累计已知 Token，下面为输入、输出、缓存命中、推理四个小卡片。缓存与推理说明属于输入/输出的明细；缓存写入只有上游提供时才出现。
@@ -119,11 +119,11 @@
 - **状态与诊断**：保存失败、历史缺失、内容不完整使用简短人话说明；运行 ID、PID、保存水位、来源偏移和解析日志收入默认折叠的“诊断详情”。停止运行保留原确认流程。
 - **交互**：统计随模型用量更新，无需打开请求详情；刷新/重复事件不增加总量，阅读缓存淘汰不减少累计。切历史仍显示当前运行用量；打开/关闭/键盘操作统计不卸载终端或发送输入。1024 / 736 / 320px 无整页横向溢出。
 
-此次不改模型/工具卡的信息来源，不扩展 R4 文件/Git 或 R5 设备范围。数据契约见[详细设计 §5.1.2](codex-native-cli-workbench-detailed-design.md#512-本次运行用量概览)。
+此次不改模型/工具卡的信息来源，不扩展 R4 文件/Git 或 R5 设备范围。数据契约见[详细设计 §5.1.2](workbench-detailed-design.md#512-本次运行用量概览)。
 
 ### 1.6 对话内调用详情与用量中的调用记录
 
-调用入口按 [ADR 0047](decisions/0047-contextual-call-inspection.md)收拢入口：
+调用入口按 [ADR 0047](../decisions/0047-contextual-call-inspection.md)收拢入口：
 
 - 实时对话为日常阅读入口；模型回复和工具卡都提供“调用详情”。只生成工具调用而没有文字的响应也可检查。对话正文与工具结果只在对话中展示一次。
 - 调用详情在中央阅读区域内打开侧面板，不覆盖右侧原生终端。按需读取请求参数、系统说明、实际历史输入、工具定义、响应状态与逐次用量；同轮原生命令/文件修改记录仍可展开。关闭返回原位置，Escape 只在面板内生效并恢复入口焦点。
@@ -136,21 +136,21 @@
 
 ### 1.7 历史占用、清理与工作台设置
 
-历史按工作台运行保存，没有人工归档动作。配置表单、占用与候选预览、按运行/批量删除和可选保留期限遵守同一套保护规则，完整契约见[历史与配置方案](codex-native-cli-workbench-history-settings.md)及 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md)。
+历史按工作台运行保存，没有人工归档动作。配置表单、占用与候选预览、按运行/批量删除和可选保留期限遵守同一套保护规则，完整契约见[历史与配置方案](history-settings.md)及 [ADR 0048](../decisions/0048-history-cleanup-and-json-settings.md)。
 
 - **先看占用。** 历史列表显示每次运行大小，顶部显示当前项目总量、活动运行和待清理暂存占用。后台统计注明测量时间与不完整范围；未知不写成 0，预计文件大小不当作物理磁盘释放保证。
 - **删除默认关闭。** 用户在设置中开启“允许清理历史记录”，再按单次或勾选批量操作；预览具体运行、预计大小和跳过原因，一次确认后后台处理并报告逐项结果。运行中的会话不可删除，原生 Codex 会话及旧 Observer 数据不在范围内。
 - **保留期限单独开启。** 总开关与自动清理开关默认都关；90 天仅是表单初值。开启后在当前项目检查到期且已停止的正常运行，服务未运行时不清理；旧记录没有可靠结束时间时不自动删除，仍可手动处理。
-- **统一 JSON 与用户目录。** macOS/Linux 使用 `~/.codex-web`，Windows 路径约定使用 `%USERPROFILE%\.codex-web`；共用 `config/config.json` 与 `history/`，默认值独立于 `CODEX_HOME`，见 [ADR 0049](decisions/0049-workbench-user-directory.md)。`--config-dir`、`--data-dir` 和 JSON 自定义位置继续有效。启动偏好、数据目录、删除/保留策略及后续用户长期设置统一纳入该契约。旧配置和历史保留原位，需显式指定才能继续使用，不自动搬迁或合并；完整 Windows 运行支持尚未验收。
-- **独立设置页。** 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板约定：Application 使用 `/settings`，Run 使用 `/runs/{runId}/settings`；单端口中转加 `/g/{gatewayId}` 前缀。表单以中文先呈现“历史清理”的两个开关和保留天数，再展示“历史记录与日志”的实际文件夹、占用和“启动偏好”。程序位置、启动配置名称、更改保存位置折叠到高级启动设置；单值接入适配器不显示，配置文件路径仅在修复错误时显示。提供保存、取消、恢复默认草稿、字段错误和外部编辑冲突提示；同标签应用页或同 Run 页切换保留未保存草稿，不重放输入。表单修改同一完整 JSON，启动项/数据路径下次启动生效，清理策略按保存后的有效配置执行。
+- **统一 JSON 与用户目录。** macOS/Linux 使用 `~/.codex-web`，Windows 路径约定使用 `%USERPROFILE%\.codex-web`；共用 `config/config.json` 与 `history/`，默认值独立于 `CODEX_HOME`，见 [ADR 0049](../decisions/0049-workbench-user-directory.md)。`--config-dir`、`--data-dir` 和 JSON 自定义位置继续有效。启动偏好、数据目录、删除/保留策略及后续用户长期设置统一纳入该契约。旧配置和历史保留原位，需显式指定才能继续使用，不自动搬迁或合并；完整 Windows 运行支持尚未验收。
+- **独立设置页。** 按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板约定：Application 使用 `/settings`，Run 使用 `/runs/{runId}/settings`；单端口中转加 `/g/{gatewayId}` 前缀。表单以中文先呈现“历史清理”的两个开关和保留天数，再展示“历史记录与日志”的实际文件夹、占用和“启动偏好”。程序位置、启动配置名称、更改保存位置折叠到高级启动设置；单值接入适配器不显示，配置文件路径仅在修复错误时显示。提供保存、取消、恢复默认草稿、字段错误和外部编辑冲突提示；同标签应用页或同 Run 页切换保留未保存草稿，不重放输入。表单修改同一完整 JSON，启动项/数据路径下次启动生效，清理策略按保存后的有效配置执行。
 - **已有历史位置。** 展示当前数据目录下的 `runs`，展开可查看本次运行日志目录；更改下次启动的保存位置不改变当前目录提示。没有独立归档文件，本次不为展示路径新增归档、导出或存储功能。
 - **范围明确。** 同一配置目录的设置共享于各项目，各工作台只清理自己的项目；原生模型、认证、权限和对话交互继续由 CLI 管理。同 Run 的设置/历史页面保留同一终端实例（未展示时隐藏）、当前输入目标和本次运行用量。
 
-不新增回收站、全项目清空、容量阈值淘汰、原生会话导入或任意文件编辑。[设置表单设计](codex-native-cli-workbench-history-settings.md#61-简单表单与交互原型)定义交互与配置契约。
+不新增回收站、全项目清空、容量阈值淘汰、原生会话导入或任意文件编辑。[设置表单设计](history-settings.md#61-简单表单与交互原型)定义交互与配置契约。
 
 ### 1.8 手机接入与扫码配对
 
-手机接入按 ADR 0059 使用 `/runs/{runId}/access` 独立页，名称为“本地局域网接入”，与公网中转站接入区分，同 Run 切换不卸载终端。页面列出同一服务的 IP/MagicDNS 地址，提供二维码、复制链接、有效期与统一撤销，不再设计互斥网络模式；具体布局与契约见[设备接入设计](codex-native-cli-workbench-device-access.md)。[ADR 0051](decisions/0051-workbench-device-access.md) 保留原同页面板的历史决定，配对与权限边界继续适用。
+手机接入按 ADR 0059 使用 `/runs/{runId}/access` 独立页，名称为“本地局域网接入”，与公网中转站接入区分，同 Run 切换不卸载终端。页面列出同一服务的 IP/MagicDNS 地址，提供二维码、复制链接、有效期与统一撤销，不再设计互斥网络模式；具体布局与契约见[设备接入设计](device-access.md)。[ADR 0051](../decisions/0051-workbench-device-access.md) 保留原同页面板的历史决定，配对与权限边界继续适用。
 
 - 开启设备访问后，共用一个设备监听和端口，局域网 IP 与 MagicDNS URL 同时可用；名称直接访问 HTTP 服务，不要求 Serve。前后端业务保持一套实现，当前本机 URL 仍可用；局域网 HTTP 只用于可信网络。
 - 二维码在本地生成，与复制链接一致；两地址共用本次运行固定配对码，可重复扫码，程序退出后失效、下次启动重新生成。页面刷新或切换二维码不换码、不断开连接；有效 Cookie 重复扫码复用授权，可逐浏览器或全部撤销。
@@ -161,11 +161,11 @@
 
 ### 1.9 R6：全部历史首页与项目工作台
 
-统一入口从项目概览进入全部历史；另一个项目开新工作台标签，原项目继续。项目入口默认新对话，历史详情另有明确“继续此会话”。[R6 详细方案](codex-native-cli-workbench-history-home.md)与 [ADR 0053](decisions/0053-history-first-workbench.md)规定：应用/历史服务先启动，只有用户明确开始工作才创建普通 CLI；已有项目或指定现有目录都从同一页进入，返回历史不停止 Run。
+统一入口从项目概览进入全部历史；另一个项目开新工作台标签，原项目继续。项目入口默认新对话，历史详情另有明确“继续此会话”。[R6 详细方案](history-home.md)与 [ADR 0053](../decisions/0053-history-first-workbench.md)规定：应用/历史服务先启动，只有用户明确开始工作才创建普通 CLI；已有项目或指定现有目录都从同一页进入，返回历史不停止 Run。
 
 旧 Observer、原生 rollout、工作台保存记录由独立只读 adapter 统一到目录，来源与缺口保留，不启动第二个 Observer 服务。实际 schema 25 的兼容需单独验证；旧库不迁移/降级，不恢复旧 Session/App Server。新目录只能由明确启动决定，不因浏览历史而扩大现有 Run 的文件/输入/清理范围；手机配对仍绑定 Run。
 
-Application 统一提供只读来源登记、目录、搜索和三类历史阅读；明确新建/恢复通过网页启动协议执行，丢失启动响应后只查询原操作。同项目已运行时进入该 Run，恢复其他历史须先停止它；不根据最后观察到的 metadata 认领现有 CLI。多 Run、资源和权限边界见[历史首页方案](codex-native-cli-workbench-history-home.md)，当前导航见[本机交互](interactions/workbench.md)。
+Application 统一提供只读来源登记、目录、搜索和三类历史阅读；明确新建/恢复通过网页启动协议执行，丢失启动响应后只查询原操作。同项目已运行时进入该 Run，恢复其他历史须先停止它；不根据最后观察到的 metadata 认领现有 CLI。多 Run、资源和权限边界见[历史首页方案](history-home.md)，当前导航见[本机交互](../interactions/workbench.md)。
 
 ## 2. 时延判断：已证实什么
 
@@ -237,9 +237,9 @@ flowchart LR
 
 Launcher 的模型接入只对本次子进程覆盖经过验证的模型地址，保留 model、provider 身份、认证、重试、权限和用户配置；不改全局配置，不换 `CODEX_HOME`，不升级/修改 CLI。终端颜色能力与关闭动画按 §1 的已确认显示规则设置，仅影响本次子进程。测试才使用隔离 home。
 
-CLI 不做精确版本锁定。已验证版本只是兼容诊断信息，其他版本提示后继续检查配置并启动，无需降级或添加绕过参数。策略见 [ADR 0045](decisions/0045-cli-version-compatibility.md)，不把正常启动等同于所有未来协议均已验证。
+CLI 不做精确版本锁定。已验证版本只是兼容诊断信息，其他版本提示后继续检查配置并启动，无需降级或添加绕过参数。策略见 [ADR 0045](../decisions/0045-cli-version-compatibility.md)，不把正常启动等同于所有未来协议均已验证。
 
-每个支持的 profile 固定原 upstream、路径映射、协议和覆盖方法。不能可靠确定实际生效配置时明确报错，不能猜服务地址、把凭证发往新 provider 或回退到全机 TLS 劫持。API key、自定义 Responses provider、命令认证与 ChatGPT 登录分别验证；未验证方式不在兼容清单内。当前路由、认证条件及实机范围见[支持说明](codex-native-cli-workbench-support.md)。
+每个支持的 profile 固定原 upstream、路径映射、协议和覆盖方法。不能可靠确定实际生效配置时明确报错，不能猜服务地址、把凭证发往新 provider 或回退到全机 TLS 劫持。API key、自定义 Responses provider、命令认证与 ChatGPT 登录分别验证；未验证方式不在兼容清单内。当前路由、认证条件及实机范围见[支持说明](../guides/support.md)。
 
 ### 4.3 必须接受的信息边界
 
@@ -277,7 +277,7 @@ CLI 不做精确版本锁定。已验证版本只是兼容诊断信息，其他�
 
 ## 6. 验收与扩展原则
 
-验收按[详细设计的必测矩阵](codex-native-cli-workbench-detailed-design.md#92-必测矩阵)执行，覆盖接入、转发、终端、角色与工具语义、恢复、性能隔离和权限负向场景。合成回归、实际安装版 CLI、真实 provider 和手机实机分别报告范围；静态界面不能代替运行时验收。新增 profile 通过同等验证后才加入支持清单。
+验收按[详细设计的必测矩阵](workbench-detailed-design.md#92-必测矩阵)执行，覆盖接入、转发、终端、角色与工具语义、恢复、性能隔离和权限负向场景。合成回归、实际安装版 CLI、真实 provider 和手机实机分别报告范围；静态界面不能代替运行时验收。新增 profile 通过同等验证后才加入支持清单。
 
 原生 Plan/Goal 按安装版使用，不建设 UltraPlan 专家输入器。图片通过原生入口验证，必要最小桥接不自动 Enter；不恢复旧 upload/queue 状态机。V3 多主体控制未来重新评审。
 
@@ -285,4 +285,4 @@ CLI 不做精确版本锁定。已验证版本只是兼容诊断信息，其他�
 
 新运行路径使用独立数据目录和 API，不自动升级/清理旧 schema 20。旧 `/v1` 与数据库作为独立历史读取兼容层，功能价值保留，内部表和 `/v2` 控制协议不再约束新设计。先交付新入口，验证后删除旧 Session Runtime 控制路径；并行存在仅限迁移，不把两套内核作为长期产品。
 
-旧 Controller/Session Kernel 设计与过程记录通过 Git 历史追溯，不作为当前任务或契约。[AGENTS.md](../AGENTS.md)、[核心约束](codex-local-gateway-v2-development-constraints.md)与 ADR 0039 共同约束新实现；旧数据的只读行为见[Observer 兼容契约](architecture/observer-compatibility.md)。文档清理不改变用户数据或服务配置。
+旧 Controller/Session Kernel 设计与过程记录通过 Git 历史追溯，不作为当前任务或契约。[AGENTS.md](../../AGENTS.md)、[核心约束](development-constraints.md)与 ADR 0039 共同约束新实现；旧数据的只读行为见[Observer 兼容契约](../architecture/observer-compatibility.md)。文档清理不改变用户数据或服务配置。

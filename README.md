@@ -1,128 +1,97 @@
-# Codex Local Gateway
+# Codex View & Codex Relay
 
-本机原生 Codex 工作台。在项目目录执行 `code-view`，即可打开网页并启动普通官方 Codex CLI：右侧原生终端负责输入、审批、追问和模型/权限设置，中央阅读实时对话与工具结果，左侧查看项目文件与历史。
+本仓库（Codex Local Gateway）提供两个可独立构建、部署的组件：**Codex View** 是运行在用户电脑上的原生 Codex 工作台，**Codex Relay** 是可选的公网中继。View 可单独使用；需要从手机或其他设备远程访问时，再部署并连接 Relay。
 
-工作台通过本次 CLI 的模型 HTTP/SSE/WS 代理提供实时阅读，后台异步保存观察记录。官方 CLI 保持原版；保存失败时终端继续可用，页面明确显示缺口和未保存状态。`code-view --history` 或 `codex-view` 打开全部历史首页，浏览历史不创建 CLI。
+## Codex View：本地工作台
 
-## 主要功能
+在项目目录启动普通官方 Codex CLI，通过网页操作同一个原生终端，并阅读对话、工具结果和历史。官方 CLI 保持原版，输入、审批和模型设置仍由它负责。
 
-- **原生终端交互**：保留 CLI 的目录信任、审批、键盘操作、ANSI 颜色与设置。在网页中操作同一个 CLI，无需换用另一套对话输入协议。
-- **实时对话和工具阅读**：模型回复生成过程中即可阅读；工具卡展示参数、结果及拟议文件变更，调用详情可查看对应请求上下文与用量。模型输出、工具执行和整轮完成分别呈现。
-- **统一历史**：按项目、来源、主会话/子代理筛选，搜索会话与消息；读取原生会话、工作台记录和已登记的旧 Observer 历史。可核验身份的原生会话提供明确的“继续此会话”入口。
-- **文件、搜索与 Git**：阅读当前项目文件、搜索代码、跳转行号，查看已暂存/未暂存变更和提交记录。文件与 Diff 保持只读，打开文件不会中断右侧终端。
-- **用量和保存状态**：查看本次运行的 Token、输入/输出、缓存及推理明细；缺失用量不当作零，保存异常和历史覆盖单独提示。
-- **多个项目并行**：最多 4 个活动项目，各自拥有 CLI、文件、代理、用量和保存状态。可返回首页、重新进入工作台或只停止一个项目。
-- **本地局域网接入**：电脑端明确开启设备访问后，通过二维码配对同一项目的终端与阅读页面；支持可互访的局域网和已连接 Tailscale 的设备。公网中转是另一套可选账号接入。
-- **历史与配置管理**：独立设置页提供数据来源、历史占用、明确确认后的手动清理和可选保留期限。原生 Codex 数据与旧数据库不自动迁移或清理。
+- **终端与实时阅读**：保留原生 CLI 交互，同时展示流式回复、工具调用、上下文与用量。
+- **项目与历史**：管理多个活动项目，浏览、搜索跨来源历史，明确选择可恢复的原生会话继续工作。
+- **文件与 Git**：只读浏览项目文件、搜索代码、查看 Diff 和提交记录。
+- **本地优先**：异步保存阅读记录，保存异常不阻断 CLI；默认仅本机访问，可显式开启局域网配对或公网连接。
 
-## 运行条件与支持范围
+日常入口是 `code-view`，底层程序为 `codex-view`；`codex-observerd` 仅保留旧 Observer 历史兼容能力。
 
-发布包支持 **macOS / Apple Silicon（arm64）**，内嵌网页和目录选择助手，运行不需要源码、Rust 或 Node.js。安装只使用系统 `curl`、Bash 和归档工具，无需 GitHub 账号、GitHub CLI 或 sudo。
+[使用指南](docs/guides/usage.md) · [本机部署](docs/guides/local-workbench-deployment.md) · [架构](docs/architecture/workbench.md)
 
-开始项目需要自行安装并配置官方 Codex CLI。当前已验证接入为 `unmanaged-custom`：原生 `custom` provider、Responses、显式上游地址与静态 bearer；命令式 `auth.command` 新增合成 CLI/Chrome 验证，由原版 CLI 执行和刷新，不保证所有真实 provider 均可用。其他 provider、ChatGPT/管理配置及环境认证尚未纳入支持，具体认证限制见支持范围。历史首页无需安装 CLI 即可打开。代码搜索需要 `rg`，Git 阅读需要 `git`；缺少时只影响对应能力。
+## Codex Relay：公网中继
 
-已有 CLI `0.154.0`、`0.155.1`、`0.156.1`、`0.159.2` 的受测记录，命令认证专项使用 `0.162.1`；未知版本提示后继续检查配置，不自动升级、降级或修改 CLI。Intel macOS、Linux、Windows 完整工作台运行尚未验收。具体能力与验证边界见[支持范围](docs/codex-native-cli-workbench-support.md)。
+部署在可信服务器上，为同一账号下的多台电脑提供统一 HTTPS 门户。电脑主动建立出站连接，无需将本机工作台端口直接暴露到公网。
 
-源码新增默认关闭的可信公网中转：本机登录并开启后，手机通过同账号门户访问自己的多台电脑，服务器独立部署。新单 IP/单 HTTPS 端口已有 Linux/TLS 测试部署和本地三电脑回归；域名模式及真实手机完整公网验收另列，见[部署指南](docs/guides/public-relay-deployment.md)与[支持范围](docs/codex-native-cli-workbench-support.md)。现有 `0.3.0` 发布包不包含这项源码增量。
+- **账号与电脑管理**：登录、电脑登记与授权，以及由管理员维护普通用户账号。
+- **统一远程入口**：手机或浏览器选择自己的在线电脑，访问其工作台、历史、项目和原生终端。
+- **受限流转发**：提供经过身份校验的 HTTP、SSE 和终端 WebSocket 转发，不是通用网络代理。
+- **独立运行**：程序为 `codex-relayd`，不运行 Codex CLI、模型代理或本机历史服务，不保存工作台历史正文。
 
-本仓库有两个独立编译/部署单元：电脑上的 **workbench**（`codex-view` / `codex-observerd`）与服务器上的 **relay**（`relay/` 中的 `codex-relayd`）。本机独立使用不需中转；服务器不需 Codex CLI、PTY 或本机历史。组件能力、部署顺序和供 AI agent 使用的操作入口见[组件指南](docs/guides/component-deployment.md)、[本机部署](docs/guides/local-workbench-deployment.md)和[中转部署](docs/guides/public-relay-deployment.md)。
+Relay 是可信中继，并非端到端加密服务；运营者可接触经过中继的内容。远程访问需要电脑在线且两端版本兼容。
 
-## macOS 快速安装与卸载
+[中继部署与运维](docs/guides/public-relay-deployment.md) · [架构](docs/architecture/relay.md) · [交互与 API](docs/interactions/relay.md)
 
-复制执行以下命令：先下载脚本，再用 Bash 执行，成功后让当前终端立即找到命令。稳定发布包见 [GitHub Releases](https://github.com/windsyu/codex-plugin/releases/latest)。
+## 架构概览
 
-```sh
-(
-  installer_file=$(mktemp) || exit
-  trap 'rm -f "$installer_file"' EXIT
-  curl --disable --fail --silent --show-error --location \
-    --proto '=https' --proto-redir '=https' \
-    --output "$installer_file" \
-    'https://raw.githubusercontent.com/windsyu/codex-plugin/main/scripts/install-macos.sh' || exit
-  bash "$installer_file"
-) && export PATH="$HOME/.codex-view/bin:$PATH"
+```mermaid
+flowchart LR
+  Local["本机浏览器"] <--> View["Codex View<br/>本机工作台"]
+  View <-->|PTY 原生交互| CLI["官方 Codex CLI"]
+  Remote["手机 / 远程浏览器"] <-->|HTTPS| Relay["Codex Relay<br/>账号门户与流转发"]
+  View <-->|电脑主动建立 WSS · 可选| Relay
 ```
 
-[安装脚本](scripts/install-macos.sh)匿名下载最新稳定版本、校验归档与包内文件后，将命令安装到 **`~/.codex-view/bin`**，许可与卸载清单位于 `~/.codex-view/share/code-view`。脚本为 zsh 和 Bash 登录终端添加有标记的 PATH 区块，保留已有配置；新终端自动可用。程序配置和历史继续存放在 `~/.codex-web`。
+View 负责本机 CLI、模型代理、实时观察和异步历史；Relay 只负责远程接入。两端仅共享协议与内嵌网页资源，不互相依赖对方的运行模块；电脑连接器仍属于 View。模型请求由电脑端直连配置的上游，不经 Relay。
 
-如果曾用旧快速脚本安装到 `~/.local`，先退出工作台并运行 `"$HOME/.local/bin/code-view-uninstall"`，再执行上面的安装命令。脚本会提示这一冲突，不自动搬迁或删除旧安装。指定版本、其他安装目录和升级方式见[安装指南](docs/guides/installation.md)。
+更细的模块、数据和安全边界见[本机架构](docs/architecture/workbench.md)、[中继架构](docs/architecture/relay.md)；分端构建与部署见[组件指南](docs/guides/component-deployment.md)。
 
-## 开始使用
+## 快速开始与支持范围
 
-### 在项目目录快速启动
+先按[安装指南](docs/guides/installation.md#快速安装与-path)安装本机组件，并自行安装、配置官方 Codex CLI：
 
 ```sh
 cd /path/to/project
-code-view
-# 或直接指定已有项目目录
-code-view "/path/to/another project"
-# 使用原生命名 profile，不自动打开浏览器
-code-view --profile named --no-open
-# 检查安装版本
-code-view --version
+code-view       # 在当前项目启动 CLI 与网页工作台
+codex-view      # 仅打开项目 / 历史首页，不启动 CLI
 ```
 
-无参数 `code-view` 直接启动当前目录项目的新对话；同目录已有活动工作台时复用，不自动续最近会话。在右侧原生终端完成目录信任、输入和审批。使用 `--no-open` 时，根据启动输出的私有入口文件执行 `code-view open <entryFile>` 打开页面。
+发布包当前面向 macOS / Apple Silicon；模型接入以已验证的自定义 Responses provider 为限。其他平台、认证方式和 CLI 版本的边界见[支持范围](docs/guides/support.md)。现有 `v0.3.0` 发布包不包含公网中继等后续源码增量。
 
-原启动器终端保持前台运行。关闭网页或点击“← 全部历史”会保留 CLI；首页卡片可重新进入。在首页选择“停止”，或在项目“用量与状态”中选择“停止当前运行”，只结束该项目。**在启动器终端按 Ctrl-C 会结束整个应用及其自有 CLI。**
+从源码运行或部署 Relay，请分别阅读[开发指南](docs/development/README.md)和[中继部署指南](docs/guides/public-relay-deployment.md)。安装、后台运行、配置与卸载的完整步骤均在 `docs/guides/`。
 
-### 阅读历史、继续会话与切换项目
+## 仓库目录
 
-```sh
-code-view --history
-# 等价的历史首页入口
-codex-view
+```text
+.
+├── src/                      # View 后端与旧 Observer 兼容实现
+│   ├── bin/codex-view.rs     # 本机工作台入口
+│   ├── workbench/           # CLI / PTY、代理、观察、记录及电脑连接器
+│   ├── history/             # 跨来源历史目录与只读查询
+│   └── main.rs              # 旧 codex-observerd 入口
+├── relay/                    # Relay 独立服务：账号、门户、授权与隧道
+├── crates/                   # 两端共享的协议与静态网页资源
+├── web/                      # 工作台前端、单元测试与浏览器测试
+├── docs/                     # 使用、架构、设计和工程文档
+│   ├── guides/              # 安装、使用、分端部署与支持范围
+│   ├── architecture/        # 组件架构、数据与安全边界
+│   ├── interactions/        # 页面流程与 API 契约
+│   ├── configuration/       # 配置示例与 JSON Schema
+│   ├── design/              # 产品方案、详细设计与专题契约
+│   ├── decisions/           # 架构决策记录（ADR）
+│   ├── development/         # 工具链、检查、调试与发布
+│   └── references/          # 外部实现研究
+├── scripts/                  # 统一开发入口、安装与发布工具
+├── deploy/                   # Relay 的 TLS / systemd 部署模板
+├── tests/                    # Rust 集成与契约测试
+├── fixtures/                 # 合成测试数据
+├── examples/                 # 合成调试程序
+├── compatibility/            # Codex 兼容能力清单
+├── migrations/               # 旧 Observer 数据库迁移
+├── vendor/                   # 带原许可与修改说明的补丁依赖
+└── .github/                  # CI 与协作模板
 ```
 
-首页可直接阅读已有记录，不启动 CLI。点击“开始新对话”或“打开其他目录”，核对真实项目目录后明确启动；点击“继续此会话”时同样需要核对工作目录。原生会话只有在来源、会话 ID 和文件身份可验证时才能恢复；旧 Observer 副本、工作台记录和继承历史可以阅读，但不从网页恢复。
-
-最多同时运行 4 个项目，切换页面不会替其他项目提交输入。历史扫描与正文搜索有独立覆盖状态，“全部历史”不代表所有来源或正文已扫描完毕。工具详情按需加载；保存的是脱敏阅读记录，不是完整终端录像。
-
-### 文件、用量与设备
-
-左侧“文件 / 搜索代码 / Git”对应当前项目，文件和 Diff 在中央打开，关闭后恢复对话阅读位置。文件支持连续滚动、行号跳转与查找；单文件最大 1 MiB，搜索最多 200 处匹配，超限或截断会提示。底栏 Token 摘要可展开查看本次运行用量与保存状态，切换历史不会把旧用量计入当前运行。
-
-电脑端点击“本地局域网接入 → 开启设备访问”后扫描二维码。局域网要求网络可互访；MagicDNS 要求手机已连接对应 Tailscale，无需配置 Serve。配对只授权当前项目，运行结束后失效；默认仅本机访问，局域网 HTTP 不加密。公网接入则在本机登录中转，手机登录同一门户选择电脑，不使用局域网配对码。手机相册上传未提供；本机图片可在原生终端中粘贴完整路径，确认 CLI 出现附件标记后手动提交。
-
-配置位于 `~/.codex-web/config/config.json`，工作台历史位于 `~/.codex-web/history`，独立于原生 `CODEX_HOME`。设置中可管理历史来源、占用与清理；手动删除和自动清理默认关闭，启用后也只处理符合条件的工作台记录。详细操作、恢复条件与设备边界见[使用指南](docs/guides/usage.md)。
-
-## 卸载
-
-先在启动器终端按 Ctrl-C 退出工作台，再执行：
-
-```sh
-code-view-uninstall
-# 当前 PATH 尚未刷新时
-"$HOME/.codex-view/bin/code-view-uninstall"
-```
-
-以上是同一卸载命令的两种调用方式，选择其一即可。卸载可离线执行，按安装清单移除程序和对应 PATH 区块，保留 `~/.codex-web`、原生 Codex 数据、个人 shell 配置及未知文件。已修改的受管文件会触发冲突提示，避免误删。自定义前缀使用对应 `<prefix>/bin/code-view-uninstall`；保护与恢复说明见[安装指南](docs/guides/installation.md#卸载)。
-
-## 从源码构建
-
-开发基线：Rust 1.95.0、Node 22.23.2；macOS 需 Apple SDK/Clang。首次安装依赖需要网络。
-
-```bash
-node scripts/dev.mjs doctor
-node scripts/dev.mjs bootstrap
-# 只编译电脑端；服务器改为 --component relay
-node scripts/dev.mjs build --component workbench
-# 只打开历史首页，不启动 CLI
-./target/debug/codex-view
-# 在需要启动 CLI 的项目目录使用构建产物
-<repository>/target/debug/codex-view --project .
-```
-
-标准构建先生成共享 Web 资源，再编译所选产品，确保内嵌页面和后端一致。只构建中转使用 `node scripts/dev.mjs build --component relay --release`；完整工作区构建/检查用 `--component all`（`build/check` 不传组件保持原全量行为）。本机 macOS 安装包用 `node scripts/dev.mjs package --component workbench`，不含中转服务器；两端专项检查分别用 `check --component workbench` / `relay`，提交前仍执行完整 `node scripts/dev.mjs check`。`codex-observerd` 保留旧 Observer 历史导入、只读网页/API 和显式维护命令；旧历史读取方式见使用指南。
+源码与部署模板保留在各自目录；详细操作和技术说明统一从 [docs 文档总索引](docs/README.md)进入。根目录只保留项目介绍、执行规范、贡献、安全、变更及许可等仓库级文档。
 
 ## 文档与参与
 
-- [安装指南](docs/guides/installation.md)：固定版本、升级、自定义目录、手动安装与卸载。
-- [使用指南](docs/guides/usage.md)：终端、历史、配置、手机接入和旧历史兼容。
-- [组件与部署指南](docs/guides/component-deployment.md)：本机后端与公网中转分别编译、部署，以及 AI agent 操作边界。
-- 本机维护：[架构](docs/architecture/workbench.md)与[交互](docs/interactions/workbench.md)；中转维护：[架构](docs/architecture/relay.md)与[交互](docs/interactions/relay.md)。
-- [开发指南](docs/development/README.md)：模块、工具链、测试、产物和发布。
-- [文档总索引](docs/README.md)：设计契约、ADR、操作指南与支持限制。
-- [贡献指南](CONTRIBUTING.md)、[项目执行规范](AGENTS.md)、[安全报告](SECURITY.md)、[第三方许可](THIRD_PARTY_NOTICES.md)与[变更日志](CHANGELOG.md)。
+[文档总索引](docs/README.md) · [贡献指南](CONTRIBUTING.md) · [执行规范](AGENTS.md) · [安全报告](SECURITY.md) · [变更日志](CHANGELOG.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
-项目使用 [MIT 许可证](LICENSE)。分发包附带依赖的原许可与修改说明。
+项目使用 [MIT 许可证](LICENSE)。

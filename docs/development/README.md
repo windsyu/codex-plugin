@@ -86,7 +86,7 @@
 
 异常退出可能遗留 `target/.artifact-maintenance/lock` 或仍有 lease 的任务。工具不会仅凭 PID 不存在或锁文件很旧就自动解锁/清除 lease。恢复前先核实记录归属、持有者进程及其构建/运行子进程均已停止，并保存锁、元数据和诊断证据；只对确认属于本次维护任务的遗留锁或任务元数据显式处理，保留无法确认的任务。不要将未登记目录、用户历史或其他任务改写为受管数据；不能确认完成时间或结果时继续保留，不伪造成功凭证。
 
-旧产物首次整理只生成分类清单；`observer-data`、数据库、备份和 bundle 保留原位。复现专项测试时优先使用受管任务或独立临时目录，未登记输出由所有者明确处理。这里的构建产物清理与用户的[历史保留设置](../codex-native-cli-workbench-history-settings.md)相互独立。
+旧产物首次整理只生成分类清单；`observer-data`、数据库、备份和 bundle 保留原位。复现专项测试时优先使用受管任务或独立临时目录，未登记输出由所有者明确处理。这里的构建产物清理与用户的[历史保留设置](../design/history-settings.md)相互独立。
 
 主缓存清理采用保守的 Cargo 布局检查，并检查数据库/备份内容、进程和打开的文件。未知 build-script 输出（包括部分正常生成的 `.a`、`.rs`、`.o`）也可能被拒绝，需由所有者人工分类；不要删除保护检查或直接改用整体 `cargo clean` 绕过。该命令不承诺自动识别所有 Cargo 版本和依赖生成的文件。
 
@@ -96,7 +96,7 @@
 
 常规检查包含前端 TypeScript、单元测试和构建，以及整个 workspace 的 Rust fmt、Clippy、常规测试和三个 binary 构建。macOS CI 调用同一入口，不能跳过失败来制造通过。检查全部分支历史前先只读核实远端 refs 是否与本地远端跟踪 refs 一致；离线或未获取的分支必须在结论中明确说明。
 
-真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，每次执行的环境、版本、命令、结果和未验证项保存在 PR、CI 或受管产物中；持续限制同步到[支持范围](../codex-native-cli-workbench-support.md)，不新增带日期的阶段报告。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
+真实官方 CLI、真实模型、系统 Chrome、大规模数据和 ignored 测试是显式专项，不包含在“常规测试通过”结论中。[专项调试](debugging.md)保留可复现命令，每次执行的环境、版本、命令、结果和未验证项保存在 PR、CI 或受管产物中；持续限制同步到[支持范围](../guides/support.md)，不新增带日期的阶段报告。Playwright 使用系统 Chrome，不下载 Chromium。真实 binary 集成测试同时隔离 HOME/USERPROFILE 与 CODEX_HOME，不写真实 `~/.codex` / `~/.codex-web`。
 
 账号删除门户专项可在标准构建后执行 `node web/e2e/relay-account-probe.cjs`：脚本自行启动隔离合成中转、系统 Chrome 手机视口，登记受管结果，并只清理自己的运行目录/进程，不操作真实部署账号。
 

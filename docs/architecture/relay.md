@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [交互与 API](../interactions/relay.md) · [部署运维](../guides/public-relay-deployment.md) · [本机架构](workbench.md)
 
-本文说明当前服务器组件的职责、依赖、身份、数据与安全不变量；操作顺序和接口见交互文档。决策依据为 [ADR 0056](../decisions/0056-public-workbench-relay.md)、[0058](../decisions/0058-admin-accounts-single-origin-relay.md)、[0059](../decisions/0059-workbench-routes-and-relay-recovery.md)、[0061](../decisions/0061-account-deletion-admin-rename.md)、[0062](../decisions/0062-independent-component-builds.md)。受测环境与未验证事项见[支持范围](../codex-native-cli-workbench-support.md)，部署过程见[运维指南](../guides/public-relay-deployment.md)。
+本文说明当前服务器组件的职责、依赖、身份、数据与安全不变量；操作顺序和接口见交互文档。决策依据为 [ADR 0056](../decisions/0056-public-workbench-relay.md)、[0058](../decisions/0058-admin-accounts-single-origin-relay.md)、[0059](../decisions/0059-workbench-routes-and-relay-recovery.md)、[0061](../decisions/0061-account-deletion-admin-rename.md)、[0062](../decisions/0062-independent-component-builds.md)。受测环境与未验证事项见[支持范围](../guides/support.md)，部署过程见[运维指南](../guides/public-relay-deployment.md)。
 
 ## 1. 职责、部署单元与非目标
 

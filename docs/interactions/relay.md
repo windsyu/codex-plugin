@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [架构与安全](../architecture/relay.md) · [部署运维](../guides/public-relay-deployment.md) · [本机交互](workbench.md)
 
-本文描述当前账号、电脑认证、固定工作台页面和撤销流程，供维护者追踪用户操作到代码。运行预算、依赖和 schema 不变量见架构文档；受测边界见[支持范围](../codex-native-cli-workbench-support.md)。不提供公开注册、跨用户管理电脑、离线访问或另一套 Codex 模型认证。
+本文描述当前账号、电脑认证、固定工作台页面和撤销流程，供维护者追踪用户操作到代码。运行预算、依赖和 schema 不变量见架构文档；受测边界见[支持范围](../guides/support.md)。不提供公开注册、跨用户管理电脑、离线访问或另一套 Codex 模型认证。
 
 ## 1. 登录与门户页面
 

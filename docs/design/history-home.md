@@ -1,7 +1,7 @@
 # 历史首页与按项目启动原生工作台
 
-> 本文定义历史读取、项目导航、明确启动/恢复与多 Run 契约。项目分层、单条可撤销归属和任务呈现另见[项目会话整理](codex-native-cli-workbench-session-organization.md)。关键决定见 [ADR 0053](decisions/0053-history-first-workbench.md)。
-> 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)，无参数启动进入项目概览 `/`，全部历史为 `/history`，启动与设置为 `/launch`、`/settings`，仅本机提供 `/relay`。历史只读、显式启动与 Run 隔离不随页面变化。
+> 本文定义历史读取、项目导航、明确启动/恢复与多 Run 契约。项目分层、单条可撤销归属和任务呈现另见[项目会话整理](session-organization.md)。关键决定见 [ADR 0053](../decisions/0053-history-first-workbench.md)。
+> 按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md)，无参数启动进入项目概览 `/`，全部历史为 `/history`，启动与设置为 `/launch`、`/settings`，仅本机提供 `/relay`。历史只读、显式启动与 Run 隔离不随页面变化。
 
 ## 1. 用户价值、范围与已确认选择
 
@@ -27,7 +27,7 @@
 
 网页启动与显式恢复见 §12，独立项目并行 Run 见 §13。综合资源按 §8 验收，不增加第三套原生对话界面。
 
-非目标：恢复旧 Controller/App Server、网页 Composer、自动输入/审批、任意 Shell、网页文件编辑、Git 写入、删除原生/旧 Observer 数据、跨机器自动启动或 IM。新路径指所连电脑上的现有目录，不代建文件夹。macOS 后台服务与 owner 远端目录浏览另见 [ADR 0063](decisions/0063-background-service-directory-browser.md)，公网账号授权另见[中转架构](architecture/relay.md)。Linux/Windows 完整运行、未支持 provider 和更多手机体验仍不由本设计扩大为已支持。
+非目标：恢复旧 Controller/App Server、网页 Composer、自动输入/审批、任意 Shell、网页文件编辑、Git 写入、删除原生/旧 Observer 数据、跨机器自动启动或 IM。新路径指所连电脑上的现有目录，不代建文件夹。macOS 后台服务与 owner 远端目录浏览另见 [ADR 0063](../decisions/0063-background-service-directory-browser.md)，公网账号授权另见[中转架构](../architecture/relay.md)。Linux/Windows 完整运行、未支持 provider 和更多手机体验仍不由本设计扩大为已支持。
 
 ## 2. 设计依据与兼容限制
 
@@ -36,7 +36,7 @@
 | 依据 | 对设计的约束 |
 | --- | --- |
 | Application 与 CLI 的生命周期不同 | 首页先提供只读能力，明确启动才装配代理、Recorder 和 PTY；每 Run 的清理和文件根继续隔离 |
-| V1 提供项目分组、搜索和工具阅读，但 `serve` 同时会导入、迁移和初始化库 | 可复用纯查询/分类函数，不调用旧 `serve`、writer、purge、retention 或 blob sweep；详见[Observer 兼容契约](architecture/observer-compatibility.md) |
+| V1 提供项目分组、搜索和工具阅读，但 `serve` 同时会导入、迁移和初始化库 | 可复用纯查询/分类函数，不调用旧 `serve`、writer、purge、retention 或 blob sweep；详见[Observer 兼容契约](../architecture/observer-compatibility.md) |
 | 旧 Observer 写入口只迁移至 schema 20，另有 schema 25 历史形状 | 新 reader 只按明确列与能力读取，不把迁移上限改为 25，不恢复多出的控制表；结构相容不能代替 JSON/锁/WAL 测试 |
 | 旧 Workbench meta 可能只有 workspace 哈希和显示名，没有 cwd | 显示“路径未记录”，不能按项目名猜路径；新 Run 的 project sidecar 与源位置另有明确身份 |
 | 公共 SessionMeta 分开表达 thread ID、cwd、parent/fork/history_base | [协议定义](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/protocol/src/protocol.rs#L3025)与[列表实现](https://github.com/openai/codex/blob/633ab199cfd724aa78013c006b27a2b3d049fc3b/codex-rs/rollout/src/list.rs#L1128)提供有版本范围的依据；文件名 UUID 不能直接作为 resume 身份，cwd 也不保证代表用户项目 |
@@ -94,7 +94,7 @@ Run 的当前页面为 `/runs/{runId}/{chat|terminal|files|search|git|history|us
 
 ### 3.3 指定目录与恢复会话
 
-启动功能位于 `/launch`，历史中的新建/继续动作先进入该页核验。支持时可调用 macOS 系统文件夹选择窗口，通过 `⌘⇧G` 输入路径；手动入口支持粘贴绝对路径及用户 `~`。系统选中目录后自动执行只读校验，在启动页显示真实目录和“开始新对话”；选目录本身不启动 CLI，取消选择保留原有草稿和预览。窗口不可用时保留手动输入；具备目录浏览能力的远程连接提供网页目录选择器，选择只填回表单并执行现有校验，不直接启动 CLI，详见[本机交互](interactions/workbench.md)。不存在、非目录、系统平台不匹配或无法安全打开时不启动；launch 时重新检查身份，目录发生替换返回 `project_changed`。无文件上传、无 Shell 展开、无任意命令输入。系统窗口目前仅实现 macOS；Windows 原生工作台运行支持尚未接入。
+启动功能位于 `/launch`，历史中的新建/继续动作先进入该页核验。支持时可调用 macOS 系统文件夹选择窗口，通过 `⌘⇧G` 输入路径；手动入口支持粘贴绝对路径及用户 `~`。系统选中目录后自动执行只读校验，在启动页显示真实目录和“开始新对话”；选目录本身不启动 CLI，取消选择保留原有草稿和预览。窗口不可用时保留手动输入；具备目录浏览能力的远程连接提供网页目录选择器，选择只填回表单并执行现有校验，不直接启动 CLI，详见[本机交互](../interactions/workbench.md)。不存在、非目录、系统平台不匹配或无法安全打开时不启动；launch 时重新检查身份，目录发生替换返回 `project_changed`。无文件上传、无 Shell 展开、无任意命令输入。系统窗口目前仅实现 macOS；Windows 原生工作台运行支持尚未接入。
 
 历史中的 cwd 是不可信元数据，不能仅凭它创建进程。“开始”显式绑定所显示的真实路径、当前设置修订和本次应用实例；普通 CLI 自己进行 trust/profile/权限检查，不添加 `--skip-*`。
 
@@ -126,7 +126,7 @@ flowchart LR
 
 ### 4.1 重复启动与命令兼容
 
-为同一有效配置目录和数据根提供应用实例锁与私有发现文件，位于 `~/.codex-web/runtime/<scope>/`，0700/0600，仅保存运行期发现信息，不是另一份用户配置。重复执行 `codex-view` 验证所属用户、实例握手和监听地址后打开已有首页，不新增 CLI/后台服务。锁在但握手失败时明确提示重试，不凭 PID 杀进程、不启动第二个写者；残留文件只在取得锁且验证文件身份后清理。macOS 后台模式使用同一锁与作用域，不接管已有前台实例，具体生命周期见 [ADR 0063](decisions/0063-background-service-directory-browser.md)。
+为同一有效配置目录和数据根提供应用实例锁与私有发现文件，位于 `~/.codex-web/runtime/<scope>/`，0700/0600，仅保存运行期发现信息，不是另一份用户配置。重复执行 `codex-view` 验证所属用户、实例握手和监听地址后打开已有首页，不新增 CLI/后台服务。锁在但握手失败时明确提示重试，不凭 PID 杀进程、不启动第二个写者；残留文件只在取得锁且验证文件身份后清理。macOS 后台模式使用同一锁与作用域，不接管已有前台实例，具体生命周期见 [ADR 0063](../decisions/0063-background-service-directory-browser.md)。
 
 命令契约：
 
@@ -201,7 +201,7 @@ interface HistoryEntry {
 
 合成 schema 25 fixture 由 schema 20 加观察到的结构差异构造，用户正文/真实路径/凭证不复制进 fixture；额外控制表填合成哨兵验证从不读写。列形状对照结果不替代实际查询/JSON/缺列/锁/WAL/未知版本测试。旧 `codex-observerd` 的写入口仍保持现有版本保护，R6 不为它放开更高 schema 写入。
 
-`src/history` 的独立只读 adapter 使用专用 VFS 禁止写、创建、截断与删除，并结合 `readonly_shm=1` 保留原锁和 WAL 一致性检查。缺少必要 WAL/SHM、需要热日志恢复或同进程只能得到可写 SHM 时返回不可用，不修复源文件。缺列/附件不可用按能力降级，页、字段、附件及取消均有预算。实际旧库的限定抽查不能推导全库完整性或用户正文语义正确；详见[Observer 兼容契约](architecture/observer-compatibility.md)。
+`src/history` 的独立只读 adapter 使用专用 VFS 禁止写、创建、截断与删除，并结合 `readonly_shm=1` 保留原锁和 WAL 一致性检查。缺少必要 WAL/SHM、需要热日志恢复或同进程只能得到可写 SHM 时返回不可用，不修复源文件。缺列/附件不可用按能力降级，页、字段、附件及取消均有预算。实际旧库的限定抽查不能推导全库完整性或用户正文语义正确；详见[Observer 兼容契约](../architecture/observer-compatibility.md)。
 
 ### 5.4 索引、分页、资源与恢复
 
@@ -344,7 +344,7 @@ Application 已独立持有网页、随机 instanceId、本机 owner 配对、�
 
 `src/history/library` 已接入 Application 的独立后台索引与查询线程。默认读取当前 nativeHome 和有效历史根，可额外登记最多 8 个来源。原生 reader 共享旧 importer 使用的纯分类/结构脱敏函数，并补充当前 typed UserMessage、用户/模型/系统上下文的区分及工作台文字凭证脱敏；不实例化 Importer，不访问 Codex 私有 SQLite。原生身份只使用 `SessionMeta.id`，不使用文件名或根 `session_id` 替代。
 
-目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=4`（C 初始版本为 1，F.1 为 2；R7 的 3/4 仅重建派生目录，独立用户归类不变，见[整理契约](codex-native-cli-workbench-session-organization.md)），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
+目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=4`（C 初始版本为 1，F.1 为 2；R7 的 3/4 仅重建派生目录，独立用户归类不变，见[整理契约](session-organization.md)），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
 
 自动重扫间隔从整轮扫描及工作台补全结束后计算，至少等待 30 秒；明确刷新或来源配置变化可提前触发。开始一轮时消费已有刷新请求，避免启动后无故再扫一轮。来源正在更新时保留同一来源身份已发布的 revision，暖启动从已提交目录恢复 revision；只读实例也报告已发布 revision/条目数。原生检查点复用仍推进本轮已整理条目数，不能长时间把有效工作显示为 0。
 
@@ -421,7 +421,7 @@ Observer 窗口继续使用 A 的零写 VFS/白名单 reader，有界读取 Cont
 | `native_config_changed` | 最后启动检查时已读配置或认证文件发生变化 |
 | `native_launch_failed` | 不能归入以上类型的启动失败 |
 
-失败不创建可用 Run，也不影响首页继续读取历史；记录和日志中的诊断仅包含固定错误码。认证条件与启动前快照复核见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)。
+失败不创建可用 Run，也不影响首页继续读取历史；记录和日志中的诊断仅包含固定错误码。认证条件与启动前快照复核见 [ADR 0054](../decisions/0054-native-custom-bearer-auth.md)。
 
 ### 12.2 原生恢复资格
 
@@ -581,4 +581,4 @@ V1 的纯规则已复制为独立、可测试的归属函数，没有引入 Obse
 5. 顶层/nested/两者相同/冲突/父记录缺失的子代理 fixture 覆盖筛选和父入口；不伪造继承项目。
 6. 最近记录排序、相同时间/无时间与分页稳定；未归属汇总不受项目分页影响，来源/搜索/主子筛选的计数一致。系统无头 Chrome 验证首页、刷新、前后退、键盘及 320px，无桌面鼠标模拟。
 
-风险：可持久化元数据没有完整的 Desktop 私有项目意图，兼容启发式只覆盖已知形态；仍不能宣称所有 App 版本的项目完全一致。发现新形态时新增独立证据与 fixture，不能凭短名称扩大规则。[项目会话整理](codex-native-cli-workbench-session-organization.md)定义分层展示与单条可撤销覆盖；用户覆盖与自动规则分别保存，不改变原恢复 cwd 与原始数据只读边界。
+风险：可持久化元数据没有完整的 Desktop 私有项目意图，兼容启发式只覆盖已知形态；仍不能宣称所有 App 版本的项目完全一致。发现新形态时新增独立证据与 fixture，不能凭短名称扩大规则。[项目会话整理](session-organization.md)定义分层展示与单条可撤销覆盖；用户覆盖与自动规则分别保存，不改变原恢复 cwd 与原始数据只读边界。

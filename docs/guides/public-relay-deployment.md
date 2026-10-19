@@ -1,6 +1,6 @@
 # Linux 公网中继部署与运维
 
-本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。受测 Linux/TLS 环境、真实手机及多电脑限制见[支持范围](../codex-native-cli-workbench-support.md)；本指南提供操作方法，不代表任意部署已通过验收。
+本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。受测 Linux/TLS 环境、真实手机及多电脑限制见[支持范围](support.md)；本指南提供操作方法，不代表任意部署已通过验收。
 
 ## 构建与服务隔离
 

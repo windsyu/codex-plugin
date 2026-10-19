@@ -1,6 +1,6 @@
 # 合成场景与专项调试
 
-[开发指南](README.md) · [支持范围](../codex-native-cli-workbench-support.md)
+[开发指南](README.md) · [支持范围](../guides/support.md)
 
 以下历史调试命令用于显式专项检查。先通过标准入口构建；真实 CLI 子进程必须隔离 HOME/USERPROFILE 和 CODEX_HOME，不能指向私人数据。现有 `/private/tmp` 示例是 macOS 临时路径，复现时选择自己的私有临时目录；未登记输出不会被自动过期删除。
 

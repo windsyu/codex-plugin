@@ -24,6 +24,6 @@
 
 ## Consequences
 
-仅改变前端导航、阅读布局与相应测试；不更改模型采集、代理/PTY 转发、API、存储格式、累计用量计算或原生 CLI 配置，无 migration。详情仍是有界脱敏副本，缺失、省略、截断和淘汰不会被隐藏。早期静态原型及历史验收截图保留为当时记录，当前约定以[方案 §1.6](../codex-native-cli-workbench.md#16-对话内调用详情与用量中的调用记录)为准。
+仅改变前端导航、阅读布局与相应测试；不更改模型采集、代理/PTY 转发、API、存储格式、累计用量计算或原生 CLI 配置，无 migration。详情仍是有界脱敏副本，缺失、省略、截断和淘汰不会被隐藏。早期静态原型及历史验收截图保留为当时记录，当前约定以[方案 §1.6](../design/workbench.md#16-对话内调用详情与用量中的调用记录)为准。
 
-调用上下文与覆盖语义见[工作台设计](../codex-native-cli-workbench.md)，合成 Chrome 复现见[专项调试](../development/debugging.md)。
+调用上下文与覆盖语义见[工作台设计](../design/workbench.md)，合成 Chrome 复现见[专项调试](../development/debugging.md)。

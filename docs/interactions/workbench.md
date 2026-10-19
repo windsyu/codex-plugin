@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [架构与安全](../architecture/workbench.md) · [部署与接入](../guides/local-workbench-deployment.md) · [中转交互](relay.md)
 
-本文按用户操作追踪 Application、Run、阅读与终端接口，供开发和维护定位。身份、存储及安全不变量见架构手册；完整字段/错误契约继续由[详细设计](../codex-native-cli-workbench-detailed-design.md)、[历史首页与启动](../codex-native-cli-workbench-history-home.md)、[设置与历史管理](../codex-native-cli-workbench-history-settings.md)、[设备接入](../codex-native-cli-workbench-device-access.md)负责。受测环境与剩余限制见[支持范围](../codex-native-cli-workbench-support.md)。
+本文按用户操作追踪 Application、Run、阅读与终端接口，供开发和维护定位。身份、存储及安全不变量见架构手册；完整字段/错误契约继续由[详细设计](../design/workbench-detailed-design.md)、[历史首页与启动](../design/history-home.md)、[设置与历史管理](../design/history-settings.md)、[设备接入](../design/device-access.md)负责。受测环境与剩余限制见[支持范围](../guides/support.md)。
 
 ## 1. 页面、接口与作用域
 
@@ -86,9 +86,9 @@ SSE epoch/游标落在窗口外或丢失 item revision 时重新取 snapshot，�
 
 应用历史走 `A/library/sources`、`/projects`、`/entries`、`/entries/{entry}` 和 `/details`；分页/搜索游标包含来源与已发布修订，来源变更需重查，来源撤销不得继续返回缓存正文。`POST /library/refresh` 只触发后台工作；`POST /library/preview` 有界预览现有 observer TOML 来源，随后由用户保存配置，不隐式扫描导入或创建 writer。目录/搜索有覆盖说明，不能把首屏命中当完整正文或全部来源已扫描。
 
-主线历史模块另提供 `GET A/library/session-groups`、`GET A/library/session-groups/{id}` 与 `GET/PUT A/library/entries/{entry}/organization`，只允许 Application owner/RemoteOwner。派生 catalog 为 v4；用户归类单独存于 `organization/state.sqlite` schema 1，不随索引重建。远程中央前端使用 API 2 配套升级；查询、更新状态轮询及归类写入均沿用固定电脑授权，阅读/分页位置继续按账号会话、电脑及 Application 实例隔离。具体请求、强 ETag 和降级契约见[项目会话整理](../codex-native-cli-workbench-session-organization.md)。
+主线历史模块另提供 `GET A/library/session-groups`、`GET A/library/session-groups/{id}` 与 `GET/PUT A/library/entries/{entry}/organization`，只允许 Application owner/RemoteOwner。派生 catalog 为 v4；用户归类单独存于 `organization/state.sqlite` schema 1，不随索引重建。远程中央前端使用 API 2 配套升级；查询、更新状态轮询及归类写入均沿用固定电脑授权，阅读/分页位置继续按账号会话、电脑及 Application 实例隔离。具体请求、强 ETag 和降级契约见[项目会话整理](../design/session-organization.md)。
 
-历史删除与共享设置是不同操作：cleanup 预览、确认、job 查询只在开放的既有作用域内执行，不允许任意路径/当前运行数据。删除默认关闭，源记录不可安全确认或已变化时拒绝；历史清理不删除原生数据或构建产物。精确 preview/job/保留策略见[设置与历史管理](../codex-native-cli-workbench-history-settings.md)、[management_api.rs](../../src/workbench/web/management_api.rs)。
+历史删除与共享设置是不同操作：cleanup 预览、确认、job 查询只在开放的既有作用域内执行，不允许任意路径/当前运行数据。删除默认关闭，源记录不可安全确认或已变化时拒绝；历史清理不删除原生数据或构建产物。精确 preview/job/保留策略见[设置与历史管理](../design/history-settings.md)、[management_api.rs](../../src/workbench/web/management_api.rs)。
 
 ## 5. 终端控制与断线恢复
 
@@ -112,7 +112,7 @@ Application 设置 GET/PUT `A/application/settings` 使用 `{instanceId,config}`
 
 Run 接入状态读取鉴权后返回 runEpoch 与接入修订，enable/disable 写请求须携带当前 runEpoch 和 If-Match；pairing 地址仅 owner/RemoteOwner 可取。每 Run 的随机配对码只在内存，QR 本地生成，链接保留 `/?run=<id>#pair=…`。配对 POST 校验精确 Host/Origin，换作用域固定的 Cookie；当前最多 8 个设备，有效 Cookie 重复配对不占新槽。IP 与 DNS 是不同浏览器 origin，需要各自 Cookie。
 
-关闭接入或撤销设备先提升/撤销许可代际，关闭该作用域 SSE/WS 并拒绝排队输入与 reconnect；最后一个 Run 关闭才停 listener，本机及其他 Run 不受影响。重新开启可沿用本次 Run 配对码，但旧 Cookie/控制权限不能复活；Run 停止撤销设备，不再开放。源码见 [web/access](../../src/workbench/web/access)，完整契约见[设备接入](../codex-native-cli-workbench-device-access.md)。
+关闭接入或撤销设备先提升/撤销许可代际，关闭该作用域 SSE/WS 并拒绝排队输入与 reconnect；最后一个 Run 关闭才停 listener，本机及其他 Run 不受影响。重新开启可沿用本次 Run 配对码，但旧 Cookie/控制权限不能复活；Run 停止撤销设备，不再开放。源码见 [web/access](../../src/workbench/web/access)，完整契约见[设备接入](../design/device-access.md)。
 
 ## 7. 可选公网连接器
 
