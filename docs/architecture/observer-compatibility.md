@@ -63,7 +63,7 @@ Observer 的 raw event、Thread/Turn/Item projection 和 source checkpoint 在�
 
 原生 cwd 是执行上下文，不能直接当作完整的 Codex 项目身份。旧降级规则见 [domain/project.rs](../../src/domain/project.rs)：缺失有效 cwd 时无展示项目；有 cwd 时，仅对已知 Desktop originator（`Codex Desktop` / `codex_work_desktop`）及 `*/Documents/Codex/YYYY-MM-DD/<name>` 形态目录，将展示项目判为 `null`。普通 CLI 和其他明确目录不因同名形态自动取消归属。该规则是有界兼容判断，不声称读取了完整项目注册表。
 
-Projectless 记录仍保留原 cwd 和来源信息，不从 cwd 生造用户项目。新工作台进一步分离 `recordedCwd` 与展示归属，显式恢复只使用经过验证的原 cwd、SessionMeta 和来源身份，见[历史首页](../codex-native-cli-workbench-history-home.md)与[项目会话整理](../codex-native-cli-workbench-session-organization.md)。
+Projectless 记录仍保留原 cwd 和来源信息，不从 cwd 生造用户项目。新工作台进一步分离 `recordedCwd` 与展示归属，显式恢复只使用经过验证的原 cwd、SessionMeta 和来源身份，见[历史首页](../design/history-home.md)与[项目会话整理](../design/session-organization.md)。
 
 ## 5. 脱敏、导出、保留与 purge
 
@@ -82,4 +82,4 @@ Projectless 记录仍保留原 cwd 和来源信息，不从 cwd 生造用户项�
 - 不把旧局域网身份、配对码或 bearer 自动升级为全局工作台、公网账号或跨电脑授权。
 - 兼容修改继续验证只读路由、分页/cursor、来源边界和内容安全；测试使用合成数据及隔离 HOME/CODEX_HOME，不以私人历史作为可写 fixture。
 
-旧验证不构成当前平台、容量或 SLA 承诺；实际支持和仍未实测的组合见[支持范围](../codex-native-cli-workbench-support.md)。
+旧验证不构成当前平台、容量或 SLA 承诺；实际支持和仍未实测的组合见[支持范围](../guides/support.md)。

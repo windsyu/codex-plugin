@@ -1,6 +1,6 @@
 # 本地局域网接入：同一工作台的多个访问地址
 
-**局域网 IP 和 Tailscale MagicDNS 是同一服务的地址。** 共用监听、配对和二维码，配对码在本次程序运行期间固定、可重复使用。默认仅本机，点击开启后才接受设备连接。取舍见 [ADR 0051](decisions/0051-workbench-device-access.md)。
+**局域网 IP 和 Tailscale MagicDNS 是同一服务的地址。** 共用监听、配对和二维码，配对码在本次程序运行期间固定、可重复使用。默认仅本机，点击开启后才接受设备连接。取舍见 [ADR 0051](../decisions/0051-workbench-device-access.md)。
 
 ## 1. 用户结果与范围
 
@@ -14,19 +14,19 @@
 
 | 实现 | 行为 |
 | --- | --- |
-| [共用接入](../src/workbench/web/access.rs)与[地址发现](../src/workbench/web/access/discovery.rs) | Application 共用设备监听与地址缓存，按 Run 选择 WebState；每 10 秒刷新 IP/MagicDNS，只读发现，不调用 Serve |
-| [Web 边界](../src/workbench/web.rs) | listener generation 与 Host 集合同时验证，每次请求的 Origin 须对应当前 Host；远端不能伪装本机管理入口 |
-| [许可](../src/workbench/permission.rs)、[终端仲裁](../src/workbench/control.rs)与[WS](../src/workbench/web/terminal_api.rs) | 单个浏览器许可可撤销；流、排队输入及断线重连保留均检查此许可 |
-| [接入面板](../web/src/workbench/AccessPanel.tsx) | 独立 Run 接入页、本地 QR、固定配对码、地址选择与撤销；业务 API/WS 继续跟随页面地址 |
-| [HTTP 随机 ID](../web/src/workbench/browserId.ts) | randomUUID 不可用时使用 getRandomValues，兼容普通 HTTP 下的历史清理操作 ID |
+| [共用接入](../../src/workbench/web/access.rs)与[地址发现](../../src/workbench/web/access/discovery.rs) | Application 共用设备监听与地址缓存，按 Run 选择 WebState；每 10 秒刷新 IP/MagicDNS，只读发现，不调用 Serve |
+| [Web 边界](../../src/workbench/web.rs) | listener generation 与 Host 集合同时验证，每次请求的 Origin 须对应当前 Host；远端不能伪装本机管理入口 |
+| [许可](../../src/workbench/permission.rs)、[终端仲裁](../../src/workbench/control.rs)与[WS](../../src/workbench/web/terminal_api.rs) | 单个浏览器许可可撤销；流、排队输入及断线重连保留均检查此许可 |
+| [接入面板](../../web/src/workbench/AccessPanel.tsx) | 独立 Run 接入页、本地 QR、固定配对码、地址选择与撤销；业务 API/WS 继续跟随页面地址 |
+| [HTTP 随机 ID](../../web/src/workbench/browserId.ts) | randomUUID 不可用时使用 getRandomValues，兼容普通 HTTP 下的历史清理操作 ID |
 
 [MagicDNS 官方说明](https://tailscale.com/docs/features/magicdns)支持用设备名称访问其 Web 服务；[连接设备说明](https://tailscale.com/docs/how-to/connect-to-devices)要求目标服务运行、端口可达且访问策略允许。名称访问不要求 Serve；手机需接入相应 Tailscale 网络及 DNS，普通局域网设备使用 IP。
 
-此前只读检查确认本机 Tailscale 1.102.3、daemon Running 及本机 DNSName，只是地址发现依据，不代表手机已验收。旧 [tailscale.rs](../src/tailscale.rs) 的持久 Serve 发布不用于本增量。
+此前只读检查确认本机 Tailscale 1.102.3、daemon Running 及本机 DNSName，只是地址发现依据，不代表手机已验收。旧 [tailscale.rs](../../src/tailscale.rs) 的持久 Serve 发布不用于本增量。
 
 ## 3. 网页交互
 
-按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)，接入使用 `/runs/{runId}/access` 独立页，当前名称为“本地局域网接入”，同 Run 导航保留终端实例，未展示时隐藏，不重放输入。单端口中转的工作台页加 `/g/{gatewayId}` 前缀，但页面路由不扩大设备配对权限；公网 owner 授权另按中转契约处理。首次显示“开启设备访问”。以下示意页面中的地址、二维码与撤销内容：
+按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md)，接入使用 `/runs/{runId}/access` 独立页，当前名称为“本地局域网接入”，同 Run 导航保留终端实例，未展示时隐藏，不重放输入。单端口中转的工作台页加 `/g/{gatewayId}` 前缀，但页面路由不扩大设备配对权限；公网 owner 授权另按中转契约处理。首次显示“开启设备访问”。以下示意页面中的地址、二维码与撤销内容：
 
 ```text
 本地局域网接入
@@ -104,7 +104,7 @@ Application 下手机链接为 `/?run=<id>#pair=<token>`，复用 fragment → P
 }
 ```
 
-这是可选配置片段，需合并进现有 JSON；[schema](configuration/workbench.config.schema.json)已支持，也可在“设置 → 高级启动设置”修改。0 为自动，非零为 1024–65535；缺省保持省略。沿用 JSON 修订/If-Match，保存后下次开启生效，不保存开放状态/凭证。旧二进制回退需移除新字段或使用旧配置副本，不迁移历史。
+这是可选配置片段，需合并进现有 JSON；[schema](../configuration/workbench.config.schema.json)已支持，也可在“设置 → 高级启动设置”修改。0 为自动，非零为 1024–65535；缺省保持省略。沿用 JSON 修订/If-Match，保存后下次开启生效，不保存开放状态/凭证。旧二进制回退需移除新字段或使用旧配置副本，不迁移历史。
 
 下表省略 /workbench/v1；access 管理只限本机管理会话。沿用现有校验和错误封装，JSON 拒绝未知字段、接入与配对正文上限 1KiB，不按网络拆 API：
 

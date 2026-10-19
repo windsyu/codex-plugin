@@ -36,4 +36,4 @@ Git 使用固定 cwd/argv 和清理后的环境，禁用 pager、外部 Diff、t
 
 ## Consequences
 
-本片不增加用户可调配置、migration、网页文件/Git 写接口或远程访问。查询不是文件系统/仓库全局事务，多次读取之间可发生变化；界面显示读取时间，旧结果不等于实时最新。文件名规则不保证任意文件正文无秘密。当前在 macOS、安装版 Git/rg/Chrome 验证，Linux/Windows 完整运行支持不因此扩大。当前受测范围见[支持文档](../codex-native-cli-workbench-support.md)，FD 与并发回归方法见[调试指南](../development/debugging.md)。
+本片不增加用户可调配置、migration、网页文件/Git 写接口或远程访问。查询不是文件系统/仓库全局事务，多次读取之间可发生变化；界面显示读取时间，旧结果不等于实时最新。文件名规则不保证任意文件正文无秘密。当前在 macOS、安装版 Git/rg/Chrome 验证，Linux/Windows 完整运行支持不因此扩大。当前受测范围见[支持文档](../guides/support.md)，FD 与并发回归方法见[调试指南](../development/debugging.md)。

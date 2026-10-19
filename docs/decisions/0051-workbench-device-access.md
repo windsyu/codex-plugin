@@ -11,7 +11,7 @@
 
 ## Decision
 
-采用[修订设计](../codex-native-cli-workbench-device-access.md)：
+采用[修订设计](../design/device-access.md)：
 
 1. 一个 Router、API、WebState、Run 和 CLI，同时提供 IP/MagicDNS URL。二维码地址选择只影响展示，不切换服务、撤销另一地址或重启会话。
 2. 默认仅本机；显式开启后增加一个共用 0.0.0.0:port IPv4 listener，两种设备 URL 使用同一端口。保留原 loopback listener 只为保持电脑 URL，不按网络建独立服务。明确 wildcard 接受本机 IPv4 网卡连接、LAN HTTP 不加密，不自动改防火墙。
@@ -36,4 +36,4 @@
 
 LAN HTTP 存在同网监听/篡改风险；Tailscale 地址的 HTTP 页面也不自动成为浏览器安全上下文，需兼容受限 API。不同主机 Cookie/草稿不自动迁移。wildcard 覆盖本机 IPv4 网卡，不能宣称仅某一 Wi-Fi 可达；显式开启和配对仍必需。
 
-实现已加入可选设备监听、共用浏览器授权、二维码面板及 access.port；默认关闭，不修改 Tailscale、防火墙或迁移历史。支持范围与真机限制见[支持文档](../codex-native-cli-workbench-support.md)。
+实现已加入可选设备监听、共用浏览器授权、二维码面板及 access.port；默认关闭，不修改 Tailscale、防火墙或迁移历史。支持范围与真机限制见[支持文档](../guides/support.md)。

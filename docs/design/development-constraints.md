@@ -1,20 +1,20 @@
 # Codex 工作台开发核心约束
 
 > 当前方向：2026-09-18 用户授权完全重构，按 cc-viewer 的目录启动、普通 CLI、模型代理、实时直推与异步历史实现。
-> 适用范围：当前原生 CLI 工作台及独立公网中转；受测环境和剩余限制见[支持范围](codex-native-cli-workbench-support.md)。
-> 决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)；[整体方案](codex-native-cli-workbench.md)；[详细设计](codex-native-cli-workbench-detailed-design.md)。
+> 适用范围：当前原生 CLI 工作台及独立公网中转；受测环境和剩余限制见[支持范围](../guides/support.md)。
+> 决策：[ADR 0039](../decisions/0039-cc-viewer-style-runtime.md)；[整体方案](workbench.md)；[详细设计](workbench-detailed-design.md)。
 
-2026-09-22 用户新增 R6：默认全部历史首页，明确选择项目/现有目录后启动 CLI；另项目新标签、默认新对话、指定会话另行恢复。该授权扩展为 Application 管理多个独立项目 Run，覆盖本文“每次启动一个项目”的后续边界；每 Run 的 PTY/目录/代理/保存隔离与零自动输入仍适用。设计和实现契约见[历史首页方案](codex-native-cli-workbench-history-home.md)。
+2026-09-22 用户新增 R6：默认全部历史首页，明确选择项目/现有目录后启动 CLI；另项目新标签、默认新对话、指定会话另行恢复。该授权扩展为 Application 管理多个独立项目 Run，覆盖本文“每次启动一个项目”的后续边界；每 Run 的 PTY/目录/代理/保存隔离与零自动输入仍适用。设计和实现契约见[历史首页方案](history-home.md)。
 
 ## 1. 文档目的与约束级别
 
 本文约束新工作台设计、实现、测试和迁移。当前会话明确要求优先于 AGENTS.md，后者优先于本文与详细设计；旧代码不是必须复用的约束。
 
-旧 Controller/Session Kernel 控制内核与旧 `/v2` 路径已退役；V1 只读历史兼容见[兼容契约](architecture/observer-compatibility.md)。ADR 0038 的 raw-first 增量草案已撤回，历史背景通过 Git 追溯。设计决定与实际验收分别报告，不通过改文档宣称未执行的验证。
+旧 Controller/Session Kernel 控制内核与旧 `/v2` 路径已退役；V1 只读历史兼容见[兼容契约](../architecture/observer-compatibility.md)。ADR 0038 的 raw-first 增量草案已撤回，历史背景通过 Git 追溯。设计决定与实际验收分别报告，不通过改文档宣称未执行的验证。
 
 ## 2. 已确认事实与产品决定
 
-2026-09-18 事实基线：main `930172493c163a903621ca14c540d1ca10dd4f3e`，Observer schema 20；cc-viewer 源码 `5b544c6ee112bb14a80670480d3c4c900b17d307`、实际运行 1.8.18；官方 Codex 研究源码 `633ab199cfd724aa78013c006b27a2b3d049fc3b`、当时安装版 0.154.0。这些是架构研究时的固定基线，不代表当前安装版本或完整 provider 支持；受测版本和限制见[支持范围](codex-native-cli-workbench-support.md)。
+2026-09-18 事实基线：main `930172493c163a903621ca14c540d1ca10dd4f3e`，Observer schema 20；cc-viewer 源码 `5b544c6ee112bb14a80670480d3c4c900b17d307`、实际运行 1.8.18；官方 Codex 研究源码 `633ab199cfd724aa78013c006b27a2b3d049fc3b`、当时安装版 0.154.0。这些是架构研究时的固定基线，不代表当前安装版本或完整 provider 支持；受测版本和限制见[支持范围](../guides/support.md)。
 
 新主线是本机原生 CLI 工作台，V1 历史读取价值继续保留；旧 V2 控制内核可以被替换，不再要求保留 ledger/CAS/lease 或旧 `/v2` mutation 兼容。V3 IM 目标保留为未来产品，其原架构依赖需在未来重新设计，不提前混入本轮。
 
@@ -22,16 +22,16 @@
 
 ## 3. 产品目标与非目标
 
-2026-10-14 用户明确要求独立功能页面，按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖此前同页配置和历史首页入口约定：`/` 为项目概览，历史、启动、设置分别为 `/history`、`/launch`、`/settings`，仅本机提供 `/relay`；Run 使用 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单端口中转加 `/g/{gatewayId}` 前缀。同 Run 功能切换保留终端实例，不启动 CLI、不重放输入；授权和 wire contract 不随页面改变。历史验收只证明当时版本。
+2026-10-14 用户明确要求独立功能页面，按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖此前同页配置和历史首页入口约定：`/` 为项目概览，历史、启动、设置分别为 `/history`、`/launch`、`/settings`，仅本机提供 `/relay`；Run 使用 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单端口中转加 `/g/{gatewayId}` 前缀。同 Run 功能切换保留终端实例，不启动 CLI、不重放输入；授权和 wire contract 不随页面改变。历史验收只证明当时版本。
 
-`codex-view` 默认进入零 CLI 的应用首页，明确启动项目后打开普通官方 CLI。`code-view start` 的后台服务由 [ADR 0063](decisions/0063-background-service-directory-browser.md)约束。右侧真实终端承担全部对话、Slash、信任、权限和追问；中央实时阅读，左侧文件/搜索/Git，另有模型请求上下文诊断。
+`codex-view` 默认进入零 CLI 的应用首页，明确启动项目后打开普通官方 CLI。`code-view start` 的后台服务由 [ADR 0063](../decisions/0063-background-service-directory-browser.md)约束。右侧真实终端承担全部对话、Slash、信任、权限和追问；中央实时阅读，左侧文件/搜索/Git，另有模型请求上下文诊断。
 
-每个 Run 启动一个项目、一个交互 CLI；多个页面一个可输入终端、其余可读。网页不另造 Composer、网页队列、审批表单或原生模型/权限设置状态机。2026-09-20 用户要求增加工作台自己的 JSON 配置，属于 R3.1；其原同页面板按 ADR 0059 改为独立设置页，仍不接管 Codex 原生配置。首版不接管外部 CLI，不做网页项目文件编辑、任意 Shell、开发端口代理或 IM。可选公网访问按独立[中转安全契约](architecture/relay.md)实施，不将本机所有者能力直接开放给网络。图片和手机能力须独立验证。
+每个 Run 启动一个项目、一个交互 CLI；多个页面一个可输入终端、其余可读。网页不另造 Composer、网页队列、审批表单或原生模型/权限设置状态机。2026-09-20 用户要求增加工作台自己的 JSON 配置，属于 R3.1；其原同页面板按 ADR 0059 改为独立设置页，仍不接管 Codex 原生配置。首版不接管外部 CLI，不做网页项目文件编辑、任意 Shell、开发端口代理或 IM。可选公网访问按独立[中转安全契约](../architecture/relay.md)实施，不将本机所有者能力直接开放给网络。图片和手机能力须独立验证。
 
 ## 4. 运行与代理约束
 
 - 直接启动普通官方 CLI，不启动本项目管理的外部 App Server，不使用 remote TUI。官方 CLI 内部实现由官方负责。
-- CLI 版本号不作启动白名单；用户升级后照常尝试运行，未回归版本只提示。版本探测和路由/认证错误分别诊断，不通过版本差异推断不兼容；规则见 [ADR 0045](decisions/0045-cli-version-compatibility.md)，受测版本见支持文档。
+- CLI 版本号不作启动白名单；用户升级后照常尝试运行，未回归版本只提示。版本探测和路由/认证错误分别诊断，不通过版本差异推断不兼容；规则见 [ADR 0045](../decisions/0045-cli-version-compatibility.md)，受测版本见支持文档。
 - 在原模型服务前放显式本机 HTTP/SSE/WS 代理；允许这一经用户授权的新路线，旧模型 API 代理禁令不再适用。
 - Launcher 对模型接入只覆盖本次运行经过验证的路由，不改全局配置、原 provider/模型/权限或真实 CODEX_HOME。2026-09-19 用户确认的显示例外：网页终端使用 truecolor、子进程清除继承的 `NO_COLOR`，并用官方 `tui.animations=false` 关闭装饰动画；不靠删改输出字节移除动画。
 - 不假定所有认证模式和配置优先级都兼容；R0 先验证当前必要 profile，其他 profile 验收后加入支持清单。无法确认 upstream 时明确失败，不猜服务，不强制关闭 WS，不静默切回旧内核。
@@ -40,7 +40,7 @@
 
 ## 5. 认证与安全
 
-默认启动仅 loopback；Web 配对认证、Host/Origin/CSRF、模型代理运行期能力和固定 upstream 必须存在。模型代理与浏览器 API 不共用认证入口，不提供任意 upstream、CONNECT 或开放 CORS。用户 2026-09-21 要求同一使用者通过 LAN IP/Tailscale MagicDNS 接入，已实现的显式接入例外仅限网页入口，见[设备接入设计](codex-native-cli-workbench-device-access.md)与 [ADR 0051](decisions/0051-workbench-device-access.md)；按本次实例显式开启，共用 IP/MagicDNS 监听与浏览器授权，模型代理仍只能 loopback。自动化/Chrome 验证与手机真机验收分开记录，不自动修改防火墙或 Tailscale。
+默认启动仅 loopback；Web 配对认证、Host/Origin/CSRF、模型代理运行期能力和固定 upstream 必须存在。模型代理与浏览器 API 不共用认证入口，不提供任意 upstream、CONNECT 或开放 CORS。用户 2026-09-21 要求同一使用者通过 LAN IP/Tailscale MagicDNS 接入，已实现的显式接入例外仅限网页入口，见[设备接入设计](device-access.md)与 [ADR 0051](../decisions/0051-workbench-device-access.md)；按本次实例显式开启，共用 IP/MagicDNS 监听与浏览器授权，模型代理仍只能 loopback。自动化/Chrome 验证与手机真机验收分开记录，不自动修改防火墙或 Tailscale。
 
 认证材料只在必要转发链路中出现，观察副本在进入 UI/持久化前脱敏；不要把 bearer、Cookie、URL token、加密 reasoning、图片 base64 或私人 fixture 写入仓库/通用日志。上游 TLS 正常校验，不安装本机根证书做系统 MITM。
 
@@ -78,10 +78,10 @@ Git 视图不意味着工作区独占，不增加 Git 锁或替其他进程协�
 - 记录队列满、磁盘错误、解码不支持或慢消费者均显式标记；记录/阅读失败不主动关闭模型连接。
 - 已显示未保存尾部可以丢失；snapshot、rollout 最终内容不能假装恢复全部中间事件。区分 live capture 状态、保存状态和历史覆盖，旧单一 completeness 枚举不强制复用。
 - 服务重启保留已存历史，旧 Run 标结束/异常；不自动复活 CLI、接管外部进程或重放输入。
-- 当前持久化契约见 [ADR 0044](decisions/0044-workbench-asynchronous-history.md)：独立 Recorder、提交标记以内的恢复、连续水位与恢复分段水位分开，历史只读且不恢复 CLI。
+- 当前持久化契约见 [ADR 0044](../decisions/0044-workbench-asynchronous-history.md)：独立 Recorder、提交标记以内的恢复、连续水位与恢复分段水位分开，历史只读且不恢复 CLI。
 - 新数据目录独立，旧 schema 20/audit 保留；未经迁移验收不删除、覆盖或自动改写用户数据。
 
-后续历史管理按 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md)及[配置/清理契约](codex-native-cli-workbench-history-settings.md)实施：默认关闭所有历史删除；占用、手动/批量删除和按天保留均限当前项目工作台数据。活动运行锁/身份必须重验，自动策略跳过旧记录的未知结束时间；删除任务需可恢复且不阻塞转发。JSON 与网页表单读写同一配置，损坏/未知配置暂停删除，启动和路径选项下次生效。原生/旧数据保护不因新增清理能力而放松，历史正文仍只读；R3.1 管理 mutation 不进入旧 `/v1`。
+后续历史管理按 [ADR 0048](../decisions/0048-history-cleanup-and-json-settings.md)及[配置/清理契约](history-settings.md)实施：默认关闭所有历史删除；占用、手动/批量删除和按天保留均限当前项目工作台数据。活动运行锁/身份必须重验，自动策略跳过旧记录的未知结束时间；删除任务需可恢复且不阻塞转发。JSON 与网页表单读写同一配置，损坏/未知配置暂停删除，启动和路径选项下次生效。原生/旧数据保护不因新增清理能力而放松，历史正文仍只读；R3.1 管理 mutation 不进入旧 `/v1`。
 
 ## 11. Web 交互
 

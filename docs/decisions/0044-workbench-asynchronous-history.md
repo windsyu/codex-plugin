@@ -33,4 +33,4 @@
 
 增加独立的版本化存储与历史读取契约；它们不改变官方 CLI、旧 `/v1` 或旧数据。存储故障会产生明确缺口，原生会话继续。历史中的终态只表示最后保存的观察事实；未正常退出时无法精确统计未保存尾部。数据目录需要由当前用户独占，索引与快照不能替代日志验证。
 
-保存、恢复和覆盖语义见[详细设计](../codex-native-cli-workbench-detailed-design.md)，受测范围见[支持文档](../codex-native-cli-workbench-support.md)。
+保存、恢复和覆盖语义见[详细设计](../design/workbench-detailed-design.md)，受测范围见[支持文档](../guides/support.md)。

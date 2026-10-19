@@ -2,7 +2,7 @@
 
 [文档总索引](../README.md) · [交互与 API](../interactions/workbench.md) · [部署与接入](../guides/local-workbench-deployment.md) · [中转架构](relay.md)
 
-本文是电脑端组件的维护入口：先确定责任模块、运行身份和正确性不变量，再进入专题契约与测试。产品目标见[工作台方案](../codex-native-cli-workbench.md)，细节见[详细设计](../codex-native-cli-workbench-detailed-design.md)。本文描述当前实现，不将源码检查当作真实 CLI、模型、手机或部署验收；受测范围见[支持范围](../codex-native-cli-workbench-support.md)。
+本文是电脑端组件的维护入口：先确定责任模块、运行身份和正确性不变量，再进入专题契约与测试。产品目标见[工作台方案](../design/workbench.md)，细节见[详细设计](../design/workbench-detailed-design.md)。本文描述当前实现，不将源码检查当作真实 CLI、模型、手机或部署验收；受测范围见[支持范围](../guides/support.md)。
 
 ## 1. 组件边界与非目标
 
@@ -83,7 +83,7 @@ Application 可以没有 CLI：历史首页与配置可用，缺少 CLI、native
 
 用户提交仅取原生 rollout 的明确 UserMessage 身份，不从 Enter、终端回显或模型请求 `role:user` 推断。工具参数表示模型生成；工具成功必须有匹配的原生执行/结果证据。关联要求明确调用域和身份，冲突/缺失保持不确定。`response.completed`、用户提交、工具完成、整轮完成和 CLI 退出分别表达。
 
-Live ViewItem schema 2 使用稳定 `itemKey`、revision、orderIndex 和 provenance：首次 `item.replace` 创建项，patch 必须满足基础 revision 与 contentKey，最终完整内容 replace，不再次 append。同一事件的文本、文件/图片上下文、详情与用量不能通过不同恢复路径重复计数。具体契约见[详细设计](../codex-native-cli-workbench-detailed-design.md)。
+Live ViewItem schema 2 使用稳定 `itemKey`、revision、orderIndex 和 provenance：首次 `item.replace` 创建项，patch 必须满足基础 revision 与 contentKey，最终完整内容 replace，不再次 append。同一事件的文本、文件/图片上下文、详情与用量不能通过不同恢复路径重复计数。具体契约见[详细设计](../design/workbench-detailed-design.md)。
 
 ### 4.2 保存、恢复与历史来源
 
@@ -93,7 +93,7 @@ Recorder 独立有界入队，不让慢存储反压代理。保存顺序为 blob
 
 跨来源目录分开处理 native、workbench 和明确注册的旧 observer。旧库使用零写入 reader/VFS 并保持 WAL 一致性，不启动迁移、writer 或 import，不把活动 WAL 当 immutable。页面只访问已发布目录/reader 的有界队列与缓存，不在请求里全库扫描。目录索引覆盖、搜索覆盖与正文覆盖分别报告；来源撤销立即阻断已有缓存正文访问。
 
-展示归属 `projectId/projectPath/projectBasis` 与恢复输入 `recordedCwd` 分离；同名目录不合并，来源关系不拼成一条虚构完整 thread。恢复须唯一原生 SessionMeta、canonical rollout、可验证原目录/nativeHome 与来源修订，不靠推测关联、`--last`、回放消息或自动 Enter。详情见[历史首页与启动](../codex-native-cli-workbench-history-home.md)。
+展示归属 `projectId/projectPath/projectBasis` 与恢复输入 `recordedCwd` 分离；同名目录不合并，来源关系不拼成一条虚构完整 thread。恢复须唯一原生 SessionMeta、canonical rollout、可验证原目录/nativeHome 与来源修订，不靠推测关联、`--last`、回放消息或自动 Enter。详情见[历史首页与启动](../design/history-home.md)。
 
 ### 4.3 只读项目与不可信内容
 

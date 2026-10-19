@@ -1,6 +1,6 @@
 # 项目会话整理：明确归属、分层展示与可撤销纠偏
 
-> 本文件定义项目分组、会话分层、可撤销归属与任务呈现的实现契约。持久化与兼容决定见 [ADR 0055](decisions/0055-project-session-organization.md)与 [ADR 0064](decisions/0064-human-conversation-presentation.md)。
+> 本文件定义项目分组、会话分层、可撤销归属与任务呈现的实现契约。持久化与兼容决定见 [ADR 0055](../decisions/0055-project-session-organization.md)与 [ADR 0064](../decisions/0064-human-conversation-presentation.md)。
 
 ## 1. 用户价值与成功标准
 
@@ -21,9 +21,9 @@
 | token-monitor 将项目路径身份、会话键和展示分组分开；workspace 无法解码时回退元数据 reader | [路径解析与回退](https://github.com/Javis603/token-monitor/blob/542c269b3ceebf7924b118c6057b423230dafe92/src/shared/sessionMetadata.js)。借鉴证据优先级，不通过 opaque key、标题或正文猜项目 |
 | token-monitor 用明确来源判定后台审查，再折叠为一组 | [来源判定](https://github.com/Javis603/token-monitor/blob/542c269b3ceebf7924b118c6057b423230dafe92/src/shared/providers/codex/sessionMetadata.js)、[分组展示](https://github.com/Javis603/token-monitor/blob/542c269b3ceebf7924b118c6057b423230dafe92/src/electron/renderer/sessionRows.js)。借鉴辅助记录折叠，不依赖模型名或提示词 |
 | token-monitor 的项目统计按规范化目录名称合并，而非路径 ID | [统计实现](https://github.com/Javis603/token-monitor/blob/542c269b3ceebf7924b118c6057b423230dafe92/src/shared/usage.js)。同名不同路径会相加；本项目不采用该规则 |
-| 我们已分开 recordedCwd 与 projectId/projectBasis，处理已知 Desktop 日期目录、旧库 NULL 和父关系冲突 | [归属模型](../src/history/library/model.rs)、[F.1 契约](codex-native-cli-workbench-history-home.md#14-项目归属纠偏诊断与实现契约)。已有能力不能再作为新改造宣称 |
-| 基线首页主/子代理同级混列；项目和会话共用 q/source/group；项目路径来自当前页 | 本次以独立项目查询、selectedProject 和分层组查询替代；[首页实现](../web/src/workbench/HistoryLibraryPanel.tsx)。原展示问题不等于证明所有现有归属都是错误的 |
-| 原生与旧库仅在显式同 nativeHome、同 nativeThreadId 时关联；工作台 Run 不是 thread | [关联实现](../src/history/library.rs)、[来源契约](codex-native-cli-workbench-history-home.md#52-数据模型与身份)。不能把同名、同 cwd 或近似时间当作副本 |
+| 我们已分开 recordedCwd 与 projectId/projectBasis，处理已知 Desktop 日期目录、旧库 NULL 和父关系冲突 | [归属模型](../../src/history/library/model.rs)、[F.1 契约](history-home.md#14-项目归属纠偏诊断与实现契约)。已有能力不能再作为新改造宣称 |
+| 基线首页主/子代理同级混列；项目和会话共用 q/source/group；项目路径来自当前页 | 本次以独立项目查询、selectedProject 和分层组查询替代；[首页实现](../../web/src/workbench/HistoryLibraryPanel.tsx)。原展示问题不等于证明所有现有归属都是错误的 |
+| 原生与旧库仅在显式同 nativeHome、同 nativeThreadId 时关联；工作台 Run 不是 thread | [关联实现](../../src/history/library.rs)、[来源契约](history-home.md#52-数据模型与身份)。不能把同名、同 cwd 或近似时间当作副本 |
 
 **项目选择：**继续使用完整路径身份，不扩大 Desktop 启发式；增加展示层次、归属解释和本机显式覆盖。**待验证：**当前受测 CLI 的 rollout 是否提供足以细分 guardian review 的明确字段。token-monitor 读取私有 SQLite 的实现不是本项目的协议依据；没有受测 rollout/公共协议证据时只显示已确认子代理，不开放专门审查判定。
 
@@ -189,7 +189,7 @@ interface SessionGroup {
 
 ## 10. 试用改进：任务识别与人类对话优先
 
-任务呈现优先提供有意义标题、正文对话、任务/交流预览/时间列表和当前项目主标题。决定见 [ADR 0064](decisions/0064-human-conversation-presentation.md)。
+任务呈现优先提供有意义标题、正文对话、任务/交流预览/时间列表和当前项目主标题。决定见 [ADR 0064](../decisions/0064-human-conversation-presentation.md)。
 
 ### 10.1 标题与交流预览
 

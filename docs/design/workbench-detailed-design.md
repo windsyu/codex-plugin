@@ -1,12 +1,12 @@
 # 原生 CLI 实时工作台详细设计
 
 > 本文定义原生 CLI 工作台的模块、协议、安全、保存和验收契约。
-> 上位方案：[工作台方案](codex-native-cli-workbench.md)；决策：[ADR 0039](decisions/0039-cc-viewer-style-runtime.md)。
-> 当前环境和兼容边界见[支持范围](codex-native-cli-workbench-support.md)；设计与验收标准不代表所有平台、provider 或发行产物均已验证。
+> 上位方案：[工作台方案](workbench.md)；决策：[ADR 0039](../decisions/0039-cc-viewer-style-runtime.md)。
+> 当前环境和兼容边界见[支持范围](../guides/support.md)；设计与验收标准不代表所有平台、provider 或发行产物均已验证。
 
-[历史首页方案](codex-native-cli-workbench-history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。Application 先提供零 CLI 首页，只有明确新建或恢复才创建 Run；最多 4 个活动项目，每 Run 明确寻址。手机共用设备 listener 和地址目录，但授权、终端输入、文件根与保存均按 Run 隔离。项目展示归属与原生恢复 cwd 独立，旧 Observer schema 20/25 通过只读 adapter 读取；详见[兼容契约](architecture/observer-compatibility.md)。下述 Run 数据契约继续适用。
+[历史首页方案](history-home.md)定义 Application/Run 拆分、三类历史 adapter、全局目录与按项目启动。Application 先提供零 CLI 首页，只有明确新建或恢复才创建 Run；最多 4 个活动项目，每 Run 明确寻址。手机共用设备 listener 和地址目录，但授权、终端输入、文件根与保存均按 Run 隔离。项目展示归属与原生恢复 cwd 独立，旧 Observer schema 20/25 通过只读 adapter 读取；详见[兼容契约](../architecture/observer-compatibility.md)。下述 Run 数据契约继续适用。
 
-前端视觉与交互基准见[方案 §1.1–1.4](codex-native-cli-workbench.md#ui-prototype)。聊天角色、内容类型、原生终端生命周期、数据来源与异常状态以下述契约为准，示例内容不作为运行事实。
+前端视觉与交互基准见[方案 §1.1–1.4](workbench.md#ui-prototype)。聊天角色、内容类型、原生终端生命周期、数据来源与异常状态以下述契约为准，示例内容不作为运行事实。
 
 ## 1. 运行单元与模块
 
@@ -43,15 +43,15 @@ codex-view --project . --codex-bin <installed-cli> --resume <explicit-thread-uui
 codex-view open <private-entry-file>
 ```
 
-命令由独立 [binary](../src/bin/codex-view.rs) 和 [Launcher](../src/workbench/launch.rs)实现。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。记录器在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
+命令由独立 [binary](../../src/bin/codex-view.rs) 和 [Launcher](../../src/workbench/launch.rs)实现。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。记录器在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
 
-工作台使用独立 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](codex-native-cli-workbench-history-settings.md#2-配置目录与文件契约)。
+工作台使用独立 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](history-settings.md#2-配置目录与文件契约)。
 
-生命周期分别处理：返回首页或关闭网页不停止 CLI；原生 CLI 退出或 `POST /workbench/v1/runs/{runId}/stop` 停止本次子进程后，终端显示已结束，电脑保留有界内存阅读，该 Run 的设备许可撤销且不能重新开启。某个 Run 的代理或关键运行线程故障只回收该 Run；启动失败只清理本次部分资源，其余 Run 和首页继续可用。启动器收到 SIGINT/SIGTERM/SIGHUP，或 Application 本身关键线程异常退出时，才回收全部自有 Run、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell；应用重启不自动恢复 Run。macOS 后台运行通过用户级 LaunchAgent 管理，`code-view start` 不自动启动项目，`stop` 完整回收所属 Run；已有前台实例不自动接管，详见 [ADR 0063](decisions/0063-background-service-directory-browser.md)与[本机架构](architecture/workbench.md)。不提供 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。
+生命周期分别处理：返回首页或关闭网页不停止 CLI；原生 CLI 退出或 `POST /workbench/v1/runs/{runId}/stop` 停止本次子进程后，终端显示已结束，电脑保留有界内存阅读，该 Run 的设备许可撤销且不能重新开启。某个 Run 的代理或关键运行线程故障只回收该 Run；启动失败只清理本次部分资源，其余 Run 和首页继续可用。启动器收到 SIGINT/SIGTERM/SIGHUP，或 Application 本身关键线程异常退出时，才回收全部自有 Run、监听和私有入口。SIGHUP 覆盖启动终端挂断；不将仅关闭网页解释为挂断。stop 返回接受后异步结束 CLI，重复调用不重启。PTY 对仍存活的自有进程组发 TERM，约 750ms 后仍未结束则 KILL 并回收，不杀其他 Codex。原生结束后不启动 Shell；应用重启不自动恢复 Run。macOS 后台运行通过用户级 LaunchAgent 管理，`code-view start` 不自动启动项目，`stop` 完整回收所属 Run；已有前台实例不自动接管，详见 [ADR 0063](../decisions/0063-background-service-directory-browser.md)与[本机架构](../architecture/workbench.md)。不提供 OS 终端/网页同时可写。SIGKILL 无法捕获，不能承诺执行相同清理；原生工具自行脱离该进程组的完整回收也不由当前测试证明。
 
 默认私有入口为 `~/.codex-web/runtime/<scope>/instance.json`，scope 绑定有效配置目录和数据根；目录 0700、文件 0600。Application entry v2 使用 instanceId 和可选目标 runId，首页不携带旧格式的 runEpoch/cliPid；`--entry-file` 可将同一入口另写到用户指定的尚不存在文件，不替换实例发现文件。配对 capability 仅写私有入口，经系统浏览器打开；普通首页 ready 输出只有安全地址、instanceId 与文件位置，明确项目就绪后才另输出 Run/PID/cliVersion。`open` 同时接受 v1/v2，只读当前 OS 用户拥有、无组/其他权限的普通文件，拒绝符号链接、超限文件和非 loopback/非法配对 URL；可选 runId 必须与 URL 一致。清理仅删除仍匹配原 inode/device 的自有入口及空的自有目录，instance.lock 保留相同文件身份；异常被杀后的残留文件不是持久历史或服务存活证据。同配置/数据根重复启动通过锁和实例握手复用应用，不根据 PID 杀进程。
 
-按 [ADR 0045](decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。诊断中的受测版本只用于兼容提示，不作为准入锁；当前范围见[支持说明](codex-native-cli-workbench-support.md)。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
+按 [ADR 0045](../decisions/0045-cli-version-compatibility.md)，版本探测只确认指定程序能在 5 秒内成功返回有界、可识别的 `codex-cli <version>`，不做精确版本、最低版本或 major 版本准入。输出最多 4096 字节，版本标识最多 64 个 ASCII 字符，以数字开头，仅允许字母、数字、`.`、`+`、`-`；不会把任意子进程输出写进诊断。未列入回归基线的版本打印一次提示后照常启动，不需要 bypass 参数。探测执行失败、超时、格式错误或实际配置/路由检查失败仍明确报错。诊断中的受测版本只用于兼容提示，不作为准入锁；当前范围见[支持说明](../guides/support.md)。未来 CLI 参数或协议真正变化时，应针对具体故障诊断，不能把版本号不同当作已证实不兼容。
 
 目录就是 workspace 根。网页打开目录不改变 CLI cwd，原生导航也不自动扩大文件读取根。需要其他目录时新建一次运行。浏览器刷新、切面板或重新获得输入权不重新 spawn。
 
@@ -74,8 +74,8 @@ interface CaptureProfile {
 
 macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
 
-- 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。取舍见 [ADR 0054](decisions/0054-native-custom-bearer-auth.md)。
-- 命令认证：非空 `model_providers.custom.auth.command`，可选 `args` 为字符串数组，要求 `requires_openai_auth=false`；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表按原生递归覆盖语义检查，args 数组替换而非拼接。工作台只校验配置形状和路由/冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
+- 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。取舍见 [ADR 0054](../decisions/0054-native-custom-bearer-auth.md)。
+- 命令认证：非空 `model_providers.custom.auth.command`，可选 `args` 为字符串数组，要求 `requires_openai_auth=false`；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表按原生递归覆盖语义检查，args 数组替换而非拼接。工作台只校验配置形状和路由/冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
 
 两条路径都拒绝 `env_key`、`env_http_headers`、AWS、系统/managed 路由来源及 `supports_websockets=true`，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置及认证快照未改变。检查不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。命令 token 不被工作台读取，不能按精确值脱敏上游/工具主动回显到正文的凭证；认证头始终排除观察、调用详情与 journal。
 
@@ -91,7 +91,7 @@ macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动�
 
 公网中转账号同样只保护网页/网关访问，不给 CLI 登录模型服务，不向本机下发模型凭证。模型认证继续由本机官方 CLI 和原生 provider 配置完成；中转 Cookie/账号状态不能作为模型凭证可用或请求成功的证据。
 
-上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](codex-native-cli-workbench-device-access.md)及 [ADR 0051](decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。真实手机按 §9.2 的 P14 单独验收，桌面视口不能代替实际设备。
+上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](device-access.md)及 [ADR 0051](../decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。真实手机按 §9.2 的 P14 单独验收，桌面视口不能代替实际设备。
 
 每个受支持 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
 
@@ -173,7 +173,7 @@ HTTP 请求分别编号；WS 每次 create 的 metadata、response 身份独立�
 
 ### 4.3 聊天角色与类型契约
 
-按 [ADR 0043](decisions/0043-unified-reading-items.md)，用户、模型正文、工具和安全提示使用统一 DTO；见[契约实现](../src/workbench/live/view.rs)与[前端封闭类型](../web/src/workbench/viewItems.ts)。后端的来源聚合仍分类型维护各自预算，但快照只有一个 `items` 数组，浏览器也只保存这一份阅读项目；渲染选择器没有第二份长期状态。该变更不涉及旧数据库 migration。
+按 [ADR 0043](../decisions/0043-unified-reading-items.md)，用户、模型正文、工具和安全提示使用统一 DTO；见[契约实现](../../src/workbench/live/view.rs)与[前端封闭类型](../../web/src/workbench/viewItems.ts)。后端的来源聚合仍分类型维护各自预算，但快照只有一个 `items` 数组，浏览器也只保存这一份阅读项目；渲染选择器没有第二份长期状态。该变更不涉及旧数据库 migration。
 
 ```ts
 interface ViewBase {
@@ -334,7 +334,7 @@ compact、fork 与显式 resume 按以下规则处理：摘要保留在后续模
 
 #### 4.5.1 已实现的工具流与结果增量契约
 
-快照中的工具属于 `items: ViewItem[]`，独立 `toolContexts: ToolContext[]`、`nativeCommands: NativeCommand[]` 继续保留；具体字段见[前端封闭类型](../web/src/workbench/toolTypes.ts)、[后端工具视图](../src/workbench/live/tools.rs)和[上下文提取](../src/workbench/decode/tool_context.rs)。统一 union 保留以下实际工具字段，不引入 file/search/cancelled 等没有当前事实来源的类别或状态。
+快照中的工具属于 `items: ViewItem[]`，独立 `toolContexts: ToolContext[]`、`nativeCommands: NativeCommand[]` 继续保留；具体字段见[前端封闭类型](../../web/src/workbench/toolTypes.ts)、[后端工具视图](../../src/workbench/live/tools.rs)和[上下文提取](../../src/workbench/decode/tool_context.rs)。统一 union 保留以下实际工具字段，不引入 file/search/cancelled 等没有当前事实来源的类别或状态。
 
 ```ts
 interface ToolCall {
@@ -367,7 +367,7 @@ interface ToolCall {
 - **类别与参数。** 顶层 `tools`、developer `additional_tools` 与 namespace 均有安全元信息提取。原生 `exec_command` 的 function/object schema/string cmd 才映射命令；原生 grammar `exec` 映射代码、`apply_patch` 映射拟议修改，其余保留普通工具。缺 namespace 时仅允许无歧义定义匹配，外部 namespace 的同名工具不冒充原生命令。仅完整、未截断且无身份冲突的安全 JSON 提取 cmd/workdir，cwd 未给就显示未捕获。
 - **结果关联。** 只接受已确认用途、同一原生 thread 的 HTTP 请求域。后续请求必须含唯一的同 call ID、同工具类型/名称/namespace 的伴随调用，并与已观察调用的原始完整参数指纹一致；本 Run 中候选也必须唯一。指纹、原始参数和内部解析事实不随 DTO 输出。缺伴随调用、WS 或身份不明时，结果保留在对应请求上下文。先到结果可在调用补齐后关联；后续重复历史不新增卡片或重复 revision。
 - **执行依据。** 后续请求中的直接命令结果只识别已验证且从输出首部开始的原生 `Wall time` / `Process exited with code` 或 `Process running with session ID` / `Output:` 格式；正文中出现相同字样不作为退出事实。Code Mode 返回的 JSON/文本不递归解析成子命令状态，只标 result_observed。运行中 envelope 保留进程 ID 供原生结果匹配；`write_stdin` 卡保留自身 call ID，原命令通过规范完成记录取得最终结果，不拼接两个不同调用的文本。
-- **原生补齐。** 按 [ADR 0041](decisions/0041-native-command-result-evidence.md)，独立 RolloutReader 读取规范 `event_msg/item_completed/CommandExecution`。只接受明确 thread/turn/native item ID 和已知 source/status；同一 HTTP conversation 的 thread + turn + call ID 唯一匹配，已有进程 ID 时还须一致。已验证安装版命令在最后一次模型请求之后退出，原卡能取得最终合并输出、退出码、耗时和 cwd。未匹配子命令在同轮调用详情独立保留，不按 Code Mode 代码或 ID 前缀猜归属。`completed/failed/declined` 有封闭映射，受测原生流程未取得 declined 或可靠 started；规范支持不等于实际捕获。原生策略拒绝、参数错误与中断未必具有逐工具终态，UI 保持 result_observed/unobserved，turn_aborted/EOF 不生成工具取消。底层 declined 也可能来自运行准备拒绝，不默认标成“用户拒绝”。
+- **原生补齐。** 按 [ADR 0041](../decisions/0041-native-command-result-evidence.md)，独立 RolloutReader 读取规范 `event_msg/item_completed/CommandExecution`。只接受明确 thread/turn/native item ID 和已知 source/status；同一 HTTP conversation 的 thread + turn + call ID 唯一匹配，已有进程 ID 时还须一致。已验证安装版命令在最后一次模型请求之后退出，原卡能取得最终合并输出、退出码、耗时和 cwd。未匹配子命令在同轮调用详情独立保留，不按 Code Mode 代码或 ID 前缀猜归属。`completed/failed/declined` 有封闭映射，受测原生流程未取得 declined 或可靠 started；规范支持不等于实际捕获。原生策略拒绝、参数错误与中断未必具有逐工具终态，UI 保持 result_observed/unobserved，turn_aborted/EOF 不生成工具取消。底层 declined 也可能来自运行准备拒绝，不默认标成“用户拒绝”。
 - **原生去重与冲突。** 原生结果同键同内容指纹不重复发布；相异最终记录保留各自 sourceRef/byteOffset，标冲突并撤销明确成败。网络旧运行中证据、重放或迟到 started 不降级已有最终状态；网络最终退出码与原生退出码矛盾、重复候选或进程不一致均不能静默覆盖。
 - **稳定阅读身份。** 同一 response 中明确同时出现 output_index 与正式 item ID 时建立有界别名，保留首次 key；`TextKey.wireItemId` 可以继续为 `@output:N`，不为了补协议 ID 更换 DOM 身份。之后仅带 ID/位置的事件原位更新，最终替换不追加。别名表共用 decoder 的 256 项预算且计入缓冲总量；验收须覆盖 SSE、并发 WS、正文/工具身份和浏览器节点、焦点、刷新。没有显式关联时不凭最近项或 call 名称猜配。
 - **冲突。** 同键身份变化、同调用不同参数、重复 call ID 候选或相异结果明确标冲突并撤销成功状态，已有参数/结果保留，其他输出仍可在调用详情的上下文查看。位置/正式 ID 一对多、类别变化或两张已独立发布卡片事后出现矛盾桥接，保留原内容并发身份诊断，不静默合并。显式无效/敏感 ID 不退回位置编号；HTTP 显式 response ID 与已确认 ID 不同也拒绝更新。最终工具身份缺失或被脱敏拒绝时，不允许用旧参数指纹为新内容背书。
@@ -380,7 +380,7 @@ UI 使用不同布局、图标和文字标签呈现用户、模型及工具，�
 
 #### 4.5.2 结构化拟议 Diff（已实现）
 
-[纯读取 parser](../src/workbench/decode/patch.rs)在已有原生工具定义证明 `custom apply_patch` 后，解释完整、未截断且无身份冲突的安全参数。它不解析 Code Mode 内嵌代码、不读写文件、不查 Git，也不推断工具成功。数据随原 `item.replace`/snapshot 发布，不新增网络读取；只有类别、参数、生成状态、截断或身份发生变化才重新计算。定义晚到可补齐，定义变得不明确则撤销结构化预览。
+[纯读取 parser](../../src/workbench/decode/patch.rs)在已有原生工具定义证明 `custom apply_patch` 后，解释完整、未截断且无身份冲突的安全参数。它不解析 Code Mode 内嵌代码、不读写文件、不查 Git，也不推断工具成功。数据随原 `item.replace`/snapshot 发布，不新增网络读取；只有类别、参数、生成状态、截断或身份发生变化才重新计算。定义晚到可补齐，定义变得不明确则撤销结构化预览。
 
 ```ts
 type ProposedPatch =
@@ -401,11 +401,11 @@ interface ProposedFile {
 
 上限为参数 64KiB、输入 4096 行、64 文件、256 片段、2000 个增删/上下文行；路径 4096 字节、环境 ID 128 字节。结构化内容的内存估算计入工具与正文共享预算，淘汰继续使用原有缺口/重新快照机制。路径、锚点、内容均作为字面文本，不提供执行、打开文件或跳转链接；文件阅读另按 §8 的只读边界提供。
 
-[Diff 组件](../web/src/workbench/ProposedDiff.tsx)使用操作名称、增删符号、计数和颜色共同区分，首文件默认展开，其余可键盘展开；长内容在有界区域滚动。参数完成、迟到结果和面板切换不重建原卡及已展开节点，不抢焦点。验收应覆盖临时文件的增、删、改、移动和缺失文件失败。规范 FileChange 状态已按 §4.5.3 补齐；只有 output 正文时继续标 `result_observed`，不得把预览或输出中的“Success”当作已验证的执行状态转换。
+[Diff 组件](../../web/src/workbench/ProposedDiff.tsx)使用操作名称、增删符号、计数和颜色共同区分，首文件默认展开，其余可键盘展开；长内容在有界区域滚动。参数完成、迟到结果和面板切换不重建原卡及已展开节点，不抢焦点。验收应覆盖临时文件的增、删、改、移动和缺失文件失败。规范 FileChange 状态已按 §4.5.3 补齐；只有 output 正文时继续标 `result_observed`，不得把预览或输出中的“Success”当作已验证的执行状态转换。
 
 #### 4.5.3 原生文件修改结果（已实现）
 
-按 [ADR 0042](decisions/0042-native-file-change-evidence.md)，同一只读后台 reader 提取规范 `event_msg/item_completed/FileChange`，仅接受明确 thread/turn/item ID 及 closed status。缺失/未知身份或状态发来源位置诊断。与模型调用的关联要求明确 HTTP conversation 域、唯一 call ID、已生成且类别已由工具声明确认的原生 custom apply_patch；Code Mode 和外部同名工具不猜归属。
+按 [ADR 0042](../decisions/0042-native-file-change-evidence.md)，同一只读后台 reader 提取规范 `event_msg/item_completed/FileChange`，仅接受明确 thread/turn/item ID 及 closed status。缺失/未知身份或状态发来源位置诊断。与模型调用的关联要求明确 HTTP conversation 域、唯一 call ID、已生成且类别已由工具声明确认的原生 custom apply_patch；Code Mode 和外部同名工具不猜归属。
 
 ```ts
 interface NativeFileChange {
@@ -442,7 +442,7 @@ WS   /workbench/v1/runs/{runId}/terminal?epoch=<runEpoch>
 POST /workbench/v1/runs/{runId}/stop
 ```
 
-运行接口明确绑定 URL 中的 Run；其中 history 读取该项目的已保存 Run。Application 不再提供无 Run 前缀的运行路径，即使只有一个项目也返回 404；内部独立 ReadingServer 的测试/兼容路径不作为产品公开别名。网页项目启动与显式恢复通过 Application 的 launch-targets/runs/launch-operations，具体契约见[R6 启动接口](codex-native-cli-workbench-history-home.md#62-启动接口与同源-run-寻址)，没有通用 shell 或 JSON-RPC 透传。当前 mutation 包括目录核验后的明确启动、输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验对应作用域的配对身份、Origin/CSRF 和实例/Run 身份，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。管理接口提供工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，其[管理 API](codex-native-cli-workbench-history-settings.md#62-管理接口契约)在产品中同样置于 Run 前缀，共享设置仅电脑 owner 可用，全局 library 保持只读。
+运行接口明确绑定 URL 中的 Run；其中 history 读取该项目的已保存 Run。Application 不再提供无 Run 前缀的运行路径，即使只有一个项目也返回 404；内部独立 ReadingServer 的测试/兼容路径不作为产品公开别名。网页项目启动与显式恢复通过 Application 的 launch-targets/runs/launch-operations，具体契约见[R6 启动接口](history-home.md#62-启动接口与同源-run-寻址)，没有通用 shell 或 JSON-RPC 透传。当前 mutation 包括目录核验后的明确启动、输入仲裁、本次运行停止、工作台 JSON 配置保存及历史清理任务；原生发送、approval、queue 和模型/权限 settings 全留 CLI。Mutation 校验对应作用域的配对身份、Origin/CSRF 和实例/Run 身份，旧页面不能误停端口复用后的新 Run；stop 对同一 Run 可重复且不创建新进程。新 namespace 与旧 `/v1`、`/v2` 明确区分。管理接口提供工作台配置保存、占用查询/刷新、候选预览、删除任务及可选保留期限，其[管理 API](history-settings.md#62-管理接口契约)在产品中同样置于 Run 前缀，共享设置仅电脑 owner 可用，全局 library 保持只读。
 
 终端接入时将原草案的 claim/release/takeover 三个 POST 收敛为上述 WebSocket 内的类型化消息，原因是操作必须绑定实际终端连接，私有 grant 也只应回给该连接；不增加用于跨 HTTP 请求认领连接的第二套 token。尚未发布的 POST 草案没有兼容消费者；旧 `/v1` 仍只读，旧 `/v2` 已退役并返回 404。运行停止仍为 HTTP POST，JSON body 为 `{ "epoch": "<runEpoch>" }`。
 
@@ -563,7 +563,7 @@ usage 仅来自可归属 response 的终态报告，各响应独立，重复事�
 
 #### 5.1.2 本次运行用量概览
 
-按 [ADR 0046](decisions/0046-user-facing-run-usage.md)，在单次响应事实之上新增“本次运行累计已知用量”。保留单次响应详情，取消“不可跨响应求和”的界面限制；合计不代表某个原生任务的完整用量，也不求和观察时长。`usageSummary` 是 snapshot 与 `request.state` / `capture.gap` 事件中的可选附加字段，不改变 ViewItem schemaVersion=2：
+按 [ADR 0046](../decisions/0046-user-facing-run-usage.md)，在单次响应事实之上新增“本次运行累计已知用量”。保留单次响应详情，取消“不可跨响应求和”的界面限制；合计不代表某个原生任务的完整用量，也不求和观察时长。`usageSummary` 是 snapshot 与 `request.state` / `capture.gap` 事件中的可选附加字段，不改变 ViewItem schemaVersion=2：
 
 ```ts
 interface UsageMetric { tokens: number | null; responses: number }
@@ -613,9 +613,9 @@ Browser 只在完整应用事件后推进 cursor；重复事件按 epoch/seq 忽
 
 TerminalPanel 保持挂载，隐藏/折叠只影响布局，切换阅读 Thread 不控制 CLI。原生快捷键、IME、多行、Slash/picker 由 CLI 解释；浏览器只解决键盘传递、焦点和终端尺寸。终端 escape sequence 不自动写本机剪贴板、下载文件或打开 URL。
 
-独立 [PTY actor](../src/workbench/terminal.rs) 将输入仲裁与写入串行处理，并以有界 VT 快照/输出订阅隔离慢消费者。原生输入缓冲区写满时，单次传递约 100ms 后返回可诊断失败；可能已有部分字节到达，输入序号已消费，页面须提示检查原生草稿，不能重放或自动补写。已接入 [WebSocket 路由](../src/workbench/web/terminal_api.rs)和独立工作台 xterm；完整退出、真实 IME 与设备输入须分别验证。
+独立 [PTY actor](../../src/workbench/terminal.rs) 将输入仲裁与写入串行处理，并以有界 VT 快照/输出订阅隔离慢消费者。原生输入缓冲区写满时，单次传递约 100ms 后返回可诊断失败；可能已有部分字节到达，输入序号已消费，页面须提示检查原生草稿，不能重放或自动补写。已接入 [WebSocket 路由](../../src/workbench/web/terminal_api.rs)和独立工作台 xterm；完整退出、真实 IME 与设备输入须分别验证。
 
-屏幕重建按 [ADR 0040](decisions/0040-vt-screen-failure-isolation.md)与 CLI 生命周期隔离。已修复 `vt100` 宽字符 resize 缺陷；其他解析 unwind 会丢弃损坏状态，发出带 outputSeq 的 `screen_state_unavailable`，已连接页面继续收实时输出，输入和 resize 继续。此时重新附着只能得到不完整空快照及后续输出，页面持久提示屏幕恢复不可用；没有可靠光标时不合成 CPR。不能吞异常后假装成功恢复，也不能为了重建屏幕自动重启 CLI。
+屏幕重建按 [ADR 0040](../decisions/0040-vt-screen-failure-isolation.md)与 CLI 生命周期隔离。已修复 `vt100` 宽字符 resize 缺陷；其他解析 unwind 会丢弃损坏状态，发出带 outputSeq 的 `screen_state_unavailable`，已连接页面继续收实时输出，输入和 resize 继续。此时重新附着只能得到不完整空快照及后续输出，页面持久提示屏幕恢复不可用；没有可靠光标时不合成 CPR。不能吞异常后假装成功恢复，也不能为了重建屏幕自动重启 CLI。
 
 <a id="terminal-wire-contract"></a>
 
@@ -677,7 +677,7 @@ interface WorkbenchViewState {
 }
 ```
 
-上例是早期布局示意；文件/Git 已实现，当前独立功能路径与导航以 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md)及[本机交互](interactions/workbench.md)为准。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
+上例是早期布局示意；文件/Git 已实现，当前独立功能路径与导航以 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md)及[本机交互](../interactions/workbench.md)为准。调用选择绑定运行及历史窗口，切换历史记录/窗口成功时关闭旧详情；历史加载失败仍保留原记录。底栏调用入口始终读取当前运行。关闭面板恢复入口焦点，入口已卸载时回到“用量与状态”；面板内 Escape 关闭，终端的 Escape 仍交给 CLI。面板覆盖的阅读内容临时 inert，节点与滚动仍保留，终端不被 inert。
 
 该状态只表达页面阅读选择，不授予输入权，也不替代 Run、request/response 或 controller generation。`path` 仍由服务端按 §8 验证。折叠和导航仅影响展示，TerminalPanel/连接保留；隐藏后的尺寸恢复遵守本节 controller resize 规则，不通过重新 spawn 修复画面。浏览器若记忆阅读位置，恢复时只恢复可用的阅读选择，不自动执行 claim/takeover、输入或模型请求。
 
@@ -689,7 +689,7 @@ interface WorkbenchViewState {
 
 ### 7.1 文件布局与保存语义
 
-本节定义异步历史契约；关键决定见 [ADR 0044](decisions/0044-workbench-asynchronous-history.md)。默认目录按 [ADR 0049](decisions/0049-workbench-user-directory.md) 更新为 `~/.codex-web/history`，Windows 对应 `%USERPROFILE%\.codex-web\history`，独立于原生 `CODEX_HOME`。`--data-dir` 可指定其他私有目录，其父目录须已存在；默认根可由异步记录器创建。旧目录不搬迁、合并或自动选取，需显式指定后继续读取。
+本节定义异步历史契约；关键决定见 [ADR 0044](../decisions/0044-workbench-asynchronous-history.md)。默认目录按 [ADR 0049](../decisions/0049-workbench-user-directory.md) 更新为 `~/.codex-web/history`，Windows 对应 `%USERPROFILE%\.codex-web\history`，独立于原生 `CODEX_HOME`。`--data-dir` 可指定其他私有目录，其父目录须已存在；默认根可由异步记录器创建。旧目录不搬迁、合并或自动选取，需显式指定后继续读取。
 
 ```text
 <workbench-data>/runs/<runEpoch>/
@@ -729,11 +729,11 @@ RolloutReader 后台只读 `sessions` 和 `archived_sessions`，以明确 thread
 
 ### 7.4 历史管理与统一配置扩展
 
-工作台支持占用统计、按运行删除、批量清理、可选保留期限及 JSON/网页配置。详细契约与验收要求统一维护在[历史与配置方案](codex-native-cli-workbench-history-settings.md)，为本文组成部分；此处不重复维护接口或字段。
+工作台支持占用统计、按运行删除、批量清理、可选保留期限及 JSON/网页配置。详细契约与验收要求统一维护在[历史与配置方案](history-settings.md)，为本文组成部分；此处不重复维护接口或字段。
 
 核心边界：后台扫描逻辑字节数并表达 partial；默认不允许手动或自动删除；精确 UUID 预览后确认，执行前复核当前项目、配置和运行 flock；整次运行移入同数据根暂存后可恢复地删除。新管理路径不等待/阻塞转发，也不修改原生会话、旧库或当前 Token/保存水位。仅移入暂存不表示空间已释放。
 
-现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。2026-10-14 按 [ADR 0059](decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板：网页设置位于 `/settings` 或 `/runs/{runId}/settings`，单端口中转加 `/g/{gatewayId}` 前缀；同 Run 切换保留终端实例，不重放输入。设置数据 API 仍为 `/workbench/v1/application/settings` 或 `/workbench/v1/runs/{runId}/settings`，展示路由不修改 wire contract。配置与兼容取舍仍见 [ADR 0048](decisions/0048-history-cleanup-and-json-settings.md) 及默认路径补充 [ADR 0049](decisions/0049-workbench-user-directory.md)，其历史验收不替代新路由验收。
+现有 meta v1 严格拒绝未知字段。保留期限使用新增独立 `lifecycle.json` 绑定最终已提交 meta 摘要和 endedAt；不迁移或补造旧记录时间，缺凭证/异常记录跳过自动清理。工作台配置默认在 `~/.codex-web/config/config.json`，Windows 对应 `%USERPROFILE%\.codex-web\config\config.json`；网页与本地文件共享契约，独立于原生 `CODEX_HOME`。路径/启动项下次启动生效，当前数据根不变。2026-10-14 按 [ADR 0059](../decisions/0059-workbench-routes-and-relay-recovery.md) 覆盖原同页面板：网页设置位于 `/settings` 或 `/runs/{runId}/settings`，单端口中转加 `/g/{gatewayId}` 前缀；同 Run 切换保留终端实例，不重放输入。设置数据 API 仍为 `/workbench/v1/application/settings` 或 `/workbench/v1/runs/{runId}/settings`，展示路由不修改 wire contract。配置与兼容取舍仍见 [ADR 0048](../decisions/0048-history-cleanup-and-json-settings.md) 及默认路径补充 [ADR 0049](../decisions/0049-workbench-user-directory.md)，其历史验收不替代新路由验收。
 
 ## 8. 文件、搜索与 Git 阅读
 
@@ -765,19 +765,19 @@ WorkspaceReader 使用独立线程、8 项有界队列和每请求 5 秒预算�
 
 逐组件 `openat(O_NOFOLLOW)` 阻止路径穿越与替换为 symlink；根内 symlink、普通文件硬链接、设备/FIFO 也拒绝。`.git`、常见凭证目录/文件名和私钥名按统一规则排除；这不是对任意源码内秘密的检测。目录扫描和文件读取检查前后元数据，异常明确返回。目录名称按 UTF-8 展示，不可编码名称省略。
 
-rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安全读取并以最多 16 个匿名文件描述符一批交给 rg，不执行 shell/preprocess，不让 rg 重新打开项目正文路径。Git 固定 cwd/argv、`-z` 路径、当前目录 pathspec/prefix 双重范围，禁用 pager、external diff/textconv、fsmonitor、hooks、可选锁、子模块递归、签名与远程抓取。Diff 从验证过的 HEAD/index blob 与安全读取的当前文本生成私有内容快照后比较；因此模式/rename 看左侧状态，冲突不伪造单一版本。决定、边界与替代方案见 [ADR 0050](decisions/0050-read-only-workspace.md)。
+rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安全读取并以最多 16 个匿名文件描述符一批交给 rg，不执行 shell/preprocess，不让 rg 重新打开项目正文路径。Git 固定 cwd/argv、`-z` 路径、当前目录 pathspec/prefix 双重范围，禁用 pager、external diff/textconv、fsmonitor、hooks、可选锁、子模块递归、签名与远程抓取。Diff 从验证过的 HEAD/index blob 与安全读取的当前文本生成私有内容快照后比较；因此模式/rename 看左侧状态，冲突不伪造单一版本。决定、边界与替代方案见 [ADR 0050](../decisions/0050-read-only-workspace.md)。
 
-快照写入后 rewind，在父进程中提前持有实际 CLOEXEC FD；子进程只清除相应 CLOEXEC，不覆盖固定 FD，父进程仍禁止其它 exec 继承。rg 使用实际 `/dev/fd/N`，按请求一次性消费共享偏移。Git 为避开 macOS 同号 `/dev/fd` 并发 stat 异常，改为只重开请求自有 0700 临时目录中的 0600 before/after 文件，不重新打开原项目路径。查询正常结束、错误和取消后清理；强制终止或清理失败可能遗留私有临时正文，不自动扫描删除未知目录。可选 `CODEX_WORKSPACE_DIAGNOSTICS=1` 将长度、偏移、FD 元数据、启动 errno、退出码/信号及 stderr 字节数/静态类别输出为本机 stderr JSONL，不进入 HTTP/历史，不记录正文、摘要、路径、argv 或环境。诊断不读正文或重置偏移，默认关闭，详见[调试指南](development/debugging.md#工作区-fd-诊断)及 [ADR 0050](decisions/0050-read-only-workspace.md)。
+快照写入后 rewind，在父进程中提前持有实际 CLOEXEC FD；子进程只清除相应 CLOEXEC，不覆盖固定 FD，父进程仍禁止其它 exec 继承。rg 使用实际 `/dev/fd/N`，按请求一次性消费共享偏移。Git 为避开 macOS 同号 `/dev/fd` 并发 stat 异常，改为只重开请求自有 0700 临时目录中的 0600 before/after 文件，不重新打开原项目路径。查询正常结束、错误和取消后清理；强制终止或清理失败可能遗留私有临时正文，不自动扫描删除未知目录。可选 `CODEX_WORKSPACE_DIAGNOSTICS=1` 将长度、偏移、FD 元数据、启动 errno、退出码/信号及 stderr 字节数/静态类别输出为本机 stderr JSONL，不进入 HTTP/历史，不记录正文、摘要、路径、argv 或环境。诊断不读正文或重置偏移，默认关闭，详见[调试指南](../development/debugging.md#工作区-fd-诊断)及 [ADR 0050](../decisions/0050-read-only-workspace.md)。
 
 只刷新当前可见查询，每次完成后至少等待 5 秒；文件树保留展开项但只轮询最后选中的目录。其他展开项保留上次结果，重新选中或“刷新文件”可更新。首版使用有界轮询而不增加递归 watcher，外部文件变化与已确认工具结果由下一轮读取反映，不把通知当作 Git 状态。切换/收起取消未完成查询，取消/超时回收查询子进程，已进入内核的磁盘 I/O 不能保证立即终止。
 
 文件树、搜索、Git 面板只改变左侧，中央可继续显示对话/历史。打开文件、搜索命中或有来源的工具路径才改变中央内容；代码行号、Diff 区分和读取时间保留，历史工具链接标明阅读当前文件。关闭文件回到此前中央选择。没有文件写、Git 写、命令执行或切换 CLI 的浏览器接口，也不增加 Git 锁与工作区独占承诺。
 
-2026-09-22 文件阅读按 [ADR 0052](decisions/0052-continuous-file-reading.md) 改为按需加载的 CodeMirror 6 只读视图：行号、滚动条、跨视口选区复制、全文查找与行号跳转共用完整的当前文档；Diff 保留源行按钮和颜色。一个中央文档实例，关闭/切换即销毁，不建逐文件缓存。相同 revision 不重置模型/选区/滚动，变化时按公共前后缀替换差异并映射位置。视口附近的行才创建 DOM，Diff 另有每行 4 字节的源行映射；1 MiB 输入边界不等同于整个浏览器堆上限。不加入编辑、保存、语言服务或自动加载外部资源。
+2026-09-22 文件阅读按 [ADR 0052](../decisions/0052-continuous-file-reading.md) 改为按需加载的 CodeMirror 6 只读视图：行号、滚动条、跨视口选区复制、全文查找与行号跳转共用完整的当前文档；Diff 保留源行按钮和颜色。一个中央文档实例，关闭/切换即销毁，不建逐文件缓存。相同 revision 不重置模型/选区/滚动，变化时按公共前后缀替换差异并映射位置。视口附近的行才创建 DOM，Diff 另有每行 4 字节的源行映射；1 MiB 输入边界不等同于整个浏览器堆上限。不加入编辑、保存、语言服务或自动加载外部资源。
 
 侧栏展示采用以下约定：活动栏统一静态 SVG 和中文短标签；文件树用目录/文件类型图标、缩进引导线、单行省略及当前文件选中态；Git 文件名、目录、原路径和中文状态分别展示，变更按 `path + scope` 高亮，保留完整路径的可访问名称和悬停提示。只将中央实际打开的 `FileSelection` 传给侧栏，不另建选中数据源或新增读取请求。选中目录的 `readAt/truncated` 移至树外底部，其他目录仍保留各自上次结果；Git 同样保留读取时刻和截断，解释文字折叠。已有结果的刷新不插入加载行，失败在结果上方说明仍是上次成功读取的内容。显示调整不改变查询、轮询、取消、分页或终端生命周期。
 
-图标进一步按用户要求采用 Microsoft Codicons 固定提交的 20 项本地 SVG 子集，映射、来源和许可见 [icons/README](../web/src/workbench/icons/README.md)。原始 `viewBox` 和路径保留，由 Preact 创建受控 SVG 节点；不注入 SVG 字符串、不加载字体或远程资源。中文名称、键盘焦点与树状态仍由原控件提供，装饰图标对辅助技术隐藏。
+图标进一步按用户要求采用 Microsoft Codicons 固定提交的 20 项本地 SVG 子集，映射、来源和许可见 [icons/README](../../web/src/workbench/icons/README.md)。原始 `viewBox` 和路径保留，由 Preact 创建受控 SVG 节点；不注入 SVG 字符串、不加载字体或远程资源。中文名称、键盘焦点与树状态仍由原控件提供，装饰图标对辅助技术隐藏。
 
 ## 9. 性能测量与验收
 
@@ -806,7 +806,7 @@ rg 固定 argv、`-e`、JSON 和项目 ignore 规则；先枚举候选，再安�
 | P11 前端交互 | 对照方案 §1 和 §9.3：深色布局、角色标签、用户/模型气泡、工具/命令/结果卡、调用入口；左侧 Git 与中央对话共存；导航与折叠保持终端和草稿；历史不切换 CLI；上滚保持锚点、显式跟随最新；捕获/保存/覆盖与接管分别呈现；键盘可达，1024/736/320px 无整页横向溢出 |
 | P12 历史管理 | 占用/partial/分页、精确候选、默认关闭删除、活动锁/跨项目/链接/路径替换负向、批量/幂等/读删并发、各删除崩溃点及暂存恢复；按可靠结束时间保留，旧/异常记录不自动删除；慢 I/O 与原生/旧数据不变 |
 | P13 统一配置 | JSON/Schema/默认/参数覆盖、字段与路径校验、原子保存/备份失败/修订冲突、外部编辑/损坏时禁删、共享范围/下次启动；独立设置路由直达/前后退、同标签草稿保留、文件往返、同 Run 终端保活与不重放输入 |
-| P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve；详见[设备接入设计](codex-native-cli-workbench-device-access.md) |
+| P14 设备接入 | 同一服务 IP/MagicDNS 同时可用、切换二维码不改变连接、共用 Run 级固定配对码（可重复扫码、重启更换）与浏览器授权、Host/Origin 对应、撤销流/重连/排队输入、默认关闭、HTTP 浏览器兼容与真机操作；不依赖 Serve；详见[设备接入设计](device-access.md) |
 | P15 跨项目历史与旧库兼容 | 原生/工作台/Observer 20/25 同页分页与搜索；来源/身份/缺口明确，零源写入、WAL/未知结构/索引预算/源撤销、路径缺失负向通过 |
 | P16 历史首页与明确启动 | 默认 0 CLI/模型请求，缺 CLI/profile 首页可读；重复启动复用；已有项目/指定目录新建、明确会话恢复、丢 ACK 不重发；entry/config 兼容；后台重复启停、前台冲突、首次注册和完整退出按 ADR 0063 验证 |
 | P17 多项目与授权隔离 | 新标签独立 Run；HTTP/SSE/WS/文件/用量/保存/清理不串接；手机只访问授权 Run；单 Run 停止与应用退出边界、慢全局历史不阻塞 CLI |
