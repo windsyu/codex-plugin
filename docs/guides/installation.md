@@ -2,7 +2,7 @@
 
 [使用指南](usage.md) · [支持范围](support.md) · [发布维护](../development/releasing.md)
 
-`0.3.0` 发布包面向已验证的 macOS / Apple Silicon。网页和原生目录选择助手已嵌入程序，运行时不需要源码、Rust 或 Node.js。启动项目仍需自行安装并配置官方 Codex CLI；当前模型接入限 `unmanaged-custom` Responses 静态 bearer。代码搜索需要 `rg`，Git 阅读需要 `git`。
+`0.5.1` 发布包面向已验证的 macOS / Apple Silicon，包含后台服务、历史整理和可选公网连接器，不包含独立 Relay 服务器。网页和原生目录选择助手已嵌入程序，运行时不需要源码、Rust 或 Node.js。启动项目仍需自行安装并配置官方 Codex CLI；当前模型接入限 `unmanaged-custom` Responses，静态 bearer 与原生 `auth.command` 的受测范围见[支持文档](support.md)。代码搜索需要 `rg`，Git 阅读需要 `git`。
 
 ## 快速安装与 PATH
 
@@ -27,7 +27,7 @@
 ```sh
 bash scripts/install-macos.sh
 # 可固定版本或指定绝对安装前缀
-bash scripts/install-macos.sh --version v0.3.0 --prefix "$HOME/.codex-view"
+bash scripts/install-macos.sh --version v0.5.1 --prefix "$HOME/.codex-view"
 # 明确升级已有安装：后台先 code-view stop，前台先 Ctrl-C
 bash scripts/install-macos.sh --force
 # 只安装程序，由自己管理 PATH
@@ -73,20 +73,20 @@ code-view-uninstall
 
 ## 手动安装发布包
 
-从 [v0.3.0 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 下载安装包与 `SHA256SUMS`。正式资产的 manifest 记录发布 tag 对应的源码提交，`sourceDirty` 为 `false`。
+从 [v0.5.1 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.5.1) 下载安装包与 `SHA256SUMS`。正式资产的 manifest 记录发布 tag 对应的源码提交，`sourceDirty` 为 `false`。
 
-将 `code-view-0.3.0-aarch64-apple-darwin.tar.gz` 和同目录的 `SHA256SUMS` 放在一起，校验并解压：
+将 `code-view-0.5.1-aarch64-apple-darwin.tar.gz` 和同目录的 `SHA256SUMS` 放在一起，校验并解压：
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-tar -xzf code-view-0.3.0-aarch64-apple-darwin.tar.gz
-cd code-view-0.3.0-aarch64-apple-darwin
+tar -xzf code-view-0.5.1-aarch64-apple-darwin.tar.gz
+cd code-view-0.5.1-aarch64-apple-darwin
 ./install.sh --prefix "$HOME/.codex-view"
 export PATH="$HOME/.codex-view/bin:$PATH"
 code-view --version
 ```
 
-包内安装器先校验内容、平台与目标冲突，再复制到指定前缀的 `bin` 和 `share/code-view`；已发布的 `v0.3.0` 包内默认仍为 `~/.local`，所以上面显式传入新前缀，无需 sudo；后续从当前源码生成的包默认使用 `~/.codex-view`。这个手动入口不编辑 shell 配置或生成快速卸载清单；需要 PATH 和卸载管理时使用上面的快速脚本。手动安装器遇到已有文件会停止，明确升级时使用 `./install.sh --prefix "$HOME/.codex-view" --force`。升级前先在原启动器中 Ctrl-C 退出旧应用，再启动新版本。
+包内安装器先校验内容、平台与目标冲突，再复制到指定前缀的 `bin` 和 `share/code-view`，默认前缀为 `~/.codex-view`，无需 sudo；旧 `v0.3.0` 包内安装器的默认前缀为 `~/.local`。这个手动入口不编辑 shell 配置或生成快速卸载清单；需要 PATH 和卸载管理时使用上面的快速脚本。手动安装器遇到已有文件会停止，明确升级时使用 `./install.sh --prefix "$HOME/.codex-view" --force`。升级前后台实例先 `code-view stop`，前台实例先在原启动器中 Ctrl-C，再安装并启动新版本。
 
 当前源码的包安装器拒绝符号链接、非普通文件或多硬链接的可执行文件目标；`--force` 不绕过这些检查，避免覆盖同一文件的其他安装路径。升级服务检查与安装锁同样适用于手动包入口。
 
