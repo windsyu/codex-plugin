@@ -18,6 +18,26 @@ async function until(check, description) {
   }
   throw new Error(`Release verification timed out: ${description}`);
 }
+export async function waitForSyntheticLaunches(file, expected) {
+  await until(() => {
+    let content;
+    try { content = fs.readFileSync(file, 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+    const launches = content.split('\n');
+    const pending = launches.pop();
+    const remaining = [...expected];
+    for (const cwd of launches) {
+      const index = remaining.indexOf(cwd);
+      assert.ok(index !== -1, `Unexpected or duplicate synthetic CLI launch: ${cwd}`);
+      remaining.splice(index, 1);
+    }
+    // The shell may still be appending a line. Only complete records establish
+    // execution; run-ready establishes process creation, not script progress.
+    if (remaining.length || pending) return false;
+    assert.deepEqual(launches.sort(), [...expected].sort());
+    return true;
+  }, 'synthetic CLI launch cwd records');
+}
 export async function verifyRelease(archive, workspace, version) {
   const root = path.join(workspace, '安装验证 with spaces');
   fs.mkdirSync(root);
@@ -52,7 +72,7 @@ export async function verifyRelease(archive, workspace, version) {
     cliPids.push(ready.cliPid);
     const entry = JSON.parse(fs.readFileSync(entryFile, 'utf8'));
     assert.equal(entry.instanceId, ready.instanceId);
-    assert.equal(fs.readFileSync(path.join(native, 'launched-cwds'), 'utf8').trim(), project);
+    await waitForSyntheticLaunches(path.join(native, 'launched-cwds'), [project]);
     const page = await fetch(entry.address);
     assert.equal(page.status, 200);
     const html = await page.text();
@@ -76,10 +96,11 @@ export async function verifyRelease(archive, workspace, version) {
     assert.equal(reused.cliPid, ready.cliPid);
     run('code-view', ['--history', '--no-open'], options);
     assert.equal((await getApplication()).runs.length, 1, 'history does not start CLI');
+    await waitForSyntheticLaunches(path.join(native, 'launched-cwds'), [project]);
     const second = JSON.parse(run('code-view', [other, '--no-open', '--codex-bin', fakeCli], options));
     cliPids.push(second.cliPid);
     assert.equal((await getApplication()).runs.length, 2);
-    assert.deepEqual(fs.readFileSync(path.join(native, 'launched-cwds'), 'utf8').trim().split('\n').sort(), [project, other].sort());
+    await waitForSyntheticLaunches(path.join(native, 'launched-cwds'), [project, other]);
   } finally {
     if (child.exitCode === null) child.kill('SIGINT');
     try { await until(() => child.exitCode !== null || child.signalCode !== null, 'launcher shutdown'); }
