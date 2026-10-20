@@ -6,14 +6,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { parseArgs } from 'node:util';
 import { createRun } from './lib/artifacts.mjs';
 
 assert.equal(process.platform, 'darwin', 'requires a logged-in macOS desktop');
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const { values } = parseArgs({ options: { binary: { type: 'string' } }, allowPositionals: false });
+const binary = fs.realpathSync(path.resolve(root, values.binary ?? 'target/debug/codex-view'));
+const binarySha256 = crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex');
 const run = createRun(root, { label: 'real-launchagent-lifecycle' });
 const home = path.join(run.path, 'home');
 const native = path.join(home, 'native');
-const binary = path.join(root, 'target/debug/codex-view');
 fs.mkdirSync(native, { recursive: true, mode: 0o700 });
 const cli = path.join(home, 'synthetic-codex');
 fs.writeFileSync(cli, '#!/bin/sh\nif [ "$1" = --version ]; then echo "codex-cli 0.155.1"; exit 0; fi\necho "synthetic terminal ready"\nexec /bin/cat\n', { mode: 0o700 });
@@ -52,8 +56,11 @@ async function privateShutdown() {
   assert.equal(response.status, 200);
 }
 let success = false;
+let binaryVersion;
 try {
   console.log(`Task artifacts: ${run.path}`);
+  binaryVersion = command(['--version']).stdout.trim();
+  assert.match(binaryVersion, /^codex-view \d+\.\d+\.\d+$/);
   const first = command(['--no-open', '--codex-bin', cli, 'start']);
   assert.match(first.stderr, /code-view open --relay/);
   let s = status();
@@ -126,7 +133,7 @@ try {
     foreground.kill('SIGTERM');
     await until(() => foreground.exitCode !== null, 'test foreground cleanup').catch(() => { success = false; });
   }
-  fs.writeFileSync(path.join(run.path, 'report.json'), JSON.stringify({ success, checks, limitations: ['Actual login/logout and sleep/resume are not simulated.'] }, null, 2));
+  fs.writeFileSync(path.join(run.path, 'report.json'), JSON.stringify({ success, binary, binaryVersion, binarySha256, checks, limitations: ['Actual login/logout and sleep/resume are not simulated.'] }, null, 2));
   run.finish(success);
   console.log(JSON.stringify({ success, checks }));
   if (!success) process.exitCode = 1;

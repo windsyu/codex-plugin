@@ -8,6 +8,7 @@
 | Microsoft Codicons 子集 | 来源 commit、作者、20 个图形的提取方式见[图标说明](web/src/workbench/icons/README.md)，保留原 [CC BY 4.0 许可证](web/src/workbench/icons/LICENSE)及归属声明 |
 | Rust 依赖 | 精确解析版本见 `Cargo.lock`；发布者需根据实际分发的依赖保留其要求的版权、许可和通知 |
 | Web 依赖 | 精确解析版本见 `web/package-lock.json`；前端会嵌入 binary，发布前应核对随包分发要求 |
+| macOS Rust 运行库 | 从实际 `rustc --print sysroot` 保留 `share/doc/rust/COPYRIGHT-library.html`、MIT/Apache-2.0/Unicode-3.0/BSD-2-Clause/LLVM-exception 原许可文本，以及同工具链 `rust-src` 的 `lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt` 和其明确引用的 `libm/LICENSE.txt`；Cargo metadata 不覆盖这些静态链接的运行库 |
 | 静态 Linux 运行库 | 指定测试中转的 musl 构建另附实际 Zig 工具链的 musl、LLVM libunwind、compiler runtime 及 Rust 标准库/内建函数原通知；这些运行库不由 Cargo/npm metadata 完整列出，不能只收集依赖索引 |
 
 ## 更新与发布
@@ -18,4 +19,6 @@
 
 分发包须包含项目 LICENSE、本声明及分发材料要求的第三方许可。`node scripts/dev.mjs package` 根据 host-resolved Cargo metadata 与已安装的 npm 运行依赖保留实际许可/通知文件，另包含上述补丁、归属与修改说明；结果索引为包内 `licenses/INDEX.json`。维护者仍需核对锁定依赖和实际分发内容；本清单不代替生成包的检查结果。
 
-目标专用静态包装通过 `writeLicenses` 的显式 `runtimeLicenses` 输入保留运行库原文件，索引类别为 `toolchain-runtime`，并纳入全包校验和。Linux 测试包保守附带 musl/工具链相关原始文本以完整保留单文件通知；Rust 使用 `COPYRIGHT-library.html` 及原许可文本，不把编译器文档清单中的跨平台或可选组件认定为当前二进制依赖。此收集不会安装、链接或执行附带源码，也不代表新增平台发布支持。macOS 正式包装仍须按其实际 sysroot 独立核查，不能用 Linux 包的许可检查替代。
+目标专用静态包装通过 `writeLicenses` 的显式 `runtimeLicenses` 输入保留运行库原文件，索引类别为 `toolchain-runtime`，并纳入全包校验和。macOS 包自动从实际 sysroot 收集上表材料；索引中的运行库版本指构建用的 Rust 工具链版本。标准库通知包含上游跨平台材料，原文完整保留不表示所有列出的组件均链接到 macOS binary。compiler-builtins 自带的许可声明为 `MIT AND Apache-2.0 WITH LLVM-exception`，不能用项目 MIT 许可替代。缺少对应 `rust-src`、空文件、未知通知格式、符号链接或二进制通知时拒绝打包，须准备匹配工具链的原始材料后重试。
+
+Linux 测试包保守附带 musl/工具链相关原始文本以完整保留单文件通知；Rust 使用 `COPYRIGHT-library.html` 及原许可文本，不把编译器文档清单中的跨平台或可选组件认定为当前二进制依赖。此收集不会安装、链接或执行附带源码，也不代表新增平台发布支持。macOS 与 Linux 运行库按各自实际 sysroot 独立核查，不能相互替代。

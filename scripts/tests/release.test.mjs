@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { collectLicenseFiles, writeLicenses, writeChecksums, packageRelease, RELEASE_TARGET } from '../lib/release.mjs';
+import { collectLicenseFiles, writeLicenses, writeChecksums, packageRelease, macosRustRuntimeLicenses, RELEASE_TARGET } from '../lib/release.mjs';
 import { parseArgs } from '../dev.mjs';
 
 function fixture(t) {
@@ -29,6 +29,19 @@ function packagingFixture(t, host = RELEASE_TARGET) {
   const tools = path.join(f.root, 'tools');
   const home = path.join(f.root, 'home');
   const target = path.join(f.root, 'target');
+  const sysroot = path.join(f.root, 'actual rust sysroot');
+  const noticeFiles = [
+    'share/doc/rust/COPYRIGHT-library.html',
+    ...['MIT', 'Apache-2.0', 'Unicode-3.0', 'BSD-2-Clause', 'LLVM-exception'].map(name => `share/doc/rust/licenses/${name}.txt`),
+    'lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt',
+    'lib/rustlib/src/rust/library/compiler-builtins/libm/LICENSE.txt',
+  ];
+  for (const file of noticeFiles) {
+    fs.mkdirSync(path.dirname(path.join(sysroot, file)), { recursive: true });
+    fs.writeFileSync(path.join(sysroot, file), file.endsWith('.html')
+      ? '<h1>Copyright notices for The Rust Standard Library</h1>\n'
+      : file.endsWith('LICENSE.txt') ? 'MIT AND Apache-2.0 WITH LLVM-exception\n' : `original ${file}\n`);
+  }
   for (const directory of [tools, home, path.join(home, '.cargo')]) fs.mkdirSync(directory);
   const environment = {
     HOME: home, USERPROFILE: home, CARGO_HOME: path.join(home, '.cargo'),
@@ -42,11 +55,13 @@ function packagingFixture(t, host = RELEASE_TARGET) {
     }
   });
   const mock = (name, body) => fs.writeFileSync(path.join(tools, name), `#!${process.execPath}\n${body}\n`, { mode: 0o755 });
-  mock('rustc', `console.log(${JSON.stringify(`rustc 1.95.0\nhost: ${host}`)});`);
+  mock('rustc', `const assert = require('node:assert/strict');
+    if (process.argv[2] === '-vV') console.log(${JSON.stringify(`rustc 1.95.0\nhost: ${host}\nrelease: 1.95.0`)});
+    else { assert.deepEqual(process.argv.slice(2), ['--print', 'sysroot']); console.log(${JSON.stringify(sysroot)}); }`);
   mock('cargo', `require('node:assert/strict').deepEqual(process.argv.slice(2), ['metadata', '--locked', '--offline', '--filter-platform', ${JSON.stringify(RELEASE_TARGET)}, '--format-version', '1']); console.log(${JSON.stringify(JSON.stringify({ ...f.metadata, target_directory: target }))});`);
   mock('otool', `console.log(process.argv[3] + ':\\n\\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)');`);
   mock('git', "if (process.argv[2] === 'rev-parse') console.log('0123456789012345678901234567890123456789'); else if (process.argv[2] !== 'status') process.exit(1);");
-  return { ...f, target };
+  return { ...f, target, sysroot, noticeFiles };
 }
 
 test('packaging selects freshly built explicit-target binaries over stale same-version host binaries', { skip: process.platform !== 'darwin' }, t => {
@@ -72,6 +87,47 @@ test('packaging selects freshly built explicit-target binaries over stale same-v
   }
   assert.equal(release.target, RELEASE_TARGET);
   assert.equal(fs.statSync(release.archive).isFile(), true);
+  const index = JSON.parse(fs.readFileSync(path.join(release.bundle, 'licenses/INDEX.json')));
+  const runtimes = index.filter(entry => entry.ecosystem === 'toolchain-runtime');
+  assert.deepEqual(runtimes.map(entry => [entry.name, entry.version]), [['rust-library', '1.95.0'], ['rust-compiler-builtins', '1.95.0']]);
+  assert.equal(JSON.stringify(index).includes(f.sysroot), false);
+  const checksums = fs.readFileSync(path.join(release.bundle, 'CHECKSUMS.sha256'), 'utf8');
+  for (const entry of runtimes) {
+    for (const file of entry.licenseFiles) {
+      const original = file.slice(`licenses/toolchain-runtime/${entry.name}@${entry.version}/`.length);
+      const payload = fs.readFileSync(path.join(release.bundle, file));
+      assert.deepEqual(payload, fs.readFileSync(path.join(f.sysroot, original)));
+      assert.ok(checksums.includes(`${crypto.createHash('sha256').update(payload).digest('hex')}  ${file}\n`));
+    }
+  }
+  assert.equal(runtimes.flatMap(entry => entry.licenseFiles).length, f.noticeFiles.length);
+});
+
+test('macOS runtime notice discovery fails closed for missing, empty, binary and changed notices', async t => {
+  for (const change of ['missing', 'empty', 'binary', 'unrecognized', 'symlink']) {
+    await t.test(change, t => {
+      const f = packagingFixture(t);
+      const notice = path.join(f.sysroot, 'lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt');
+      if (change === 'missing') fs.unlinkSync(notice);
+      if (change === 'empty') fs.writeFileSync(notice, ' \n');
+      if (change === 'binary') fs.writeFileSync(notice, Buffer.from([65, 0, 66]));
+      if (change === 'unrecognized') fs.writeFileSync(notice, 'new license terms require review');
+      if (change === 'symlink') { fs.unlinkSync(notice); fs.symlinkSync(path.join(f.sysroot, 'share/doc/rust/licenses/MIT.txt'), notice); }
+      assert.throws(() => macosRustRuntimeLicenses(f.root), undefined, change);
+      assert.deepEqual(fs.readdirSync(f.output), []);
+    });
+  }
+});
+
+test('runtime notice discovery rejects symlink ancestors and unknown compiler versions', t => {
+  const f = packagingFixture(t);
+  const library = path.join(f.sysroot, 'lib');
+  const moved = path.join(f.sysroot, 'real-lib');
+  fs.renameSync(library, moved);
+  fs.symlinkSync(moved, library);
+  assert.throws(() => macosRustRuntimeLicenses(f.root), /Symlink/);
+  fs.writeFileSync(path.join(f.root, 'tools/rustc'), `#!${process.execPath}\nconsole.log('release: unknown');\n`);
+  assert.throws(() => macosRustRuntimeLicenses(f.root), /stable Rust runtime version/);
 });
 
 test('unsupported Rust host fails before package inputs are read or artifacts written', t => {
