@@ -1,7 +1,5 @@
 use crate::{
-    App, Failure, Result,
-    auth::set_cookie,
-    bad, denied,
+    App, Failure, Result, bad, denied,
     store::{digest, now, secret},
 };
 use axum::{
@@ -34,21 +32,8 @@ pub(crate) struct ForgetGate {
     pub reached: std::sync::Arc<tokio::sync::Notify>,
     pub resume: std::sync::Arc<tokio::sync::Notify>,
 }
-pub(crate) async fn index(
-    State(s): State<App>,
-    h: HeaderMap,
-    request: axum::extract::Request,
-) -> Response {
-    if s.0.config.host_origin(&h).is_some_and(|(_, g)| g.is_some()) {
-        tunnel_index(s, h, request).await
-    } else {
-        Html(include_str!("../static/index.html")).into_response()
-    }
-}
-async fn tunnel_index(s: App, h: HeaderMap, request: axum::extract::Request) -> Response {
-    crate::tunnel::forward_inner(s, h, request, None)
-        .await
-        .unwrap_or_else(IntoResponse::into_response)
+pub(crate) async fn index() -> Response {
+    Html(include_str!("../static/index.html")).into_response()
 }
 pub(crate) async fn script() -> impl IntoResponse {
     (
@@ -60,17 +45,6 @@ pub(crate) async fn style() -> impl IntoResponse {
     (
         [("content-type", "text/css; charset=utf-8")],
         include_str!("../static/portal.css"),
-    )
-}
-pub(crate) async fn exchange_page() -> impl IntoResponse {
-    Html(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Opening workbench</title><p id=\"status\">Opening your workbench…</p><script src=\"/relay/v1/exchange.js\" defer></script></html>",
-    )
-}
-pub(crate) async fn exchange_script() -> impl IntoResponse {
-    (
-        [("content-type", "text/javascript; charset=utf-8")],
-        "const code=new URLSearchParams(location.hash.slice(1)).get('code');history.replaceState(null,'',location.pathname);fetch('/relay/v1/session/exchange',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})}).then(r=>{if(!r.ok)throw Error();location.replace('/')}).catch(()=>{document.getElementById('status').textContent='This link expired or was already used. Open the workbench again from your account.'});",
     )
 }
 pub(crate) async fn binding_start(
@@ -203,21 +177,12 @@ pub(crate) async fn binding_approve(
         .resume
         .as_ref()
         .map(|(id, _)| *id)
-        .or(s.0.config.fixed_gateway_id)
         .unwrap_or_else(Uuid::new_v4);
     let gateway_origin = s.0.config.gateway_origin(id).ok_or_else(bad)?;
     let token = secret();
     let mut c = s.0.store.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let (username,generation): (String,i64) = tx.query_row("SELECT a.username,a.auth_generation FROM accounts a JOIN sessions s ON s.account=a.id WHERE a.id=?1 AND a.disabled=0 AND a.must_change_password=0 AND s.id=?2 AND s.gateway IS NULL AND s.parent IS NULL AND s.auth_generation=a.auth_generation AND s.expires>?3",params![account.account.to_string(),account.id.to_string(),now()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(denied)?;
-    if p.resume.is_none()
-        && s.0.config.fixed_gateway_id.is_some()
-        && tx.query_row("SELECT EXISTS(SELECT 1 FROM gateways)", [], |r| {
-            r.get::<_, bool>(0)
-        })?
-    {
-        return Err(Failure(StatusCode::CONFLICT));
-    }
     let n = if let Some((_, hash)) = &p.resume {
         tx.execute("UPDATE gateways SET name=?1,credential=?2,auth_generation=?3,workbench_api_version=0 WHERE id=?4 AND account=?5 AND credential=?6",params![p.name,digest(&token),generation,id.to_string(),account.account.to_string(),hash])?
     } else {
@@ -380,7 +345,7 @@ pub(crate) async fn open(
     req: axum::extract::Request,
 ) -> Result<Json<serde_json::Value>> {
     let account = s.authorized_portal_session(&h)?;
-    if s.0.config.single_origin {
+    {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct OpenInput {
@@ -401,6 +366,7 @@ pub(crate) async fn open(
             return Err(Failure(StatusCode::CONFLICT));
         }
         let grant = Uuid::new_v4();
+        let tunnels = s.0.tunnels.lock().unwrap();
         let mut c = s.0.store.0.lock().unwrap();
         let tx = c.transaction()?;
         let compatible: Option<(u32,i64)> = tx.query_row("SELECT workbench_api_version,auth_generation FROM gateways WHERE id=?1 AND account=?2",params![id.to_string(),account.account.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
@@ -410,72 +376,19 @@ pub(crate) async fn open(
         if api != input.ui_api_version || generation != account.auth_generation {
             return Err(Failure(StatusCode::CONFLICT));
         }
+        let connection = tunnels
+            .get(&id)
+            .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
+        if connection.workbench_api_version != input.ui_api_version || *connection.cancel.borrow() {
+            return Err(Failure(StatusCode::CONFLICT));
+        }
         let n = tx.execute("INSERT INTO sessions(id,hash,account,gateway,parent,expires,auth_generation,ui_api_version) SELECT ?1,?2,p.account,?3,p.id,MIN(p.expires,?4),a.auth_generation,?5 FROM sessions p JOIN accounts a ON a.id=p.account WHERE p.id=?6 AND p.account=?7 AND p.gateway IS NULL AND p.parent IS NULL AND p.expires>?8 AND p.auth_generation=a.auth_generation AND a.disabled=0 AND a.must_change_password=0",params![grant.to_string(),digest(&secret()),id.to_string(),now()+43200,input.ui_api_version,account.id.to_string(),account.account.to_string(),now()])?;
         if n != 1 {
             return Err(denied());
         }
         tx.commit()?;
-        return Ok(Json(
+        Ok(Json(
             serde_json::json!({"url":format!("{}/g/{id}/#grant={grant}&session={}&api={}",s.0.config.portal_origin,account.id,input.ui_api_version)}),
-        ));
+        ))
     }
-    let gateway_origin =
-        s.0.config
-            .gateway_origin(id)
-            .ok_or(Failure(StatusCode::NOT_FOUND))?;
-    let code = secret();
-    let c = s.0.store.0.lock().unwrap();
-    let n=c.execute("INSERT INTO open_codes(hash,parent,gateway,expires) SELECT ?1,p.id,g.id,?3 FROM gateways g JOIN accounts a ON a.id=g.account JOIN sessions p ON p.account=a.id WHERE g.id=?4 AND g.account=?5 AND p.id=?2 AND p.gateway IS NULL AND p.parent IS NULL AND p.expires>?6 AND a.disabled=0 AND a.must_change_password=0 AND p.auth_generation=a.auth_generation AND g.auth_generation=a.auth_generation AND g.workbench_api_version=?7",params![digest(&code),account.id.to_string(),now()+60,id.to_string(),account.account.to_string(),now(),codex_relay_protocol::WORKBENCH_API_VERSION])?;
-    if n != 1 {
-        return Err(Failure(StatusCode::NOT_FOUND));
-    }
-    Ok(Json(
-        serde_json::json!({"url":format!("{}/relay/v1/open#code={code}",gateway_origin)}),
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Exchange {
-    code: String,
-}
-pub(crate) async fn exchange(
-    State(s): State<App>,
-    h: HeaderMap,
-    Json(input): Json<Exchange>,
-) -> Result<Response> {
-    let gateway =
-        s.0.config
-            .host_origin(&h)
-            .and_then(|(_, g)| g)
-            .ok_or_else(denied)?;
-    if input.code.len() > 128 {
-        return Err(denied());
-    }
-    let token = secret();
-    let mut c = s.0.store.0.lock().unwrap();
-    let tx = c.transaction()?;
-    let (parent,account,generation)=tx.query_row("SELECT p.id,p.account,a.auth_generation FROM open_codes o JOIN sessions p ON p.id=o.parent JOIN accounts a ON a.id=p.account JOIN gateways g ON g.id=o.gateway WHERE o.hash=?1 AND o.gateway=?2 AND o.expires>?3 AND p.expires>?3 AND p.gateway IS NULL AND p.parent IS NULL AND a.disabled=0 AND a.must_change_password=0 AND g.account=p.account AND p.auth_generation=a.auth_generation AND g.auth_generation=a.auth_generation AND g.workbench_api_version=?4",params![digest(&input.code),gateway.to_string(),now(),codex_relay_protocol::WORKBENCH_API_VERSION],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).optional()?.ok_or_else(denied)?;
-    tx.execute(
-        "DELETE FROM open_codes WHERE hash=?1",
-        [digest(&input.code)],
-    )?;
-    tx.execute(
-        "INSERT INTO sessions(id,hash,account,gateway,parent,expires,auth_generation,ui_api_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![
-            Uuid::new_v4().to_string(),
-            digest(&token),
-            account,
-            gateway.to_string(),
-            parent,
-            now() + 43200,
-            generation,
-            codex_relay_protocol::WORKBENCH_API_VERSION
-        ],
-    )?;
-    tx.commit()?;
-    Ok((
-        set_cookie("__Host-workbench_session", &token, 43200),
-        Json(serde_json::json!({"ok":true})),
-    )
-        .into_response())
 }

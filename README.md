@@ -24,7 +24,7 @@
 - **受限流转发**：提供经过身份校验的 HTTP、SSE 和终端 WebSocket 转发，不是通用网络代理。
 - **独立运行**：程序为 `codex-relayd`，不运行 Codex CLI、模型代理或本机历史服务，不保存工作台历史正文。
 
-Relay 是可信中继，并非端到端加密服务；运营者可接触经过中继的内容。远程访问需要电脑在线且两端版本兼容。
+Relay 提供可信中央前端；浏览器与电脑按 CLI Run 建立加密通道，后端只转发业务密文。运营者仍属可信方，恶意修改前端或授权不在防护范围内。远程访问需要电脑在线且三端版本兼容，见 [ADR 0066](docs/decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 [中继部署与运维](docs/guides/public-relay-deployment.md) · [架构](docs/architecture/relay.md) · [交互与 API](docs/interactions/relay.md)
 
@@ -52,7 +52,7 @@ code-view       # 在当前项目启动 CLI 与网页工作台
 codex-view      # 仅打开项目 / 历史首页，不启动 CLI
 ```
 
-`v0.5.1` 发布包面向 macOS / Apple Silicon，包含后台服务与可选公网连接器，不附带独立 Relay 服务器；模型接入以已验证的自定义 Responses provider 为限。其他平台、认证方式和 CLI 版本的边界见[支持范围](docs/guides/support.md)。旧 `v0.3.0` 发布包不包含后续源码增量。
+`v1.0.0` 发布包面向 macOS / Apple Silicon，包含后台服务与按 Run 加密的可选公网连接器，不附带独立 Relay 服务器；公网前端、电脑与 Relay 须配套使用 API/wire 3，无明文回退，仍信任自部署前端及授权方。模型接入以已验证的自定义 Responses provider 为限。其他平台、认证方式和 CLI 版本的边界见[支持范围](docs/guides/support.md)，主版本号不扩大受测范围。
 
 从源码运行或部署 Relay，请分别阅读[开发指南](docs/development/README.md)和[中继部署指南](docs/guides/public-relay-deployment.md)。安装、后台运行、配置与卸载的完整步骤均在 `docs/guides/`。
 

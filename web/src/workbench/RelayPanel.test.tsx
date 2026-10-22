@@ -19,6 +19,9 @@ it('reads only when open and sends instance-scoped bind with a safe verification
   document.body.append(root); await act(async () => render(<RelayPanel instanceId={instanceId} open={false} onClose={() => {}} />, root));
   expect(fetch).not.toHaveBeenCalled();
   await show();
+  expect(root.textContent).toContain('浏览器与电脑间加密传输');
+  expect(root.textContent).toContain('前端及授权逻辑仍须可信');
+  expect(root.textContent).not.toContain('公网服务能够读取经它传输的内容');
   const inputs = root.querySelectorAll('input');
   await act(async () => { inputs[0].value = 'https://app.example.com'; inputs[0].dispatchEvent(new Event('input', { bubbles: true })); inputs[1].value = 'My workstation'; inputs[1].dispatchEvent(new Event('input', { bubbles: true })); });
   await click('登录并开启公网接入');

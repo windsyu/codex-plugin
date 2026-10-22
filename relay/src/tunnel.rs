@@ -1,17 +1,18 @@
-use crate::{App, Failure, Result, bad, cookie, denied};
+use crate::{App, Failure, Result, bad, denied};
 use axum::{
-    body::{Body, Bytes},
+    Json,
     extract::{
         Path, Query, Request, State,
-        ws::{Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use codex_relay_protocol::{
-    self as protocol, Data, Hello, MAX_FRAME, MAX_STREAMS, Open, StreamKind, ToGateway, ToRelay,
-    Welcome,
+    self as protocol, Hello, MAX_FRAME, MAX_STREAMS, ToGateway, ToRelay, Welcome,
 };
+use futures_util::{SinkExt, StreamExt};
+use protocol::secure::{AccessContext, ChannelBinding, Scope};
 use serde::Deserialize;
 use std::{collections::HashSet, time::Duration};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -32,7 +33,6 @@ pub(crate) struct Connection {
     pub instance: Uuid,
     pub sessions: HashSet<Uuid>,
     pub capacity: std::sync::Arc<tokio::sync::Semaphore>,
-    pub terminal_capacity: std::sync::Arc<tokio::sync::Semaphore>,
     pub send: mpsc::Sender<ToGateway>,
     pub cancel: watch::Sender<bool>,
 }
@@ -40,7 +40,6 @@ pub(crate) struct Stream {
     pub gateway: Uuid,
     pub epoch: Uuid,
     pub session: Uuid,
-    pub terminal: bool,
     pub cancel: watch::Sender<bool>,
     attach: Option<oneshot::Sender<WebSocket>>,
 }
@@ -95,7 +94,10 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
         _ => None,
     };
     let Some(hello) = hello.filter(|h| {
-        h.version == protocol::VERSION && h.gateway_id == gateway && h.client_version.len() <= 128
+        h.version == protocol::VERSION
+            && h.gateway_id == gateway
+            && !h.instance_id.is_nil()
+            && h.client_version.len() <= 128
     }) else {
         return;
     };
@@ -145,6 +147,20 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
             return;
         }
         cancel_streams(&s, gateway, None);
+        // Physical channels from the previous epoch still hold their permits
+        // until their sockets drop. Reconnect must not reset this budget.
+        let capacity = {
+            let mut capacities = s.0.gateway_channel_capacity.lock().unwrap();
+            capacities.retain(|_, v| v.strong_count() > 0);
+            capacities
+                .get(&gateway)
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS));
+                    capacities.insert(gateway, std::sync::Arc::downgrade(&capacity));
+                    capacity
+                })
+        };
         if let Some(old) = tunnels.insert(
             gateway,
             Connection {
@@ -153,8 +169,7 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
                 epoch,
                 instance: hello.instance_id,
                 sessions: HashSet::new(),
-                capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)),
-                terminal_capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+                capacity,
                 send,
                 cancel,
             },
@@ -186,7 +201,7 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
             _=sweep.tick()=>{
                 if s.0.store.cleanup_expired_if_due().is_err(){eprintln!("relay metadata cleanup failed");}
                 s.revoke_invalid();
-                if s.0.store.gateway_auth(&credential)!=Some((gateway,account)) || heartbeat.elapsed()>Duration::from_secs(40){break;}
+                if s.0.store.gateway_auth(&credential)!=Some((gateway,account)) || heartbeat.elapsed()>Duration::from_secs(protocol::LEASE_SECONDS){break;}
                 continue;
             },
             _=renew.tick()=>{
@@ -198,7 +213,7 @@ async fn control(s: App, mut socket: WebSocket, credential: String, gateway: Uui
                 match msg {
                     Some(Ok(Message::Text(text)))=>match serde_json::from_str::<ToRelay>(&text){
                         Ok(ToRelay::Heartbeat)=>heartbeat=tokio::time::Instant::now(),
-                        Ok(ToRelay::StreamFailed{stream_id,..})=>{let mut streams=s.0.streams.lock().unwrap();if streams.get(&stream_id).is_some_and(|v|v.gateway==gateway&&v.epoch==epoch) && let Some(v)=streams.remove(&stream_id){v.cancel.send_replace(true);}},
+                        Ok(ToRelay::ChannelFailed{channel_id:stream_id,..})=>{let mut streams=s.0.streams.lock().unwrap();if streams.get(&stream_id).is_some_and(|v|v.gateway==gateway&&v.epoch==epoch) && let Some(v)=streams.remove(&stream_id){v.cancel.send_replace(true);}},
                         _=>break,
                     },
                     Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},
@@ -252,6 +267,7 @@ async fn send_json<T: serde::Serialize>(ws: &mut WebSocket, v: &T) -> std::resul
         .map_err(|_| ())
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Epoch {
     epoch: Uuid,
 }
@@ -264,7 +280,11 @@ pub(crate) async fn attach(
 ) -> Result<Response> {
     let (gateway, _) = s.0.store.gateway_auth(bearer(&h)?).ok_or_else(denied)?;
     let tunnels = s.0.tunnels.lock().unwrap();
-    if tunnels.get(&gateway).is_none_or(|c| c.epoch != query.epoch) {
+    let c = tunnels
+        .get(&gateway)
+        .filter(|c| c.epoch == query.epoch)
+        .ok_or_else(denied)?;
+    if *c.cancel.borrow() {
         return Err(denied());
     }
     let mut streams = s.0.streams.lock().unwrap();
@@ -272,482 +292,349 @@ pub(crate) async fn attach(
         .get_mut(&id)
         .filter(|v| v.gateway == gateway && v.epoch == query.epoch)
         .ok_or_else(denied)?;
-    if !s.0.store.active(p.session) {
+    if !s.0.store.active(p.session) || *p.cancel.borrow() {
         return Err(denied());
     }
-    let max_message = if p.terminal {
-        protocol::MAX_WS_MESSAGE
-    } else {
-        MAX_FRAME
-    };
     let send = p.attach.take().ok_or_else(denied)?;
     Ok(ws
-        .max_frame_size(max_message)
-        .max_message_size(max_message)
+        .max_frame_size(MAX_RECORD)
+        .max_message_size(MAX_RECORD)
         .on_upgrade(move |socket| async move {
             let _ = send.send(socket);
         }))
 }
+
+/// This endpoint can only describe an existing page grant; it never creates one.
+pub(crate) async fn access(
+    State(s): State<App>,
+    Path(id): Path<Uuid>,
+    h: HeaderMap,
+    req: Request,
+) -> Result<Json<AccessContext>> {
+    if req.uri().path() != format!("/relay/v1/gateways/{id}/access") {
+        return Err(bad());
+    }
+    let (grant, remaining) = crate::routing::selectors(&h, req.uri().query(), false)?;
+    if !remaining.is_empty() {
+        return Err(bad());
+    }
+    crate::routing::grant_session(&s, &h, id, grant)?;
+    let tunnels = s.0.tunnels.lock().unwrap();
+    let c = tunnels
+        .get(&id)
+        .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
+    Ok(Json(context(&s, &h, id, grant, c)?))
+}
+
+fn context(
+    s: &App,
+    h: &HeaderMap,
+    gateway: Uuid,
+    grant: Uuid,
+    c: &Connection,
+) -> Result<AccessContext> {
+    let parent = s.authorized_portal_session(h)?;
+    let session = crate::routing::grant_session(s, h, gateway, grant)?;
+    if c.workbench_api_version != protocol::WORKBENCH_API_VERSION {
+        return Err(Failure(StatusCode::CONFLICT));
+    }
+    if *c.cancel.borrow()
+        || s.0.store.gateway_auth(&c.credential) != Some((gateway, session.account))
+    {
+        return Err(denied());
+    }
+    Ok(AccessContext {
+        wire_version: protocol::VERSION,
+        api_version: protocol::WORKBENCH_API_VERSION,
+        account_id: session.account,
+        parent_session_id: parent.id,
+        grant_id: grant,
+        gateway_id: gateway,
+        instance_id: c.instance,
+        connection_epoch: c.epoch,
+    })
+}
+
+fn channel_scope(query: &str) -> Result<Scope> {
+    let mut scope = None;
+    let mut run = None;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').ok_or_else(bad)?;
+        match key {
+            "scope" if scope.is_none() => scope = Some(value),
+            "runId" if run.is_none() => run = Some(value),
+            _ => return Err(bad()),
+        }
+    }
+    match (scope, run) {
+        (Some("application"), None) => Ok(Scope::Application),
+        (Some("run"), Some(raw)) => {
+            let run_id = Uuid::parse_str(raw).map_err(|_| bad())?;
+            if run_id.is_nil() || raw != run_id.to_string() {
+                return Err(bad());
+            }
+            Ok(Scope::Run { run_id })
+        }
+        _ => Err(bad()),
+    }
+}
+
+pub(crate) async fn secure_channel(
+    State(s): State<App>,
+    h: HeaderMap,
+    ws: WebSocketUpgrade,
+    req: Request,
+) -> Result<Response> {
+    let (gateway, tail) = crate::routing::canonical_gateway(req.uri().path())?;
+    if tail != "workbench/v1/secure-channel" {
+        return Err(bad());
+    }
+    let (grant, query) = crate::routing::selectors(&h, req.uri().query(), true)?;
+    let scope = channel_scope(&query)?;
+    // Revocation must remain visible even when the gateway is offline or capacity
+    // is exhausted. Admission below rechecks under the control installation lock.
+    crate::routing::grant_session(&s, &h, gateway, grant)?;
+    let global_permit =
+        s.0.stream_capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?;
+    let id = Uuid::new_v4();
+    let (attachment, receiver) = oneshot::channel();
+    let (cancel, mut stop) = watch::channel(false);
+    let (binding, gateway_permit) = {
+        // Recheck the original parent, grant, credential and epoch at admission.
+        // This follows the control installation lock order: tunnels -> store.
+        let mut tunnels = s.0.tunnels.lock().unwrap();
+        let c = tunnels
+            .get_mut(&gateway)
+            .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
+        let context = context(&s, &h, gateway, grant, c)?;
+        let permit = c
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?;
+        let mut streams = s.0.streams.lock().unwrap();
+        if streams.values().filter(|v| v.gateway == gateway).count() >= MAX_STREAMS
+            || (c.sessions.len() >= 256 && !c.sessions.contains(&grant))
+        {
+            return Err(Failure(StatusCode::TOO_MANY_REQUESTS));
+        }
+        let binding = ChannelBinding {
+            context,
+            channel_id: id,
+            scope,
+        };
+        c.sessions.insert(grant);
+        streams.insert(
+            id,
+            Stream {
+                gateway,
+                epoch: c.epoch,
+                session: grant,
+                cancel,
+                attach: Some(attachment),
+            },
+        );
+        if c.send
+            .try_send(ToGateway::OpenChannel {
+                binding: binding.clone(),
+            })
+            .is_err()
+        {
+            streams.remove(&id);
+            return Err(Failure(StatusCode::SERVICE_UNAVAILABLE));
+        }
+        (binding, permit)
+    };
+    let guard = StreamGuard {
+        s,
+        id,
+        _gateway_permit: gateway_permit,
+        _global_permit: global_permit,
+    };
+    let agent = tokio::select! {
+        biased;
+        _=stop.changed()=>return Err(denied()),
+        result=tokio::time::timeout(Duration::from_secs(10),receiver)=>
+            result.map_err(|_|Failure(StatusCode::GATEWAY_TIMEOUT))?
+                .map_err(|_|Failure(StatusCode::BAD_GATEWAY))?
+    };
+    Ok(ws
+        .max_frame_size(MAX_RECORD)
+        .max_message_size(MAX_RECORD)
+        .on_upgrade(move |public| bridge(public, agent, stop, guard, binding)))
+}
+
 struct StreamGuard {
     s: App,
     id: Uuid,
     _gateway_permit: tokio::sync::OwnedSemaphorePermit,
     _global_permit: tokio::sync::OwnedSemaphorePermit,
-    _gateway_terminal_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    _global_terminal_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         self.s.0.streams.lock().unwrap().remove(&self.id);
     }
 }
-pub(crate) async fn forward(
-    State(s): State<App>,
-    h: HeaderMap,
-    ws: std::result::Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    req: Request,
-) -> Response {
-    forward_inner(s, h, req, ws.ok())
-        .await
-        .unwrap_or_else(IntoResponse::into_response)
+
+// Opaque records are bounded independently in each direction. A blocked writer
+// never stops the opposite reader/writer or the gateway control connection.
+const MAX_RECORD: usize = protocol::secure::WIRE_RECORD;
+const MAX_HANDSHAKE: usize = protocol::secure::HANDSHAKE;
+const QUEUE_BYTES: usize = 128 * 1024;
+const QUEUE_RECORDS: usize = 32;
+struct Queued {
+    message: Message,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
 }
-pub(crate) async fn forward_inner(
-    s: App,
-    h: HeaderMap,
-    req: Request,
-    ws: Option<WebSocketUpgrade>,
-) -> Result<Response> {
-    let method = req.method().as_str().to_string();
-    let (gateway, session, path) = if s.0.config.single_origin {
-        if !req.uri().path().starts_with("/g/") {
-            return Err(Failure(StatusCode::NOT_FOUND));
-        }
-        let (gateway, tail) = crate::routing::canonical_gateway(req.uri().path())?;
-        if !tail.starts_with("workbench/v1/") {
-            return Err(Failure(StatusCode::NOT_FOUND));
-        }
-        let streaming = tail.ends_with("/live/events") || tail.ends_with("/terminal");
-        let (grant, query) = crate::routing::selectors(&h, req.uri().query(), streaming)?;
-        let session = crate::routing::grant_session(&s, &h, gateway, grant)?;
-        let path = format!(
-            "/{tail}{}",
-            if query.is_empty() {
-                String::new()
-            } else {
-                format!("?{query}")
-            }
-        );
-        (gateway, session, path)
-    } else {
-        let gateway =
-            s.0.config
-                .host_origin(&h)
-                .and_then(|(_, g)| g)
-                .ok_or_else(denied)?;
-        let session =
-            s.0.store
-                .session(
-                    &cookie(&h, "__Host-workbench_session").ok_or_else(denied)?,
-                    Some(gateway),
-                )
-                .ok_or_else(denied)?;
-        let path = req
-            .uri()
-            .path_and_query()
-            .ok_or_else(bad)?
-            .as_str()
-            .to_string();
-        (gateway, session, path)
-    };
-    if !protocol::allowed(&method, &path) {
-        return Err(Failure(StatusCode::NOT_FOUND));
-    }
-    let terminal = ws.is_some();
-    if terminal && !(req.uri().path().ends_with("/terminal") && method == "GET") {
-        return Err(bad());
-    }
-    let (gateway_permit, gateway_terminal_permit, admitted_epoch) = {
-        let tunnels = s.0.tunnels.lock().unwrap();
-        let c = tunnels
-            .get(&gateway)
-            .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
-        if c.workbench_api_version != protocol::WORKBENCH_API_VERSION {
-            return Err(Failure(StatusCode::CONFLICT));
-        }
-        if s.0.store.gateway_auth(&c.credential).is_none() {
-            return Err(denied());
-        }
-        (
-            c.capacity
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?,
-            if terminal {
-                Some(
-                    c.terminal_capacity
-                        .clone()
-                        .try_acquire_owned()
-                        .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?,
-                )
-            } else {
-                None
-            },
-            c.epoch,
-        )
-    };
-    let global_permit =
-        s.0.stream_capacity
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?;
-    let global_terminal_permit = if terminal {
-        Some(
-            s.0.terminal_capacity
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| Failure(StatusCode::TOO_MANY_REQUESTS))?,
-        )
-    } else {
-        None
-    };
-    let id = Uuid::new_v4();
-    let guard = StreamGuard {
-        s: s.clone(),
-        id,
-        _gateway_permit: gateway_permit,
-        _global_permit: global_permit,
-        _gateway_terminal_permit: gateway_terminal_permit,
-        _global_terminal_permit: global_terminal_permit,
-    };
-    let response_type = if s.0.config.single_origin {
-        Some(
-            if path
-                .split('?')
-                .next()
-                .is_some_and(|p| p.ends_with("/live/events"))
-            {
-                "text/event-stream"
-            } else {
-                "application/json"
-            },
-        )
-    } else {
-        None
-    };
-    let body = tokio::time::timeout(
-        Duration::from_secs(10),
-        axum::body::to_bytes(req.into_body(), protocol::MAX_HTTP_BODY),
-    )
-    .await
-    .map_err(|_| Failure(StatusCode::REQUEST_TIMEOUT))?
-    .map_err(|_| Failure(StatusCode::PAYLOAD_TOO_LARGE))?;
-    let (attachment, receiver) = oneshot::channel();
-    let (cancel, mut stop) = watch::channel(false);
-    let request_headers = filtered_request(&h)?;
-    {
-        let mut tunnels = s.0.tunnels.lock().unwrap();
-        let c = tunnels
-            .get_mut(&gateway)
-            .ok_or(Failure(StatusCode::SERVICE_UNAVAILABLE))?;
-        if c.epoch != admitted_epoch {
-            return Err(Failure(StatusCode::SERVICE_UNAVAILABLE));
-        }
-        if c.workbench_api_version != protocol::WORKBENCH_API_VERSION
-            || s.0.store.gateway_auth(&c.credential).is_none()
-        {
-            return Err(denied());
-        }
-        let mut streams = s.0.streams.lock().unwrap();
-        if !s.0.store.active(session.id) {
-            return Err(denied());
-        }
-        if streams.values().filter(|v| v.gateway == gateway).count() >= MAX_STREAMS {
-            return Err(Failure(StatusCode::TOO_MANY_REQUESTS));
-        }
-        if c.sessions.len() >= 256 && !c.sessions.contains(&session.id) {
-            return Err(Failure(StatusCode::TOO_MANY_REQUESTS));
-        }
-        c.sessions.insert(session.id);
-        streams.insert(
-            id,
-            Stream {
-                gateway,
-                epoch: c.epoch,
-                session: session.id,
-                terminal,
-                cancel,
-                attach: Some(attachment),
-            },
-        );
-        let request = Open {
-            stream_id: id,
-            session_id: session.id,
-            instance_id: c.instance,
-            kind: if terminal {
-                StreamKind::WebSocket
-            } else {
-                StreamKind::Http
-            },
-            method,
-            path,
-            headers: request_headers,
-        };
-        if c.send.try_send(ToGateway::Open { request }).is_err() {
-            streams.remove(&id);
-            return Err(Failure(StatusCode::SERVICE_UNAVAILABLE));
-        }
-    }
-    let mut data = tokio::select! {
-        _=stop.changed()=>return Err(Failure(StatusCode::SERVICE_UNAVAILABLE)),
-        result=tokio::time::timeout(Duration::from_secs(10),receiver)=>result.map_err(|_|Failure(StatusCode::GATEWAY_TIMEOUT))?.map_err(|_|Failure(StatusCode::BAD_GATEWAY))?
-    };
-    if let Some(upgrade) = ws {
-        match next_data(&mut data, &mut stop).await? {
-            Data::WebSocketReady => {}
-            _ => return Err(Failure(StatusCode::BAD_GATEWAY)),
-        }
-        return Ok(upgrade
-            .max_message_size(96 * 1024)
-            .max_frame_size(96 * 1024)
-            .on_upgrade(move |public| bridge(public, data, stop, guard)));
-    }
-    for chunk in body.chunks(MAX_FRAME) {
-        tokio::select! {_=stop.changed()=>return Err(denied()), r=tokio::time::timeout(Duration::from_secs(10),data.send(Message::Binary(Bytes::copy_from_slice(chunk))))=>{r.map_err(|_|Failure(StatusCode::GATEWAY_TIMEOUT))?.map_err(|_|Failure(StatusCode::BAD_GATEWAY))?;}}
-    }
-    tokio::select! {_=stop.changed()=>return Err(denied()),r=send_json(&mut data,&Data::RequestEnd)=>r.map_err(|_|Failure(StatusCode::BAD_GATEWAY))?};
-    let Data::ResponseHead {
-        status,
-        mut headers,
-    } = next_data(&mut data, &mut stop).await?
-    else {
-        return Err(Failure(StatusCode::BAD_GATEWAY));
-    };
-    let status = StatusCode::from_u16(status)
-        .ok()
-        .filter(|s| s.as_u16() >= 200)
-        .ok_or(Failure(StatusCode::BAD_GATEWAY))?;
-    let mut response = Response::builder().status(status);
-    let empty = matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED);
-    if empty
-        && let Some(expected) = response_type
-        && !headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        headers.push(("content-type".into(), expected.into()));
-    }
-    for (key, value) in filtered_response(headers, response_type)? {
-        response = response.header(key, value);
-    }
-    if empty {
-        return response
-            .body(Body::empty())
-            .map_err(|_| Failure(StatusCode::BAD_GATEWAY));
-    }
-    let stream = async_stream::try_stream! {
-        let _guard=guard;
+
+fn enqueue(
+    tx: &mpsc::Sender<Queued>,
+    bytes: &std::sync::Arc<tokio::sync::Semaphore>,
+    message: Message,
+    size: usize,
+) -> std::result::Result<(), ()> {
+    let permit = bytes
+        .clone()
+        .try_acquire_many_owned(size.max(1) as u32)
+        .map_err(|_| ())?;
+    tx.try_send(Queued {
+        message,
+        _bytes: permit,
+    })
+    .map_err(|_| ())
+}
+
+async fn pump(
+    mut source: futures_util::stream::SplitStream<WebSocket>,
+    mut target: futures_util::stream::SplitSink<WebSocket, Message>,
+) {
+    let bytes = std::sync::Arc::new(tokio::sync::Semaphore::new(QUEUE_BYTES));
+    let (tx, mut rx) = mpsc::channel::<Queued>(QUEUE_RECORDS);
+    let read = async move {
+        let mut text_count = 0;
+        let mut binary_seen = false;
+        let deadline = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(deadline);
         loop {
-            let message=tokio::select!{_=stop.changed()=>None,m=data.recv()=>m};
-            match message {
-                Some(Ok(Message::Binary(bytes))) if bytes.len()<=MAX_FRAME=>yield bytes,
-                Some(Ok(Message::Text(text))) if matches!(serde_json::from_str::<Data>(&text),Ok(Data::ResponseEnd))=>break,
-                Some(Ok(Message::Ping(_)|Message::Pong(_)))=>continue,
-                _=>{Err(std::io::Error::other("relay stream interrupted"))?;break;}
+            let message = tokio::select! {
+                _ = &mut deadline, if !binary_seen => break,
+                message = source.next() => message,
+            };
+            let Some(Ok(message)) = message else { break };
+            let size = match &message {
+                Message::Text(t) if !binary_seen && t.len() <= MAX_HANDSHAKE && text_count < 2 => {
+                    text_count += 1;
+                    t.len()
+                }
+                Message::Binary(b) if b.len() <= MAX_RECORD => {
+                    binary_seen = true;
+                    b.len()
+                }
+                Message::Ping(_) | Message::Pong(_) => continue,
+                _ => break,
+            };
+            // Fail this channel at the boundary; never accumulate unbounded data.
+            if enqueue(&tx, &bytes, message, size).is_err() {
+                break;
             }
         }
     };
-    let stream: std::pin::Pin<
-        Box<dyn futures_util::Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send>,
-    > = Box::pin(stream);
-    response
-        .body(Body::from_stream(stream))
-        .map_err(|_| Failure(StatusCode::BAD_GATEWAY))
+    let write = async move {
+        while let Some(record) = rx.recv().await {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(10), target.send(record.message)).await,
+                Ok(Ok(()))
+            ) {
+                break;
+            }
+        }
+    };
+    tokio::select! { _=read=>{}, _=write=>{} }
 }
-async fn next_data(ws: &mut WebSocket, stop: &mut watch::Receiver<bool>) -> Result<Data> {
-    tokio::select! {_=stop.changed()=>Err(denied()),r=tokio::time::timeout(Duration::from_secs(30),ws.recv())=>{
-        match r {Ok(Some(Ok(Message::Text(text)))) if text.len()<=MAX_FRAME=>serde_json::from_str(&text).map_err(|_|Failure(StatusCode::BAD_GATEWAY)),_=>Err(Failure(StatusCode::BAD_GATEWAY))}
-    }}
-}
+
 async fn bridge(
     mut public: WebSocket,
-    mut agent: WebSocket,
+    agent: WebSocket,
     mut stop: watch::Receiver<bool>,
     _guard: StreamGuard,
+    binding: ChannelBinding,
 ) {
-    loop {
-        tokio::select! {
-            _=stop.changed()=>break,
-            msg=public.recv()=>match msg {
-                Some(Ok(message @ (Message::Text(_)|Message::Binary(_))))=>if tokio::select!{_=stop.changed()=>true,r=tokio::time::timeout(Duration::from_secs(10),agent.send(message))=>!matches!(r,Ok(Ok(())))}{break;},
-                Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break
-            },
-            msg=agent.recv()=>match msg {
-                Some(Ok(message @ (Message::Text(_)|Message::Binary(_))))=>if tokio::select!{_=stop.changed()=>true,r=tokio::time::timeout(Duration::from_secs(10),public.send(message))=>!matches!(r,Ok(Ok(())))}{break;},
-                Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break
-            }
-        }
+    if *stop.borrow() {
+        return;
     }
-    // Dropping both sockets terminates without replay or terminal ACK synthesis.
+    let envelope = serde_json::json!({"type":"channel_binding","binding":binding});
+    if tokio::select! {
+        biased;
+        _=stop.changed()=>true,
+        result=send_json(&mut public,&envelope)=>result.is_err(),
+    } {
+        return;
+    }
+    let (public_write, public_read) = public.split();
+    let (agent_write, agent_read) = agent.split();
+    tokio::select! {
+        biased;
+        _=stop.changed()=>{},
+        _=pump(public_read, agent_write)=>{},
+        _=pump(agent_read, public_write)=>{},
+    }
 }
-fn filtered_request(h: &HeaderMap) -> Result<Vec<(String, String)>> {
-    let mut output = Vec::new();
-    for name in [
-        "origin",
-        "accept",
-        "content-type",
-        "if-match",
-        "user-agent",
-        "if-none-match",
-        "if-modified-since",
-        "last-event-id",
-        "range",
-    ] {
-        for value in h.get_all(name) {
-            output.push((name.to_string(), value.to_str().map_err(|_| bad())?.into()));
-        }
-    }
-    Ok(output)
-}
-fn filtered_response(
-    headers: Vec<(String, String)>,
-    expected_type: Option<&str>,
-) -> Result<Vec<(String, String)>> {
-    let mut names = HashSet::new();
-    for (name, value) in &headers {
-        if !names.insert(name.to_ascii_lowercase())
-            || axum::http::HeaderName::try_from(name).is_err()
-            || axum::http::HeaderValue::try_from(value).is_err()
-            || value.len() >= 16384
-        {
-            return Err(Failure(StatusCode::BAD_GATEWAY));
-        }
-    }
-    if let Some(expected) = expected_type {
-        let supplied = headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.split(';').next().unwrap_or("").trim());
-        if supplied.is_none_or(|v| !v.eq_ignore_ascii_case(expected)) {
-            return Err(Failure(StatusCode::BAD_GATEWAY));
-        }
-    }
-    let mut output: Vec<_> = headers
-        .into_iter()
-        .filter(|(n, v)| {
-            v.len() < 16384
-                && matches!(
-                    n.to_ascii_lowercase().as_str(),
-                    "content-type"
-                        | "etag"
-                        | "last-modified"
-                        | "content-range"
-                        | "accept-ranges"
-                        | "content-disposition"
-                )
-        })
-        .collect();
-    if let Some(expected) = expected_type {
-        output.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type"));
-        output.push(("content-type".into(), format!("{expected}; charset=utf-8")));
-    }
-    Ok(output)
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn organization_preconditions_keep_duplicates_and_reject_opaque_values() {
-        use axum::http::HeaderValue;
-        for name in ["if-match", "content-type"] {
-            let mut headers = HeaderMap::new();
-            headers.append(name, HeaderValue::from_static("first"));
-            headers.append(name, HeaderValue::from_static("second"));
-            headers.insert("authorization", HeaderValue::from_static("private"));
-            let forwarded = filtered_request(&headers).unwrap();
-            assert_eq!(
-                forwarded,
-                vec![
-                    (name.into(), "first".into()),
-                    (name.into(), "second".into())
-                ]
-            );
-            headers.append(name, HeaderValue::from_bytes(b"\xff").unwrap());
-            assert!(matches!(
-                filtered_request(&headers),
-                Err(Failure(StatusCode::BAD_REQUEST))
-            ));
-        }
-    }
-    #[test]
-    fn response_cannot_set_credentials_redirect_or_hop_headers() {
-        let h = filtered_response(
-            vec![
-                ("Set-Cookie".into(), "owner=secret".into()),
-                ("Location".into(), "https://evil.test".into()),
-                ("Connection".into(), "upgrade".into()),
-                ("Content-Type".into(), "text/event-stream".into()),
-            ],
-            None,
-        )
-        .unwrap();
-        assert_eq!(h, vec![("Content-Type".into(), "text/event-stream".into())]);
-    }
-    #[test]
-    fn same_origin_response_type_is_fixed_and_duplicate_headers_fail_closed() {
-        for malicious in [
-            "text/html",
-            "text/javascript",
-            "image/svg+xml",
-            "application/json, text/html",
-        ] {
+    #[tokio::test]
+    async fn queue_bounds_bytes_including_inflight_and_zero_length_record_count() {
+        let bytes = std::sync::Arc::new(tokio::sync::Semaphore::new(QUEUE_BYTES));
+        let (tx, mut rx) = mpsc::channel(QUEUE_RECORDS);
+        for _ in 0..2 {
             assert!(
-                filtered_response(
-                    vec![("content-type".into(), malicious.into())],
-                    Some("application/json")
+                enqueue(
+                    &tx,
+                    &bytes,
+                    Message::Binary(vec![0; 64 * 1024].into()),
+                    64 * 1024
                 )
-                .is_err()
+                .is_ok()
             );
         }
+        assert_eq!(bytes.available_permits(), 0);
+        let inflight = rx.recv().await.unwrap();
+        assert!(enqueue(&tx, &bytes, Message::Binary(vec![0].into()), 1).is_err());
+        drop(inflight);
+        drop(rx.recv().await.unwrap());
+        assert_eq!(bytes.available_permits(), QUEUE_BYTES);
+        for _ in 0..QUEUE_RECORDS {
+            assert!(enqueue(&tx, &bytes, Message::Binary(Vec::new().into()), 0).is_ok());
+        }
+        assert!(enqueue(&tx, &bytes, Message::Binary(Vec::new().into()), 0).is_err());
+        drop(rx);
+        assert_eq!(bytes.available_permits(), QUEUE_BYTES);
+    }
+    #[test]
+    fn scope_is_exact_and_contains_no_business_selectors() {
+        assert!(matches!(
+            channel_scope("scope=application"),
+            Ok(Scope::Application)
+        ));
+        let run = Uuid::new_v4();
         assert!(
-            filtered_response(
-                vec![
-                    ("content-type".into(), "application/json".into()),
-                    ("Content-Type".into(), "text/html".into())
-                ],
-                Some("application/json")
-            )
-            .is_err()
+            matches!(channel_scope(&format!("scope=run&runId={run}")), Ok(Scope::Run {run_id}) if run_id == run)
         );
-        assert!(
-            filtered_response(
-                vec![(
-                    "content-type".into(),
-                    "application/json\r\nX-Injected: yes".into()
-                )],
-                Some("application/json")
-            )
-            .is_err()
-        );
-        assert!(filtered_response(vec![], Some("application/json")).is_err());
-        let safe = filtered_response(
-            vec![
-                (
-                    "content-type".into(),
-                    "application/json; charset=iso-8859-1".into(),
-                ),
-                ("Content-Security-Policy".into(), "default-src *".into()),
-                ("Refresh".into(), "0;url=https://evil.test".into()),
-                ("Link".into(), "</evil.js>; rel=preload".into()),
-            ],
-            Some("application/json"),
-        )
-        .unwrap();
-        assert_eq!(
-            safe,
-            vec![(
-                "content-type".into(),
-                "application/json; charset=utf-8".into()
-            )]
-        );
+        for query in [
+            "scope=run",
+            "scope=application&runId=x",
+            "scope=application&scope=application",
+            "scope=application&path=secret",
+            "scope=run&runId=00000000-0000-0000-0000-000000000000",
+            "scope=%61pplication",
+            "scope=application&",
+            "scope=other",
+        ] {
+            assert!(channel_scope(query).is_err(), "{query}");
+        }
     }
 }

@@ -46,6 +46,25 @@ it('blocks cross-origin and traversal paths', () => {
   const context = createContext(entry(), sessionStorage);
   for (const route of ['https://evil.example/', '//evil.example/', '/../relay/v1', '/%2e%2e/relay/v1', '/\\evil.example']) expect(() => context.path(route)).toThrow();
 });
+it('keeps remote business selectors in the fragment and merges authorization into an existing hash', () => {
+  const context = createContext(entry(), sessionStorage);
+  const target = new URL(context.navigation('/history?q=private+query&project=private-project#entry=private-entry&view=records'), entry());
+  expect(target.search).toBe('');
+  const fragment = new URLSearchParams(target.hash.slice(1));
+  expect(fragment.get('q')).toBe('private query');
+  expect(fragment.get('project')).toBe('private-project');
+  expect(fragment.get('entry')).toBe('private-entry');
+  expect(fragment.get('grant')).toBe(grant);
+  expect(fragment.get('view')).toBe('records');
+});
+it('pins the real portal fragment parent Session UUID, distinct from the account UUID', async () => {
+  const { SecureTransport } = await import('./secureTransport');
+  const context = createContext(entry(), sessionStorage);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ wireVersion: 3, apiVersion: 3, accountId: '99999999-9999-4999-8999-999999999999', parentSessionId: session, grantId: grant, gatewayId: gateway, instanceId: '55555555-5555-4555-8555-555555555555', connectionEpoch: '66666666-6666-4666-8666-666666666666' }))));
+  const transport = new SecureTransport(context, vi.fn());
+  try { expect((await transport.probe()).parentSessionId).toBe(session); expect(context.valid).toBe(true); }
+  finally { transport.invalidate(); vi.unstubAllGlobals(); }
+});
 it('invalidates a pinned grant on denial and never replays a mutation', async () => {
   vi.resetModules(); history.replaceState(null, '', entry().pathname + entry().hash);
   const fetch = vi.fn(async () => ({ status: 401 })); vi.stubGlobal('fetch', fetch);

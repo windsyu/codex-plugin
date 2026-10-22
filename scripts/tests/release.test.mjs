@@ -64,10 +64,10 @@ function packagingFixture(t, host = RELEASE_TARGET) {
   return { ...f, target, sysroot, noticeFiles };
 }
 
-test('packaging selects freshly built explicit-target binaries over stale same-version host binaries', { skip: process.platform !== 'darwin' }, t => {
+for (const version of ['0.3.0', '1.0.0', '12.34.56']) test(`packaging ${version} selects freshly built explicit-target binaries over stale same-version host binaries`, { skip: process.platform !== 'darwin' }, t => {
   const f = packagingFixture(t);
-  fs.writeFileSync(path.join(f.root, 'Cargo.toml'), '[package]\nname = "release-fixture"\nversion = "0.3.0"\n');
-  fs.writeFileSync(path.join(f.root, 'web/package.json'), JSON.stringify({ version: '0.3.0' }));
+  fs.writeFileSync(path.join(f.root, 'Cargo.toml'), `[package]\nname = "release-fixture"\nversion = "${version}"\n`);
+  fs.writeFileSync(path.join(f.root, 'web/package.json'), JSON.stringify({ version }));
   const resources = ['scripts/release/code-view', 'scripts/release/install.sh', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md', 'Cargo.lock', 'vendor/vt100/LICENSE', 'vendor/vt100/PATCH.md', 'web/src/workbench/icons/LICENSE', 'web/src/workbench/icons/README.md'];
   for (const file of resources) {
     fs.mkdirSync(path.dirname(path.join(f.root, file)), { recursive: true });
@@ -76,7 +76,7 @@ test('packaging selects freshly built explicit-target binaries over stale same-v
   for (const [directory, marker] of [[path.join(f.target, 'release'), 'stale-host-build'], [path.join(f.target, RELEASE_TARGET, 'release'), 'fresh-explicit-target-build']]) {
     fs.mkdirSync(directory, { recursive: true });
     for (const binary of ['codex-view', 'codex-observerd']) {
-      fs.writeFileSync(path.join(directory, binary), `#!/bin/sh\n# ${marker}\nprintf '%s\\n' '${binary} 0.3.0'\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(directory, binary), `#!/bin/sh\n# ${marker}\nprintf '%s\\n' '${binary} ${version}'\n`, { mode: 0o755 });
     }
   }
   const release = packageRelease(f.root, f.output, { offline: true });
@@ -86,7 +86,18 @@ test('packaging selects freshly built explicit-target binaries over stale same-v
     assert.doesNotMatch(packaged, /stale-host-build/);
   }
   assert.equal(release.target, RELEASE_TARGET);
+  assert.equal(release.version, version);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(release.bundle, 'manifest.json'))).version, version);
+  assert.equal(path.basename(release.archive), `code-view-${version}-${RELEASE_TARGET}.tar.gz`);
   assert.equal(fs.statSync(release.archive).isFile(), true);
+  const notes = fs.readFileSync(path.join(release.bundle, 'RELEASE.md'), 'utf8');
+  assert.match(notes, /workbench UI\/API 3, wire transport 3 and relay schema 3/);
+  assert.match(notes, /separate Application and per-Run channels/);
+  assert.match(notes, /frontend and authorization service remain trusted/);
+  assert.match(notes, /no plaintext fallback/);
+  assert.match(notes, /Upgrade all three components together/);
+  assert.match(notes, /CLI 0\.162\.1 command authentication was tested with a synthetic provider; real-provider command authentication remains unverified/);
+  assert.doesNotMatch(notes, /UI\/API 2|transport 2|relay is trusted and can read forwarded content/);
   const index = JSON.parse(fs.readFileSync(path.join(release.bundle, 'licenses/INDEX.json')));
   const runtimes = index.filter(entry => entry.ecosystem === 'toolchain-runtime');
   assert.deepEqual(runtimes.map(entry => [entry.name, entry.version]), [['rust-library', '1.95.0'], ['rust-compiler-builtins', '1.95.0']]);
@@ -128,6 +139,15 @@ test('runtime notice discovery rejects symlink ancestors and unknown compiler ve
   assert.throws(() => macosRustRuntimeLicenses(f.root), /Symlink/);
   fs.writeFileSync(path.join(f.root, 'tools/rustc'), `#!${process.execPath}\nconsole.log('release: unknown');\n`);
   assert.throws(() => macosRustRuntimeLicenses(f.root), /stable Rust runtime version/);
+});
+
+test('packaging rejects malformed and non-stable release versions before artifacts are written', t => {
+  const f = packagingFixture(t);
+  for (const version of ['01.0.0', '1.00.0', '1.0.00', 'v1.0.0', '1.0', '1.0.0-beta.1', '1.0.0+build.1', '../1.0.0', '1.0.0\n']) {
+    fs.writeFileSync(path.join(f.root, 'Cargo.toml'), `[package]\nversion = "${version}"\n`);
+    assert.throws(() => packageRelease(f.root, f.output, { offline: true }), /Expected stable semver release version/, version);
+    assert.deepEqual(fs.readdirSync(f.output), [], version);
+  }
 });
 
 test('unsupported Rust host fails before package inputs are read or artifacts written', t => {

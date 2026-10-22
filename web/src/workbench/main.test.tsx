@@ -91,3 +91,13 @@ it('rejects an unknown document before any application or run fetch', async () =
   expect(fetch).not.toHaveBeenCalled();
   expect(rendered.app).not.toHaveBeenCalled();
 });
+it('consumes only pairing and authorization fragment fields, preserving business selectors', async () => {
+  document.body.innerHTML = '<div id="workbench-root"></div>';
+  history.replaceState(null, '', '/history#q=private-query&entry=private-entry&grant=old&session=old&api=3');
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ instanceId: 'app', runs: [], sources: [] }) })));
+  await import('./main');
+  await vi.waitFor(() => expect(rendered.home).toHaveBeenCalled());
+  expect(new URLSearchParams(location.hash.slice(1)).get('q')).toBe('private-query');
+  expect(new URLSearchParams(location.hash.slice(1)).get('entry')).toBe('private-entry');
+  expect(location.hash).not.toMatch(/grant|session|api=/);
+});

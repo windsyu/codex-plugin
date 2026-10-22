@@ -2,7 +2,7 @@ use super::*;
 use axum::body::Body;
 use axum::http::{Request, header};
 use codex_relay_protocol::{
-    BindingPending, BindingPoll, BindingStart, Bound, Data, Hello, ToGateway, VERSION,
+    BindingPending, BindingPoll, BindingStart, Bound, Hello, ToGateway, VERSION,
     WORKBENCH_API_VERSION, Welcome,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -12,6 +12,14 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use tower::ServiceExt;
+
+#[test]
+fn portal_privacy_copy_matches_encrypted_channels_and_trusted_frontend() {
+    let page = include_str!("../static/index.html");
+    assert!(page.contains("浏览器与电脑间加密传输"));
+    assert!(page.contains("前端及授权逻辑仍须可信"));
+    assert!(!page.contains("公网服务可读取经它传输的内容"));
+}
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -31,10 +39,7 @@ impl Fixture {
         let config = Config {
             data_dir: dir.path().to_path_buf(),
             portal_origin: format!("http://localhost:{port}"),
-            workbench_domain: "localhost".into(),
-            workbench_origin: None,
-            fixed_gateway_id: None,
-            single_origin: false,
+            single_origin: true,
             password_workers: 4,
             allow_insecure_loopback: true,
             trusted_client_ip_header: None,
@@ -154,10 +159,7 @@ async fn json(response: Response) -> serde_json::Value {
 }
 
 fn single_fixture(port: u16) -> Fixture {
-    let mut f = Fixture::new(port);
-    f.config.single_origin = true;
-    f.config.workbench_domain.clear();
-    f
+    Fixture::new(port)
 }
 #[tokio::test]
 async fn forget_rechecks_authorization_after_waiting_for_admission() {
@@ -240,9 +242,9 @@ async fn mint_grant(f: &Fixture, router: &Router) -> Uuid {
     assert_eq!(values["api"], WORKBENCH_API_VERSION.to_string());
     Uuid::parse_str(&values["grant"]).unwrap()
 }
-fn grant_request(f: &Fixture, grant: Uuid, tail: &str) -> Request<Body> {
+fn grant_request(f: &Fixture, grant: Uuid, _tail: &str) -> Request<Body> {
     let mut request = f.request(
-        &format!("/g/{}/workbench/v1/{tail}", f.gateway),
+        &format!("/relay/v1/gateways/{}/access", f.gateway),
         "GET",
         serde_json::json!({}),
         false,
@@ -258,7 +260,7 @@ fn grant_request(f: &Fixture, grant: Uuid, tail: &str) -> Request<Body> {
 #[tokio::test]
 async fn page_grant_requires_its_exact_parent_cookie_and_cannot_cross_accounts_or_gateways() {
     let f = single_fixture(9801);
-    let router = app(f.config.clone()).unwrap();
+    let router = connected_router(&f);
     let grant = mint_grant(&f, &router).await;
     assert_eq!(
         router
@@ -267,7 +269,7 @@ async fn page_grant_requires_its_exact_parent_cookie_and_cannot_cross_accounts_o
             .await
             .unwrap()
             .status(),
-        StatusCode::SERVICE_UNAVAILABLE
+        StatusCode::OK
     );
     let second = store::secret();
     f.store
@@ -299,7 +301,7 @@ async fn page_grant_requires_its_exact_parent_cookie_and_cannot_cross_accounts_o
         );
     }
     let mut request = grant_request(&f, grant, "application");
-    *request.uri_mut() = format!("/g/{}/workbench/v1/application", Uuid::new_v4())
+    *request.uri_mut() = format!("/relay/v1/gateways/{}/access", Uuid::new_v4())
         .parse()
         .unwrap();
     assert_eq!(
@@ -344,7 +346,7 @@ async fn page_grant_requires_its_exact_parent_cookie_and_cannot_cross_accounts_o
 #[tokio::test]
 async fn single_origin_never_proxies_documents_and_rejects_incompatible_opens() {
     let f = single_fixture(9802);
-    let router = app(f.config.clone()).unwrap();
+    let router = connected_router(&f);
     let grant = mint_grant(&f, &router).await;
     let page = router
         .clone()
@@ -423,42 +425,6 @@ async fn single_origin_never_proxies_documents_and_rejects_incompatible_opens() 
     .await;
     assert_eq!(list["gateways"][0]["versionIncompatible"], true);
     assert_eq!(list["gateways"][0]["status"], "versionIncompatible");
-}
-
-#[tokio::test]
-async fn streaming_selectors_require_parent_cookie_and_strip_identity_only_after_validation() {
-    let f = single_fixture(9805);
-    let router = app(f.config.clone()).unwrap();
-    let grant = mint_grant(&f, &router).await;
-    for route in ["live/events", "terminal"] {
-        let path = format!(
-            "/g/{}/workbench/v1/runs/{}/{route}?relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}&epoch={}",
-            f.gateway,
-            Uuid::new_v4(),
-            Uuid::new_v4()
-        );
-        let request = f.request(&path, "GET", serde_json::json!({}), false);
-        assert_eq!(
-            router.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        let mut request = f.request(&path, "GET", serde_json::json!({}), false);
-        request.headers_mut().remove("cookie");
-        assert_eq!(
-            router.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
-        let request = f.request(
-            &format!("{path}&relayApi={WORKBENCH_API_VERSION}"),
-            "GET",
-            serde_json::json!({}),
-            false,
-        );
-        assert_eq!(
-            router.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
 }
 
 #[test]
@@ -683,21 +649,16 @@ async fn reauthorization_requires_retained_machine_proof_and_current_exact_owner
     );
 }
 #[tokio::test]
-async fn ownership_origin_cookie_and_single_use_exchange() {
+async fn ownership_origin_and_legacy_exchange_fail_closed() {
     let f = Fixture::new(9876);
-    let app = app(f.config.clone()).unwrap();
-    let response = app
-        .clone()
-        .oneshot(f.request("/relay/v1/gateways", "GET", serde_json::json!(null), false))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        json(response).await["gateways"][0]["gatewayId"],
-        f.gateway.to_string()
-    );
+    let app = connected_router(&f);
     let path = format!("/relay/v1/gateways/{}/open", f.gateway);
-    let mut req = f.request(&path, "POST", serde_json::json!({}), false);
+    let mut req = f.request(
+        &path,
+        "POST",
+        serde_json::json!({"uiApiVersion": WORKBENCH_API_VERSION}),
+        false,
+    );
     req.headers_mut()
         .insert("origin", "https://evil.test".parse().unwrap());
     assert_eq!(
@@ -719,7 +680,12 @@ async fn ownership_origin_cookie_and_single_use_exchange() {
             ],
         )
         .unwrap();
-    let mut req = f.request(&path, "POST", serde_json::json!({}), false);
+    let mut req = f.request(
+        &path,
+        "POST",
+        serde_json::json!({"uiApiVersion":WORKBENCH_API_VERSION}),
+        false,
+    );
     req.headers_mut().insert(
         "cookie",
         format!("__Host-relay_session={other_cookie}")
@@ -730,68 +696,64 @@ async fn ownership_origin_cookie_and_single_use_exchange() {
         app.clone().oneshot(req).await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
-    let opened = json(
+    let grant = mint_grant(&f, &app).await;
+    let before: i64 = f
+        .store
+        .0
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    let metadata = json(
         app.clone()
-            .oneshot(f.request(&path, "POST", serde_json::json!({}), false))
+            .oneshot(grant_request(&f, grant, ""))
             .await
             .unwrap(),
     )
     .await;
-    let code = opened["url"]
-        .as_str()
+    assert_eq!(metadata["grantId"], grant.to_string());
+    assert_eq!(metadata["parentSessionId"], f.parent.to_string());
+    assert_eq!(metadata["accountId"], f.account.to_string());
+    assert_eq!(metadata.as_object().unwrap().len(), 8);
+    let after: i64 = f
+        .store
+        .0
+        .lock()
         .unwrap()
-        .split("#code=")
-        .nth(1)
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
         .unwrap();
-    let request = || {
-        f.request(
-            "/relay/v1/session/exchange",
-            "POST",
-            serde_json::json!({"code":code}),
-            true,
-        )
-    };
-    let response = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = response
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    for expected in [
-        "__Host-workbench_session=",
-        "Secure",
-        "HttpOnly",
-        "SameSite=Strict",
-        "Path=/",
-    ] {
-        assert!(cookie.contains(expected));
-    }
-    assert!(!cookie.contains("Domain="));
-    assert_eq!(
-        app.clone().oneshot(request()).await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let mut req = f.request(
+    assert_eq!(before, after, "access must not mint grants");
+    for path in [
+        "/relay/v1/session/exchange",
+        "/relay/v1/open",
+        "/relay/v1/exchange.js",
         "/workbench/v1/application",
-        "GET",
-        serde_json::json!(null),
-        true,
-    );
-    req.headers_mut()
-        .insert("authorization", "Bearer forged".parse().unwrap());
+    ] {
+        let response = app
+            .clone()
+            .oneshot(f.request(
+                path,
+                if path.ends_with("exchange") {
+                    "POST"
+                } else {
+                    "GET"
+                },
+                serde_json::json!({"code":"unused"}),
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     assert_eq!(
-        app.clone().oneshot(req).await.unwrap().status(),
-        StatusCode::BAD_REQUEST
+        app.clone()
+            .oneshot(f.request("/relay/v1/logout", "POST", serde_json::json!({}), false))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
-    let response = app
-        .clone()
-        .oneshot(f.request("/relay/v1/logout", "POST", serde_json::json!({}), false))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(f.store.session(&f.browser, Some(f.gateway)).is_none());
+    assert!(!f.store.active(grant));
     assert!(!f.store.active(f.parent));
 }
 #[tokio::test]
@@ -1125,28 +1087,104 @@ async fn legacy_hello_zero_is_incompatible_even_after_disconnect() {
     server.abort();
     let _ = server.await;
 }
-#[tokio::test]
-async fn independent_http_sse_terminal_streams_epoch_and_logout() {
-    active_streams_revocation(false).await;
+type TestSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn hello(control: &mut TestSocket, f: &Fixture) -> Welcome {
+    control
+        .send(Message::Text(
+            serde_json::to_string(&Hello {
+                version: VERSION,
+                workbench_api_version: WORKBENCH_API_VERSION,
+                gateway_id: f.gateway,
+                instance_id: Uuid::new_v4(),
+                client_version: "synthetic".into(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    serde_json::from_str(control.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()
+}
+
+async fn channel_pair(
+    control: &mut TestSocket,
+    f: &Fixture,
+    port: u16,
+    grant: Uuid,
+    scope: &str,
+) -> (
+    TestSocket,
+    TestSocket,
+    codex_relay_protocol::secure::ChannelBinding,
+) {
+    let browser = tokio::spawn({
+        let host = f.host(false);
+        let origin = f.config.portal_origin.clone();
+        let cookie = format!("__Host-relay_session={}", f.portal);
+        let path = format!(
+            "/g/{}/workbench/v1/secure-channel?relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}&{scope}",
+            f.gateway
+        );
+        async move { socket(port, &host, &path, None, Some(&cookie), Some(&origin)).await }
+    });
+    let binding = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = control.next().await.unwrap().unwrap();
+            if let ToGateway::OpenChannel { binding } =
+                serde_json::from_str(message.to_text().unwrap()).unwrap()
+            {
+                break binding;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let agent = socket(
+        port,
+        &f.host(false),
+        &format!(
+            "/relay/v1/tunnel/channels/{}?epoch={}",
+            binding.channel_id, binding.context.connection_epoch
+        ),
+        Some(&f.credential),
+        None,
+        None,
+    )
+    .await;
+    let mut public = browser.await.unwrap();
+    let envelope: serde_json::Value =
+        serde_json::from_str(public.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(envelope["type"], "channel_binding");
+    assert_eq!(envelope["binding"], serde_json::to_value(&binding).unwrap());
+    assert_eq!(binding.context.grant_id, grant);
+    assert_eq!(binding.context.parent_session_id, f.parent);
+    assert_eq!(binding.context.account_id, f.account);
+    assert_eq!(binding.context.gateway_id, f.gateway);
+    (public, agent, binding)
 }
 
 #[tokio::test]
-async fn account_deletion_closes_active_sse_and_terminal_streams() {
-    active_streams_revocation(true).await;
+async fn opaque_channels_preserve_bytes_and_logout_closes_both_scopes() {
+    opaque_revocation(false).await;
 }
 
-async fn active_streams_revocation(delete_account: bool) {
+#[tokio::test]
+async fn account_deletion_closes_opaque_channels_and_control() {
+    opaque_revocation(true).await;
+}
+
+async fn opaque_revocation(delete_account: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let f = Fixture::new(port);
     let router = app(f.config.clone()).unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap()
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
     });
     let mut control = socket(
         port,
@@ -1157,159 +1195,73 @@ async fn active_streams_revocation(delete_account: bool) {
         None,
     )
     .await;
-    control
-        .send(Message::Text(
-            serde_json::to_string(&Hello {
-                version: VERSION,
-                workbench_api_version: codex_relay_protocol::WORKBENCH_API_VERSION,
-                gateway_id: f.gateway,
-                instance_id: Uuid::new_v4(),
-                client_version: "test".into(),
-            })
-            .unwrap()
-            .into(),
-        ))
-        .await
-        .unwrap();
-    let welcome: Welcome =
-        serde_json::from_str(control.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let url = format!("http://127.0.0.1:{port}/workbench/v1/application");
-    let host = f.host(true);
-    let cookie = format!("__Host-workbench_session={}", f.browser);
-    let mut request = tokio::spawn({
-        let client = client.clone();
-        let host = host.clone();
-        let cookie = cookie.clone();
-        async move {
-            client
-                .get(url)
-                .header("host", host)
-                .header("cookie", cookie)
-                .send()
-                .await
-                .unwrap()
-        }
-    });
-    let open = loop {
-        let m = tokio::select! {
-            message = control.next() => message.unwrap().unwrap(),
-            response = &mut request => panic!("HTTP request ended before stream admission: {:?}",response.unwrap().status()),
-        };
-        if let ToGateway::Open { request } = serde_json::from_str(m.to_text().unwrap()).unwrap() {
-            break request;
-        }
-    };
-    let mut data = socket(
+    let welcome = hello(&mut control, &f).await;
+    let grant = mint_grant(&f, &router).await;
+    let (mut app_public, mut app_agent, app_binding) =
+        channel_pair(&mut control, &f, port, grant, "scope=application").await;
+    let run = Uuid::new_v4();
+    let (mut run_public, mut run_agent, run_binding) = channel_pair(
+        &mut control,
+        &f,
         port,
-        &f.host(false),
-        &format!(
-            "/relay/v1/tunnel/streams/{}?epoch={}",
-            open.stream_id, welcome.connection_epoch
-        ),
-        Some(&f.credential),
-        None,
-        None,
+        grant,
+        &format!("scope=run&runId={run}"),
     )
     .await;
-    assert!(matches!(
-        serde_json::from_str::<Data>(data.next().await.unwrap().unwrap().to_text().unwrap())
-            .unwrap(),
-        Data::RequestEnd
-    ));
-    data.send(Message::Text(
-        serde_json::to_string(&Data::ResponseHead {
-            status: 200,
-            headers: vec![
-                ("content-type".into(), "text/event-stream".into()),
-                ("set-cookie".into(), "owner=forged".into()),
-            ],
-        })
-        .unwrap()
-        .into(),
-    ))
-    .await
-    .unwrap();
-    data.send(Message::Binary("data: first\n\n".into()))
-        .await
-        .unwrap();
-    let mut sse_response = request.await.unwrap();
-    assert_eq!(sse_response.status(), 200);
-    assert!(sse_response.headers().get("set-cookie").is_none());
     assert_eq!(
-        sse_response.chunk().await.unwrap().unwrap(),
-        "data: first\n\n"
+        run_binding.scope,
+        codex_relay_protocol::secure::Scope::Run { run_id: run }
     );
-    // An independently attached terminal works while the SSE response remains open.
-    let terminal_path = format!("/workbench/v1/runs/{}/terminal", Uuid::new_v4());
-    let terminal = tokio::spawn({
-        let host = host.clone();
-        let cookie = cookie.clone();
-        let origin = f.config.gateway_origin(f.gateway).unwrap();
-        async move {
-            socket(
-                port,
-                &host,
-                &terminal_path,
-                None,
-                Some(&cookie),
-                Some(&origin),
-            )
-            .await
-        }
-    });
-    let open = loop {
-        let m = control.next().await.unwrap().unwrap();
-        if let ToGateway::Open { request } = serde_json::from_str(m.to_text().unwrap()).unwrap() {
-            break request;
-        }
-    };
-    let mut terminal_data = socket(
-        port,
-        &f.host(false),
-        &format!(
-            "/relay/v1/tunnel/streams/{}?epoch={}",
-            open.stream_id, welcome.connection_epoch
-        ),
-        Some(&f.credential),
-        None,
-        None,
-    )
-    .await;
-    terminal_data
-        .send(Message::Text(
-            serde_json::to_string(&Data::WebSocketReady).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-    let mut public = terminal.await.unwrap();
-    public
-        .send(Message::Text("synthetic input".into()))
+    assert_ne!(app_binding.channel_id, run_binding.channel_id);
+    assert_eq!(
+        app_binding.context.connection_epoch,
+        welcome.connection_epoch
+    );
+    // Relay must carry handshake bytes and arbitrary encrypted bytes unchanged.
+    let hello_text = "{\"type\":\"client_hello\",\"publicKey\":\"synthetic opaque\"}";
+    app_public
+        .send(Message::Text(hello_text.into()))
         .await
         .unwrap();
     assert_eq!(
-        terminal_data
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap(),
-        "synthetic input"
+        app_agent.next().await.unwrap().unwrap().to_text().unwrap(),
+        hello_text
     );
-    terminal_data
-        .send(Message::Binary(vec![0, 1, 2].into()))
+    let server_text = "{\"type\":\"server_hello\",\"publicKey\":\"synthetic opaque\"}";
+    app_agent
+        .send(Message::Text(server_text.into()))
         .await
         .unwrap();
     assert_eq!(
-        public.next().await.unwrap().unwrap().into_data().as_ref(),
-        &[0, 1, 2]
+        app_public.next().await.unwrap().unwrap().to_text().unwrap(),
+        server_text
     );
-    let (operation, token, expected) = if delete_account {
+    for (public, agent) in [
+        (&mut app_public, &mut app_agent),
+        (&mut run_public, &mut run_agent),
+    ] {
+        let up = vec![0x91; 64 * 1024];
+        let down = vec![0xa3; 64 * 1024];
+        let (sent_up, sent_down) = tokio::join!(
+            public.send(Message::Binary(up.clone().into())),
+            agent.send(Message::Binary(down.clone().into()))
+        );
+        sent_up.unwrap();
+        sent_down.unwrap();
+        assert_eq!(
+            agent.next().await.unwrap().unwrap().into_data().as_ref(),
+            up
+        );
+        assert_eq!(
+            public.next().await.unwrap().unwrap().into_data().as_ref(),
+            down
+        );
+    }
+    let (path, method, token, expected) = if delete_account {
         let token = store::secret();
         let c = f.store.0.lock().unwrap();
         c.execute(
-            "UPDATE accounts SET role='admin' WHERE id=?1",
+            "UPDATE accounts SET role=\'admin\' WHERE id=?1",
             [f.other.to_string()],
         )
         .unwrap();
@@ -1324,43 +1276,239 @@ async fn active_streams_revocation(delete_account: bool) {
         )
         .unwrap();
         (
-            client.delete(format!(
-                "http://127.0.0.1:{port}/relay/v1/admin/users/{}",
-                f.account
-            )),
+            format!("/relay/v1/admin/users/{}", f.account),
+            "DELETE",
             token,
-            204,
+            StatusCode::NO_CONTENT,
         )
     } else {
         (
-            client.post(format!("http://127.0.0.1:{port}/relay/v1/logout")),
+            "/relay/v1/logout".into(),
+            "POST",
             f.portal.clone(),
-            200,
+            StatusCode::OK,
         )
     };
-    let response = operation
-        .header("host", f.host(false))
-        .header("origin", &f.config.portal_origin)
-        .header("cookie", format!("__Host-relay_session={token}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), expected);
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), public.next()).await,
-        Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
-    ));
-    assert!(!f.store.active(open.session_id));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await,
-        Ok(Ok(None)) | Ok(Err(_))
-    ));
+    let mut req = f.request(&path, method, serde_json::json!({}), false);
+    req.headers_mut().insert(
+        "cookie",
+        format!("__Host-relay_session={token}").parse().unwrap(),
+    );
+    assert_eq!(
+        router.clone().oneshot(req).await.unwrap().status(),
+        expected
+    );
+    for socket in [
+        &mut app_public,
+        &mut app_agent,
+        &mut run_public,
+        &mut run_agent,
+    ] {
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), socket.next()).await,
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
+        ));
+    }
+    assert!(!f.store.active(grant));
     if delete_account {
         assert!(f.store.gateway_auth(&f.credential).is_none());
-        server.abort();
-        return;
+    } else {
+        let mut replacement = socket(
+            port,
+            &f.host(false),
+            "/relay/v1/tunnel",
+            Some(&f.credential),
+            None,
+            None,
+        )
+        .await;
+        let next = hello(&mut replacement, &f).await;
+        assert_ne!(next.connection_epoch, welcome.connection_epoch);
+        let mut req = format!(
+            "ws://127.0.0.1:{port}/relay/v1/tunnel/channels/{}?epoch={}",
+            app_binding.channel_id, welcome.connection_epoch
+        )
+        .into_client_request()
+        .unwrap();
+        req.headers_mut()
+            .insert("host", f.host(false).parse().unwrap());
+        req.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", f.credential).parse().unwrap(),
+        );
+        assert!(connect_async(req).await.is_err());
     }
-    // A new control connection replaces the epoch and old stream attachments fail closed.
+    server.abort();
+}
+fn secure_request(
+    f: &Fixture,
+    port: u16,
+    grant: Uuid,
+    extra: &str,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut req=format!("ws://127.0.0.1:{port}/g/{}/workbench/v1/secure-channel?relayGrant={grant}&relayApi={WORKBENCH_API_VERSION}&{extra}",f.gateway).into_client_request().unwrap();
+    req.headers_mut()
+        .insert("host", f.host(false).parse().unwrap());
+    req.headers_mut()
+        .insert("origin", f.config.portal_origin.parse().unwrap());
+    req.headers_mut().insert(
+        "cookie",
+        format!("__Host-relay_session={}", f.portal)
+            .parse()
+            .unwrap(),
+    );
+    req
+}
+
+async fn websocket_status(req: tokio_tungstenite::tungstenite::http::Request<()>) -> StatusCode {
+    match connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        _ => panic!("expected rejected WebSocket handshake"),
+    }
+}
+
+#[tokio::test]
+async fn secure_admission_authenticates_before_offline_and_capacity_checks() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let f = Fixture::new(port);
+    let grant = f.store.session(&f.browser, Some(f.gateway)).unwrap().id;
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET ui_api_version=?1 WHERE id=?2",
+            params![WORKBENCH_API_VERSION, grant.to_string()],
+        )
+        .unwrap();
+    let state = synthetic_state(&f);
+    let router = router(state.clone());
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
+    });
+    assert_eq!(
+        websocket_status(secure_request(&f, port, grant, "scope=application")).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a valid grant still distinguishes an offline gateway"
+    );
+    assert_eq!(
+        router
+            .oneshot(f.request("/relay/v1/logout", "POST", serde_json::json!({}), false))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!f.store.active(f.parent));
+    assert_eq!(
+        websocket_status(secure_request(&f, port, grant, "scope=application")).await,
+        StatusCode::UNAUTHORIZED,
+        "offline state must not hide parent revocation"
+    );
+    let _occupied = state
+        .0
+        .stream_capacity
+        .clone()
+        .try_acquire_many_owned(256)
+        .unwrap();
+    assert_eq!(
+        websocket_status(secure_request(&f, port, grant, "scope=application")).await,
+        StatusCode::UNAUTHORIZED,
+        "capacity exhaustion must not hide parent revocation"
+    );
+    assert!(state.0.streams.lock().unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn secure_admission_rejects_foreign_parent_selectors_scope_and_capacity_overflow() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let f = Fixture::new(port);
+    let state = synthetic_state(&f);
+    let router = router(state.clone());
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
+    });
+    let mut control = socket(
+        port,
+        &f.host(false),
+        "/relay/v1/tunnel",
+        Some(&f.credential),
+        None,
+        None,
+    )
+    .await;
+    hello(&mut control, &f).await;
+    let grant = mint_grant(&f, &router).await;
+    for scope in [
+        "scope=run",
+        "scope=application&runId=unexpected",
+        "scope=application&path=private",
+        "scope=application&scope=run",
+        "scope=%61pplication",
+        "scope=application&relayGrant=duplicate",
+    ] {
+        assert_eq!(
+            websocket_status(secure_request(&f, port, grant, scope)).await,
+            StatusCode::BAD_REQUEST,
+            "{scope}"
+        );
+    }
+    for same_account in [true, false] {
+        let token = store::secret();
+        f.store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions(id,hash,account,expires) VALUES(?1,?2,?3,?4)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    store::digest(&token),
+                    if same_account { f.account } else { f.other }.to_string(),
+                    store::now() + 3600
+                ],
+            )
+            .unwrap();
+        let mut req = secure_request(&f, port, grant, "scope=application");
+        req.headers_mut().insert(
+            "cookie",
+            format!("__Host-relay_session={token}").parse().unwrap(),
+        );
+        assert_eq!(websocket_status(req).await, StatusCode::UNAUTHORIZED);
+    }
+    let mut req = secure_request(&f, port, grant, "scope=application");
+    req.headers_mut().remove("cookie");
+    assert_eq!(websocket_status(req).await, StatusCode::UNAUTHORIZED);
+    let mut req = secure_request(&f, port, grant, "scope=application");
+    req.headers_mut()
+        .insert("x-workbench-grant", grant.to_string().parse().unwrap());
+    assert_eq!(websocket_status(req).await, StatusCode::BAD_REQUEST);
+    let mut req = secure_request(&f, port, grant, "scope=application");
+    req.headers_mut()
+        .insert("origin", "https://evil.test".parse().unwrap());
+    assert_eq!(websocket_status(req).await, StatusCode::FORBIDDEN);
+    let per_gateway = state
+        .0
+        .tunnels
+        .lock()
+        .unwrap()
+        .get(&f.gateway)
+        .unwrap()
+        .capacity
+        .clone();
+    assert_eq!(per_gateway.available_permits(), 64);
+    assert_eq!(state.0.stream_capacity.available_permits(), 256);
+    let occupied = per_gateway.clone().try_acquire_many_owned(64).unwrap();
+    // A new control epoch must keep the physical permits held by old channels.
     let mut replacement = socket(
         port,
         &f.host(false),
@@ -1370,46 +1518,175 @@ async fn active_streams_revocation(delete_account: bool) {
         None,
     )
     .await;
-    replacement
-        .send(Message::Text(
-            serde_json::to_string(&Hello {
-                version: VERSION,
-                workbench_api_version: codex_relay_protocol::WORKBENCH_API_VERSION,
-                gateway_id: f.gateway,
-                instance_id: Uuid::new_v4(),
-                client_version: "test".into(),
-            })
+    hello(&mut replacement, &f).await;
+    assert_eq!(
+        state
+            .0
+            .tunnels
+            .lock()
             .unwrap()
-            .into(),
+            .get(&f.gateway)
+            .unwrap()
+            .capacity
+            .available_permits(),
+        0
+    );
+    control = replacement;
+    assert_eq!(
+        websocket_status(secure_request(&f, port, grant, "scope=application")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    drop(occupied);
+    let occupied = state
+        .0
+        .stream_capacity
+        .clone()
+        .try_acquire_many_owned(256)
+        .unwrap();
+    assert_eq!(
+        websocket_status(secure_request(&f, port, grant, "scope=application")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    drop(occupied);
+    assert!(state.0.streams.lock().unwrap().is_empty());
+    // All rejected attempts released capacity; a real channel can still open.
+    let (public, agent, _) = channel_pair(&mut control, &f, port, grant, "scope=application").await;
+    drop(public);
+    drop(agent);
+    server.abort();
+}
+
+#[tokio::test]
+async fn oversized_records_and_plaintext_after_binary_close_only_their_channel() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let f = Fixture::new(port);
+    let router = app(f.config.clone()).unwrap();
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
+    });
+    let mut control = socket(
+        port,
+        &f.host(false),
+        "/relay/v1/tunnel",
+        Some(&f.credential),
+        None,
+        None,
+    )
+    .await;
+    hello(&mut control, &f).await;
+    let grant = mint_grant(&f, &router).await;
+    for invalid in [
+        Message::Text("x".repeat(16 * 1024 + 1).into()),
+        Message::Binary(vec![0; 96 * 1024 + 1].into()),
+        Message::Text("plaintext after finished".into()),
+    ] {
+        let (mut public, mut agent, _) =
+            channel_pair(&mut control, &f, port, grant, "scope=application").await;
+        if invalid == Message::Text("plaintext after finished".into()) {
+            public
+                .send(Message::Binary(vec![1, 2, 3].into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                agent.next().await.unwrap().unwrap().into_data().as_ref(),
+                [1, 2, 3]
+            );
+        }
+        public.send(invalid).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), agent.next()).await,
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
+        ));
+    }
+    let (mut public, mut agent, _) =
+        channel_pair(&mut control, &f, port, grant, "scope=application").await;
+    agent
+        .send(Message::Binary(vec![4, 5, 6].into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        public.next().await.unwrap().unwrap().into_data().as_ref(),
+        [4, 5, 6]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn unfinished_handshake_times_out_and_releases_physical_channel_budget() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let f = Fixture::new(port);
+    let state = synthetic_state(&f);
+    let router = router(state.clone());
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
+    });
+    let mut control = socket(
+        port,
+        &f.host(false),
+        "/relay/v1/tunnel",
+        Some(&f.credential),
+        None,
+        None,
+    )
+    .await;
+    hello(&mut control, &f).await;
+    let grant = mint_grant(&f, &router).await;
+    let (mut public, _agent, _) =
+        channel_pair(&mut control, &f, port, grant, "scope=application").await;
+    assert_eq!(state.0.stream_capacity.available_permits(), 255);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(12), public.next()).await,
+        Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
+    ));
+    assert!(state.0.streams.lock().unwrap().is_empty());
+    assert_eq!(state.0.stream_capacity.available_permits(), 256);
+    assert_eq!(
+        state
+            .0
+            .tunnels
+            .lock()
+            .unwrap()
+            .get(&f.gateway)
+            .unwrap()
+            .capacity
+            .available_permits(),
+        64
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn opening_offline_gateway_does_not_create_page_grant() {
+    let f = Fixture::new(9879);
+    let router = app(f.config.clone()).unwrap();
+    let count = || {
+        f.store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = count();
+    let response = router
+        .oneshot(f.request(
+            &format!("/relay/v1/gateways/{}/open", f.gateway),
+            "POST",
+            serde_json::json!({"uiApiVersion":WORKBENCH_API_VERSION}),
+            false,
         ))
         .await
         .unwrap();
-    let next: Welcome = serde_json::from_str(
-        replacement
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_ne!(welcome.connection_epoch, next.connection_epoch);
-    let mut forged = format!(
-        "ws://127.0.0.1:{port}/relay/v1/tunnel/streams/{}?epoch={}",
-        open.stream_id, welcome.connection_epoch
-    )
-    .into_client_request()
-    .unwrap();
-    forged
-        .headers_mut()
-        .insert("host", f.host(false).parse().unwrap());
-    forged.headers_mut().insert(
-        "authorization",
-        format!("Bearer {}", f.credential).parse().unwrap(),
-    );
-    assert!(connect_async(forged).await.is_err());
-    server.abort();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(count(), before);
 }
 
 fn synthetic_state(f: &Fixture) -> App {
@@ -1420,8 +1697,9 @@ fn synthetic_state(f: &Fixture) -> App {
         portal_capacity: Arc::new(Semaphore::new(32)),
         control_capacity: Arc::new(Semaphore::new(256)),
         gateway_control_capacity: Mutex::new(HashMap::new()),
+        gateway_channel_capacity: Mutex::new(HashMap::new()),
         stream_capacity: Arc::new(Semaphore::new(256)),
-        terminal_capacity: Arc::new(Semaphore::new(16)),
+
         limits: Mutex::new(HashMap::new()),
         bindings: Mutex::new(HashMap::new()),
         tunnels: Mutex::new(HashMap::new()),
@@ -1607,69 +1885,6 @@ async fn trusted_proxy_ip_requires_opt_in_loopback_and_exactly_one_ip() {
     );
 }
 #[tokio::test]
-async fn slow_request_bodies_are_admitted_before_read_and_release_capacity() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let f = Fixture::new(9781);
-    let s = synthetic_state(&f);
-    let (send, _recv) = tokio::sync::mpsc::channel(128);
-    let (cancel, _stop) = tokio::sync::watch::channel(false);
-    let capacity = Arc::new(Semaphore::new(64));
-    s.0.tunnels.lock().unwrap().insert(
-        f.gateway,
-        tunnel::Connection {
-            credential: f.credential.clone(),
-            workbench_api_version: codex_relay_protocol::WORKBENCH_API_VERSION,
-            epoch: Uuid::new_v4(),
-            instance: Uuid::new_v4(),
-            sessions: Default::default(),
-            capacity: capacity.clone(),
-            terminal_capacity: Arc::new(Semaphore::new(4)),
-            send,
-            cancel,
-        },
-    );
-    let started = Arc::new(AtomicUsize::new(0));
-    let mut requests = Vec::new();
-    for _ in 0..64 {
-        let mut req = f.request("/workbench/v1/runs", "POST", serde_json::json!({}), true);
-        let count = started.clone();
-        let mut first = true;
-        *req.body_mut() = Body::from_stream(futures_util::stream::poll_fn(move |_| {
-            if first {
-                first = false;
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-            std::task::Poll::<Option<std::result::Result<axum::body::Bytes,std::io::Error>>>::Pending
-        }));
-        let state = s.clone();
-        let h = req.headers().clone();
-        requests.push(tokio::spawn(async move {
-            tunnel::forward_inner(state, h, req, None).await
-        }));
-    }
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while started.load(Ordering::SeqCst) < 64 {
-            tokio::task::yield_now().await
-        }
-    })
-    .await
-    .unwrap();
-    let req = f.request("/workbench/v1/runs", "POST", serde_json::json!({}), true);
-    assert!(matches!(
-        tunnel::forward_inner(s.clone(), req.headers().clone(), req, None).await,
-        Err(Failure(StatusCode::TOO_MANY_REQUESTS))
-    ));
-    assert_eq!(capacity.available_permits(), 0);
-    assert_eq!(s.0.stream_capacity.available_permits(), 192);
-    for task in requests {
-        task.abort();
-        let _ = task.await;
-    }
-    assert_eq!(capacity.available_permits(), 64);
-    assert_eq!(s.0.stream_capacity.available_permits(), 256);
-    assert!(s.0.streams.lock().unwrap().is_empty());
-}
-#[tokio::test]
 async fn idle_grants_remain_renewable_and_are_revoked_without_streams() {
     let f = Fixture::new(9782);
     let s = synthetic_state(&f);
@@ -1685,7 +1900,7 @@ async fn idle_grants_remain_renewable_and_are_revoked_without_streams() {
             instance: Uuid::new_v4(),
             sessions: std::collections::HashSet::from([session.id]),
             capacity: Arc::new(Semaphore::new(64)),
-            terminal_capacity: Arc::new(Semaphore::new(4)),
+
             send,
             cancel,
         },
@@ -2136,244 +2351,70 @@ fn expired_parent_fanout_cannot_expand_cleanup_beyond_row_budget() {
     );
 }
 
-impl Fixture {
-    fn ip_trial() -> Self {
-        let mut f = Self::new(9443);
-        f.config.portal_origin = "https://192.0.2.10:9443".into();
-        f.config.workbench_domain.clear();
-        f.config.workbench_origin = Some("https://192.0.2.10:9444".into());
-        f.config.fixed_gateway_id = Some(f.gateway);
-        f.config.password_workers = 1;
-        f.config.allow_insecure_loopback = false;
-        f
-    }
-}
-
 #[test]
-fn fixed_ip_configuration_is_explicit_and_fails_closed() {
-    let f = Fixture::ip_trial();
-    f.config.validate().unwrap();
-    assert_eq!(
-        f.config.gateway_origin(f.gateway),
-        f.config.workbench_origin
-    );
-    assert_eq!(f.config.gateway_origin(Uuid::new_v4()), None);
-    for (portal, workbench) in [
-        ("http://192.0.2.10:9443", "http://192.0.2.10:9444"),
-        ("https://192.0.2.10:9443", "https://192.0.2.11:9444"),
-        ("https://192.0.2.10:9443", "https://192.0.2.10:9443"),
-        ("https://192.0.2.10:9443", "https://example.com:9444"),
-        ("https://192.0.2.10:9443", "https://192.0.2.10:9444/path"),
+fn single_origin_accepts_ip_or_domain_and_rejects_insecure_public_origins() {
+    let mut f = Fixture::new(9443);
+    f.config.allow_insecure_loopback = false;
+    for origin in [
+        "https://192.0.2.10:9443",
+        "https://relay.example.test",
+        "https://[::1]:9443",
     ] {
-        let mut c = f.config.clone();
-        c.portal_origin = portal.into();
-        c.workbench_origin = Some(workbench.into());
-        c.allow_insecure_loopback = true;
-        assert!(c.validate().is_err(), "accepted {portal} / {workbench}");
+        f.config.portal_origin = origin.into();
+        f.config.validate().unwrap();
+        assert_eq!(f.config.gateway_origin(f.gateway), Some(origin.into()));
+        assert_eq!(f.config.gateway_origin(Uuid::new_v4()), Some(origin.into()));
     }
-    let mut c = f.config.clone();
-    c.fixed_gateway_id = None;
-    assert!(c.validate().is_err());
-    c.fixed_gateway_id = Some(Uuid::nil());
-    assert!(c.validate().is_err());
-    let mut c = f.config.clone();
-    c.workbench_domain = "example.com".into();
-    assert!(c.validate().is_err());
-    for workers in [0, 5, usize::MAX] {
-        let mut c = f.config.clone();
-        c.password_workers = workers;
-        assert!(c.validate().is_err());
+    for origin in [
+        "http://192.0.2.10:9443",
+        "https://example.test/path",
+        "https://user@example.test",
+    ] {
+        f.config.portal_origin = origin.into();
+        assert!(f.config.validate().is_err(), "{origin}");
     }
-    let mut c = f.config.clone();
-    c.fixed_gateway_id = Some(Uuid::new_v4());
-    assert!(app(c).is_err());
-    drop(app(f.config.clone()).unwrap());
-    drop(app(f.config.clone()).unwrap()); // Restart preserves the configured mapping.
 }
 
-#[tokio::test]
-async fn fixed_ip_ports_origins_routes_and_cookie_types_remain_separate() {
-    let f = Fixture::ip_trial();
-    let app = app(f.config.clone()).unwrap();
-    for host in ["192.0.2.10", "192.0.2.10:9445", "192.0.2.11:9443"] {
-        let mut req = f.request("/relay/v1/account", "GET", serde_json::json!({}), false);
-        req.headers_mut().insert("host", host.parse().unwrap());
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::MISDIRECTED_REQUEST
-        );
-    }
-    for gateway in [false, true] {
-        let mut req = f.request(
-            if gateway {
-                "/relay/v1/session/exchange"
-            } else {
-                "/relay/v1/logout"
-            },
-            "POST",
-            serde_json::json!({"code":"invalid"}),
-            gateway,
-        );
-        req.headers_mut().insert(
-            "origin",
-            if gateway {
-                f.config.portal_origin.clone()
-            } else {
-                f.config.workbench_origin.clone().unwrap()
-            }
-            .parse()
-            .unwrap(),
-        );
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    let mut req = f.request("/relay/v1/account", "GET", serde_json::json!({}), false);
-    req.headers_mut().insert(
-        "cookie",
-        format!("__Host-relay_session={}", f.browser)
-            .parse()
-            .unwrap(),
+fn connected_router(f: &Fixture) -> Router {
+    let state = synthetic_state(f);
+    let (send, _receive) = tokio::sync::mpsc::channel(128);
+    let (cancel, _stop) = tokio::sync::watch::channel(false);
+    state.0.tunnels.lock().unwrap().insert(
+        f.gateway,
+        tunnel::Connection {
+            credential: f.credential.clone(),
+            workbench_api_version: WORKBENCH_API_VERSION,
+            epoch: Uuid::new_v4(),
+            instance: Uuid::new_v4(),
+            sessions: Default::default(),
+            capacity: Arc::new(Semaphore::new(64)),
+            send,
+            cancel,
+        },
     );
-    assert_eq!(
-        app.clone().oneshot(req).await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let mut req = f.request(
-        "/workbench/v1/application",
-        "GET",
-        serde_json::json!({}),
-        true,
-    );
-    req.headers_mut().insert(
-        "cookie",
-        format!("__Host-workbench_session={}", f.portal)
-            .parse()
-            .unwrap(),
-    );
-    assert_eq!(
-        app.clone().oneshot(req).await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(f.request("/relay/v1/account", "GET", serde_json::json!({}), true))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-}
-
-#[tokio::test]
-async fn fixed_ip_binding_capacity_and_rebind_revoke_old_identity() {
-    let f = Fixture::ip_trial();
-    let app = app(f.config.clone()).unwrap();
-    let pending: BindingPending = serde_json::from_value(
-        json(
-            app.clone()
-                .oneshot(f.request(
-                    "/relay/v1/bindings",
-                    "POST",
-                    serde_json::json!({"name":"Replacement"}),
-                    false,
-                ))
-                .await
-                .unwrap(),
-        )
-        .await,
-    )
-    .unwrap();
-    let approve = || {
-        f.request(
-            "/relay/v1/bindings/approve",
-            "POST",
-            serde_json::json!({"userCode":pending.user_code}),
-            false,
-        )
-    };
-    assert_eq!(
-        app.clone().oneshot(approve()).await.unwrap().status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        app.clone()
-            .oneshot(f.request(
-                &format!("/relay/v1/gateways/{}", f.gateway),
-                "DELETE",
-                serde_json::json!({}),
-                false
-            ))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    assert!(f.store.gateway_auth(&f.credential).is_none());
-    assert!(f.store.session(&f.browser, Some(f.gateway)).is_none());
-    assert_eq!(
-        app.clone().oneshot(approve()).await.unwrap().status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        app.clone().oneshot(approve()).await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let bound: Bound = serde_json::from_value(
-        json(
-            app.oneshot(f.request(
-                &format!("/relay/v1/bindings/{}/poll", pending.binding_id),
-                "POST",
-                serde_json::json!({"deviceCode":pending.device_code}),
-                false,
-            ))
-            .await
-            .unwrap(),
-        )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(bound.gateway_id, f.gateway);
-    assert_eq!(Some(bound.gateway_origin), f.config.workbench_origin);
-    assert_eq!(
-        f.store.gateway_auth(&bound.credential),
-        Some((f.gateway, f.account))
-    );
-    assert!(f.store.gateway_auth(&f.credential).is_none());
-    assert!(f.store.session(&f.browser, Some(f.gateway)).is_none());
+    router(state)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fixed_uuid_rebind_cannot_be_replaced_by_stale_control_admission() {
-    let f = Fixture::ip_trial();
-    let s = synthetic_state(&f);
+async fn rebind_cannot_be_replaced_by_stale_authenticated_control_admission() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let f = Fixture::new(port);
+    let state = synthetic_state(&f);
     let reached = Arc::new(tokio::sync::Notify::new());
     let resume = Arc::new(tokio::sync::Notify::new());
-    *s.0.admission_gate.lock().unwrap() = Some(tunnel::AdmissionGate {
+    *state.0.admission_gate.lock().unwrap() = Some(tunnel::AdmissionGate {
         credential: f.credential.clone(),
         reached: reached.clone(),
         resume: resume.clone(),
     });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let router = Router::new()
-        .route("/relay/v1/tunnel", get(tunnel::connect))
-        .with_state(s.clone());
-    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let hello = || {
-        Message::Text(
-            serde_json::to_string(&Hello {
-                version: VERSION,
-                workbench_api_version: codex_relay_protocol::WORKBENCH_API_VERSION,
-                gateway_id: f.gateway,
-                instance_id: Uuid::new_v4(),
-                client_version: "rebind-race".into(),
-            })
-            .unwrap()
-            .into(),
-        )
-    };
+    let router = router(state.clone());
+    let server = tokio::spawn({
+        let router = router.clone();
+        async move {
+            axum::serve(listener, router).await.unwrap();
+        }
+    });
     let mut stale = socket(
         port,
         &f.host(false),
@@ -2383,82 +2424,56 @@ async fn fixed_uuid_rebind_cannot_be_replaced_by_stale_control_admission() {
         None,
     )
     .await;
-    stale.send(hello()).await.unwrap();
-    // The old credential was authenticated on a real worker. Pause it at the
-    // former validation/install gap while another worker completes a rebind.
-    tokio::time::timeout(Duration::from_secs(5), reached.notified())
+    stale
+        .send(Message::Text(
+            serde_json::to_string(&Hello {
+                version: VERSION,
+                workbench_api_version: WORKBENCH_API_VERSION,
+                gateway_id: f.gateway,
+                instance_id: Uuid::new_v4(),
+                client_version: "stale".into(),
+            })
+            .unwrap()
+            .into(),
+        ))
         .await
         .unwrap();
-    let old_headers = f
-        .request("/", "GET", serde_json::json!({}), false)
-        .headers()
-        .clone();
+    tokio::time::timeout(Duration::from_secs(2), reached.notified())
+        .await
+        .unwrap();
+    let pending:BindingPending=serde_json::from_value(json(router.clone().oneshot(f.request(
+        "/relay/v1/bindings","POST",serde_json::json!({"name":"Recovered","resumeGatewayId":f.gateway,"resumeCredential":f.credential}),false
+    )).await.unwrap()).await).unwrap();
     assert_eq!(
-        portal::forget(
-            State(s.clone()),
-            axum::extract::Path(f.gateway),
-            old_headers
-        )
-        .await
-        .ok(),
-        Some(StatusCode::NO_CONTENT)
+        router
+            .clone()
+            .oneshot(f.request(
+                "/relay/v1/bindings/approve",
+                "POST",
+                serde_json::json!({"userCode":pending.user_code}),
+                false
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
-    let other_token = store::secret();
-    s.0.store
-        .0
-        .lock()
-        .unwrap()
-        .execute(
-            "INSERT INTO sessions(id,hash,account,expires) VALUES(?1,?2,?3,?4)",
-            params![
-                Uuid::new_v4().to_string(),
-                store::digest(&other_token),
-                f.other.to_string(),
-                store::now() + 3600
-            ],
+    let bound: Bound = serde_json::from_value(
+        json(
+            router
+                .clone()
+                .oneshot(f.request(
+                    &format!("/relay/v1/bindings/{}/poll", pending.binding_id),
+                    "POST",
+                    serde_json::json!({"deviceCode":pending.device_code}),
+                    false,
+                ))
+                .await
+                .unwrap(),
         )
-        .unwrap();
-    let mut other_headers = HeaderMap::new();
-    other_headers.insert(
-        "cookie",
-        format!("__Host-relay_session={other_token}")
-            .parse()
-            .unwrap(),
-    );
-    let axum::Json(pending) = portal::binding_start(
-        State(s.clone()),
-        axum::Json(BindingStart {
-            name: "Other owner".into(),
-            resume_gateway_id: None,
-            resume_credential: None,
-        }),
+        .await,
     )
-    .await
-    .ok()
     .unwrap();
-    assert!(
-        portal::binding_approve(
-            State(s.clone()),
-            other_headers,
-            axum::Json(
-                serde_json::from_value(serde_json::json!({"userCode":pending.user_code})).unwrap()
-            )
-        )
-        .await
-        .is_ok()
-    );
-    let response = portal::binding_poll(
-        State(s.clone()),
-        axum::extract::Path(pending.binding_id),
-        axum::Json(BindingPoll {
-            device_code: pending.device_code,
-        }),
-    )
-    .await
-    .ok()
-    .unwrap();
-    let bound: Bound = serde_json::from_value(json(response).await).unwrap();
-    assert_eq!(bound.account_id, f.other);
     assert_eq!(bound.gateway_id, f.gateway);
     let mut current = socket(
         port,
@@ -2469,33 +2484,19 @@ async fn fixed_uuid_rebind_cannot_be_replaced_by_stale_control_admission() {
         None,
     )
     .await;
-    current.send(hello()).await.unwrap();
-    let welcome = tokio::time::timeout(Duration::from_secs(5), current.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let Message::Text(welcome) = welcome else {
-        panic!("missing current welcome")
-    };
-    let welcome: Welcome = serde_json::from_str(&welcome).unwrap();
-    assert_eq!(welcome.account_id, f.other);
+    let welcome = hello(&mut current, &f).await;
     resume.notify_one();
-    let stale_message = tokio::time::timeout(Duration::from_secs(5), stale.next())
-        .await
-        .unwrap();
-    assert!(
-        !matches!(
-            stale_message,
-            Some(Ok(Message::Text(_) | Message::Binary(_)))
-        ),
-        "stale admission received a Welcome or grant"
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), stale.next()).await,
+        Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
+    ));
+    let tunnels = state.0.tunnels.lock().unwrap();
+    assert_eq!(
+        tunnels.get(&f.gateway).unwrap().epoch,
+        welcome.connection_epoch
     );
-    let tunnels = s.0.tunnels.lock().unwrap();
-    let active = tunnels.get(&f.gateway).unwrap();
-    assert_eq!(active.epoch, welcome.connection_epoch);
-    assert!(!*active.cancel.borrow());
-    assert!(s.0.store.gateway_auth(&f.credential).is_none());
+    assert!(!*tunnels.get(&f.gateway).unwrap().cancel.borrow());
+    assert!(f.store.gateway_auth(&f.credential).is_none());
     drop(tunnels);
     server.abort();
 }

@@ -1,6 +1,6 @@
 [package]
 name = "codex-local-observer"
-version = "0.5.1"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "Native Codex CLI workbench with read-only Observer history compatibility"
@@ -35,6 +35,7 @@ libc = "0.2"
 notify = "8"
 portable-pty = "0.9"
 rand = "0.9"
+ring = "0.17.14"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots"] }
 rusqlite = { version = "0.37", features = ["bundled", "hooks", "limits"] }
 # Keep the built UI and API together in local trial binaries as well as releases.

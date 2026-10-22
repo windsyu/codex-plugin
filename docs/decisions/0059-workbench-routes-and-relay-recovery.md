@@ -1,5 +1,7 @@
 # ADR 0059：独立功能页面与中转断线恢复
 
+2026-10-21：[ADR 0066](0066-run-scoped-encrypted-relay-channels.md) 将远程业务改为按 Run 的加密通道，并移除旧域名模式；本 ADR 的页面语义、固定授权及输入不重放约束继续有效。
+
 - Status: Accepted
 - Date: 2026-10-14
 

@@ -25,7 +25,7 @@ struct StateData {
     runs: RunHandle,
     sources: crate::history::library::LibraryHandle,
     native_home: PathBuf,
-    run: RwLock<Vec<(RunSummary, Router)>>,
+    run: RwLock<Vec<(RunSummary, Router, crate::workbench::permission::Permission)>>,
     devices: Arc<access::SharedAccess>,
     launch_error: RwLock<Option<&'static str>>,
     picker: crate::workbench::application::folder_picker::FolderPicker,
@@ -44,8 +44,13 @@ impl SurfaceHandle {
     ) -> Result<RunSurface> {
         RunSurface::new(run, &self.0.owner, config, self.0.devices.clone())
     }
-    pub fn publish(&self, summary: RunSummary, router: Router) {
-        self.0.run.write().unwrap().push((summary, router));
+    pub fn publish(
+        &self,
+        summary: RunSummary,
+        router: Router,
+        life: crate::workbench::permission::Permission,
+    ) {
+        self.0.run.write().unwrap().push((summary, router, life));
     }
     pub fn summary(&self, summary: RunSummary) {
         if let Some(run) = self
@@ -63,10 +68,21 @@ impl SurfaceHandle {
         *self.0.launch_error.write().unwrap() = code;
     }
     pub fn clear(&self) {
-        self.0.run.write().unwrap().clear();
+        let mut runs = self.0.run.write().unwrap();
+        for run in runs.iter() {
+            run.2.revoke();
+        }
+        runs.clear();
     }
     pub fn remove(&self, id: Uuid) {
-        self.0.run.write().unwrap().retain(|r| r.0.run_id != id);
+        self.0.run.write().unwrap().retain(|r| {
+            if r.0.run_id == id {
+                r.2.revoke();
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 pub struct ApplicationServer {
@@ -192,6 +208,17 @@ impl ApplicationServer {
             .layer(middleware::from_fn_with_state(state.clone(), boundary))
             .with_state(state.clone());
         let remote = remote::Ingress::start(app.clone(), id)?;
+        let weak = Arc::downgrade(&state);
+        remote.handle().set_run_resolver(Arc::new(move |id| {
+            let state = weak.upgrade()?;
+            state
+                .run
+                .read()
+                .unwrap()
+                .iter()
+                .find(|run| run.0.run_id == id)
+                .map(|run| run.2.clone())
+        }));
         match crate::workbench::relay::Service::start(relay_root, id, remote.handle()) {
             Ok(relay) => *state.relay.write().unwrap() = Some(relay),
             Err(_) => eprintln!(
