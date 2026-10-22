@@ -131,7 +131,7 @@ export function writeChecksums(directory) {
 export function packageRelease(repo, artifacts, { offline = false } = {}) {
   const host = releaseTarget(repo);
   const version = fs.readFileSync(path.join(repo, 'Cargo.toml'), 'utf8').match(/^version = "([^"]+)"$/m)?.[1];
-  if (!/^0\.\d+\.\d+$/.test(version)) throw new Error('Expected pre-1.0 semver release version');
+  if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version) || version !== version.trim()) throw new Error('Expected stable semver release version');
   const web = JSON.parse(fs.readFileSync(path.join(repo, 'web/package.json'), 'utf8'));
   if (web.version !== version) throw new Error('Rust and Web release versions differ');
   const metadata = JSON.parse(command('cargo', ['metadata', '--locked', ...(offline ? ['--offline'] : []), '--filter-platform', host, '--format-version', '1'], repo));
