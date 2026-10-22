@@ -4,7 +4,7 @@
 
 ## 本地打包
 
-当前版本 `0.3.0`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
+当前版本 `0.5.1`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
 
 ```sh
 node scripts/dev.mjs doctor
@@ -12,6 +12,8 @@ node scripts/dev.mjs bootstrap
 node scripts/dev.mjs check
 node scripts/dev.mjs package --offline
 ```
+
+macOS 打包还需当前固定工具链配套的 `rust-docs` 与 `rust-src` 组件，用于保留实际 sysroot 的标准库、内建函数及其引用的原始许可通知；不是从 Cargo metadata 推导这部分许可。缺失时先运行 `rustup component add rust-docs rust-src --toolchain 1.95.0`（需要网络），再重新打包；打包入口本身不自动下载或替换工具链。
 
 `package` 重新生成 Web 资源并编译两个 release binary，检查 binary 的版本和动态库依赖，然后在 `target/artifacts/<UUID>` 生成压缩包、`SHA256SUMS` 与解包目录。该任务按独立构建产物登记，保留 30 天；需要长期留存时由所有者明确复制或固定保留。只允许当前已受测的 macOS / Apple Silicon，不自动交叉编译或推导其他平台支持。
 

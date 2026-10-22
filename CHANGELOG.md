@@ -6,6 +6,11 @@
 
 - 公网业务改为浏览器与电脑 P-256/HKDF/AES-GCM 加密：每页面按 CLI Run 复用通道，Application 独立，Relay 只转发密文；仍信任自部署前端和授权方。wire/UI/API 同升至 3，无明文回退；仅保留单 origin，移除旧域名/双端口交换入口及模板，账号、登记、schema 3 和历史保留，见 [ADR 0066](docs/decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
+## 0.5.1（2026-10-20）
+
+- 发布基于最新 main 的 macOS / Apple Silicon View 安装包，包含下述自 0.3.0 以来的源码增量；不附带独立 `codex-relayd` 服务器。View/Web 版本同步为 0.5.1，共享协议与中转 package 保持各自版本；不因打包新增数据库迁移。
+- 发布包装补齐实际 Rust sysroot 的标准库与内建函数原始许可通知；安装冒烟等待合成 CLI 的实际执行记录，仍严格核对目录及启动次数。后台专项支持指定最终包内 binary，并记录版本及 SHA256，区分 debug 检查与发布产物验证。
+
 - 清理阶段计划、验证报告、旧原型和开发归档，保留详细设计、ADR、操作与维护契约；有效限制及旧 Observer 兼容规则并入长期技术文档，历史记录可通过 Git 追溯。
 
 - 公网中转整合 main 的新版历史、会话分组与单条归类，配套工作台 API 升至 2；已有 catalog 4 和独立归类状态保留，旧工作台页面需从电脑门户重新打开。修复短折叠窗口滚动和迟到读取响应导致详情返回目标卸载的问题，见 [ADR 0065](docs/decisions/0065-main-history-relay-integration.md)。

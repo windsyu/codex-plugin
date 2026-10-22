@@ -52,7 +52,7 @@ code-view       # 在当前项目启动 CLI 与网页工作台
 codex-view      # 仅打开项目 / 历史首页，不启动 CLI
 ```
 
-发布包当前面向 macOS / Apple Silicon；模型接入以已验证的自定义 Responses provider 为限。其他平台、认证方式和 CLI 版本的边界见[支持范围](docs/guides/support.md)。现有 `v0.3.0` 发布包不包含公网中继等后续源码增量。
+`v0.5.1` 发布包面向 macOS / Apple Silicon，包含后台服务与可选公网连接器，不附带独立 Relay 服务器；模型接入以已验证的自定义 Responses provider 为限。其他平台、认证方式和 CLI 版本的边界见[支持范围](docs/guides/support.md)。旧 `v0.3.0` 发布包不包含后续源码增量。
 
 从源码运行或部署 Relay，请分别阅读[开发指南](docs/development/README.md)和[中继部署指南](docs/guides/public-relay-deployment.md)。安装、后台运行、配置与卸载的完整步骤均在 `docs/guides/`。
 
