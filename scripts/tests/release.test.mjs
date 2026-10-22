@@ -90,6 +90,14 @@ for (const version of ['0.3.0', '1.0.0', '12.34.56']) test(`packaging ${version}
   assert.equal(JSON.parse(fs.readFileSync(path.join(release.bundle, 'manifest.json'))).version, version);
   assert.equal(path.basename(release.archive), `code-view-${version}-${RELEASE_TARGET}.tar.gz`);
   assert.equal(fs.statSync(release.archive).isFile(), true);
+  const notes = fs.readFileSync(path.join(release.bundle, 'RELEASE.md'), 'utf8');
+  assert.match(notes, /workbench UI\/API 3, wire transport 3 and relay schema 3/);
+  assert.match(notes, /separate Application and per-Run channels/);
+  assert.match(notes, /frontend and authorization service remain trusted/);
+  assert.match(notes, /no plaintext fallback/);
+  assert.match(notes, /Upgrade all three components together/);
+  assert.match(notes, /CLI 0\.162\.1 command authentication was tested with a synthetic provider; real-provider command authentication remains unverified/);
+  assert.doesNotMatch(notes, /UI\/API 2|transport 2|relay is trusted and can read forwarded content/);
   const index = JSON.parse(fs.readFileSync(path.join(release.bundle, 'licenses/INDEX.json')));
   const runtimes = index.filter(entry => entry.ecosystem === 'toolchain-runtime');
   assert.deepEqual(runtimes.map(entry => [entry.name, entry.version]), [['rust-library', '1.95.0'], ['rust-compiler-builtins', '1.95.0']]);
