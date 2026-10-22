@@ -1,6 +1,6 @@
 # ADR 0057：独立端口的单工作台 IP 测试
 
-Status: Accepted（仅测试接入；验收另列）
+Status: Superseded by [ADR 0066](0066-run-scoped-encrypted-relay-channels.md)（原测试接入决定保留，双端口入口与模板已移除）
 
 Date: 2026-10-13
 
@@ -25,4 +25,4 @@ Date: 2026-10-13
 
 这是单工作台功能试用入口，不能替代多工作台域名模式验收。同 IP 的其他 HTTPS 服务可能收到中转 Cookie；只应在这些服务均可信的测试服务器使用。证书复用不自动赋予新 Caddy 实例续签能力，必须验证源证书更新与自身重载。停止测试仅停止新增服务和容器，不操作既有应用。
 
-操作与限制见 [部署指南的历史兼容章节](../guides/public-relay-deployment.md#历史域名与固定单机兼容)。
+当前升级限制见 [部署指南的历史模式退出章节](../guides/public-relay-deployment.md#历史模式退出与升级)，不再提供本 ADR 的部署模式。

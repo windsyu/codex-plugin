@@ -2,9 +2,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Central UI, application/start and terminal contract. Strict match required.
-pub const WORKBENCH_API_VERSION: u32 = 2;
+pub const WORKBENCH_API_VERSION: u32 = 3;
+pub mod secure;
 /// Exact document routes shared by the local server and central relay UI.
 /// `/relay` is local-only and deliberately absent from remote routing.
 pub const APPLICATION_PAGES: &[&str] = &["/", "/history", "/launch", "/settings"];
@@ -78,6 +79,7 @@ pub struct Open {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToGateway {
+    OpenChannel { binding: secure::ChannelBinding },
     Open { request: Open },
     Renew { session_ids: Vec<Uuid> },
     Revoke { session_id: Uuid },
@@ -87,6 +89,7 @@ pub enum ToGateway {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToRelay {
+    ChannelFailed { channel_id: Uuid, code: String },
     Heartbeat,
     StreamFailed { stream_id: Uuid, code: String },
 }

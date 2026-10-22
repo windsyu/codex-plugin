@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- 公网业务改为浏览器与电脑 P-256/HKDF/AES-GCM 加密：每页面按 CLI Run 复用通道，Application 独立，Relay 只转发密文；仍信任自部署前端和授权方。wire/UI/API 同升至 3，无明文回退；仅保留单 origin，移除旧域名/双端口交换入口及模板，账号、登记、schema 3 和历史保留，见 [ADR 0066](docs/decisions/0066-run-scoped-encrypted-relay-channels.md)。
+
 - 清理阶段计划、验证报告、旧原型和开发归档，保留详细设计、ADR、操作与维护契约；有效限制及旧 Observer 兼容规则并入长期技术文档，历史记录可通过 Git 追溯。
 
 - 公网中转整合 main 的新版历史、会话分组与单条归类，配套工作台 API 升至 2；已有 catalog 4 和独立归类状态保留，旧工作台页面需从电脑门户重新打开。修复短折叠窗口滚动和迟到读取响应导致详情返回目标卸载的问题，见 [ADR 0065](docs/decisions/0065-main-history-relay-integration.md)。

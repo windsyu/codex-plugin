@@ -1,5 +1,5 @@
 import { workbenchFetch } from './context';
-import { streamURL, workbenchContext } from './context';
+import { workbenchEvents, workbenchContext, type WorkbenchEvents } from './context';
 import { useEffect, useState } from 'preact/hooks';
 import { modelItems, toolItems, userMessages, parseViewItem, sameItemType, VIEW_SCHEMA_VERSION, type ViewItem, type ViewBase, type ModelItem } from './viewItems';
 import type { NativeCommand, NativeFileChange, ToolCall, ToolContext } from './toolTypes';
@@ -159,7 +159,7 @@ export function applyReadingEvent(state: ReadingView, event: ReadingEvent): Read
 export function useReading(epoch: string): ReadingView {
   const [view, setView] = useState<ReadingView>(empty);
   useEffect(() => {
-    let state = empty(), disposed = false, source: EventSource | undefined;
+    let state = empty(), disposed = false, source: WorkbenchEvents | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined, frame = 0;
     const publish = () => {
       cancelAnimationFrame(frame);
@@ -177,7 +177,7 @@ export function useReading(epoch: string): ReadingView {
         if (disposed) return;
         if (snapshot.runEpoch !== epoch) throw new Error('reading run changed');
         state = readSnapshot(snapshot, epoch); publish();
-        source = new EventSource(streamURL(runApi(`/live/events?epoch=${encodeURIComponent(epoch)}&after=${snapshot.viewSeq}`)));
+        source = workbenchEvents(runApi(`/live/events?epoch=${encodeURIComponent(epoch)}&after=${snapshot.viewSeq}`));
         source.onopen = () => { state = { ...state, connected: true }; publish(); };
         source.addEventListener('view', event => {
           try {

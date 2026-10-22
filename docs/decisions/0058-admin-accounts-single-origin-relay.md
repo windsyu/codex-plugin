@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-13
 
+2026-10-21：[ADR 0066](0066-run-scoped-encrypted-relay-channels.md) 替代明文/逐请求业务转发及旧域名/双端口兼容。单 origin、可信前端、账号归属和数据保护决定继续有效。
+
 2026-10-14 补充：[ADR 0061](0061-account-deletion-admin-rename.md) 将默认登录名改为 `windsyu`，增加普通账号删除与 schema 3 无损迁移；下述 `admin` 默认名称保留为原决定背景，不是当前登录名。
 
 ## Context

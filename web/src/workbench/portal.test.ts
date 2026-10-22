@@ -7,7 +7,7 @@ const member = { username: 'person', role: 'user', mustChangePassword: false };
 const response = (data: unknown, status = 200) => ({ ok: status < 400, status, json: async () => data });
 const el = (id: string) => document.getElementById(id)!;
 async function settle() { for (let i = 0; i < 15; i++) await Promise.resolve(); }
-async function portal(account: object | null = member, route = '/computers') {
+async function portal(account: object | null = member, route = '/computers', scriptLocation: Pick<Location, 'origin' | 'pathname' | 'hash' | 'assign' | 'reload'> = location) {
   history.replaceState(null, '', route);
   document.body.innerHTML = new DOMParser().parseFromString(html, 'text/html').body.innerHTML;
   const fetch = vi.fn(async (path: string): Promise<ReturnType<typeof response>> => response(
@@ -17,7 +17,7 @@ async function portal(account: object | null = member, route = '/computers') {
     path.endsWith('/account') && !account ? 401 : 200,
   ));
   vi.stubGlobal('fetch', fetch);
-  new Function(script)();
+  new Function('location', script)(scriptLocation);
   await settle();
   return fetch;
 }
@@ -181,4 +181,55 @@ it('unknown computer states never enable opening', async () => {
   el('refresh').click(); await settle();
   expect(el('gateways').textContent).toContain('状态未知');
   expect(document.querySelector<HTMLButtonElement>('#gateways button')!.disabled).toBe(true);
+});
+
+const portalOrigin = 'https://relay.example';
+const entry = portalOrigin + '/g/' + id + '/#grant=' + id + '&session=' + id + '&api=3';
+async function onlinePortal(openResponse: string | Promise<ReturnType<typeof response>>) {
+  const assign = vi.fn();
+  const fetch = await portal(member, '/computers', {
+    origin: portalOrigin, get pathname() { return location.pathname; }, get hash() { return location.hash; },
+    assign, reload: vi.fn(),
+  });
+  fetch.mockImplementation(async path => path.endsWith('/open')
+    ? typeof openResponse === 'string' ? response({ url: openResponse }) : await openResponse
+    : response({ gateways: [{ gatewayId: id, name: 'test computer', status: 'online' }] }));
+  el('refresh').click(); await settle();
+  const open = document.querySelector<HTMLButtonElement>('#gateways button')!;
+  expect(open.disabled).toBe(false);
+  return { assign, fetch, open };
+}
+it('opens the online computer through the real API 3 portal flow', async () => {
+  const { assign, fetch, open } = await onlinePortal(entry);
+  open.click(); await settle();
+  expect(fetch).toHaveBeenCalledWith('/relay/v1/gateways/' + id + '/open', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ uiApiVersion: 3 }),
+  }));
+  expect(assign).toHaveBeenCalledTimes(1);
+  expect(assign).toHaveBeenCalledWith(entry);
+});
+it.each([
+  entry.replace('api=3', 'api=2'), entry.replace('api=3', 'api=4'), entry.replace('&api=3', ''),
+  entry.replace(portalOrigin, 'https://foreign.example'), entry.replace(portalOrigin, portalOrigin + ':9443'),
+  entry.replace('/g/' + id + '/', '/g/22222222-2222-4222-8222-222222222222/'),
+  entry.replace('/#', '/?search=private#'), entry.replace('grant=' + id, 'grant=invalid'),
+  entry.replace('session=' + id, 'session=invalid'), entry.replace('grant=' + id + '&', ''),
+  entry.replace('session=' + id + '&', ''), entry.replace('https://', 'https://person:secret@'),
+  entry.replace('https://', 'http://'), 'javascript:alert(1)', 'not a URL',
+])('rejects unsafe or incompatible portal entries: %s', async unsafe => {
+  const { assign, open } = await onlinePortal(unsafe);
+  open.click(); await settle();
+  expect(assign).not.toHaveBeenCalled();
+  expect(el('status').dataset.error).toBe('true');
+});
+it('does not navigate on a late open response after logout', async () => {
+  let resolve!: (value: ReturnType<typeof response>) => void;
+  const pending = new Promise<ReturnType<typeof response>>(done => { resolve = done; });
+  const { assign, open } = await onlinePortal(pending);
+  open.click(); await settle();
+  el('logout').click(); await settle();
+  resolve(response({ url: entry })); await settle();
+  expect(assign).not.toHaveBeenCalled();
+  expect(location.pathname).toBe('/login');
+  expect(el('gateways').textContent).toBe('');
 });

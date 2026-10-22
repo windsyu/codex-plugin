@@ -1,4 +1,4 @@
-import { navigationURL, workbenchFetch } from './context';
+import { navigationURL, workbenchFetch, workbenchContext } from './context';
 export interface Coverage { state: string; reasons: string[] }
 export type UnassignedReason = 'desktop_generated' | 'source_unassigned' | 'missing_cwd' | 'invalid_metadata' | 'identity_conflict' | 'user_unassigned' | 'unknown';
 export interface LibraryEntry {
@@ -91,11 +91,16 @@ export interface HistoryRoute { project: string; source: string; group: string; 
 const keys = ['project', 'source', 'group', 'q', 'entry', 'revision', 'match', 'projectQ', 'view', 'section'] as const;
 export const historyView = (route: HistoryRoute) => route.view === 'records' || (!route.view && (route.group === 'main' || route.group === 'agents')) ? 'records' : 'groups';
 export function routeFromURL(): HistoryRoute {
-  const params = new URLSearchParams(location.search);
+  const params = new URLSearchParams(workbenchContext().gateway ? location.hash.slice(1) : location.search);
   return Object.fromEntries(keys.map(k => [k, (params.get(k) || '').slice(0, k === 'q' || k === 'projectQ' ? 512 : 256)])) as unknown as HistoryRoute;
 }
 export function routeURL(route: HistoryRoute) {
   const url = new URL(location.href);
-  for (const key of keys) { if (route[key]) url.searchParams.set(key, route[key]); else url.searchParams.delete(key); }
-  return navigationURL(url.pathname + url.search);
+  const remote = workbenchContext().gateway;
+  const params = remote ? new URLSearchParams(url.hash.slice(1)) : url.searchParams;
+  for (const key of keys) {
+    if (route[key]) params.set(key, route[key]); else params.delete(key);
+    if (remote) url.searchParams.delete(key);
+  }
+  return navigationURL(url.pathname + url.search + (remote && params.size ? `#${params}` : ''));
 }

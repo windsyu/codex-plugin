@@ -22,7 +22,7 @@ ADR 记录决定及其理由；适用边界以当前架构、专题契约和[支
 - [ADR 0054：保留显式 provider bearer 与原生 API Key 认证](0054-native-custom-bearer-auth.md)
 - [ADR 0055：项目会话的分层展示与本机可撤销归属](0055-project-session-organization.md)
 - [ADR 0056：可信公网中转与账号归属路由](0056-public-workbench-relay.md)（Accepted；实现与公网手机验收另列）
-- [ADR 0057：独立端口的单工作台 IP 测试](0057-single-workbench-ip-trial.md)（Accepted；共享主机 Cookie 信任边界，单独验收）
+- [ADR 0057：独立端口的单工作台 IP 测试](0057-single-workbench-ip-trial.md)（Superseded by 0066；保留历史测试接入背景）
 - [ADR 0058：管理员账号与单端口可信工作台前端](0058-admin-accounts-single-origin-relay.md)（Accepted；替代邀请流程，新模式同源边界和 schema 2）
 - [ADR 0059：独立功能页面与中转断线恢复](0059-workbench-routes-and-relay-recovery.md)（Accepted；覆盖同页设置限制，保留固定授权和输入不重放）
 - [ADR 0060：命令认证由原生 CLI 持有](0060-native-provider-command-auth.md)（Accepted；网页/网关登录与模型凭证分离，不执行或缓存命令凭证，保留有效路由来源门禁）
@@ -31,3 +31,4 @@ ADR 记录决定及其理由；适用边界以当前架构、专题契约和[支
 - [ADR 0063：本机后台服务与 owner 目录浏览](0063-background-service-directory-browser.md)（Accepted；macOS 用户服务、首次注册引导、完整退出与有界远端目录元信息）
 - [ADR 0064：任务识别与人类对话优先的历史呈现](0064-human-conversation-presentation.md)
 - [ADR 0065：以 main 为基础整合历史模块与公网中转 API 2](0065-main-history-relay-integration.md)
+- [ADR 0066：按 CLI Run 复用的加密中转通道](0066-run-scoped-encrypted-relay-channels.md)（Accepted；可信前端、API/wire 3、单 origin，无明文降级）

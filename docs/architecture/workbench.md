@@ -8,7 +8,7 @@
 
 本机 Cargo package `codex-local-observer` 包含 library、默认工作台 binary `codex-view` 和旧兼容 binary `codex-observerd`。工作台运行普通官方 CLI，在指定项目目录通过 PTY 交互，以本次 CLI 显式选择的模型代理观察 HTTP/SSE/WS 内容；官方 binary 和全局配置不修改、不自动升级。浏览器提供原生终端与阅读页面，不建立第二套聊天、审批或工具执行协议。
 
-服务器 package `relay/` 产出 `codex-relayd`，独立部署；电脑端的 `src/workbench/relay` 是可选出站连接器，属于工作台，并不要求电脑安装中转服务。两个产品正常/构建依赖只共享 `crates/relay-protocol`、`crates/workbench-assets`，共享包不反向依赖产品运行模块。本机对 relay 的 dev-dependency 仅用于跨端测试。共享静态资源由两端嵌入；新 `single-origin` 模式的公网页面来自可信中转构建，不从电脑加载脚本。历史域名/固定单机模式仍转发电脑页面与静态资源，不能沿用中央前端的安全结论，须独立回归。
+服务器 package `relay/` 产出 `codex-relayd`，独立部署；电脑端的 `src/workbench/relay` 是可选出站连接器，不要求电脑安装中转服务。两个产品正常/构建依赖只共享协议与静态资源，共享包不反向依赖运行模块；本机对 relay 的 dev-dependency 仅用于跨端测试。公网仅保留 single-origin，页面来自可信中转构建；端点密码实现在电脑与浏览器，Relay 不链接电脑的 `ring` 密码模块。按 Run 复用的加密、作用域和恢复见 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 新 API 使用 `/workbench/v1`。旧 `/v1` 保持只读兼容，旧数据库和 audit 不迁移进新运行热路径；已移除的 `/v2` 控制内核不恢复。非目标包括 App Server 控制、remote TUI、持久输入账本、任意网络代理、跨项目共享、自动重放输入、V3 IM 和修改文件/Git 的 Web API。
 
@@ -117,7 +117,7 @@ Application 的目录浏览器独立于固定根 WorkspaceReader，只为完整 
 | `RemoteOwner` | 账号自有电脑完整 V2 应用/Run、历史/启动/设置、目录浏览与局域网管理；排除连接器登录管理、私有 connect/服务控制、本机 native picker |
 | `PairedRun` | 指定 Run 的阅读、终端、文件/搜索/Git、项目历史、已开放的历史管理与停止；终端输入仍须独立 claim；没有全局历史/启动/共享设置/其他 Run/接入管理权限 |
 
-RemoteOwner 只由认证出站连接器通过私有 loopback ingress 建立，不能由公网/LAN Cookie、Origin 或伪造 forwarding header 推导。protocol 白名单先于授权，代理剥离外部认证字段；许可绑定账号、电脑、连接 epoch 与续租。suspend-aware clock 失败、回退、溢出或过期不可逆撤销，无 wall-clock 降级；握手、帧受理及 PTY dequeue 都须检查。中转是可信方而非端到端加密，也不是 OS 沙箱；不同外部账号需要隔离原生 home、工作台根和历史来源。公网部分见[中转架构](relay.md)。
+RemoteOwner 只由认证出站连接器通过私有 loopback ingress 建立，不能由公网/LAN Cookie、Origin 或伪造 forwarding header 推导。电脑解密后先检查 exact 路由/作用域白名单，剥离外部认证字段；grant 许可绑定账号、电脑、连接 epoch 与续租，Run 生命周期单独围栏，不能替换 PTY 的 grant 身份。suspend-aware clock 失败、回退、溢出或过期不可逆撤销，无 wall-clock 降级；握手、帧受理及 PTY dequeue 都检查。业务加密不防可信前端/授权方恶意修改，也不提供 OS 沙箱；不同外部账号仍须隔离原生 home、工作台根和历史来源。公网部分见[中转架构](relay.md)。
 
 ## 6. 修改与验证入口
 

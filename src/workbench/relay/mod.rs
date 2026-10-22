@@ -1,4 +1,8 @@
 //! Default-off, outbound-only connector to the trusted public workbench relay.
+mod channel;
+#[cfg(test)]
+pub(crate) mod channel_tests;
+mod crypto;
 #[cfg(test)]
 mod login_tests;
 mod storage;
@@ -191,7 +195,8 @@ async fn worker(
     snapshot: Shared,
     mut rx: mpsc::Receiver<Command>,
 ) {
-    let mut task = launch(&saved, instance, &ingress, &snapshot);
+    let limits = Arc::new(channel::Limits::default());
+    let mut task = launch(&saved, instance, &ingress, &snapshot, &limits);
     loop {
         tokio::select! {
             command = rx.recv() => {
@@ -238,14 +243,14 @@ async fn worker(
                     task=Some(tokio::spawn(async move {
                         match bind(&cfg,&view).await { Ok(bound)=>Completed::Bound(bound), Err(_)=> { let mut state=view.lock().unwrap(); state.state="bindingFailed".into(); state.binding=None; state.error=Some("binding_failed_or_expired".into()); Completed::Failed } }
                     }));
-                } else { task=launch(&saved,instance,&ingress,&snapshot); }
+                } else { task=launch(&saved,instance,&ingress,&snapshot,&limits); }
                 let reply = result.map(|()| snapshot.lock().unwrap().clone()); let _=command.reply.send(reply);
             }
             completed = async { match task.as_mut() { Some(task)=>Some(task.await),None=>std::future::pending().await } } => {
                 task=None; ingress.disconnect();
                 if let Some(Ok(Completed::Bound(bound)))=completed {
                     let mut next=saved.clone(); next.bound=Some(bound); next.enabled=true; next.authentication_required=false;
-                    if store.save(&next).is_ok() { saved=next; *snapshot.lock().unwrap()=Snapshot::from_saved(&saved); task=launch(&saved,instance,&ingress,&snapshot); }
+                    if store.save(&next).is_ok() { saved=next; *snapshot.lock().unwrap()=Snapshot::from_saved(&saved); task=launch(&saved,instance,&ingress,&snapshot,&limits); }
                     else {
                         // Never enable a credential that has not been durably stored.
                         let _=tokio::time::timeout(Duration::from_secs(8),revoke_server(&next)).await;
@@ -271,6 +276,7 @@ fn launch(
     instance: Uuid,
     ingress: &IngressHandle,
     snapshot: &Shared,
+    limits: &Arc<channel::Limits>,
 ) -> Option<tokio::task::JoinHandle<Completed>> {
     if !saved.enabled || saved.bound.is_none() || saved.authentication_required {
         return None;
@@ -278,8 +284,9 @@ fn launch(
     let saved = saved.clone();
     let ingress = ingress.clone();
     let snapshot = snapshot.clone();
+    let limits = limits.clone();
     Some(tokio::spawn(async move {
-        if transport::run(saved, instance, ingress, snapshot).await {
+        if transport::run_with_limits(saved, instance, ingress, snapshot, limits).await {
             Completed::AuthenticationRequired
         } else {
             Completed::Failed
