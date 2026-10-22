@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     --no-path) configure_path=false; shift ;;
     -h|--help)
       printf '%s\n' 'Usage: bash install-macos.sh [install|uninstall] [--prefix ABSOLUTE_PATH]' \
-        '       install: [--version v0.x.y] [--force] [--no-path]' \
+        '       install: [--version vx.y.z] [--force] [--no-path]' \
         'Default: latest stable macOS arm64 release, ~/.codex-view, managed zsh/bash PATH.' \
         'Uninstall keeps user history/configuration and refuses modified owned files.'
       exit 0 ;;
@@ -381,7 +381,8 @@ if [[ $action == uninstall ]]; then
     'Open a new terminal to refresh PATH.'
   exit 0
 fi
-[[ $version == latest || $version =~ ^v0\.[0-9]+\.[0-9]+$ ]] || fail 'version must be latest or v0.x.y'
+stable_version='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+[[ $version == latest || $version =~ $stable_version ]] || fail 'version must be latest or stable vx.y.z (without leading zeroes)'
 if [[ $prefix == "$HOME/.codex-view" && ( -e $HOME/.local/share/code-view/.install-receipt || -L $HOME/.local/share/code-view/.install-receipt ) ]]; then
   fail 'previous ~/.local installation found; first run "$HOME/.local/bin/code-view-uninstall", then install again'
 fi
@@ -396,7 +397,7 @@ if [[ $version == latest ]]; then
   resolved_url=$(download --head --output /dev/null --write-out '%{url_effective}' "$release_url/latest") || fail 'could not resolve the latest public release'
   case $resolved_url in "$release_url/tag/"*) version=${resolved_url#"$release_url/tag/"} ;; *) fail 'release redirected to an unexpected URL' ;; esac
 fi
-[[ $version =~ ^v0\.[0-9]+\.[0-9]+$ ]] || fail 'release did not return a supported version'
+[[ $version =~ $stable_version ]] || fail 'release did not return a supported stable version'
 archive_name=code-view-${version#v}-aarch64-apple-darwin.tar.gz
 bundle_name=${archive_name%.tar.gz}
 # Both files use the resolved tag even if latest changes during installation.

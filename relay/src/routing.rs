@@ -33,9 +33,6 @@ pub(crate) fn canonical_gateway(path: &str) -> Result<(Uuid, &str)> {
 }
 
 pub(crate) async fn page(State(s): State<App>, h: HeaderMap, req: Request) -> Result<Response> {
-    if !s.0.config.single_origin {
-        return Err(Failure(StatusCode::NOT_FOUND));
-    }
     let (gateway, tail) = canonical_gateway(req.uri().path())?;
     if !codex_relay_protocol::document_path(&format!("/{tail}")) {
         return Err(Failure(StatusCode::NOT_FOUND));
@@ -52,15 +49,7 @@ pub(crate) async fn page(State(s): State<App>, h: HeaderMap, req: Request) -> Re
     central_asset("workbench.html")
 }
 
-pub(crate) async fn asset(
-    State(s): State<App>,
-    Path(path): Path<String>,
-    h: HeaderMap,
-    req: Request,
-) -> Result<Response> {
-    if !s.0.config.single_origin {
-        return crate::tunnel::forward_inner(s, h, req, None).await;
-    }
+pub(crate) async fn asset(Path(path): Path<String>) -> Result<Response> {
     if path.is_empty()
         || path.contains("..")
         || path.contains('%')

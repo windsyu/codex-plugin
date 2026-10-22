@@ -66,9 +66,6 @@ impl Fixture {
         let router = crate::app(Config {
             data_dir: dir.path().to_owned(),
             portal_origin: "http://localhost:8123".into(),
-            workbench_domain: String::new(),
-            workbench_origin: None,
-            fixed_gateway_id: None,
             single_origin: true,
             password_workers: 4,
             allow_insecure_loopback: true,

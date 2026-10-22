@@ -620,6 +620,31 @@ test('explicit version stays pinned and skips latest release discovery', t => {
   succeeds(f.uninstall());
 });
 
+for (const version of ['1.0.0', '12.34.56']) for (const explicit of [true, false]) test(`${explicit ? 'explicit' : 'latest'} stable v${version} installs from the pinned release path`, t => {
+  const f = fixture(t);
+  f.publish(version);
+  succeeds(f.run(explicit ? ['--version', `v${version}`] : []));
+  assert.equal(f.calls().filter(args => args.includes('--head')).length, explicit ? 0 : 1);
+  const urls = f.calls().flat().filter(arg => arg.startsWith('https://'));
+  assert.deepEqual(urls, [
+    ...(!explicit ? ['https://github.com/windsyu/codex-plugin/releases/latest'] : []),
+    `https://github.com/windsyu/codex-plugin/releases/download/v${version}/code-view-${version}-aarch64-apple-darwin.tar.gz`,
+    `https://github.com/windsyu/codex-plugin/releases/download/v${version}/SHA256SUMS`,
+  ]);
+  assert.equal(command(path.join(f.prefix, 'bin/code-view'), ['--version'], { env: f.env }).stdout.trim(), `codex-view ${version}`);
+  succeeds(f.uninstall());
+});
+
+test('malformed and non-stable explicit versions reject without downloads or user writes', t => {
+  const f = fixture(t);
+  const before = snapshot(f.home);
+  for (const version of ['v01.0.0', 'v1.00.0', 'v1.0.00', '1.0.0', 'v1.0', 'v1.0.0-beta.1', 'v1.0.0+build.1', 'v1.0.0/other', 'v1.0.0\n']) {
+    fails(f.run(['--version', version]));
+    assert.deepEqual(snapshot(f.home), before, version);
+    assert.equal(f.calls().length, 0, version);
+  }
+});
+
 test('malformed, foreign, insecure and prerelease latest redirects reject before user writes', t => {
   for (const url of [
     'not-a-url',
@@ -627,7 +652,12 @@ test('malformed, foreign, insecure and prerelease latest redirects reject before
     'http://github.com/windsyu/codex-plugin/releases/tag/v0.3.0',
     'https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0-beta.1',
     'https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0?ignored=1',
-    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v01.0.0',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.00.0',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.00',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0+build.1',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0/other',
+    'https://github.com/windsyu/codex-plugin/releases/tag/v1.0.\n0',
   ]) {
     const f = fixture(t);
     const before = snapshot(f.home);

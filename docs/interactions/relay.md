@@ -60,9 +60,9 @@ macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`�
 
 1. 门户 `POST /relay/v1/gateways/{id}/open`，明确提交当前 `uiApiVersion`。
 2. 服务校验账号已改密、归属、凭据代际、在线连接及版本，创建固定子授权并返回 URL。
-3. 单端口 URL 形如 `/g/{gatewayId}/#…`，fragment 携带上下文；前端消费后清除 fragment，并保存到本标签 sessionStorage。
-4. 工作台 HTML/JS/CSS 全部来自中转构建；后续每个 HTTP/SSE/WS 请求带固定授权，并同时匹配原门户父 Cookie。
-5. 刷新恢复原上下文，导航和新标签链接显式携带同一上下文；缺少或过期授权回门户重新打开，不凭当前 Cookie 自动补授。
+3. 门户只接受同一 HTTPS origin、目标电脑精确路径、无 query 且包含有效 grant/session 与 API 3 的入口 URL；旧版本或其他 origin 拒绝跳转。URL 形如 `/g/{gatewayId}/#…`，fragment 携带固定授权；前端只消费认证字段并保存到本标签 sessionStorage，保留历史搜索、项目和阅读状态等业务 fragment。
+4. 工作台 HTML/JS/CSS 全部来自可信自部署中转构建；先用只读 access 接口核验原 grant，再分别建立 Application 和按需 Run 加密通道。外层仍匹配原门户父 Cookie。
+5. 刷新恢复原上下文，导航和新标签链接显式携带同一授权上下文，但各标签独立握手/密钥；缺少或过期授权回门户重新打开，不凭当前 Cookie 自动补授。
 
 工作台功能路径包括 `/g/{id}/history`、`/g/{id}/launch`、`/g/{id}/settings` 和 `/g/{id}/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，运行与应用接口都在该电脑前缀下；页面白名单以 [relay-protocol](../../crates/relay-protocol/src/lib.rs) 为准。返回工作台首页仍保留电脑上下文；回中转门户使用门户入口，不能误发到另一电脑。本机根路径继续独立回归。
 
@@ -87,14 +87,14 @@ macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`�
 | `POST /bindings` | `{name,resumeGatewayId?,resumeCredential?}`；恢复字段成对，返回设备码/期限/验证地址 |
 | `POST /bindings/{id}/poll` | `{deviceCode}`；本机领取独立凭据，门户看不到 secret |
 | `POST /bindings/preview`、`/approve` | `{userCode}`；当前已改密账号核对/批准，恢复登记须原账号 |
-| `POST /gateways/{id}/open` | 单端口 `{uiApiVersion:2}`；返回固定页面授权 URL |
+| `POST /gateways/{id}/open` | `{uiApiVersion:3}`；返回固定页面授权 URL |
+| `GET /gateways/{id}/access` | 原 grant 头及原父 Cookie；只读返回账号、父会话、grant、电脑、实例、epoch 和版本，不签发新 grant |
 | `DELETE /gateways/{id}` | 所有者删除电脑登记，关闭接入，不修改本机历史 |
 | `POST /gateway/revoke` | 独立 Bearer 电脑凭据撤销自身登记，Cookie 不能代替 |
 | `GET /tunnel` | 独立电脑凭据认证的控制 WSS |
-| `GET /tunnel/streams/{id}?epoch=…` | 对应连接 epoch 与 stream 的独立数据 WSS |
-| `POST /session/exchange` | 仅历史域名/固定模式，`{code}` 一次性交换，不能用于单端口绕过 grant |
+| `GET /tunnel/channels/{id}?epoch=…` | 对应连接 epoch 与 channel 的电脑主动数据 WSS，仅转发握手和业务密文 |
 
-原邀请注册/重置兑换路由和 `invite/reset/disable` CLI 已停用，不能在新 agent 部署脚本中恢复。仅 `serve` 与停服后的 `recover-admin --password-file PATH` 是当前服务 CLI；管理员恢复、初始化密码文件和 schema 操作只按部署指南。
+原邀请注册/重置兑换路由、`invite/reset/disable` CLI、`/session/exchange`、旧域名/双端口和明文业务入口已停用，不能在新 agent 部署脚本中恢复。仅 `serve` 与停服后的 `recover-admin --password-file PATH` 是当前服务 CLI；管理员恢复、初始化密码文件和 schema 操作只按部署指南。
 
 ## 5. 本机连接器 API 与业务转发
 
@@ -102,11 +102,13 @@ macOS `code-view start` 首次交互启动无绑定时会打开本机 `/relay`�
 
 远程 Application 标记 `remoteOwner:true`、`directoryPickerAvailable:false`；RemoteOwner 可管理自有工作台的 V2 项目、历史及设置，但不能打开本机 native picker 或管理中转登录。局域网配对权限只属于指定 Run，不是完整 RemoteOwner。
 
-新电脑可另外报告 `directoryBrowserAvailable:true`。远端启动表单的“浏览电脑目录”调用 `/g/{id}/workbench/v1/application/directories`，按固定电脑授权读取目录元信息；选择后进入原目标校验，不直接启动 CLI。旧电脑无能力时继续手动输入；无权限、电脑离线、目录变化和预算不完整均明确展示。列表请求也必须重验授权，不能在账号/电脑/实例变化后展示旧响应。详细字段与分页预算见[本机目录契约](workbench.md#3-项目校验新建与恢复)。本机后台服务控制不加入中转白名单。
+新电脑可另外报告 `directoryBrowserAvailable:true`。远端启动表单的“浏览电脑目录”在 Application 通道内请求 `/workbench/v1/application/directories`，按固定电脑授权读取目录元信息；选择后进入原目标校验，不直接启动 CLI。缺少能力时继续手动输入；无权限、电脑离线、目录变化和预算不完整均明确展示。列表请求也必须重验授权，不能在账号/电脑/实例变化后展示旧响应。详细字段与分页预算见[本机目录契约](workbench.md#3-项目校验新建与恢复)。本机后台服务控制不加入中转白名单。
 
-业务转发必须满足固定 grant、原父 Cookie、同账号归属、授权代际、在线 connection epoch 和 `WORKBENCH_API_VERSION`。HTTP 通过两项 `X-Workbench-*` 头传 selectors，SSE/WS 用 `relayGrant`、`relayApi` query；重复、编码别名、混用头/query 或非 canonical 电脑路径拒绝。中转保留业务 query 原始字节，剥离 selectors/认证信息及电脑路径前缀后，通过白名单转发。
+外层 access 使用 `X-Workbench-Grant` / `X-Workbench-Api-Version`；业务 WSS 为 `/g/{id}/workbench/v1/secure-channel?scope=application|run&runId=…&relayGrant=…&relayApi=3`（Application 不带 runId）。仅接受公开授权/作用域选择器，重复、额外业务 query、编码别名或非 canonical 路径拒绝。方法、完整业务路径/query、允许请求头和正文都在加密记录中；Relay 不再解析或记录这些内容。
 
-API 2 增加精确的历史路由：`GET /workbench/v1/library/session-groups`、`GET /workbench/v1/library/session-groups/{id}`、`GET/PUT /workbench/v1/library/entries/{entry}/organization`。电脑端仍验证 Application owner/RemoteOwner，PairedRun 无全局历史权限。归类 PUT 继续验证 Origin、实例、来源身份/修订和强 `If-Match`；中转外层边界拒绝重复 `If-Match`（403）；其余允许头保留全部值，由电脑端拒绝重复 `Content-Type`（415），不可表示的头值拒绝。旧页面授权须返回门户重新打开；不会删除登记、历史或归类状态。
+API 3 保留历史路由 `GET /workbench/v1/library/session-groups`、`GET /workbench/v1/library/session-groups/{id}`、`GET/PUT /workbench/v1/library/entries/{entry}/organization`。电脑解密后验证 exact 白名单、Application/Run 作用域、原 RemoteOwner 和 Run 生命周期。Run 列表、创建、summary 归 Application；终端、事件、文件、停止等归目标 Run，不能借 Application 绕过。归类 PUT 继续验证 Origin、实例、来源身份/修订和唯一强 `If-Match`；重复修订由电脑拒绝（400），重复 `Content-Type` 拒绝（415）。响应 JSON/SSE MIME、重复响应头、重定向和不可信内容检查由端点执行，业务 403 只失败该子流，不误判全页授权失效。
+
+HTTP Open 声明完整正文长度并预留空间，认证 End 收齐后才能执行。响应正文只有认证 End 后才算完整，204/304 也等待 End；停止操作须完整读取并验证 `accepted:true`。P-256/HKDF/AES-GCM 的固定 transcript、Finished、严格序号、换密钥和 credit/预算详见 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 SSE 是观察副本，不得阻塞原生模型流；终端输入仍交给当前 Run 的原版 CLI。连接关闭时不缓存待发输入；重连只恢复同一 Run 的终端连接及阅读状态，不重放键盘、审批或项目启动。启动响应中断时按原 `operationId` 查询受理结果，不盲目重发创建。
 
@@ -120,7 +122,9 @@ SSE 是观察副本，不得阻塞原生模型流；终端输入仍交给当前 
 | 电脑离线/epoch 改变 | 显示断线或不可用；不把旧数据流接到新连接 |
 | API 版本不匹配 | 显示版本不兼容并要求配套升级；不加载电脑脚本 |
 | 页面授权过期/换账号 | 清屏并关闭流，回门户显式重新打开；不自动借新身份 |
-| 恶意 HTML/SVG/脚本 MIME、重定向或路径逃逸 | 中转拒绝，不能作为门户内容执行 |
+| 恶意 HTML/SVG/脚本 MIME、重定向或路径逃逸 | 解密端点拒绝，不能作为门户内容执行 |
+| 业务 403、单流取消或慢消费 | Reset 对应子流，不清空其他 Run 或 Application 通道 |
+| AEAD/序号错误、TCP 断线、写超时或密钥额度耗尽 | 中断该通道所有子流；下一次访问重新握手，不继承或重放旧子流 |
 | 配额/限流或慢连接 | 有界失败/重试，不能无限积累或阻塞 CLI |
 | 本机保存失败/取消/迟到批准 | 保持未启用，明确错误；轮询不能重新激活 |
 | schema 冲突/不兼容 | 停止启动，保全数据库；不自动降级或恢复旧快照 |

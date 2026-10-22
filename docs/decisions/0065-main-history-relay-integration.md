@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-15
 
+2026-10-21：[ADR 0066](0066-run-scoped-encrypted-relay-channels.md) 将 wire/UI/API 升至 3，历史业务走 Application 密文通道；本文 API 2 仅为整合时基线，catalog/归类和数据保留决定不变。
+
 ## Context
 
 用户要求 `codex/public-relay` 建立在 main 基础上，并恢复本机和远端已有历史。分叉后的中转分支只识别 catalog v2，main 的历史模块已使用 v4；共用数据根时，旧程序明确拒绝读取未来版本，历史接口返回 `cache_version_unsupported`。main 同时增加会话分组和用户归类，不能只修改版本常量。

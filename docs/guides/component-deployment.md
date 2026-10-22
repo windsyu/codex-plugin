@@ -74,7 +74,7 @@ node scripts/dev.mjs package --component workbench
 
 公网账号认证保护网页/电脑连接，原生 CLI 的模型认证只在用户电脑按 provider 配置执行。二者互不替代：登录中转不能修复模型登录，模型 API Key 不可作为中转密码，也不可上传到服务器。官方 CLI 负责模型凭据与 `auth.command` 的执行/刷新，工作台只透明代理本次模型请求。当前支持的 provider 和验证限制见[本机部署](local-workbench-deployment.md)。
 
-中转是可信服务，不是端到端加密的盲转发：它可读取并操作传输中的工作台内容。仅连接用户明确接受的服务器。中转不保存正文不等于服务器操作者无法读取正文；不得在代理日志中记录正文、凭据或页面 grant。
+中转后端只转发浏览器与电脑的业务密文，按 CLI Run 复用；中央前端与授权方仍必须可信，恶意运营者修改脚本或授权不在防护范围内。仅连接用户明确接受的服务器，三端配套升级至 API/wire 3，无明文降级；不得在代理日志记录凭据或页面 grant，见 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 ## 中转独立运行的最小交接
 
@@ -92,7 +92,7 @@ codex-relayd --data-dir /var/lib/codex-relay \
   --bootstrap-password-file /var/lib/codex-relay/bootstrap-password
 ```
 
-服务器没有隐式默认数据目录，必须显式传 `--data-dir`；其中 `relay.sqlite3` 保存账号/登录/电脑登记及可能的 WAL/SHM，不是本机历史库。启动配置由部署者的 systemd 参数/非秘密环境文件和 TLS 代理配置管理，不读取本机 `config.json`。新部署使用 `--single-origin`，与旧域名模式或固定 gateway 双入口模式互斥；不要混配旧模板。
+服务器没有隐式默认数据目录，必须显式传 `--data-dir`；其中 `relay.sqlite3` 保存账号/登录/电脑登记及可能的 WAL/SHM，不是本机历史库。启动配置由部署者的 systemd 参数/非秘密环境文件和 TLS 代理配置管理，不读取本机 `config.json`。仅支持单 origin，`--single-origin` 可显式声明；旧域名/固定 gateway 双入口参数与模板已移除，不可混用旧配置。
 
 私有密码文件由服务所有者按中转指南准备，首次初始化 `windsyu` 管理员后移除文件与对应启动参数；不得把密码直接放命令行/环境。实际服务用户、目录权限、TLS Host/可信来源头、已有配置合并、账号创建与撤销、管理员离线恢复、schema 3 备份与回滚规则均只按[中转运维指南](public-relay-deployment.md)执行；IP/非默认 HTTPS 端口按其[单 IP 章节](public-relay-deployment.md#单-ip-与受限服务器部署)。不要公开 `8787` 后端、启用生产 `--allow-insecure-loopback` 或关闭 TLS 验证来消除登录错误。
 

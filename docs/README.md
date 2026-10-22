@@ -23,7 +23,7 @@ Codex View（本机工作台，构建组件名 `workbench`）与 Codex Relay（�
 - [本机工作台部署与接入](guides/local-workbench-deployment.md)：只部署 codex-plugin 电脑后端、原生 CLI 认证、局域网及可选公网连接器。
 - [安装与快速启动](guides/installation.md)：发布包校验、本地安装、后台服务及 `code-view` 项目入口。
 - [使用指南](guides/usage.md)：启动、终端、手机接入、历史、配置和旧 Observer。
-- [公网中继部署与运维](guides/public-relay-deployment.md)：windsyu 管理员、账号删除、单端口中央前端、schema 3 备份恢复；域名兼容与真实手机验收另列。
+- [公网中继部署与运维](guides/public-relay-deployment.md)：管理员、单 origin 可信前端、Run 加密通道、配套升级及 schema 3 备份恢复；真实手机验收另列。
 - [支持范围与限制](guides/support.md)：可试用环境、兼容基线与资源边界。
 - [配置示例](configuration/workbench.config.example.json)与 [JSON Schema](configuration/workbench.config.schema.json)：配置字段与校验依据，操作见[历史与配置](guides/usage.md#历史保存清理与配置)。
 - [开发与维护](development/README.md)：模块、检查、构建产物生命周期、Git 文件规则和发布。
@@ -39,7 +39,7 @@ Codex View（本机工作台，构建组件名 `workbench`）与 Codex Relay（�
 | 组件 | 架构说明 | 交互说明 | 部署说明 |
 | --- | --- | --- | --- |
 | Codex View · `workbench` | [模块、运行与数据边界](architecture/workbench.md) | [页面、原生终端与接入流程](interactions/workbench.md) | [本机部署](guides/local-workbench-deployment.md) |
-| Codex Relay · `relay` | [依赖、身份、安全与 schema](architecture/relay.md) | [账号、电脑认证与固定页面 API](interactions/relay.md) | [Linux / 单 IP / 历史兼容](guides/public-relay-deployment.md) |
+| Codex Relay · `relay` | [依赖、身份、安全与 schema](architecture/relay.md) | [账号、电脑认证与固定页面 API](interactions/relay.md) | [Linux / 单 IP / 配套升级](guides/public-relay-deployment.md) |
 
 AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和交互；跨端协议或认证变更两组都读。下列专题提供更细契约，ADR 记录理由，支持文档明确受测范围；不把历史检查结果当成当前行为保证。
 

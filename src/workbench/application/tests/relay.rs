@@ -1,12 +1,11 @@
 //! End-to-end trusted relay tests with isolated accounts, Application and synthetic CLI.
 use super::*;
+use crate::workbench::relay::channel_tests::{SecurePeer, SecureTerminal};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use codex_relay_protocol::secure::{self, Scope};
+use futures_util::StreamExt;
 use reqwest::Method;
-use tokio_tungstenite::{
-    WebSocketStream,
-    tungstenite::{Message, client::IntoClientRequest},
-};
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 struct Portal {
     _dir: tempfile::TempDir,
@@ -15,13 +14,9 @@ struct Portal {
     address: std::net::SocketAddr,
     task: tokio::task::JoinHandle<()>,
     admin_cookie: String,
-    single_origin: bool,
 }
 impl Portal {
     async fn start() -> Self {
-        Self::start_mode(false).await
-    }
-    async fn start_mode(single_origin: bool) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -35,14 +30,7 @@ impl Portal {
         let router = codex_relayd::app(codex_relayd::Config {
             data_dir: dir.path().join("relay"),
             portal_origin: origin.clone(),
-            workbench_domain: if single_origin {
-                String::new()
-            } else {
-                "localhost".into()
-            },
-            workbench_origin: None,
-            fixed_gateway_id: None,
-            single_origin,
+            single_origin: true,
             password_workers: 4,
             allow_insecure_loopback: true,
             trusted_client_ip_header: None,
@@ -63,7 +51,6 @@ impl Portal {
             address,
             task,
             admin_cookie: String::new(),
-            single_origin,
         };
         let cookie = portal
             .login("windsyu", "synthetic initial cloud phrase 1924")
@@ -112,6 +99,36 @@ impl Portal {
             .header("Origin", &self.origin)
             .header("Content-Type", "application/json")
     }
+    fn assert_business_marker_absent_from_storage(&self) {
+        let marker = b"E2EE_SYNTHETIC_SEARCH_MARKER";
+        let directory = self._dir.path().join("relay");
+        let mut checked = 0;
+        for name in [
+            "relay.sqlite3",
+            "relay.sqlite3-wal",
+            "relay.sqlite3-shm",
+            "relay.sqlite3-journal",
+        ] {
+            let bytes = match std::fs::read(directory.join(name)) {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if name != "relay.sqlite3" && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(_) => panic!("could not inspect synthetic relay storage file: {name}"),
+            };
+            if name == "relay.sqlite3" {
+                assert!(bytes.starts_with(b"SQLite format 3\0"));
+            }
+            assert!(
+                !bytes.windows(marker.len()).any(|window| window == marker),
+                "synthetic business content leaked into relay storage file: {name}"
+            );
+            checked += 1;
+        }
+        println!("Relay synthetic storage confidentiality: {checked} files checked");
+    }
     async fn bind(&self, app: &Application, cookie: &str, name: &str) -> Remote {
         let service = app.web.relay_for_test();
         service
@@ -148,71 +165,32 @@ impl Portal {
         .await
         .expect("connector binding/handshake");
         let gateway = status.gateway_id.unwrap();
+        self.open_gateway(gateway, cookie).await
+    }
+    async fn open_gateway(&self, gateway: Uuid, cookie: &str) -> Remote {
         let response = self
             .request(cookie, &format!("/relay/v1/gateways/{gateway}/open"))
-            .body(
-                (if self.single_origin {
-                    json!({"uiApiVersion":codex_relay_protocol::WORKBENCH_API_VERSION})
-                } else {
-                    json!({})
-                })
-                .to_string(),
-            )
+            .body(json!({"uiApiVersion":codex_relay_protocol::WORKBENCH_API_VERSION}).to_string())
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
         let url = reqwest::Url::parse(json_body(response).await["url"].as_str().unwrap()).unwrap();
-        if self.single_origin {
-            let grant = url
-                .fragment()
-                .unwrap()
-                .split('&')
-                .find_map(|pair| pair.strip_prefix("grant="))
-                .unwrap()
-                .to_string();
-            return Remote {
-                client: client(),
-                origin: self.origin.clone(),
-                cookie: cookie.to_owned(),
-                gateway,
-                address: self.address,
-                prefix: format!("/g/{gateway}"),
-                grant: Some(grant),
-                url: url.to_string(),
-            };
-        }
-        let code = url.fragment().unwrap().strip_prefix("code=").unwrap();
-        let origin = status.gateway_origin.unwrap();
-        let remote_client = reqwest::Client::builder()
-            .no_proxy()
-            .resolve(url.host_str().unwrap(), self.address)
-            .build()
-            .unwrap();
-        let response = remote_client
-            .post(format!("{origin}/relay/v1/session/exchange"))
-            .header("Origin", &origin)
-            .header("Content-Type", "application/json")
-            .body(json!({"code":code}).to_string())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 200);
-        let session_cookie = response.headers()["set-cookie"]
-            .to_str()
+        let grant = url
+            .fragment()
             .unwrap()
-            .split(';')
-            .next()
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("grant="))
             .unwrap()
-            .into();
+            .to_owned();
         Remote {
-            client: remote_client,
-            origin,
-            cookie: session_cookie,
+            client: client(),
+            origin: self.origin.clone(),
+            cookie: cookie.to_owned(),
             gateway,
             address: self.address,
-            prefix: String::new(),
-            grant: None,
+            prefix: format!("/g/{gateway}"),
+            grant: Some(grant),
             url: url.to_string(),
         }
     }
@@ -265,7 +243,7 @@ struct Remote {
     url: String,
 }
 impl Remote {
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> RemoteRequest {
         self.request_as(method, path, &self.cookie, self.grant.as_deref())
     }
     fn request_as(
@@ -274,56 +252,153 @@ impl Remote {
         path: &str,
         cookie: &str,
         grant: Option<&str>,
-    ) -> reqwest::RequestBuilder {
+    ) -> RemoteRequest {
         let request = self
             .client
             .request(method, format!("{}{}{path}", self.origin, self.prefix))
             .header("Cookie", cookie)
             .header("Origin", &self.origin)
             .header("Content-Type", "application/json");
-        if let Some(grant) = grant {
-            request.header("x-workbench-grant", grant).header(
-                "x-workbench-api-version",
-                codex_relay_protocol::WORKBENCH_API_VERSION,
-            )
-        } else {
-            request
+        RemoteRequest {
+            request,
+            origin: self.origin.clone(),
+            gateway: self.gateway,
+            address: self.address,
+            grant: grant.map(str::to_owned),
+            path: path.into(),
         }
     }
     async fn get(&self, path: &str) -> reqwest::Response {
         self.request(Method::GET, path).send().await.unwrap()
     }
-    async fn terminal(&self, run: Uuid) -> WebSocketStream<tokio::net::TcpStream> {
-        let mut request = format!(
-            "{}{}/workbench/v1/runs/{run}/terminal?epoch={run}{}",
-            self.origin.replace("http://", "ws://"),
-            self.prefix,
-            self.grant
-                .as_ref()
-                .map(|grant| format!(
-                    "&relayGrant={grant}&relayApi={}",
-                    codex_relay_protocol::WORKBENCH_API_VERSION
-                ))
-                .unwrap_or_default()
-        )
-        .into_client_request()
-        .unwrap();
-        request
-            .headers_mut()
-            .insert("origin", self.origin.parse().unwrap());
-        request
-            .headers_mut()
-            .insert("cookie", self.cookie.parse().unwrap());
-        tokio_tungstenite::client_async(
-            request,
-            tokio::net::TcpStream::connect(self.address).await.unwrap(),
+    async fn terminal(&self, run: Uuid) -> SecureTerminal {
+        let request = self.request(
+            Method::GET,
+            &format!("/workbench/v1/runs/{run}/terminal?epoch={run}"),
+        );
+        let headers = request.request.build().unwrap().headers().clone();
+        let peer = request_peer(
+            &self.origin,
+            self.gateway,
+            self.address,
+            self.grant.as_deref(),
+            Scope::Run { run_id: run },
+            &headers,
         )
         .await
         .unwrap()
-        .0
+        .unwrap();
+        peer.terminal(1, &format!("/workbench/v1/runs/{run}/terminal?epoch={run}"))
+            .await
+            .unwrap()
     }
 }
-async fn terminal_frame(socket: &mut WebSocketStream<tokio::net::TcpStream>, kind: &str) -> Value {
+struct RemoteRequest {
+    request: reqwest::RequestBuilder,
+    origin: String,
+    gateway: Uuid,
+    address: std::net::SocketAddr,
+    grant: Option<String>,
+    path: String,
+}
+impl RemoteRequest {
+    fn header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        reqwest::header::HeaderName: TryFrom<K>,
+        <reqwest::header::HeaderName as TryFrom<K>>::Error: Into<axum::http::Error>,
+        reqwest::header::HeaderValue: TryFrom<V>,
+        <reqwest::header::HeaderValue as TryFrom<V>>::Error: Into<axum::http::Error>,
+    {
+        self.request = self.request.header(name, value);
+        self
+    }
+    fn body(mut self, value: impl Into<reqwest::Body>) -> Self {
+        self.request = self.request.body(value);
+        self
+    }
+    async fn send(self) -> anyhow::Result<reqwest::Response> {
+        let request = self.request.build()?;
+        let Some(scope) = secure::request_scope(request.method().as_str(), &self.path) else {
+            return Ok(client().execute(request).await?);
+        };
+        let peer = request_peer(
+            &self.origin,
+            self.gateway,
+            self.address,
+            self.grant.as_deref(),
+            scope,
+            request.headers(),
+        )
+        .await?;
+        let peer = match peer {
+            Ok(peer) => peer,
+            Err(status) => {
+                return Ok(reqwest::Response::from(
+                    axum::http::Response::builder()
+                        .status(status)
+                        .body(reqwest::Body::from(Vec::<u8>::new()))?,
+                ));
+            }
+        };
+        let headers = request
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.as_str() != "cookie")
+            .map(|(name, value)| Ok((name.to_string(), value.to_str()?.to_owned())))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let method = request.method().as_str().to_owned();
+        let body = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .unwrap_or_default();
+        let mut peer = peer;
+        peer.request(1, &method, &self.path, headers, body).await?;
+        peer.response(1, &method).await
+    }
+}
+async fn request_peer(
+    origin: &str,
+    gateway: Uuid,
+    address: std::net::SocketAddr,
+    grant: Option<&str>,
+    scope: Scope,
+    headers: &reqwest::header::HeaderMap,
+) -> anyhow::Result<std::result::Result<SecurePeer, u16>> {
+    let selector = match scope {
+        Scope::Application => "scope=application".into(),
+        Scope::Run { run_id } => format!("scope=run&runId={run_id}"),
+    };
+    let mut request = format!(
+        "{}/g/{gateway}/workbench/v1/secure-channel?relayGrant={}&relayApi={}&{selector}",
+        origin.replace("http://", "ws://"),
+        grant.unwrap_or_default(),
+        codex_relay_protocol::WORKBENCH_API_VERSION
+    )
+    .into_client_request()?;
+    for name in ["cookie", "origin"] {
+        for value in headers.get_all(name) {
+            request.headers_mut().append(name, value.clone());
+        }
+    }
+    let socket = match tokio_tungstenite::client_async(
+        request,
+        tokio::net::TcpStream::connect(address).await?,
+    )
+    .await
+    {
+        Ok((socket, _)) => socket,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            return Ok(Err(response.status().as_u16()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let (peer, binding) = SecurePeer::relay(socket).await?;
+    assert_eq!(binding.context.gateway_id, gateway);
+    assert_eq!(binding.context.grant_id.to_string(), grant.unwrap());
+    assert_eq!(binding.scope, scope);
+    Ok(Ok(peer))
+}
+async fn terminal_frame(socket: &mut SecureTerminal, kind: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             match socket.next().await.unwrap().unwrap() {
@@ -470,13 +545,13 @@ async fn remote_library_organization(remote: &Remote, app: &Application, fixture
     );
     let body = json!({"instanceId":app.instance_id,"sourceIdentity":entry["sourceIdentity"],"sourceRevision":entry["sourceRevision"],"action":"unassigned"});
     for (header, value, status, code) in [
-        ("If-Match", etag.as_str(), 403, None),
         (
-            "Content-Type",
-            "application/json",
-            415,
-            Some("json_required"),
+            "If-Match",
+            etag.as_str(),
+            400,
+            "invalid_organization_revision",
         ),
+        ("Content-Type", "application/json", 415, "json_required"),
     ] {
         let rejected = remote
             .request(Method::PUT, &path)
@@ -489,13 +564,10 @@ async fn remote_library_organization(remote: &Remote, app: &Application, fixture
         let actual_status = rejected.status();
         let rejected_body = rejected.text().await.unwrap();
         assert_eq!(actual_status, status, "duplicate {header}: {rejected_body}");
-        if let Some(code) = code {
-            let rejected_body: Value = serde_json::from_str(&rejected_body).unwrap();
-            assert_eq!(rejected_body["error"]["code"], code);
-        } else {
-            // The relay's outer boundary rejects duplicate preconditions before forwarding.
-            assert!(rejected_body.is_empty());
-        }
+        // The opaque Relay cannot inspect encrypted preconditions. These exact
+        // errors now come from the authenticated desktop API, before mutation.
+        let rejected_body: Value = serde_json::from_str(&rejected_body).unwrap();
+        assert_eq!(rejected_body["error"]["code"], code);
         let unchanged = remote.get(&path).await;
         assert_eq!(unchanged.status(), 200);
         assert_eq!(unchanged.headers()["etag"].to_str().unwrap(), etag);
@@ -525,11 +597,30 @@ async fn remote_library_organization(remote: &Remote, app: &Application, fixture
     assert_eq!(std::fs::read_to_string(source).unwrap(), raw);
 }
 
+fn isolated_relay_cli(fixture: &Fixture) -> std::path::PathBuf {
+    let cli = fixture.cli();
+    std::fs::create_dir(fixture.dir.path().join("cli-user-home")).unwrap();
+    let script = std::fs::read_to_string(&cli).unwrap();
+    let script = script.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nexport HOME=\"$CODEX_HOME/../cli-user-home\" USERPROFILE=\"$CODEX_HOME/../cli-user-home\"\n",
+        1,
+    );
+    std::fs::write(&cli, script).unwrap();
+    cli
+}
+
 async fn chrome_probe(script: &str, input: Value) {
     use tokio::io::AsyncWriteExt;
+    let chrome_home = tempfile::tempdir().unwrap();
+    let chrome_native_home = chrome_home.path().join(".codex");
+    std::fs::create_dir(&chrome_native_home).unwrap();
     let mut child = tokio::process::Command::new("node")
         .arg(script)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("HOME", chrome_home.path())
+        .env("USERPROFILE", chrome_home.path())
+        .env("CODEX_HOME", &chrome_native_home)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -558,22 +649,22 @@ async fn chrome_probe(script: &str, input: Value) {
 
 #[tokio::test]
 async fn single_origin_three_computers_password_revocation_and_resume_preserve_ownership() {
-    let portal = Portal::start_mode(true).await;
+    let portal = Portal::start().await;
     let alice = portal.account("alice").await;
     let bob = portal.account("bob").await;
     let first = Fixture::new();
     let second = Fixture::new();
     let third = Fixture::new();
     let app_a = first.app(Overrides {
-        codex_bin: Some(first.cli()),
+        codex_bin: Some(isolated_relay_cli(&first)),
         ..Default::default()
     });
     let app_b = second.app(Overrides {
-        codex_bin: Some(second.cli()),
+        codex_bin: Some(isolated_relay_cli(&second)),
         ..Default::default()
     });
     let app_c = third.app(Overrides {
-        codex_bin: Some(third.cli()),
+        codex_bin: Some(isolated_relay_cli(&third)),
         ..Default::default()
     });
     let local_cookie = pair(&app_a).await;
@@ -605,11 +696,25 @@ async fn single_origin_three_computers_password_revocation_and_resume_preserve_o
         run_id.to_string()
     );
     if std::env::var_os("CODEX_RELAY_CHROME_TEST").is_some() {
+        // Dedicated portal parents let the browser revoke real server authority
+        // without logging out the Rust fixture's independent active sessions.
+        let probe_alice = portal
+            .login("alice", "synthetic long unique phrase 8362")
+            .await;
+        let probe_bob = portal
+            .login("bob", "synthetic long unique phrase 8362")
+            .await;
+        let (probe_a, probe_b, probe_c) = tokio::join!(
+            portal.open_gateway(remote_a.gateway, &probe_alice),
+            portal.open_gateway(remote_b.gateway, &probe_alice),
+            portal.open_gateway(remote_c.gateway, &probe_bob)
+        );
         chrome_probe("web/e2e/relay-single-origin-probe.cjs",json!({"portalOrigin":portal.origin,"gateways":[
-            {"url":remote_a.url,"accountCookie":alice,"expectedInstanceId":app_a.instance_id,"gatewayId":remote_a.gateway,"runId":run_id},
-            {"url":remote_b.url,"accountCookie":alice,"expectedInstanceId":app_b.instance_id,"gatewayId":remote_b.gateway},
-            {"url":remote_c.url,"accountCookie":bob,"expectedInstanceId":app_c.instance_id,"gatewayId":remote_c.gateway}
+            {"url":probe_a.url,"accountCookie":probe_alice,"expectedInstanceId":app_a.instance_id,"gatewayId":remote_a.gateway,"runId":run_id},
+            {"url":probe_b.url,"accountCookie":probe_alice,"expectedInstanceId":app_b.instance_id,"gatewayId":remote_b.gateway},
+            {"url":probe_c.url,"accountCookie":probe_bob,"expectedInstanceId":app_c.instance_id,"gatewayId":remote_c.gateway}
         ],"cwd":first.cwd})).await;
+        portal.assert_business_marker_absent_from_storage();
     }
     let response = remote_a
         .request_as(
@@ -768,11 +873,48 @@ async fn single_origin_three_computers_password_revocation_and_resume_preserve_o
         .await
         .unwrap();
     let status = stopped.status();
+    let stopped_body = stopped
+        .text()
+        .await
+        .expect("remote stop must have authenticated ResponseEnd");
     assert!(
         status.is_success(),
-        "remote stop failed: {status} {}",
-        stopped.text().await.unwrap()
+        "remote stop failed: {status} {stopped_body}"
     );
+    assert_eq!(
+        serde_json::from_str::<Value>(&stopped_body).unwrap()["accepted"],
+        true
+    );
+    tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let application = json_body(renewed_a.get("/workbench/v1/application").await).await;
+            if application["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|run| run["runId"] == run_id.to_string() && run["state"] == "stopped")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("native CLI must actually exit before checking retained Run channels");
+    for tail in ["run", "live/snapshot"] {
+        let response = renewed_a
+            .get(&format!("/workbench/v1/runs/{run_id}/{tail}"))
+            .await;
+        assert_eq!(
+            response.status(),
+            200,
+            "stopped but retained Run must remain readable over a fresh Run channel"
+        );
+        assert!(
+            response.bytes().await.is_ok(),
+            "retained Run read must have authenticated End"
+        );
+    }
 }
 
 #[tokio::test]
@@ -783,8 +925,8 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
     let bob = portal.account("bob").await;
     let fixture_a = Fixture::new();
     let fixture_b = Fixture::new();
-    let binary_a = fixture_a.cli();
-    let binary_b = fixture_b.cli();
+    let binary_a = isolated_relay_cli(&fixture_a);
+    let binary_b = isolated_relay_cli(&fixture_b);
     std::fs::write(
         fixture_a.cwd.join("example.txt"),
         "synthetic workspace content",
@@ -875,7 +1017,7 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
                 &bob,
                 &format!("/relay/v1/gateways/{}/open", remote_a.gateway)
             )
-            .body("{}")
+            .body(json!({"uiApiVersion":codex_relay_protocol::WORKBENCH_API_VERSION}).to_string())
             .send()
             .await
             .unwrap()
@@ -885,8 +1027,16 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
     assert_eq!(
         remote_a
             .client
-            .get(format!("{}/workbench/v1/application", remote_a.origin))
+            .get(format!(
+                "{}/relay/v1/gateways/{}/access",
+                remote_a.origin, remote_a.gateway
+            ))
             .header("Cookie", &remote_b.cookie)
+            .header("x-workbench-grant", remote_a.grant.as_deref().unwrap())
+            .header(
+                "x-workbench-api-version",
+                codex_relay_protocol::WORKBENCH_API_VERSION
+            )
             .send()
             .await
             .unwrap()
@@ -1026,38 +1176,22 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
     terminal.send(Message::Text(json!({"runEpoch":run_id,"id":2,"command":{"type":"input","generation":grant["grant"]["generation"],"sequence":1,"data":STANDARD.encode("synthetic remote input\n")}}).to_string().into())).await.unwrap();
     assert_eq!(terminal_frame(&mut terminal, "ack").await["id"], 2);
     if std::env::var_os("CODEX_RELAY_CHROME_TEST").is_some() {
-        use tokio::io::AsyncWriteExt;
-        let input = json!({"portalOrigin":portal.origin,"gateways":[
-            {"origin":remote_a.origin,"cookie":remote_a.cookie,"accountCookie":alice,"expectedInstanceId":app_a.instance_id,"runId":run_id},
-            {"origin":remote_b.origin,"cookie":remote_b.cookie,"accountCookie":bob,"expectedInstanceId":app_b.instance_id}
-        ],"cwd":fixture_a.cwd});
-        let mut child = tokio::process::Command::new("node")
-            .arg("web/e2e/relay-public-probe.cjs")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.to_string().as_bytes())
-            .await
-            .unwrap();
-        let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
-            .await
-            .expect("Chrome probe deadline")
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "Chrome probe failed: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        let probe_alice = portal
+            .login("alice", "synthetic long unique phrase 8362")
+            .await;
+        let probe_bob = portal
+            .login("bob", "synthetic long unique phrase 8362")
+            .await;
+        let (probe_a, probe_b) = tokio::join!(
+            portal.open_gateway(remote_a.gateway, &probe_alice),
+            portal.open_gateway(remote_b.gateway, &probe_bob)
         );
-        println!("{}", String::from_utf8_lossy(&output.stdout));
+        let input = json!({"portalOrigin":portal.origin,"gateways":[
+            {"url":probe_a.url,"accountCookie":probe_alice,"expectedInstanceId":app_a.instance_id,"gatewayId":remote_a.gateway,"runId":run_id},
+            {"url":probe_b.url,"accountCookie":probe_bob,"expectedInstanceId":app_b.instance_id,"gatewayId":remote_b.gateway}
+        ],"cwd":fixture_a.cwd});
+        chrome_probe("web/e2e/relay-single-origin-probe.cjs", input).await;
+        portal.assert_business_marker_absent_from_storage();
     }
     assert_eq!(
         portal
@@ -1126,17 +1260,15 @@ async fn public_relay_routes_two_accounts_full_owner_http_terminal_and_logout_wi
     assert!(app_b.healthy());
     portal.task.abort();
     assert!(app_a.healthy());
-    assert!(
-        client()
-            .post(format!("{}{prefix}/stop", app_a.entry.address))
-            .header("Cookie", &local_cookie)
-            .header("Origin", &app_a.entry.address)
-            .header("Content-Type", "application/json")
-            .body(json!({"epoch":run_id}).to_string())
-            .send()
-            .await
-            .unwrap()
-            .status()
-            .is_success()
-    );
+    let stopped = client()
+        .post(format!("{}{prefix}/stop", app_a.entry.address))
+        .header("Cookie", &local_cookie)
+        .header("Origin", &app_a.entry.address)
+        .header("Content-Type", "application/json")
+        .body(json!({"epoch":run_id}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(stopped.status().is_success());
+    assert_eq!(json_body(stopped).await["accepted"], true);
 }

@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## 1.0.0（2026-10-22）
+
+- 发布 macOS / Apple Silicon View 1.0.0 安装包，View/Web 版本同步；共享协议与中转仍按独立组件构建，不在 View 包内安装服务器。正式主版本不扩大既有平台、provider、CLI 或真实手机支持范围。
+- 公网业务改为浏览器与电脑 P-256/HKDF/AES-GCM 加密：每页面按 CLI Run 复用通道，Application 独立，Relay 只转发密文；仍信任自部署前端和授权方。wire/UI/API 同升至 3，无明文回退；仅保留单 origin，移除旧域名/双端口交换入口及模板，账号、登记、schema 3 和历史保留，见 [ADR 0066](docs/decisions/0066-run-scoped-encrypted-relay-channels.md)。
+- 修复门户打开工作台时遗留的 API 2 检查，统一要求 API 3、HTTPS、同 origin、精确电脑路径和固定页面授权；旧版本页面须在三端配套升级后从门户重新打开。
+- 打包与快速安装支持无前导零的稳定 `x.y.z` 主版本，继续拒绝预发布、构建后缀、异常重定向和跨仓库下载，不放宽许可、校验或服务停机保护。Relay 数据库仍为 schema 3，原生历史、旧 Observer、派生 catalog 与独立归类数据不因本次发行迁移。
+
 ## 0.5.1（2026-10-20）
 
 - 发布基于最新 main 的 macOS / Apple Silicon View 安装包，包含下述自 0.3.0 以来的源码增量；不附带独立 `codex-relayd` 服务器。View/Web 版本同步为 0.5.1，共享协议与中转 package 保持各自版本；不因打包新增数据库迁移。

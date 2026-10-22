@@ -34,7 +34,7 @@ export function HistoryHome({ initial, page }: { initial: ApplicationInfo; page?
     stopping.current.add(run.runId); setStoppingIds([...stopping.current]); setStopError('');
     try {
       const response = await workbenchFetch(`/workbench/v1/runs/${encodeURIComponent(run.runId)}/stop`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ epoch: run.runId }) });
-      if (!response.ok) throw new Error();
+      if (!response.ok || (await response.json()).accepted !== true) throw new Error();
     } catch {
       stopping.current.delete(run.runId); setStoppingIds([...stopping.current]);
       setStopError(`未能确认项目“${run.projectName}”已停止，请检查该工作台状态。`);

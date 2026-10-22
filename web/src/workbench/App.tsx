@@ -114,7 +114,7 @@ export function App({ run, applicationHome = false, page }: { run: Run; applicat
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ epoch: run.runEpoch })
       });
-      if (!result.ok) throw new Error('停止请求未成功，请检查连接。');
+      if (!result.ok || (await result.json()).accepted !== true) throw new Error('停止请求未成功，请检查连接。');
     } catch (error) { setStopError((error as Error).message); setStopping(false); }
   }
   return <WorkspaceLinks.Provider value={run.workspaceRoot ? { root: run.workspaceRoot, open: openFile } : null}><div className={`wb-shell ${page ? `wb-routed wb-route-${page}` : ''} ${sidebar !== 'run' ? 'wb-project-open' : ''} ${terminal ? '' : 'wb-terminal-hidden'}`}>

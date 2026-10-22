@@ -131,8 +131,30 @@ struct Book {
 pub(crate) struct IngressHandle {
     address: SocketAddr,
     book: Arc<Mutex<Book>>,
+    runs: Arc<Mutex<Option<RunResolver>>>,
 }
+type RunResolver = Arc<dyn Fn(Uuid) -> Option<Permission> + Send + Sync>;
 impl IngressHandle {
+    pub(crate) fn set_run_resolver(&self, resolver: RunResolver) {
+        *self.runs.lock().unwrap() = Some(resolver);
+    }
+    pub(crate) fn resolve_run(&self, id: Uuid) -> Option<Permission> {
+        self.runs
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|resolve| resolve(id))
+            .filter(Permission::active)
+    }
+    pub(crate) fn permission(&self, id: Uuid) -> Option<Permission> {
+        self.book
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&id)
+            .map(|s| s.owner.permission())
+            .filter(Permission::active)
+    }
     pub(crate) fn address(&self) -> SocketAddr {
         self.address
     }
@@ -260,6 +282,7 @@ impl Ingress {
         listener.set_nonblocking(true)?;
         let handle = IngressHandle {
             address: listener.local_addr()?,
+            runs: Arc::new(Mutex::new(None)),
             book: Arc::new(Mutex::new(Book {
                 instance,
                 context: None,
