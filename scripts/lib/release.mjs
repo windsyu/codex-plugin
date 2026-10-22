@@ -64,6 +64,33 @@ function runtimeNotices(entry) {
   }
   return { ...entry, directory, noticeFiles: [...seen].sort() };
 }
+
+// Cargo metadata does not describe the standard library or compiler builtins
+// statically linked from rustc's own sysroot. Preserve their original notices.
+export function macosRustRuntimeLicenses(repo) {
+  const version = command('rustc', ['-vV'], repo).match(/^release: (.+)$/m)?.[1];
+  if (!/^\d+\.\d+\.\d+$/.test(version || '')) throw new Error('Expected a stable Rust runtime version');
+  const directory = command('rustc', ['--print', 'sysroot'], repo);
+  if (!path.isAbsolute(directory)) throw new Error('Expected an absolute Rust sysroot');
+  const doc = 'share/doc/rust';
+  const builtins = 'lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt';
+  const entries = [
+    { name: 'rust-library', version, declaredLicense: 'SEE COPYRIGHT-library.html', directory,
+      noticeFiles: [`${doc}/COPYRIGHT-library.html`, ...['MIT', 'Apache-2.0', 'Unicode-3.0', 'BSD-2-Clause', 'LLVM-exception'].map(name => `${doc}/licenses/${name}.txt`)] },
+    { name: 'rust-compiler-builtins', version, declaredLicense: 'MIT AND Apache-2.0 WITH LLVM-exception', directory,
+      noticeFiles: [builtins, 'lib/rustlib/src/rust/library/compiler-builtins/libm/LICENSE.txt'] },
+  ].map(runtimeNotices);
+  for (const entry of entries) {
+    for (const file of entry.noticeFiles) {
+      if (!fs.readFileSync(path.join(directory, file), 'utf8').trim()) throw new Error(`Empty Rust runtime notice: ${file}`);
+    }
+  }
+  if (!fs.readFileSync(path.join(directory, doc, 'COPYRIGHT-library.html'), 'utf8').includes('Copyright notices for The Rust Standard Library') ||
+      !fs.readFileSync(path.join(directory, builtins), 'utf8').includes('MIT AND Apache-2.0 WITH')) {
+    throw new Error('Unrecognized Rust runtime notices; review the actual sysroot before packaging');
+  }
+  return entries;
+}
 export function writeLicenses(repo, metadata, destination, { runtimeLicenses = [] } = {}) {
   if (!Array.isArray(runtimeLicenses)) throw new Error('Invalid static runtime license list');
   const runtimes = runtimeLicenses.map(runtimeNotices);
@@ -134,6 +161,7 @@ export function packageRelease(repo, artifacts, { offline = false } = {}) {
   if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version) || version !== version.trim()) throw new Error('Expected stable semver release version');
   const web = JSON.parse(fs.readFileSync(path.join(repo, 'web/package.json'), 'utf8'));
   if (web.version !== version) throw new Error('Rust and Web release versions differ');
+  const runtimeLicenses = macosRustRuntimeLicenses(repo);
   const metadata = JSON.parse(command('cargo', ['metadata', '--locked', ...(offline ? ['--offline'] : []), '--filter-platform', host, '--format-version', '1'], repo));
   const name = `code-view-${version}-${host}`;
   const bundle = path.join(artifacts, name);
@@ -148,11 +176,40 @@ export function packageRelease(repo, artifacts, { offline = false } = {}) {
   copy(path.join(repo, 'scripts/release/code-view'), path.join(bundle, 'bin/code-view'), true);
   copy(path.join(repo, 'scripts/release/install.sh'), path.join(bundle, 'install.sh'), true);
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md', 'Cargo.lock', 'web/package-lock.json', 'vendor/vt100/LICENSE', 'vendor/vt100/PATCH.md', 'web/src/workbench/icons/LICENSE', 'web/src/workbench/icons/README.md']) copy(path.join(repo, file), path.join(bundle, file));
-  const licenseCount = writeLicenses(repo, metadata, bundle);
+  const licenseCount = writeLicenses(repo, metadata, bundle, { runtimeLicenses });
   const commit = command('git', ['rev-parse', 'HEAD'], repo);
   const dirty = !!command('git', ['status', '--porcelain'], repo);
   fs.writeFileSync(path.join(bundle, 'manifest.json'), `${JSON.stringify({ format: 1, name: 'code-view', version, target: host, sourceCommit: commit, sourceDirty: dirty, licenseCount }, null, 2)}\n`);
-  fs.writeFileSync(path.join(bundle, 'RELEASE.md'), `# code-view ${version}\n\nmacOS / Apple Silicon release package. Web assets and the native folder picker are embedded. No Rust, Node.js or source checkout is needed to run.\n\nInstall from the extracted directory:\n\n\`\`\`sh\nshasum -a 256 -c CHECKSUMS.sha256\n./install.sh --prefix "$HOME/.codex-view"\nexport PATH="$HOME/.codex-view/bin:$PATH"\ncd /path/to/project\ncode-view\n# Or: code-view /path/to/project\n# History only: code-view --history\n\`\`\`\n\nThe installer never edits shell files. Add the PATH line to your shell configuration if needed. Use --force only for an intentional replacement. Keep the launcher terminal open; Ctrl-C stops its application and owned CLIs. Closing the browser keeps them running.\n\nProject launch requires a separately installed official Codex CLI and the validated unmanaged-custom Responses/static-bearer configuration. Tested CLI versions: 0.154.0, 0.155.1, 0.156.1, 0.159.2. Search needs rg; Git views need git. The default data directory remains ~/.codex-web; native Codex data is not migrated. Linux, Windows and Intel macOS are unverified.\n\nSource: ${commit}${dirty ? ' (local changes included; not a published main tag)' : ''}. Package checksums verify transfer integrity; this package is not signed or notarized. Formal publishing requires a reviewed main tag and passing CI. Full usage and limits: [project documentation](https://github.com/windsyu/codex-plugin/tree/main/docs).\n\nThe licenses directory includes all host-resolved Cargo dependencies (including build/test dependencies) and installed Web runtime dependencies. Development Web tools are not shipped. See THIRD_PARTY_NOTICES.md and licenses/INDEX.json for upstream attribution and notices.\n`);
+  fs.writeFileSync(path.join(bundle, 'RELEASE.md'), `# code-view ${version}
+
+Codex View for macOS / Apple Silicon. This package contains code-view, codex-view and the read-only Observer compatibility entry codex-observerd; it does not contain the separate codex-relayd server. Web assets and the native folder picker are embedded. No Rust, Node.js or source checkout is needed to run.
+
+Install from the extracted directory:
+
+\`\`\`sh
+shasum -a 256 -c CHECKSUMS.sha256
+./install.sh --prefix "$HOME/.codex-view"
+export PATH="$HOME/.codex-view/bin:$PATH"
+cd /path/to/project
+code-view
+# Or: code-view /path/to/project
+# History only: code-view --history
+\`\`\`
+
+The installer never edits shell files. Add the PATH line to your shell configuration if needed. Use --force only for an intentional replacement. Before upgrading, stop each owned background scope with code-view stop, or exit its foreground launcher with Ctrl-C. Installation does not stop running services automatically.
+
+code-view start starts a background workbench without creating projects. Use code-view status, code-view open and code-view stop to inspect, open and stop it; stop also ends its owned CLI projects. code-view autostart on|off changes login startup preference, not the current process. Autostart runs after user login and does not promise operation while logged out, asleep or powered off. For scripts, use --no-open to suppress browser opening. Ordinary project launch stays in the foreground unless it reuses an existing background instance; keep its launcher terminal open. Closing a browser keeps projects running.
+
+Project launch requires a separately installed official Codex CLI and an unmanaged-custom Responses provider with an explicit upstream. Static bearer configurations have real-provider evidence. Native auth.command is also supported with requires_openai_auth=false and File credential storage; the CLI executes and refreshes credentials. CLI 0.162.1 command authentication was tested with a synthetic provider; real-provider command authentication remains unverified. CLI 0.154.0, 0.155.1, 0.156.1 and 0.159.2 have native interaction/history evidence, with comprehensive synthetic regression on 0.159.2. These results do not certify every provider or later CLI version. Search needs rg; Git views need git.
+
+Optional Codex Relay access requires a compatible, separately deployed server: workbench UI/API 2, transport 2 and relay schema 3. Reopen older API 1 pages from the computer portal; do not bypass version checks or delete data to upgrade. The relay is trusted and can read forwarded content. This View package does not deploy or migrate the relay server.
+
+Configuration and history remain under ~/.codex-web; native Codex and old Observer data are not migrated. Derived history catalog 4 can be rebuilt; single-record project organization uses separate schema 1 state, and JSON configuration remains schema 2. Linux, Windows and Intel macOS are unverified. Actual logout/login startup, sleep/resume and full real-phone/public-network scenarios remain outside current validation.
+
+Source: ${commit}${dirty ? ' (local changes included; not a published main tag)' : ''}. Package checksums verify transfer integrity; this package is not signed or notarized. Formal publishing requires a reviewed main tag and passing CI. Full usage and limits: [project documentation](https://github.com/windsyu/codex-plugin/tree/${commit}/docs).
+
+The licenses directory includes all host-resolved Cargo dependencies (including build/test dependencies), installed Web runtime dependencies, and original Rust standard-library/compiler-builtins notices from the build toolchain. Runtime index versions identify the Rust toolchain release. The standard-library notice includes upstream cross-platform material without claiming that every listed component is linked. Development Web tools are not shipped. See THIRD_PARTY_NOTICES.md and licenses/INDEX.json for upstream attribution and notices.
+`);
   writeChecksums(bundle);
   const archive = path.join(artifacts, `${name}.tar.gz`);
   command('tar', ['-czf', archive, '-C', artifacts, name], repo);

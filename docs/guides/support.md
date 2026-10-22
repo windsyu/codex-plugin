@@ -74,7 +74,7 @@ macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后�
 
 应用页为 `/`、`/history`、`/launch`、`/settings` 和仅本机提供的 `/relay`；Run 页为 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单 origin 中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 兼容并规范化，同 Run 页面切换保留终端，不启动 CLI 或重放输入。
 
-`0.3.0` 提供 macOS / Apple Silicon 安装包及 `code-view` 快速入口：无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.3.0) 为准；后续源码能力不自动进入既有发行包。
+`0.5.1` 提供 macOS / Apple Silicon View 安装包，包含上述后台服务、历史整理与可选公网连接器，不附带独立 Relay 服务器。`code-view` 无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v0.5.1) 为准；旧 `0.3.0` 安装包不包含后续源码能力。发布版本号不扩大本页的受测范围，原生历史与旧 Observer 不迁移；派生 catalog、独立归类库及跨端版本限制仍按上文处理。
 
 `codex-view` 统一读取原生、工作台及 Observer schema 20/25 的目录、搜索和正文。旧库使用独立零写 reader，不调用迁移；实际 schema 25 只做过限定正文抽查，不代表全库完整性验证，缺必要 WAL/SHM 或需修复时返回来源不可用。独立 `codex-observerd serve/import` 的迁移上限仍为 20，不能直接打开 schema 25，见[旧 Observer 兼容参考](../architecture/observer-compatibility.md)。
 
