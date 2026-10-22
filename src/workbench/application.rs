@@ -298,7 +298,8 @@ impl Runner {
             }
             keep
         });
-        self.surface.publish(summary.clone(), run_surface.router());
+        self.surface
+            .publish(summary.clone(), run_surface.router(), run_surface.life());
         self.active.push((run, run_surface, summary.clone()));
         self.retire_stopped();
         Ok((summary, false))

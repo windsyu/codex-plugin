@@ -1,5 +1,6 @@
 'use strict';
 (() => {
+  const uiApiVersion = 3;
   const element = id => document.getElementById(id);
   const routes = { '/login': 'signed-out', '/computers': 'workspace-access', '/authorize': 'authorization', '/account/security': 'security', '/admin/users': 'administration' };
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -85,11 +86,9 @@
   }
   function openURL(raw, gatewayId) {
     const url = new URL(raw);
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('unsafe_url');
-    if (url.origin === location.origin) {
-      const auth = new URLSearchParams(url.hash.slice(1));
-      if (url.pathname !== '/g/' + gatewayId + '/' || url.search || !uuid.test(auth.get('grant') || '') || !uuid.test(auth.get('session') || '') || auth.get('api') !== '2') throw new Error('invalid_entry');
-    }
+    if (url.protocol !== 'https:' || url.username || url.password || url.origin !== location.origin) throw new Error('unsafe_url');
+    const auth = new URLSearchParams(url.hash.slice(1));
+    if (url.pathname !== '/g/' + gatewayId + '/' || url.search || !uuid.test(auth.get('grant') || '') || !uuid.test(auth.get('session') || '') || auth.get('api') !== String(uiApiVersion)) throw new Error('invalid_entry');
     return url.href;
   }
   function schedulePoll() {
@@ -113,7 +112,7 @@
           const stateNode = node('div', Object.hasOwn(labels, state) ? labels[state] : '状态未知 · 请刷新后重试', 'state'); stateNode.dataset.state = state;
           info.append(node('h2', gateway.name, 'computer-name'), stateNode);
           const open = button('打开工作台', async () => {
-            const result = await api('gateways/' + gateway.gatewayId + '/open', { uiApiVersion: 2 });
+            const result = await api('gateways/' + gateway.gatewayId + '/open', { uiApiVersion });
             location.assign(openURL(result.url, gateway.gatewayId));
           }, 'primary');
           open.disabled = state !== 'online';

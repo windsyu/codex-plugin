@@ -2,11 +2,11 @@
 
 [文档总索引](../README.md) · [交互与 API](../interactions/relay.md) · [部署运维](../guides/public-relay-deployment.md) · [本机架构](workbench.md)
 
-本文说明当前服务器组件的职责、依赖、身份、数据与安全不变量；操作顺序和接口见交互文档。决策依据为 [ADR 0056](../decisions/0056-public-workbench-relay.md)、[0058](../decisions/0058-admin-accounts-single-origin-relay.md)、[0059](../decisions/0059-workbench-routes-and-relay-recovery.md)、[0061](../decisions/0061-account-deletion-admin-rename.md)、[0062](../decisions/0062-independent-component-builds.md)。受测环境与未验证事项见[支持范围](../guides/support.md)，部署过程见[运维指南](../guides/public-relay-deployment.md)。
+本文说明当前服务器组件的职责、依赖、身份、数据与安全不变量；操作顺序和接口见交互文档。加密与单 origin 以 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md) 为准，保留 [0058](../decisions/0058-admin-accounts-single-origin-relay.md)、[0059](../decisions/0059-workbench-routes-and-relay-recovery.md)、[0061](../decisions/0061-account-deletion-admin-rename.md)、[0062](../decisions/0062-independent-component-builds.md) 的账号、路由和组件边界。受测环境与未验证事项见[支持范围](../guides/support.md)，部署过程见[运维指南](../guides/public-relay-deployment.md)。
 
 ## 1. 职责、部署单元与非目标
 
-`relay/` 是独立 Cargo package `codex-relayd`，仅产出中转 binary。服务器负责账号门户、电脑归属、可信中央前端及有界 HTTP/SSE/终端转发；不运行官方 Codex CLI、PTY、模型代理或本机历史。电脑上的后端仍是 `codex-local-observer` 的 `codex-view`，出站连接器位于 `src/workbench/relay`，不是服务器组件。
+`relay/` 是独立 Cargo package `codex-relayd`，仅产出中转 binary。服务器负责账号门户、电脑归属、可信中央前端及有界密文通道转发；不解析内部 HTTP/SSE/终端，不运行官方 Codex CLI、PTY、模型代理或本机历史。电脑上的后端仍是 `codex-local-observer` 的 `codex-view`，出站连接器位于 `src/workbench/relay`，不是服务器组件。
 
 两个组件正常/构建依赖只共享 `crates/relay-protocol` 和 `crates/workbench-assets`，共享包不得反向依赖任一运行模块。本机的 relay dev-dependency 只用于跨端测试，不是生产依赖。
 
@@ -19,20 +19,20 @@ flowchart LR
   A --> W[本机工作台 / 原版 CLI / PTY / 历史]
 ```
 
-账号授予自有电脑完整 V2 工作台权限：原生终端、文件/搜索/Git 阅读、历史、项目启动与设置。非目标：项目共享、只读角色、离线电脑访问、V3 IM、任意 TCP/URL 代理、服务器 OS 登录和端到端加密。运营者是可信方，可读取并控制经过中转的内容。中转账号不等于本机 OS 沙箱；需要隔离本机历史时必须分别配置 OS 用户、工作台根、`CODEX_HOME`、历史数据及来源。
+账号授予自有电脑完整 V2 工作台权限：原生终端、文件/搜索/Git 阅读、历史、项目启动与设置。浏览器与电脑按 CLI Run 加密，后端不持有业务密钥；中央前端和授权方仍可信，恶意运营者修改脚本/授权不在防护范围内。非目标：项目共享、只读角色、离线访问、V3 IM、任意 TCP/URL 代理和服务器 OS 登录。中转账号不是 OS 沙箱；隔离本机历史仍须分别配置 OS 用户、工作台根、`CODEX_HOME`、历史及来源。新安全边界见 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 ## 2. 源码责任地图
 
 | 入口 | 责任与修改注意点 |
 | --- | --- |
 | [relay/src/main.rs](../../relay/src/main.rs) | CLI 参数、首次管理员初始化、离线恢复、服务启动；密码只从私有文件读取 |
-| [relay/src/lib.rs](../../relay/src/lib.rs) | 配置与三种路由模式、精确 Host/Origin、安全响应头、路由、限流及主动撤销 |
+| [relay/src/lib.rs](../../relay/src/lib.rs) | 单 origin 配置、精确 Host/Origin、安全响应头、路由、限流及主动撤销 |
 | [relay/src/auth.rs](../../relay/src/auth.rs) | Argon2id、登录、改密、账号信息、退出；异步哈希结束后重查认证代际 |
 | [relay/src/admin.rs](../../relay/src/admin.rs) | 普通用户列表、创建、重置、禁用/启用、删除；事务受理点重查管理员身份 |
 | [relay/src/store.rs](../../relay/src/store.rs) | 私有目录/数据库、schema 迁移、会话/凭据验证、全端撤销、审计与清理 |
-| [relay/src/portal.rs](../../relay/src/portal.rs) | 设备码批准与恢复登记、自有电脑列表、页面授权、历史一次性交换 |
+| [relay/src/portal.rs](../../relay/src/portal.rs) | 设备码批准与恢复登记、自有电脑列表、页面授权和只读 access |
 | [relay/src/routing.rs](../../relay/src/routing.rs) | 中央静态页面、canonical `/g/` 路径、固定 grant selector 与父会话校验 |
-| [relay/src/tunnel.rs](../../relay/src/tunnel.rs) | 控制/数据 WSS、续租、流预算、HTTP/SSE/终端桥接、响应过滤与取消 |
+| [relay/src/tunnel.rs](../../relay/src/tunnel.rs) | 控制/数据 WSS、续租、跨 epoch 通道预算、双向密文桥接与取消 |
 | [relay/static](../../relay/static) | 可信门户 HTML/JS/CSS；不得把电脑数据作为 HTML 插入 |
 | [crates/relay-protocol/src/lib.rs](../../crates/relay-protocol/src/lib.rs) | wire 版本、工作台 API 版本、接口/页面白名单及预算常量 |
 | [crates/workbench-assets](../../crates/workbench-assets) | 两端嵌入同一工作台前端、资源存在性与时效门禁 |
@@ -49,7 +49,7 @@ flowchart LR
 | 页面 grant | 子会话，固定关联原父会话、账号代际、电脑、UI/API 版本；不是仅凭 ID 可用的 bearer |
 | `instanceId` | 每次工作台应用进程身份；不同于持久电脑登记 |
 | `runId` / `runEpoch` | 本机项目运行及其终端/观察上下文，不能在重连时跨运行复用 |
-| `connectionEpoch` / `streamId` | 一次中转连接及逻辑业务流，迟到旧连接数据不能附着新连接 |
+| `connectionEpoch` / `channelId` / `streamId` | 一次控制连接、密文通道和内部子流；迟到数据不能附着新连接 |
 
 “电脑”沿用安装实例，不采集硬件指纹。原登记恢复同时要求旧独立电脑凭据证明与原所属账号批准；`gatewayId` 本身不是凭据。丢失本机私有状态需重新登记。
 
@@ -61,7 +61,7 @@ flowchart LR
 
 ## 4. 单 IP、单 HTTPS 端口与可信前端
 
-新模式显式选择 `--single-origin`，域名和字面 IP 均可；不新增电脑端入站公网端口。所有入口使用一个已有选定 HTTPS origin：
+仅支持单 origin（`--single-origin` 可显式声明），域名和字面 IP 均可；不新增电脑端入站公网端口。所有入口使用一个已有选定 HTTPS origin：
 
 | 地址 | 提供方与授权 |
 | --- | --- |
@@ -69,13 +69,14 @@ flowchart LR
 | `/relay.js`、`/relay.css`、`/relay/v1/...` | 中转门户静态资源、账号/电脑认证与隧道 |
 | `/g/{gatewayId}/` 及工作台功能页 | 中转构建的 HTML；取壳检查门户会话和归属，不因此签发业务授权 |
 | `/assets/...` | 中转构建的 JS/CSS，不从电脑获取 |
-| `/g/{gatewayId}/workbench/v1/...` | 逐请求检查原会话/grant/归属/在线/版本，剥离 `/g/{gatewayId}` 后转入 RemoteOwner |
+| `/g/{gatewayId}/workbench/v1/secure-channel` | 校验原会话/grant/归属/在线/版本和作用域，再配对电脑 WSS；只转发密文 |
+| `/relay/v1/gateways/{id}/access` | 固定 grant 只读探测，返回公开绑定元数据，不创建授权 |
 
-门户显式打开电脑才签发 grant。HTTP 使用 `X-Workbench-Grant` / `X-Workbench-Api-Version`；SSE、WS 使用 `relayGrant` / `relayApi` query selector。selector 还须匹配原父 HttpOnly Cookie，不能凭当前 Cookie 和电脑 URL 补发授权。转发前剥离 selectors、Cookie、认证头。入口 fragment 携带固定访问上下文，页面消费后清除 fragment，并在本标签 sessionStorage 保存；导航/新标签显式传递该上下文。缓存与恢复状态按会话、电脑、应用/运行身份隔离。退出、改密或切换账号后的旧页清屏、关闭流，不借用新身份。
+门户显式打开电脑才签发 grant。只读 access 使用 `X-Workbench-Grant` / `X-Workbench-Api-Version`，业务通道使用 `relayGrant` / `relayApi` 与作用域 query selector，仍须匹配原父 HttpOnly Cookie；不能凭当前 Cookie 和电脑 URL 补发授权。业务方法、路径/query、头和正文仅在密文内。入口 fragment 携带固定访问上下文，页面只消费认证字段并在本标签 sessionStorage 保存，保留业务 fragment；导航/新标签显式传递授权，但不共享密钥。缓存与恢复状态按会话、电脑、应用/运行身份隔离。退出、改密或切换账号后的旧页清屏、关闭全部通道并使迟到加解密回调失效，不借用新身份。
 
-同源路径不提供浏览器强隔离。电脑提供的内容只允许白名单对应 JSON、SSE 或终端帧，不允许 HTML、JS、CSS；HTML/脚本/SVG MIME、冲突内容类型与重定向拒绝。中转控制 Content-Type、CSP、nosniff、缓存、引用和框架策略，剥离电脑的 Set-Cookie、CSP、重定向与资源加载头；Markdown 清洗、文本文件展示和终端过滤仍不可省略。接口白名单不是“任意 GET”。若可信前端出现 XSS，可能影响当前账号全部电脑，不能声称 `/g/` 隔离消除了这一风险。
+同源路径不提供浏览器强隔离。电脑解密端只允许白名单对应 JSON、SSE 或终端帧，不允许 HTML、JS、CSS；HTML/脚本/SVG MIME、冲突内容类型与重定向拒绝，只返回过滤后的响应元数据。Relay 控制自己提供页面的 CSP、nosniff、缓存、引用和框架策略，不能检查密文业务 MIME；Markdown 清洗、文本文件展示和终端过滤仍不可省略。接口白名单不是“任意 GET”。若可信前端出现 XSS，可能影响当前账号全部电脑，不能声称 `/g/` 隔离消除了这一风险。
 
-两种历史模式保留显式配置和独立回归：`--workbench-domain` 使用独立工作台 origin/一次性交换码；`--workbench-origin` 与 `--fixed-gateway-id` 成对使用，仅支持历史双端口固定单机。这两种模式仍转发电脑 HTML/静态资源，不提供新单 origin 的中央前端和 JSON/SSE-only 响应限制，不能套用上述安全结论；与 `--single-origin` 互斥，不隐式混用。同 IP Cookie 不按端口隔离，同 IP 上其他 HTTPS 服务仍在凭据信任边界内，不能部署不可信服务。
+历史域名和固定双端口配置、一次性交换及明文业务入口已移除，无明文回退。账号、登记、凭据、schema 3 与旧电脑状态文件仍可读，不因此删除数据。同 IP Cookie 不按端口隔离，同 IP 上其他 HTTPS 服务仍在凭据信任边界内，不能部署不可信服务。
 
 ## 5. 数据、密码与迁移
 
@@ -92,18 +93,22 @@ SQLite 当前 `user_version=3`，核心表由 `store.rs` 维护：`accounts` 保
 
 ## 6. 流转发、兼容与预算
 
-`crates/relay-protocol` 定义传输 `VERSION=2` 和独立 `WORKBENCH_API_VERSION=2`。后者覆盖可信页面、Application/启动、历史分组/归类与终端契约，严格匹配；不兼容提示配套升级，不回退加载电脑脚本。网页前端、服务器和电脑后端都须核对版本。API 2 纳入主线历史模块，旧 API 1 页面需从门户重新打开；账号、电脑登记及 relay 数据库 schema 不变，见 [ADR 0065](../decisions/0065-main-history-relay-integration.md)。
+`crates/relay-protocol` 定义 `VERSION=3`、`WORKBENCH_API_VERSION=3`，覆盖可信前端与加密多路复用。三端严格匹配，不兼容提示配套升级，不回退明文或电脑脚本；旧页从门户重新打开。账号、电脑登记和数据库 schema 3 保持，见 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
-owner 目录浏览最初为 API 1 的兼容扩展，API 2 保留：精确允许 `POST /workbench/v1/application/directories`，由电脑端提供当前层目录元信息，中央前端按可选 `directoryBrowserAvailable` 显示入口。缺少能力字段时保留手动输入；不修改数据库 schema。服务停止/状态控制、native picker、私有 connect 与连接器管理仍不转发。目录不是服务器文件系统，也不是配对设备权限。
+owner 目录浏览最初为 API 1 的兼容扩展，API 3 保留：精确允许 `POST /workbench/v1/application/directories`，由电脑端提供当前层目录元信息，中央前端按可选 `directoryBrowserAvailable` 显示入口。缺少能力字段时保留手动输入；不修改数据库 schema。服务停止/状态控制、native picker、私有 connect 与连接器管理仍不转发。目录不是服务器文件系统，也不是配对设备权限。
 
-控制 WSS 每 10 秒续租，30 秒无续租失效。每逻辑 HTTP/SSE/WS 使用独立有界数据 WSS，避免慢流阻塞控制和 CLI；许可/session/stream ID 集合有容量边界，超限拒绝或旋转连接，不无限积累。
+控制 WSS 每 10 秒续租，30 秒无续租失效。每页面的 Application 和各 Run 分别建立可复用数据通道，内部 HTTP/SSE/终端独立子流；Run 不是原生 Thread，正常 CLI 退出不撤销保留的阅读面。电脑在握手/Open 校验 grant 和只读 Run 生命周期，退役只关闭对应 Run。Relay 双向独立、有界转发；端点串行 AEAD writer、严格序号和 credit 流控，普通子流错误不影响其他子流，socket/验密失败影响整条通道。关闭或重连不停止 CLI，不重放输入/修改。具体密码、调度和预算契约见 ADR 0066。
 
 | 预算 | 当前值 |
 | --- | --- |
-| 控制/HTTP 数据帧 | 128 KiB |
+| 控制帧 / 密文 WS 消息 | 128 KiB / 96 KiB |
+| 明文记录 / 数据分片 | 64 KiB / 16 KiB |
 | HTTP 请求正文及读取期限 | 2 MiB / 10 秒 |
-| 每电脑业务流 / 终端流 | 64 / 4 |
-| 全服务业务流 / 终端流 | 256 / 16 |
+| 每电脑物理通道 / 全服务物理通道 | 64 / 256 |
+| 每电脑内部业务子流 / 终端 | 64 / 4（跨全部通道） |
+| Relay 每方向转发队列 | 128 KiB，另有记录数上限 |
+| 端点每通道队列 / 控制预留 / 子流窗口 | 2 MiB / 64 KiB / 至多 256 KiB |
+| 每电脑及每页面受管传输字节预算 | 各 32 MiB，非总 RSS |
 | 内部终端消息 / 浏览器原生 WS 帧 | 16 MiB / 96 KiB |
 | 控制连接 / 每电脑并发握手 / 握手期限 | 256 / 2 / 10 秒 |
 | 门户 mutation 并发 / 正文 / 读取期限 | 32 / 8 KiB / 10 秒 |

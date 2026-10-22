@@ -28,9 +28,7 @@ use uuid::Uuid;
 pub struct Config {
     pub data_dir: PathBuf,
     pub portal_origin: String,
-    pub workbench_domain: String,
-    pub workbench_origin: Option<String>,
-    pub fixed_gateway_id: Option<Uuid>,
+    /// Compatibility option; routing is always single-origin.
     pub single_origin: bool,
     pub password_workers: usize,
     pub allow_insecure_loopback: bool,
@@ -61,127 +59,23 @@ impl Config {
                 || h.ends_with(".localhost")
                 || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
         };
-        if self.single_origin {
-            anyhow::ensure!(
-                self.workbench_origin.is_none()
-                    && self.fixed_gateway_id.is_none()
-                    && self.workbench_domain.is_empty(),
-                "single-origin conflicts with other workbench routing modes"
-            );
-            anyhow::ensure!(
-                u.scheme() == "https"
-                    || (self.allow_insecure_loopback
-                        && u.scheme() == "http"
-                        && loopback(u.host_str().unwrap_or(""))),
-                "HTTPS is required except explicit isolated loopback testing"
-            );
-            return Ok(());
-        }
-        if let Some(origin) = &self.workbench_origin {
-            anyhow::ensure!(
-                self.workbench_domain.is_empty(),
-                "workbench-origin conflicts with workbench-domain"
-            );
-            anyhow::ensure!(
-                self.fixed_gateway_id.is_some_and(|id| !id.is_nil()),
-                "fixed-gateway-id is required for workbench-origin"
-            );
-            let workbench = url::Url::parse(origin)?;
-            let ip = |url: &url::Url| {
-                url.host_str()
-                    .and_then(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().ok())
-            };
-            anyhow::ensure!(
-                workbench.origin().ascii_serialization() == *origin
-                    && workbench.username().is_empty()
-                    && workbench.password().is_none(),
-                "workbench-origin must be an exact origin"
-            );
-            anyhow::ensure!(
-                ip(&u).is_some() && ip(&u) == ip(&workbench),
-                "fixed origins must use the same literal IP"
-            );
-            anyhow::ensure!(
-                u.port().is_some() && workbench.port().is_some() && u.port() != workbench.port(),
-                "fixed origins require distinct explicit non-default ports"
-            );
-            anyhow::ensure!(
-                u.scheme() == workbench.scheme()
-                    && (u.scheme() == "https"
-                        || (self.allow_insecure_loopback
-                            && u.scheme() == "http"
-                            && ip(&u).is_some_and(|ip| ip.is_loopback()))),
-                "HTTPS is required except explicit isolated loopback testing"
-            );
-            return Ok(());
-        }
-        anyhow::ensure!(
-            self.fixed_gateway_id.is_none(),
-            "fixed-gateway-id requires workbench-origin"
-        );
         anyhow::ensure!(
             u.scheme() == "https"
                 || (self.allow_insecure_loopback
                     && u.scheme() == "http"
-                    && loopback(u.host_str().unwrap_or(""))
-                    && loopback(&self.workbench_domain)),
+                    && loopback(u.host_str().unwrap_or("").trim_matches(['[', ']']))),
             "HTTPS is required except explicit isolated loopback testing"
-        );
-        anyhow::ensure!(
-            !self.workbench_domain.is_empty()
-                && self
-                    .workbench_domain
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
-                && !self.workbench_domain.starts_with('.')
-                && !self.workbench_domain.ends_with('.'),
-            "invalid workbench domain"
-        );
-        anyhow::ensure!(
-            !u.host_str()
-                .unwrap_or("")
-                .ends_with(&format!(".{}", self.workbench_domain))
-                || !u.host_str().unwrap_or("").starts_with("g-"),
-            "portal must have a separate origin"
         );
         Ok(())
     }
-    pub fn gateway_origin(&self, id: Uuid) -> Option<String> {
-        if self.single_origin {
-            return Some(self.portal_origin.clone());
-        }
-        if let Some(origin) = &self.workbench_origin {
-            return (self.fixed_gateway_id == Some(id)).then(|| origin.clone());
-        }
-        let u = url::Url::parse(&self.portal_origin).expect("validated config");
-        Some(format!(
-            "{}://g-{}.{}{}",
-            u.scheme(),
-            id,
-            self.workbench_domain,
-            u.port().map(|p| format!(":{p}")).unwrap_or_default()
-        ))
+    pub fn gateway_origin(&self, _id: Uuid) -> Option<String> {
+        Some(self.portal_origin.clone())
     }
-    fn host_origin(&self, h: &HeaderMap) -> Option<(String, Option<Uuid>)> {
+    fn host_origin(&self, h: &HeaderMap) -> Option<String> {
         let host = h.get("host")?.to_str().ok()?;
         let portal = url::Url::parse(&self.portal_origin).ok()?;
-        if format!("{}://{}", portal.scheme(), host) == self.portal_origin {
-            return Some((self.portal_origin.clone(), None));
-        }
-        if self.single_origin {
-            return None;
-        }
-        if let Some(origin) = &self.workbench_origin {
-            return (format!("{}://{}", portal.scheme(), host) == *origin)
-                .then(|| (origin.clone(), self.fixed_gateway_id));
-        }
-        let bare = host.split(':').next()?;
-        let id = bare
-            .strip_suffix(&format!(".{}", self.workbench_domain))?
-            .strip_prefix("g-")?;
-        let id = Uuid::parse_str(id).ok()?;
-        let origin = self.gateway_origin(id)?;
-        (format!("{}://{}", portal.scheme(), host) == origin).then_some((origin, Some(id)))
+        (format!("{}://{}", portal.scheme(), host) == self.portal_origin)
+            .then(|| self.portal_origin.clone())
     }
 }
 #[derive(Clone)]
@@ -193,8 +87,8 @@ pub(crate) struct Inner {
     portal_capacity: Arc<Semaphore>,
     control_capacity: Arc<Semaphore>,
     gateway_control_capacity: Mutex<HashMap<Uuid, std::sync::Weak<Semaphore>>>,
+    gateway_channel_capacity: Mutex<HashMap<Uuid, std::sync::Weak<Semaphore>>>,
     stream_capacity: Arc<Semaphore>,
-    terminal_capacity: Arc<Semaphore>,
     limits: Mutex<HashMap<String, (Instant, u32)>>,
     bindings: Mutex<HashMap<Uuid, portal::Pending>>,
     tunnels: Mutex<HashMap<Uuid, tunnel::Connection>>,
@@ -207,17 +101,6 @@ pub(crate) struct Inner {
 pub fn app(config: Config) -> anyhow::Result<Router> {
     config.validate()?;
     let store = Store::open(&config.data_dir)?;
-    if let Some(id) = config.fixed_gateway_id {
-        let incompatible: bool = store.0.lock().unwrap().query_row(
-            "SELECT EXISTS(SELECT 1 FROM gateways WHERE id != ?1)",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(
-            !incompatible,
-            "stored gateways conflict with fixed-gateway-id"
-        );
-    }
     let password_workers = config.password_workers;
     let state = App(Arc::new(Inner {
         store,
@@ -226,8 +109,8 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
         portal_capacity: Arc::new(Semaphore::new(32)),
         control_capacity: Arc::new(Semaphore::new(256)),
         gateway_control_capacity: Mutex::new(HashMap::new()),
+        gateway_channel_capacity: Mutex::new(HashMap::new()),
         stream_capacity: Arc::new(Semaphore::new(256)),
-        terminal_capacity: Arc::new(Semaphore::new(16)),
         limits: Mutex::new(HashMap::new()),
         bindings: Mutex::new(HashMap::new()),
         tunnels: Mutex::new(HashMap::new()),
@@ -237,7 +120,10 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
         #[cfg(test)]
         forget_gate: Mutex::new(None),
     }));
-    Ok(Router::new()
+    Ok(router(state))
+}
+fn router(state: App) -> Router {
+    Router::new()
         .route("/", get(portal::index))
         .route("/login", get(portal::index))
         .route("/computers", get(portal::index))
@@ -275,23 +161,24 @@ pub fn app(config: Config) -> anyhow::Result<Router> {
         .route("/relay/v1/gateways/{id}", delete(portal::forget))
         .route("/relay/v1/gateways/{id}/open", post(portal::open))
         .route("/relay/v1/gateway/revoke", post(portal::revoke_credential))
-        .route("/relay/v1/open", get(portal::exchange_page))
-        .route("/relay/v1/exchange.js", get(portal::exchange_script))
-        .route("/relay/v1/session/exchange", post(portal::exchange))
+        .route("/relay/v1/gateways/{id}/access", get(tunnel::access))
         .route("/relay/v1/tunnel", get(tunnel::connect))
-        .route("/relay/v1/tunnel/streams/{id}", get(tunnel::attach))
+        .route("/relay/v1/tunnel/channels/{id}", get(tunnel::attach))
         .route("/g/{id}/", get(routing::page))
         .route("/g/{id}/history", get(routing::page))
         .route("/g/{id}/launch", get(routing::page))
         .route("/g/{id}/settings", get(routing::page))
         .route("/g/{id}/runs/{run}/{page}", get(routing::page))
         .route("/assets/{*path}", get(routing::asset))
-        .fallback(tunnel::forward)
+        .route(
+            "/g/{id}/workbench/v1/secure-channel",
+            get(tunnel::secure_channel),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             codex_relay_protocol::MAX_HTTP_BODY,
         ))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
-        .with_state(state))
+        .with_state(state)
 }
 pub async fn serve(config: Config, bind: SocketAddr) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -320,7 +207,7 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Response {
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some((origin, gateway)) = s.0.config.host_origin(req.headers()) else {
+    let Some(origin) = s.0.config.host_origin(req.headers()) else {
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     };
     if s.client_ip(
@@ -334,21 +221,6 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Response {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let path = req.uri().path();
-    let gateway_route = path == "/"
-        || (!path.starts_with("/relay") && gateway.is_some())
-        || matches!(
-            path,
-            "/relay/v1/open" | "/relay/v1/exchange.js" | "/relay/v1/session/exchange"
-        );
-    if (gateway.is_some() && !gateway_route)
-        || (gateway.is_none()
-            && matches!(
-                path,
-                "/relay/v1/open" | "/relay/v1/exchange.js" | "/relay/v1/session/exchange"
-            ))
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
     let machine = path == "/relay/v1/bindings"
         || path == "/relay/v1/gateway/revoke"
         || (path.starts_with("/relay/v1/bindings/") && path.ends_with("/poll"))
@@ -361,7 +233,7 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Response {
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if (gateway.is_some() || (s.0.config.single_origin && path.starts_with("/g/")))
+    if (path.starts_with("/g/") || path.ends_with("/access"))
         && req.headers().keys().any(|n| {
             n.as_str() == "authorization"
                 || (n.as_str().starts_with("x-relay-")

@@ -8,13 +8,8 @@ struct Args {
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     portal_origin: Option<String>,
-    #[arg(long, global = true, conflicts_with_all = ["workbench_origin", "fixed_gateway_id", "single_origin"])]
-    workbench_domain: Option<String>,
-    #[arg(long, global = true, requires = "fixed_gateway_id")]
-    workbench_origin: Option<String>,
-    #[arg(long, global = true, requires = "workbench_origin")]
-    fixed_gateway_id: Option<uuid::Uuid>,
-    #[arg(long, global = true, conflicts_with_all = ["workbench_domain", "workbench_origin", "fixed_gateway_id"])]
+    /// Retained for compatibility; same-origin routing is always enabled.
+    #[arg(long, global = true)]
     single_origin: bool,
     #[arg(long, global = true, default_value_t = 4)]
     password_workers: usize,
@@ -51,9 +46,6 @@ impl Args {
                 .portal_origin
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--portal-origin is required"))?,
-            workbench_domain: self.workbench_domain.clone().unwrap_or_default(),
-            workbench_origin: self.workbench_origin.clone(),
-            fixed_gateway_id: self.fixed_gateway_id,
             single_origin: self.single_origin,
             password_workers: self.password_workers,
             allow_insecure_loopback: self.allow_insecure_loopback,
@@ -102,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_requires_one_routing_mode_and_fixed_identity_pair() {
+    fn same_origin_is_default_and_legacy_routing_flags_are_rejected() {
         let base = [
             "codex-relayd",
             "--data-dir",
@@ -113,72 +105,14 @@ mod tests {
         let parse = |tail: &[&str]| -> anyhow::Result<Config> {
             Args::try_parse_from(base.into_iter().chain(tail.iter().copied()))?.config()
         };
-        assert!(parse(&["--workbench-domain", "example.com", "serve"]).is_ok());
+        assert!(parse(&["serve"]).is_ok());
         assert!(parse(&["--single-origin", "serve"]).is_ok());
-        assert!(
-            parse(&[
-                "--single-origin",
-                "--workbench-domain",
-                "example.com",
-                "serve"
-            ])
-            .is_err()
-        );
-        assert!(
-            Args::try_parse_from([
-                "codex-relayd",
-                "serve",
-                "--data-dir",
-                "/tmp/synthetic-unused",
-                "--portal-origin",
-                "https://192.0.2.10:9443",
-                "--workbench-domain",
-                "example.com"
-            ])
-            .is_ok()
-        );
-        assert!(
-            Args::try_parse_from(["codex-relayd", "--workbench-domain", "example.com", "serve"])
-                .unwrap()
-                .config()
-                .is_err()
-        );
-        assert!(parse(&["serve"]).is_err());
-        assert!(parse(&["--workbench-origin", "https://192.0.2.10:9444", "serve"]).is_err());
-        let id = "5b626c57-ff39-4482-a408-de601ebf86d2";
-        assert!(
-            parse(&[
-                "--fixed-gateway-id",
-                id,
-                "--workbench-domain",
-                "example.com",
-                "serve"
-            ])
-            .is_err()
-        );
-        assert!(
-            parse(&[
-                "--fixed-gateway-id",
-                id,
-                "--workbench-origin",
-                "https://192.0.2.10:9444",
-                "--password-workers",
-                "1",
-                "serve"
-            ])
-            .is_ok()
-        );
-        assert!(
-            parse(&[
-                "--fixed-gateway-id",
-                id,
-                "--workbench-origin",
-                "https://192.0.2.10:9444",
-                "--workbench-domain",
-                "example.com",
-                "serve"
-            ])
-            .is_err()
-        );
+        for flag in [
+            "--workbench-domain",
+            "--workbench-origin",
+            "--fixed-gateway-id",
+        ] {
+            assert!(parse(&[flag, "obsolete", "serve"]).is_err());
+        }
     }
 }

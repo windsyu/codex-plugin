@@ -43,8 +43,15 @@ window.addEventListener(AUTH_INVALID, () => unavailable('登录或工作台授�
 
 async function start() {
   const context = workbenchContext();
-  const pair = new URLSearchParams(location.hash.slice(1)).get('pair');
-  history.replaceState(history.state, '', location.pathname + location.search);
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  const pair = fragment.get('pair');
+  for (const key of ['grant', 'session', 'api', 'pair']) fragment.delete(key);
+  const search = new URLSearchParams(location.search);
+  if (context.gateway) {
+    for (const [key, value] of search) if (key !== 'run') fragment.set(key, value);
+    for (const key of [...search.keys()]) if (key !== 'run') search.delete(key);
+  }
+  history.replaceState(history.state, '', location.pathname + (search.size ? `?${search}` : '') + (fragment.size ? `#${fragment}` : ''));
   context.assert();
   const route = parseRoute(new URL(location.href));
   if (route.kind === 'missing') throw new Error('页面不存在，请检查工作台地址。');

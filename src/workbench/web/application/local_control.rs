@@ -52,7 +52,7 @@ pub(super) async fn control(
             .read()
             .unwrap()
             .iter()
-            .filter(|(r, _)| r.state == "running")
+            .filter(|(r, _, _)| r.state == "running")
             .count(),
         relay,
     })

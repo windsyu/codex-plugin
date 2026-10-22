@@ -1,6 +1,6 @@
 # Linux 公网中继部署与运维
 
-本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。当前新部署使用单 HTTPS origin：门户、可信工作台前端和 `/g/{gatewayId}/` 业务入口共享一个地址，支持多个账号与电脑。可信中继可读取并操作传输中的工作台内容。受测 Linux/TLS 环境、真实手机及多电脑限制见[支持范围](support.md)；本指南提供操作方法，不代表任意部署已通过验收。
+本指南对应[中转架构与安全契约](../architecture/relay.md)和[交互与 API](../interactions/relay.md)。仅支持单 HTTPS origin：门户、可信前端和 `/g/{gatewayId}/` 入口共享地址，支持多个账号与电脑。浏览器与电脑按 CLI Run 加密，后端只转发业务密文；运营者仍是可信前端与授权方，不防恶意修改脚本/授权。三端须配套 API/wire 3，无明文降级。受测 Linux/TLS、真实手机及规模限制见[支持范围](support.md)；操作方法不代表任意部署已经验收。
 
 ## 构建与服务隔离
 
@@ -40,7 +40,7 @@ codex-relayd --data-dir /var/lib/codex-relay \
 
 已有 Caddy 站点须合并配置，不能直接覆盖现有配置文件。保留原有证书续签机制，只验证和重载本次修改的入口。不要启用请求正文日志，访问日志也不应记录页面 grant 查询参数。生产入口必须使用受信任 TLS，不关闭证书校验。
 
-历史模式见[兼容配置](#历史域名与固定单机兼容)，三种路由模式互斥；新部署默认选择 `--single-origin`，不为新账号分配子域名或额外端口。
+单 origin 是唯一且默认模式，`--single-origin` 可显式声明；不为账号分配子域名或额外端口。旧路由模式已移除，见[升级边界](#历史模式退出与升级)。
 
 ## 单 IP 与受限服务器部署
 
@@ -60,13 +60,9 @@ TLS 进程环境设置同一个 `RELAY_PUBLIC_ADDRESS=<公网IP>:9443` 和 `RELA
 
 首次启动仍按上节私有文件初始化 `windsyu`，改密后移除参数与文件。证书续签后仅重载本次 TLS 入口；容器挂载目录以避免原子替换后仍读旧 inode，限制重载超时，不重载无关容器或修改其续签机制。模板只启用 HTTP/1.1 与 HTTP/2，不新增 UDP/HTTP3 入口。
 
-## 历史域名与固定单机兼容
+## 历史模式退出与升级
 
-域名模式显式使用 `--portal-origin https://app.example.com --workbench-domain wb.example.com`，配合[历史域名服务模板](../../deploy/relay/codex-relayd.service)和 [Caddy 模板](../../deploy/relay/Caddyfile.example)。需门户与工作台 wildcard DNS 和对应证书；标准 Caddy 不自动具备 DNS-01 插件。该模式使用独立 origin/一次性交换码，和旧固定单机模式一样仍转发电脑页面/静态资源，不具有新单 origin 的可信中央前端边界；须单独回归，不能从单 origin 测试推导已通过。
-
-[ADR 0057](../decisions/0057-single-workbench-ip-trial.md)的历史双端口固定单机显式使用 `--portal-origin https://<公网IP>:9443 --workbench-origin https://<公网IP>:9444 --fixed-gateway-id <UUID>`，与 `--single-origin` 互斥，仅支持一台工作台，第二次绑定前须撤销已有登记。使用[历史服务模板](../../deploy/relay/codex-relayd-ip-trial.service)和 [Caddy 模板](../../deploy/relay/Caddyfile.ip-trial.example)，不能误认为新模式需要开放 9444。
-
-历史配置 `/etc/codex-relay-trial.env` 使用 `RELAY_PORTAL_ORIGIN`、`RELAY_WORKBENCH_ORIGIN`、`RELAY_GATEWAY_ID`；Caddy 使用 `RELAY_TRIAL_IP`。账号流程仍升级为管理员创建和首次改密，不恢复邀请 CLI。升级已有部署前核对实际服务、端口、数据目录及停止方式，新部署不照搬旧端口规划。
+按 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)，旧域名/双端口参数、交换码入口及专用模板已移除，仅支持上面的单 origin 模板。三端同时升级，旧工作台页从门户重新打开；不能暂时启用明文回退。账号、登记、电脑凭据、schema 3 及历史保留，不需要删库或重新初始化管理员。旧电脑状态字段保持可读，但不提供旧双 origin 的自动部署迁移；原工作台 origin 改变后，电脑的固定 origin 校验会拒绝直接上线，需在本机按新入口显式重新授权，不直接改写状态文件。升级前备份并核对实际服务、入口和数据目录，不恢复旧库复活已撤销的权限。
 
 ## 账号与电脑登录
 

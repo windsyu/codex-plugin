@@ -24,7 +24,7 @@
 - **受限流转发**：提供经过身份校验的 HTTP、SSE 和终端 WebSocket 转发，不是通用网络代理。
 - **独立运行**：程序为 `codex-relayd`，不运行 Codex CLI、模型代理或本机历史服务，不保存工作台历史正文。
 
-Relay 是可信中继，并非端到端加密服务；运营者可接触经过中继的内容。远程访问需要电脑在线且两端版本兼容。
+Relay 提供可信中央前端；浏览器与电脑按 CLI Run 建立加密通道，后端只转发业务密文。运营者仍属可信方，恶意修改前端或授权不在防护范围内。远程访问需要电脑在线且三端版本兼容，见 [ADR 0066](docs/decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 [中继部署与运维](docs/guides/public-relay-deployment.md) · [架构](docs/architecture/relay.md) · [交互与 API](docs/interactions/relay.md)
 

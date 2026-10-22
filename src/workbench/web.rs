@@ -707,11 +707,15 @@ pub(crate) mod application;
 #[cfg(unix)]
 pub(crate) struct RunSurface {
     state: Arc<WebState>,
+    life: super::permission::Permission,
     stop: watch::Sender<bool>,
     _management: Option<super::recording::management::Service>,
 }
 #[cfg(unix)]
 impl RunSurface {
+    pub(crate) fn life(&self) -> super::permission::Permission {
+        self.life.clone()
+    }
     pub(crate) fn disable_devices(&self) {
         self.state.access.close();
     }
@@ -758,6 +762,7 @@ impl RunSurface {
         });
         Ok(Self {
             state,
+            life: super::permission::Permission::new(),
             stop,
             _management: management,
         })
@@ -769,6 +774,7 @@ impl Drop for RunSurface {
         // Router clones and in-flight SSE/WS/device requests retain WebState.
         // Retiring this Run must end them even while Application stays alive.
         self.state.access.close();
+        self.life.revoke();
         self.stop.send_replace(true);
     }
 }

@@ -110,7 +110,7 @@ export function RelayPanel({ instanceId, open, onClose }: { instanceId: string; 
   return <section className="wb-relay-panel" aria-label="公网接入设置">
     <div className="wb-relay-heading"><strong>公网接入</strong><button type="button" onClick={onClose} aria-label="关闭公网接入设置">×</button></div>
     <div className="wb-relay-body">
-      <p>在电脑保持运行时，用自己的账号从手机访问完整工作台。公网服务能够读取经它传输的内容。</p>
+      <p>在电脑保持运行时，用自己的账号从手机访问完整工作台。业务内容在浏览器与电脑间加密传输；前端及授权逻辑仍须可信。</p>
       <p role="status">状态：{relay ? stateText(relay) : '正在读取…'}</p>
       {relay?.error && <p className="wb-notice" role="alert">{errorText(relay.error)}</p>}
       {relay?.username && <p>登录账号：{relay.username}</p>}

@@ -42,7 +42,7 @@ macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后�
 
 默认只监听 loopback。显式开启某个 Run 的“本地局域网接入”后增加设备监听；LAN IP 与 Tailscale MagicDNS 是同一服务的多个 URL，同 Run 共用固定配对码，应用重启后更换。码、许可和撤销按 Run 隔离，共享设置与全局历史仅完整 owner 可用。LAN HTTP 不加密，Tailscale 策略和设备可达性由用户环境决定。
 
-公网中转使用独立账号流程，可信服务器可读取并操作传输中的工作台内容，不是端到端加密的盲转发。当前工作台 UI/API 为 2、传输为 2，中转 schema 为 3；旧 API 1 页面需从门户重新打开，账号和电脑登记沿用。版本不匹配时配套升级，不删除用户数据或手改版本规避检查，见[中转部署运维](public-relay-deployment.md)。
+公网中转使用独立账号流程，浏览器与电脑按 CLI Run 加密，Application 独立，后端只转发业务密文；中央前端及授权方仍可信，不防恶意运营者修改脚本或授权。当前 UI/API 和传输为 3、中转 schema 仍为 3，三端须配套升级并从门户重新打开，账号、登记和历史保留；无明文回退，仅支持单 origin，见[中转部署运维](public-relay-deployment.md)与 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。真实手机、TLS、延迟、峰值内存和规模负载仍须独立实测，不由单元测试或桌面视口推导通过。
 
 真实公网目录浏览与本机已有历史正文阅读已完成；截至上述范围记录，真实远端已有历史正文尚未完成专门的浏览器验收。完整公网模型消息与恢复仍需独立 Chrome 验证：明确启动 CLI、发送一次低风险消息、确认输入一次和流式回复，并在刷新、新标签接管、短断网及中转重启后核对同一 Run/CLI 和零输入重放。三电脑完整公网业务、真实手机/移动网络与证书续签仍待实际验收。窄屏 Chrome 和合成 provider 结果不代替这些场景。
 

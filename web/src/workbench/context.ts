@@ -1,4 +1,5 @@
-export const UI_API_VERSION = 2;
+import { SecureTransport } from './secureTransport';
+export const UI_API_VERSION = 3;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const AUTH_INVALID = 'workbench-auth-invalid';
 const expired = '登录或工作台授权已失效，请返回门户重新登录并打开工作台。';
@@ -9,6 +10,7 @@ export function createContext(url: URL, storage: Storage) {
   const basePath = gateway ? `/g/${gateway}` : '';
   const key = `workbench-auth:${gateway}`;
   let grant = '', session = '', valid = true;
+  const invalidators = new Set<() => void>();
   if (gateway) {
     const fragment = new URLSearchParams(url.hash.slice(1));
     let tuple: URLSearchParams;
@@ -27,11 +29,21 @@ export function createContext(url: URL, storage: Storage) {
     return result;
   };
   return {
-    gateway, basePath, assert,
+    gateway, basePath, grant, session, assert,
     get valid() { return valid; },
-    invalidate() { valid = false; try { if (new URLSearchParams(storage.getItem(key) || '').get('grant') === grant) storage.removeItem(key); } catch { /* No recovery is attempted. */ } },
+    invalidate() { valid = false; for (const invalidate of invalidators) invalidate(); try { if (new URLSearchParams(storage.getItem(key) || '').get('grant') === grant) storage.removeItem(key); } catch { /* No recovery is attempted. */ } },
+    onInvalidate(callback: () => void) { invalidators.add(callback); },
     path,
-    navigation(value: string) { assert(); return path(value) + (gateway ? `#${new URLSearchParams({ grant, session, api: String(UI_API_VERSION) })}` : ''); },
+    navigation(value: string) {
+      assert();
+      if (!gateway) return path(value);
+      const target = new URL(path(value), url.origin);
+      const fragment = new URLSearchParams(target.hash.slice(1));
+      for (const [key, value] of target.searchParams) if (key !== 'run') fragment.set(key, value);
+      for (const key of [...target.searchParams.keys()]) if (key !== 'run') target.searchParams.delete(key);
+      fragment.set('grant', grant); fragment.set('session', session); fragment.set('api', String(UI_API_VERSION));
+      return target.pathname + target.search + `#${fragment}`;
+    },
     stream(value: string) { assert(); const target = new URL(path(value), url.origin); if (gateway) { target.searchParams.set('relayGrant', grant); target.searchParams.set('relayApi', String(UI_API_VERSION)); } return target.pathname + target.search; },
     headers(initial?: HeadersInit) { assert(); const headers = new Headers(initial); if (gateway) { headers.set('X-Workbench-Grant', grant); headers.set('X-Workbench-Api-Version', String(UI_API_VERSION)); } return headers; },
     storageKey(value: string) { return gateway ? `relay:${session}:${gateway}:${value}` : value; }
@@ -47,12 +59,28 @@ export function workbenchFetch(path: string, init?: RequestInit): Promise<Respon
   if (!context.gateway) return fetch(context.path(path), init);
   return relayFetch(context, path, init);
 }
-async function relayFetch(context: ReturnType<typeof createContext>, path: string, init?: RequestInit) {
-  context.assert();
-  const response = await fetch(context.path(path), { ...init, headers: context.headers(init?.headers) });
-  if (context.gateway && (response.status === 401 || response.status === 403)) {
-    context.invalidate(); window.dispatchEvent(new Event(AUTH_INVALID)); throw new Error(expired);
+const transports = new WeakMap<ReturnType<typeof createContext>, SecureTransport>();
+function transport(context = workbenchContext()) {
+  let result = transports.get(context);
+  if (!result) {
+    result = new SecureTransport(context, () => window.dispatchEvent(new Event(AUTH_INVALID)));
+    const current = result;
+    context.onInvalidate(() => current.invalidate());
+    transports.set(context, result);
   }
-  context.assert();
-  return response;
+  return result;
+}
+async function relayFetch(context: ReturnType<typeof createContext>, path: string, init?: RequestInit) { return transport(context).fetch(path, init); }
+export function probeWorkbenchAccess() { return transport().probe(); }
+export function workbenchSocket(path: string) {
+  if (workbenchContext().gateway) return transport().terminal(path);
+  return new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${streamURL(path)}`);
+}
+export function workbenchEvents(path: string): WorkbenchEvents {
+  if (!workbenchContext().gateway) return new EventSource(streamURL(path));
+  return transport().events(path);
+}
+export interface WorkbenchEvents {
+  onopen: ((event: Event) => void) | null; onerror: ((event: Event) => void) | null;
+  addEventListener(type: string, callback: EventListener): void; close(): void;
 }

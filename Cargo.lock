@@ -373,6 +373,7 @@ dependencies = [
  "portable-pty",
  "rand",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
