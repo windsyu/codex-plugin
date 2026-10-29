@@ -4,6 +4,7 @@ use axum::body::Bytes;
 use serde_json::json;
 
 mod tools;
+mod websocket_identity;
 
 fn source() -> Source {
     Source {

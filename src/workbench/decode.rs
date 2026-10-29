@@ -197,7 +197,9 @@ impl Decoder {
     }
 
     pub fn push(&mut self, observation: &Observation, mut emit: impl FnMut(Decoded)) {
-        if observation.source.direction != Direction::Response {
+        if observation.source.direction != Direction::Response
+            && observation.source.transport == Transport::Http
+        {
             let response_bytes = self
                 .streams
                 .values()
@@ -247,6 +249,36 @@ impl Decoder {
                     ),
                 },
             );
+        }
+        if observation.source.direction != Direction::Response {
+            self.streams.get_mut(&id).unwrap().last_tick = self.tick;
+            let response_bytes = self
+                .streams
+                .values()
+                .map(|stream| stream.framer.buffered_bytes() + stream.model.pending_bytes())
+                .sum::<usize>();
+            let streams = &mut self.streams;
+            self.requests.push(
+                observation,
+                self.limits.buffered_bytes.saturating_sub(response_bytes),
+                &mut |event| {
+                    if let Some(stream) = streams.get_mut(&event.request_id) {
+                        stream.model.observe_request(&event.change);
+                    }
+                    emit(event);
+                },
+            );
+            if self.buffered_bytes() > self.limits.buffered_bytes {
+                self.streams.remove(&id);
+                emit_origin(
+                    observation,
+                    Change::Diagnostic {
+                        code: DiagnosticCode::Capacity,
+                    },
+                    &mut emit,
+                );
+            }
+            return;
         }
         let stream = self.streams.get_mut(&id).unwrap();
         stream.last_tick = self.tick;
@@ -380,6 +412,10 @@ struct ModelDecoder {
     transport: Transport,
     response_id: Option<String>,
     receiving: HashSet<Option<String>>,
+    // Only a continuous, single-response default lane can supply omitted IDs.
+    ws_implicit_disabled: bool,
+    ws_pending_request: Option<RequestInfo>,
+    ws_last_request_index: u64,
     text: HashMap<TextKey, TextRedactor>,
     finalized: HashSet<TextKey>,
     identity_conflict: bool,
@@ -398,14 +434,57 @@ impl ModelDecoder {
             transport,
             response_id: None,
             receiving: HashSet::new(),
+            ws_implicit_disabled: false,
+            ws_pending_request: None,
+            ws_last_request_index: 0,
             text: HashMap::new(),
             finalized: HashSet::new(),
             identity_conflict: false,
             suppress_deltas: false,
         }
     }
+    fn disable_ws_implicit(&mut self) {
+        self.ws_implicit_disabled = true;
+        self.ws_pending_request = None;
+    }
+    fn observe_request(&mut self, change: &Change) {
+        if self.transport != Transport::WebSocket {
+            return;
+        }
+        match change {
+            Change::Request { info } if !self.ws_implicit_disabled => {
+                if info.client_request_index != self.ws_last_request_index.checked_add(1)
+                    || self.ws_pending_request.is_some()
+                    || !self.receiving.is_empty()
+                {
+                    self.disable_ws_implicit();
+                } else {
+                    self.ws_last_request_index += 1;
+                    self.ws_pending_request = Some(info.clone());
+                }
+            }
+            Change::Diagnostic { .. } => self.disable_ws_implicit(),
+            _ => {}
+        }
+    }
+    fn implicit_response(&self) -> Option<String> {
+        if self.transport == Transport::Http {
+            return self.response_id.clone();
+        }
+        if !self.ws_implicit_disabled && self.receiving.len() == 1 {
+            return self.receiving.iter().next().cloned().flatten();
+        }
+        None
+    }
     fn pending_bytes(&self) -> usize {
-        self.text
+        self.ws_pending_request.as_ref().map_or(0, |info| {
+            info.requested_model
+                .as_ref()
+                .map_or(0, |model| model.as_str().len())
+                + info.codex_turn_id.as_ref().map_or(0, String::len)
+                + 256
+        }) + self
+            .text
             .values()
             .map(TextRedactor::pending_bytes)
             .sum::<usize>()
@@ -437,6 +516,7 @@ impl ModelDecoder {
     ) -> Result<TextKey, DiagnosticCode> {
         let hinted = self.identifier(response_hint);
         if !response_hint.is_null() && hinted.is_none() {
+            self.disable_ws_implicit();
             return Err(DiagnosticCode::MissingIdentity);
         }
         if self.transport == Transport::Http
@@ -447,11 +527,17 @@ impl ModelDecoder {
         {
             return Err(DiagnosticCode::ConflictingIdentity);
         }
-        let response_id = hinted.or_else(|| {
-            (self.transport == Transport::Http)
-                .then(|| self.response_id.clone())
-                .flatten()
-        });
+        // Explicit identity always wins. A different explicit response on an
+        // otherwise single default lane disproves future implicit association.
+        if self.transport == Transport::WebSocket
+            && hinted
+                .as_ref()
+                .zip(self.implicit_response().as_ref())
+                .is_some_and(|(hint, active)| hint != active)
+        {
+            self.disable_ws_implicit();
+        }
+        let response_id = hinted.or_else(|| self.implicit_response());
         if self.transport == Transport::WebSocket && response_id.is_none() {
             return Err(DiagnosticCode::MissingIdentity);
         }
@@ -515,6 +601,7 @@ impl ModelDecoder {
         }
     }
     fn gap(&mut self, emit: &mut impl FnMut(Change)) {
+        self.disable_ws_implicit();
         self.flush(emit);
         // A missing event may contain a credential prefix. Resume only from a
         // full authoritative replacement, never from an unclassified suffix.
@@ -602,12 +689,14 @@ impl ModelDecoder {
             }
         };
         if message.kind != MessageKind::Text {
+            self.disable_ws_implicit();
             emit(Change::Diagnostic {
                 code: DiagnosticCode::UnsupportedContent,
             });
             return;
         }
         if message.bytes == b"[DONE]" {
+            self.disable_ws_implicit();
             return;
         }
         let Ok(value) = serde_json::from_slice::<Value>(&message.bytes) else {
@@ -617,6 +706,9 @@ impl ModelDecoder {
             });
             return;
         };
+        if self.transport == Transport::WebSocket && value.get("stream_id").is_some() {
+            self.disable_ws_implicit();
+        }
         let kind = value["type"].as_str().unwrap_or("");
         match kind {
             "response.created" => {
@@ -630,6 +722,16 @@ impl ModelDecoder {
                         code: DiagnosticCode::ConflictingIdentity,
                     });
                     return;
+                }
+                if self.transport == Transport::WebSocket {
+                    if response_id.is_none() || !self.receiving.is_empty() {
+                        self.disable_ws_implicit();
+                    } else if !self.ws_implicit_disabled
+                        && let Some(mut info) = self.ws_pending_request.take()
+                    {
+                        info.response_id = response_id.clone();
+                        emit(Change::Request { info });
+                    }
                 }
                 self.response_id = response_id.clone();
                 if self.receiving.len() >= self.limit && !self.receiving.contains(&response_id) {
@@ -790,6 +892,11 @@ impl ModelDecoder {
                         code: DiagnosticCode::MissingIdentity,
                     });
                 }
+                if self.transport == Transport::WebSocket
+                    && (response_id.is_none() || !self.receiving.contains(&response_id))
+                {
+                    self.disable_ws_implicit();
+                }
                 if self.transport == Transport::Http {
                     self.flush(emit);
                 } else if let Some(response_id) = &response_id {
@@ -811,6 +918,13 @@ impl ModelDecoder {
                     usage,
                 });
             }
+            // CLI 0.165 consumes these as transport/auxiliary metadata, never
+            // as response text, token usage or a lifecycle transition. Lane/gap
+            // validation above still runs; payload fields cannot affect identity.
+            "codex.rate_limits"
+            | "codex.response.metadata"
+            | "response.metadata"
+            | "responsesapi.websocket_timing" => {}
             "response.in_progress"
             | "response.content_part.added"
             | "response.content_part.done" => {}
@@ -822,9 +936,12 @@ impl ModelDecoder {
                     code: DiagnosticCode::OmittedByPolicy,
                 })
             }
-            _ => emit(Change::Diagnostic {
-                code: DiagnosticCode::UnknownEvent,
-            }),
+            _ => {
+                self.disable_ws_implicit();
+                emit(Change::Diagnostic {
+                    code: DiagnosticCode::UnknownEvent,
+                });
+            }
         }
     }
 }

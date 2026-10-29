@@ -43,7 +43,40 @@ impl Fixture {
         std::fs::create_dir(&self.home).unwrap();
         std::fs::write(self.home.join("config.toml"), "model=\"synthetic-model\"\nmodel_provider=\"custom\"\n[model_providers.custom]\nname=\"synthetic\"\nbase_url=\"http://127.0.0.1:1/v1\"\nwire_api=\"responses\"\nrequires_openai_auth=false\nexperimental_bearer_token=\"synthetic-token\"\n").unwrap();
         let binary = self.dir.path().join("fake-codex");
-        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' invocation >> \"$CODEX_HOME/invocations\"\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.155.1\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > \"$CODEX_HOME/args\"\nprintf 'synthetic terminal ready\\n'\nexec /bin/cat\n").unwrap();
+        // Metadata discovery is a short-lived helper, not an ordinary TUI
+        // launch. Keep the existing version/TUI invocation oracle separate.
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+case " $* " in
+  *" app-server "*)
+    printf '%s\n' invocation >> "$CODEX_HOME/metadata-invocations"
+    while IFS= read -r line; do
+      if [ -f "$CODEX_HOME/metadata-unavailable" ]; then
+        case "$line" in
+          *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+          *'"id":2,'*) printf '%s\n' '{"id":2,"error":{"code":-32603,"message":"synthetic-private-value"}}' ;;
+        esac
+      else
+        case "$line" in
+          *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+          *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"config":{"model_provider":"custom","model_providers":{"custom":{"base_url":"http://127.0.0.1:1/v1","experimental_bearer_token":"synthetic-token"}}},"layers":[]}}' ;;
+          *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"requirements":null}}' ;;
+          *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":null}}' ;;
+          *'"id":5,'*) printf '%s\n' '{"id":5,"result":{"config":{"model_provider":"custom","model_providers":{"custom":{"base_url":"http://127.0.0.1:1/v1","experimental_bearer_token":"synthetic-token"}}},"layers":[]}}' ;;
+        esac
+      fi
+    done
+    exit 0 ;;
+esac
+printf '%s\n' invocation >> "$CODEX_HOME/invocations"
+if [ "$1" = --version ]; then printf 'codex-cli 0.155.1\n'; exit 0; fi
+printf '%s\n' "$@" > "$CODEX_HOME/args"
+printf 'synthetic terminal ready\n'
+exec /bin/cat
+"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         binary
     }

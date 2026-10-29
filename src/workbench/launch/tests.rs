@@ -230,10 +230,24 @@ experimental_bearer_token="synthetic-lifecycle-secret"
         let cli = directory.path().join("synthetic-cli");
         script(
             &cli,
-            r#"if [ "$1" = "--version" ]; then
+            r#"export HOME="$CODEX_HOME" USERPROFILE="$CODEX_HOME"
+if [ "$1" = "--version" ]; then
   printf 'codex-cli 0.154.0\n'
   exit 0
 fi
+case " $* " in
+  *" app-server "*)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2,'*) printf '%s\n' '{"id":2,"result":{"config":{"model_provider":"custom","model_providers":{"custom":{"base_url":"http://127.0.0.1:1/v1","experimental_bearer_token":"synthetic-lifecycle-secret"}}},"layers":[]}}' ;;
+        *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"requirements":null}}' ;;
+        *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":null}}' ;;
+        *'"id":5,'*) printf '%s\n' '{"id":5,"result":{"config":{"model_provider":"custom","model_providers":{"custom":{"base_url":"http://127.0.0.1:1/v1","experimental_bearer_token":"synthetic-lifecycle-secret"}}},"layers":[]}}' ;;
+      esac
+    done
+    exit 0 ;;
+esac
 printf '%s\n' "$@" > "$CODEX_HOME/fixture.args"
 printf '%s\n' "${NO_COLOR+set}" "$TERM" "$COLORTERM" > "$CODEX_HOME/fixture.display"
 pwd > "$CODEX_HOME/fixture.cwd"

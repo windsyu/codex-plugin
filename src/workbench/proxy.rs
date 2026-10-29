@@ -32,6 +32,21 @@ const COPY_BUFFER: usize = 16 * 1024;
 #[derive(Clone)]
 pub struct Upstream {
     base: Url,
+    workspace: Option<WorkspaceBinding>,
+}
+
+pub(crate) trait WorkspaceFence: Send + Sync {
+    fn unchanged(&self) -> bool;
+}
+pub(crate) trait WorkspaceGuard: Send + Sync {
+    fn check(&self) -> futures_util::future::BoxFuture<'_, Result<Arc<dyn WorkspaceFence>>>;
+}
+
+#[derive(Clone)]
+struct WorkspaceBinding {
+    account_id: String,
+    routing_override: Option<String>,
+    guard: Option<Arc<dyn WorkspaceGuard>>,
 }
 
 impl Upstream {
@@ -53,7 +68,63 @@ impl Upstream {
                 "upstream requires HTTPS (or loopback HTTP), without credentials, query or fragment"
             );
         }
-        Ok(Self { base })
+        Ok(Self {
+            base,
+            workspace: None,
+        })
+    }
+
+    /// A per-Run snapshot returned by the installed CLI's account/read. Never
+    /// infer this binding from a token or forward another account to this origin.
+    pub(crate) fn with_workspace_route(
+        mut self,
+        account_id: String,
+        routing_override: Option<String>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !account_id.is_empty()
+                && account_id.len() <= 1024
+                && account_id.parse::<axum::http::HeaderValue>().is_ok(),
+            "invalid workspace identity"
+        );
+        anyhow::ensure!(
+            routing_override
+                .as_deref()
+                .is_none_or(|value| matches!(value, "us" | "us_cr")),
+            "invalid workspace routing policy"
+        );
+        self.workspace = Some(WorkspaceBinding {
+            account_id,
+            routing_override,
+            guard: None,
+        });
+        Ok(self)
+    }
+
+    pub(crate) fn with_workspace_guard(mut self, guard: Arc<dyn WorkspaceGuard>) -> Self {
+        if let Some(binding) = &mut self.workspace {
+            binding.guard = Some(guard);
+        }
+        self
+    }
+
+    fn apply_workspace_route(&self, headers: &mut HeaderMap) -> bool {
+        let Some(binding) = &self.workspace else {
+            return true;
+        };
+        let mut accounts = headers.get_all("chatgpt-account-id").iter();
+        if accounts.next().and_then(|v| v.to_str().ok()) != Some(binding.account_id.as_str())
+            || accounts.next().is_some()
+        {
+            return false;
+        }
+        // This is exactly the native workspace route operation: remove stale
+        // override, then apply the policy returned by account/read.
+        headers.remove("x-openai-account-routing-override");
+        if let Some(value) = &binding.routing_override {
+            headers.insert("x-openai-account-routing-override", value.parse().unwrap());
+        }
+        true
     }
 
     pub fn base_path(&self) -> &str {
@@ -219,6 +290,22 @@ fn strip_hop_headers(headers: &mut HeaderMap, upgrade: bool) {
     }
 }
 
+fn responses_sse_request(method: &Method, path: &str, base: &str, headers: &HeaderMap) -> bool {
+    method == Method::POST
+        && path == format!("{base}/responses")
+        && headers.get_all(header::ACCEPT).iter().count() == 1
+        && headers
+            .get(header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+        && headers.get_all(header::CONTENT_TYPE).iter().count() == 1
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+}
+
 fn source(
     request_id: Uuid,
     direction: Direction,
@@ -226,12 +313,18 @@ fn source(
     headers: &HeaderMap,
 ) -> Source {
     let hint = |name: HeaderName| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| value.len() <= 128)
-            .unwrap_or("")
-            .to_owned()
+        if headers.get_all(&name).iter().count() > 1 {
+            return "unsupported".into();
+        }
+        match headers.get(name) {
+            None => String::new(),
+            Some(value) => value
+                .to_str()
+                .ok()
+                .filter(|value| value.len() <= 128)
+                .unwrap_or("unsupported")
+                .to_owned(),
+        }
     };
     Source {
         request_id,
@@ -272,6 +365,12 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
     let Some(destination) = state.upstream.destination(path, request.uri().query()) else {
         return diagnostic(StatusCode::NOT_FOUND, "invalid_route", request_id);
     };
+    let expects_responses_sse = responses_sse_request(
+        request.method(),
+        path,
+        state.upstream.base_path(),
+        request.headers(),
+    );
     let Ok(permit) = state.slots.clone().try_acquire_owned() else {
         return diagnostic(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -279,6 +378,32 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
             request_id,
         );
     };
+    let fence = if let Some(guard) = state
+        .upstream
+        .workspace
+        .as_ref()
+        .and_then(|binding| binding.guard.as_ref())
+    {
+        match guard.check().await {
+            Ok(fence) => Some(fence),
+            Err(_) => {
+                return diagnostic(
+                    StatusCode::CONFLICT,
+                    "native_route_changed_start_new_run",
+                    request_id,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if !state.upstream.apply_workspace_route(request.headers_mut()) {
+        return diagnostic(
+            StatusCode::CONFLICT,
+            "native_account_changed_start_new_run",
+            request_id,
+        );
+    }
     let websocket = request
         .headers()
         .get(header::UPGRADE)
@@ -340,18 +465,33 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
         return diagnostic(StatusCode::BAD_GATEWAY, "upstream_failed", request_id);
     };
     let status = upstream.status();
+    if state.upstream.workspace.is_some() && status.is_redirection() {
+        return diagnostic(
+            StatusCode::BAD_GATEWAY,
+            "native_workspace_redirect_rejected",
+            request_id,
+        );
+    }
     let mut headers = upstream.headers().clone();
     let response_transport = if status == StatusCode::SWITCHING_PROTOCOLS {
         transport
     } else {
         Transport::Http
     };
-    let response_source = source(
+    let mut response_source = source(
         request_id,
         Direction::Response,
         response_transport,
         &headers,
     );
+    // CLI 0.165 accepts SSE without a Content-Type on its Responses endpoint.
+    // This hint belongs only to the observation copy; forward headers unchanged.
+    if expects_responses_sse
+        && status == StatusCode::OK
+        && !headers.contains_key(header::CONTENT_TYPE)
+    {
+        response_source.content_type = "text/event-stream".into();
+    }
     let mut response_capture = state.capture.stream(response_source);
     if status == StatusCode::SWITCHING_PROTOCOLS {
         let Some(downstream_upgrade) = downstream_upgrade else {
@@ -376,7 +516,12 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
                     tokio::io::split(TokioIo::new(downstream));
                 let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
                 tokio::try_join!(
-                    tunnel(&mut client_read, &mut upstream_write, &mut request_capture),
+                    tunnel_fenced(
+                        &mut client_read,
+                        &mut upstream_write,
+                        &mut request_capture,
+                        fence.as_deref()
+                    ),
                     tunnel(&mut upstream_read, &mut client_write, &mut response_capture),
                 )?;
                 Ok::<(), anyhow::Error>(())
@@ -384,6 +529,14 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
             tokio::select! {
                 _ = connection => {},
                 _ = shutdown.changed() => {},
+                _ = async {
+                    if let Some(fence) = &fence {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            if !fence.unchanged() { break; }
+                        }
+                    } else { std::future::pending::<()>().await; }
+                } => {},
             }
         });
         let mut response = Response::new(Body::empty());
@@ -436,6 +589,19 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    tunnel_fenced(reader, writer, capture, None).await
+}
+
+async fn tunnel_fenced<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    capture: &mut CaptureStream,
+    fence: Option<&dyn WorkspaceFence>,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut buffer = [0u8; COPY_BUFFER];
     loop {
         let size = reader.read(&mut buffer).await?;
@@ -444,9 +610,15 @@ where
             writer.shutdown().await?;
             return Ok(());
         }
+        if fence.is_some_and(|fence| !fence.unchanged()) {
+            return Err(std::io::Error::other("native route generation changed"));
+        }
         let received_at = Instant::now();
-        writer.write_all(&buffer[..size]).await?;
+        // Enqueue the bounded observation before the peer can react. Otherwise
+        // a fast peer can make response.created precede its observed create.
+        // offer never waits for the observer; a failed write remains interrupted.
         capture.offer(Bytes::copy_from_slice(&buffer[..size]), received_at);
+        writer.write_all(&buffer[..size]).await?;
     }
 }
 

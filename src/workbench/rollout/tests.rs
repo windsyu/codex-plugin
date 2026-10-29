@@ -54,6 +54,7 @@ fn target(hub: &LiveHub, thread: Uuid, turn: &str) {
         change: Change::Request {
             info: RequestInfo {
                 client_request_index: None,
+                response_id: None,
                 requested_model: None,
                 codex_thread_id: Some(thread),
                 codex_turn_id: Some(turn.into()),

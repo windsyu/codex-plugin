@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-14
 
+配置门禁与统一捕获职责现由 [ADR 0068](0068-shared-native-model-capture.md)修订；本文保留原决定与当时的验证背景。
+
 ## Context
 
 公网门户登录只证明浏览器可访问所属电脑和工作台，不提供模型服务凭证。现有 `unmanaged-custom` 适配器仅接受静态 bearer，并将命令认证及原生登录存储一并拒绝，阻止使用原生 provider `auth.command` 的配置启动。命令凭证的生成、缓存和失效重取属于安装版官方 Codex CLI，不应在工作台重复实现。

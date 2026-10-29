@@ -97,8 +97,16 @@ for (const version of ['0.3.0', '1.0.0', '12.34.56']) test(`packaging ${version}
   assert.match(notes, /no plaintext fallback/);
   assert.match(notes, /Upgrade all three components together/);
   assert.match(notes, /CLI 0\.162\.1 command authentication was tested with a synthetic provider; real-provider command authentication remains unverified/);
-  assert.match(notes, /Default OpenAI\/ChatGPT launches use native direct mode/);
-  assert.match(notes, /live model capture and call inspection are unavailable/);
+  assert.match(notes, /Native OpenAI\/ChatGPT and supported custom Responses providers share model capture and call inspection/);
+  assert.match(notes, /official CLI metadata helper reads the effective route through config\/read, requirements and account metadata/);
+  assert.match(notes, /ordinary CLI owns authentication, provider selection and the conversation/);
+  assert.match(notes, /does not rewrite native configuration or disable native WebSocket transport/);
+  assert.match(notes, /bounded single-frame HTTP Zstd requests and SSE replies without Content-Type/);
+  assert.match(notes, /Uncompressed WebSocket capture has synthetic upstream coverage/);
+  assert.match(notes, /permessage-deflate \(PMD\), remain unverified and produce observation gaps without blocking native forwarding/);
+  assert.match(notes, /Current shared-capture validation uses CLI 0\.165\.0/);
+  assert.match(notes, /does not establish support for every provider or managed policy/);
+  assert.doesNotMatch(notes, /native direct mode|live model capture and call inspection are unavailable/);
   assert.doesNotMatch(notes, /UI\/API 2|transport 2|relay is trusted and can read forwarded content/);
   const index = JSON.parse(fs.readFileSync(path.join(release.bundle, 'licenses/INDEX.json')));
   const runtimes = index.filter(entry => entry.ecosystem === 'toolchain-runtime');

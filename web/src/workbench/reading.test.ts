@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyReadingEvent, conversationItems, conversationEntries, readSnapshot, keyOf, type ReadingView, type ReadingEvent, type RequestView } from './reading';
+import { applyReadingEvent, conversationItems, conversationEntries, readSnapshot, requestFor, keyOf, type ReadingView, type ReadingEvent, type RequestView } from './reading';
 import { modelItems, toolItems, userMessages, parseViewItem, type ModelItem, type UserItem, type ToolItem } from './viewItems';
 import type { ToolCall } from './toolTypes';
 
@@ -20,6 +20,25 @@ const patch = (viewSeq: number, baseRevision: number, append: string): ReadingEv
 const unsafeEvent = (event: unknown) => event as ReadingEvent;
 
 describe('unified reading stream', () => {
+  it('binds two WebSocket turns independently while keeping prewarm and unmatched responses outside conversation', () => {
+    const wsModel = (id: string, text: string): ModelItem => ({ ...model(text, `model:${id}`, 'socket'), evidence: [{ origin: 'model', key: { ...key, requestId: 'socket', responseId: id }, captureSeq: 1 }] });
+    const first: RequestView = { ...request('socket', 'turn-1'), clientRequestIndex: 2, responseId: 'first' };
+    const second: RequestView = { ...request('socket', 'turn-2'), clientRequestIndex: 3, responseId: null };
+    const toolKey = { ...key, requestId: 'socket', responseId: 'first', wireItemId: 'tool' };
+    const toolItem: ToolItem = { ...tool(), key: toolKey, evidence: [{ origin: 'model', key: toolKey, captureSeq: 1 }] };
+    let state: ReadingView = { ...empty(), requests: [{ ...first, clientRequestIndex: 1, responseId: 'prewarm', purpose: 'auxiliary', codexTurnId: null }, first, second], items: [user('turn-1', 'u1'), user('turn-2', 'u2'), wsModel('prewarm', '预热'), wsModel('first', '第一轮'), toolItem, wsModel('second', '第二轮'), wsModel('unmatched', '未匹配')] };
+    expect(conversationEntries(state).map(entry => entry.kind)).toEqual(['user', 'model', 'tool']);
+    state = applyReadingEvent(state, { kind: 'request.metadata', viewSeq: 1, request: { ...second, responseId: 'second' } });
+    expect(conversationEntries(state).map(entry => entry.kind)).toEqual(['user', 'model', 'tool', 'user', 'model']);
+    expect(conversationItems(state).map(item => item.text)).toEqual(['第一轮', '第二轮']);
+    expect(requestFor(state, { key: toolKey })?.codexTurnId).toBe('turn-1');
+    expect(requestFor(state, { key: { ...toolKey, responseId: 'unmatched' } })).toBeUndefined();
+    const restored = readSnapshot({ ...state, runEpoch: 'ws', schemaVersion: 2 }, 'ws');
+    expect(conversationEntries(restored)).toEqual(conversationEntries(state));
+    state.requests.push({ ...second, clientRequestIndex: 4, responseId: 'first' });
+    expect(requestFor(state, { key: toolKey })).toBeUndefined();
+    expect(conversationItems(state).map(item => item.text)).toEqual(['第二轮']);
+  });
   it('keeps native direct capture unavailable across snapshots and later partial events', () => {
     const unavailable = applyReadingEvent(empty(), { kind: 'capture.gap', viewSeq: 1, diagnostic: { requestId: 'run', captureSeq: 0, code: 'model_capture_unavailable' } });
     expect(unavailable.capture).toBe('unavailable');

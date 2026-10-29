@@ -123,35 +123,18 @@ async fn new_directory_with_native_api_key_auth_enters_scoped_workbench() {
 
 #[tokio::test]
 async fn native_launch_failure_codes_reach_operation_and_homepage_without_payloads() {
-    for code in [
-        "native_cli_not_found",
-        "native_capture_config_unsupported",
-        "native_auth_unverified",
-        "native_project_config_invalid",
-    ] {
+    for code in ["native_cli_not_found", "native_cli_version_failed"] {
         let fixture = Fixture::new();
         let cli = fixture.cli();
-        match code {
-            "native_cli_not_found" => std::fs::remove_file(&cli).unwrap(),
-            "native_capture_config_unsupported" => {
-                let text = std::fs::read_to_string(fixture.home.join("config.toml"))
-                    .unwrap()
-                    .replace("wire_api=\"responses\"", "wire_api=\"synthetic-private-value\"");
-                std::fs::write(fixture.home.join("config.toml"), text).unwrap();
-            }
-            "native_auth_unverified" => std::fs::write(
-                fixture.home.join("auth.json"),
-                r#"{"tokens":{"access_token":"synthetic-private-value"}}"#,
-            )
-            .unwrap(),
-            _ => {
-                std::fs::create_dir(fixture.cwd.join(".codex")).unwrap();
-                std::fs::write(
-                    fixture.cwd.join(".codex/config.toml"),
-                    "cli_auth_credentials_store=\"auto\"\nsecret=\"synthetic-private-value\"",
-                )
-                .unwrap();
-            }
+        if code == "native_cli_not_found" {
+            std::fs::remove_file(&cli).unwrap();
+        } else {
+            let text = std::fs::read_to_string(&cli).unwrap().replace(
+                "then printf 'codex-cli 0.155.1\\n'; exit 0; fi",
+                "then printf 'synthetic-private-value\\n' >&2; exit 9; fi",
+            );
+            assert!(text.contains("exit 9"));
+            std::fs::write(&cli, text).unwrap();
         }
         let app = fixture.app(Overrides {
             codex_bin: Some(cli),
@@ -175,6 +158,98 @@ async fn native_launch_failure_codes_reach_operation_and_homepage_without_payloa
         assert!(!failed.to_string().contains("synthetic-private-value"));
         assert!(!home.to_string().contains("synthetic-private-value"));
         assert_eq!(get(&app, &cookie, "/").await.status(), 200);
+    }
+}
+
+#[tokio::test]
+async fn native_settings_and_metadata_errors_fall_back_without_becoming_view_launch_gates() {
+    // These synthetic metadata failures exercise View's fallback contract;
+    // they do not establish whether a real CLI accepts the native settings.
+    for setting in ["wire", "auth", "project"] {
+        let fixture = Fixture::new();
+        let cli = fixture.cli();
+        let changed = match setting {
+            "wire" => {
+                let file = fixture.home.join("config.toml");
+                let text = std::fs::read_to_string(&file).unwrap().replace(
+                    "wire_api=\"responses\"",
+                    "wire_api=\"synthetic-private-value\"",
+                );
+                std::fs::write(&file, text).unwrap();
+                file
+            }
+            "auth" => {
+                let file = fixture.home.join("auth.json");
+                std::fs::write(
+                    &file,
+                    r#"{"tokens":{"access_token":"synthetic-private-value"}}"#,
+                )
+                .unwrap();
+                file
+            }
+            _ => {
+                std::fs::create_dir(fixture.cwd.join(".codex")).unwrap();
+                let file = fixture.cwd.join(".codex/config.toml");
+                std::fs::write(
+                    &file,
+                    "cli_auth_credentials_store=\"auto\"\nsecret=\"synthetic-private-value\"",
+                )
+                .unwrap();
+                file
+            }
+        };
+        let original = std::fs::read(&changed).unwrap();
+        std::fs::write(fixture.home.join("metadata-unavailable"), b"").unwrap();
+        let app = fixture.app(Overrides {
+            codex_bin: Some(cli),
+            ..Default::default()
+        });
+        let cookie = pair(&app).await;
+        let target = target_for(&app, &cookie, &fixture.cwd).await;
+        let body = start_body(&app, &target);
+        assert_eq!(
+            launch_post(&app, &cookie, "/workbench/v1/runs", body.clone())
+                .await
+                .status(),
+            202
+        );
+        let ready = operation_done(&app, &cookie, &body["operationId"]).await;
+        assert_eq!(ready["state"], "ready", "{ready}");
+        let run = ready["run"]["runId"].as_str().unwrap();
+        let snapshot = json_body(
+            get(
+                &app,
+                &cookie,
+                &format!("/workbench/v1/runs/{run}/live/snapshot"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(snapshot["capture"], "unavailable");
+        let home = json_body(get(&app, &cookie, "/workbench/v1/application").await).await;
+        assert!(home["launchError"].is_null());
+        assert!(!ready.to_string().contains("synthetic-private-value"));
+        assert!(!snapshot.to_string().contains("synthetic-private-value"));
+        assert!(!home.to_string().contains("synthetic-private-value"));
+        assert_eq!(std::fs::read(&changed).unwrap(), original);
+        assert!(
+            fixture.home.join("args").exists(),
+            "ordinary TUI must be started"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.join("invocations"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.join("metadata-invocations"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
     }
 }
 

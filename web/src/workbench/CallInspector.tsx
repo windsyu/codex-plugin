@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';
-import type { ReadingView, ResponseView } from './reading';
-import { nativeDirect } from './reading';
+import type { ReadingView, RequestView, ResponseView } from './reading';
+import { nativeDirect, requestAssociation, requestFor } from './reading';
 import { itemRequestId, modelItems, toolItems } from './viewItems';
 import { ModelMessage } from './ModelMessage';
 import { RequestDetails } from './RequestDetails';
@@ -14,6 +14,18 @@ export const callRequestIds = (reading: ReadingView) => [...new Set([
   ...reading.toolContexts.map(c => c.requestId), ...reading.diagnostics.filter(d => d.code !== 'model_capture_unavailable').map(d => d.requestId)
 ])];
 const purposes = { conversation: '对话', auxiliary: '辅助', unknown: '用途未确认' };
+const effectivePurpose = (request: RequestView) => request.clientRequestIndex !== null && !request.responseId ? 'unknown' : request.purpose;
+function requestPurpose(requests: RequestView[]) {
+  const values = [...new Set(requests.map(effectivePurpose))];
+  return values.length === 1 ? values[0] : 'unknown';
+}
+const purposeLabel = (requests: RequestView[]) => new Set(requests.map(effectivePurpose)).size > 1 ? '多种用途' : purposes[requestPurpose(requests)];
+function socketAssociation(requests: RequestView[]) {
+  const socket = requests.filter(request => request.clientRequestIndex !== null);
+  if (!socket.length) return '';
+  if (socket.every(request => !!request.responseId)) return ' · WebSocket，各次 create 分别归属';
+  return socket.some(request => !!request.responseId) ? ' · WebSocket，部分关联未确认' : ' · WebSocket，关联未确认';
+}
 function tokens(response: ResponseView) {
   const usage = response.usage;
   if (usage?.invalid || response.usageConflict) return '用量待核对';
@@ -34,12 +46,15 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
   useLayoutEffect(() => { close.current?.focus({ preventScroll: true }); }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [epoch, before, requestId]);
   const ids = callRequestIds(reading);
-  const selected = reading.requests.find(r => r.requestId === requestId && r.clientRequestIndex === null);
-  const unassignedModels = selected?.purpose === 'conversation' ? [] : modelItems(reading).filter(i => i.key.requestId === requestId);
-  const unassignedTools = selected?.purpose === 'conversation' ? [] : toolItems(reading).filter(i => i.key.requestId === requestId);
+  const selected = reading.requests.filter(r => r.requestId === requestId);
+  const unassignedModels = modelItems(reading).filter(i => i.key.requestId === requestId && requestFor(reading, i)?.purpose !== 'conversation');
+  const unassignedTools = toolItems(reading).filter(i => i.key.requestId === requestId && requestFor(reading, i)?.purpose !== 'conversation');
+  const hasTurn = (key: { codexThreadId: string; codexTurnId: string }) => selected.some(request => request.purpose === 'conversation'
+    && (request.clientRequestIndex === null || !!request.responseId)
+    && key.codexThreadId === request.codexThreadId && key.codexTurnId === request.codexTurnId);
   const scope = historical ? `历史运行 · ${epoch.slice(0, 8)}${before != null ? ' · 较早窗口' : ''}` : '本次运行';
   const title = requestId === null ? '调用记录' : '调用详情';
-  return <section className="wb-call-inspector" inert={blocked} aria-label={title} data-purpose={selected?.purpose || 'unknown'} data-request-id={requestId ?? undefined} onKeyDown={event => {
+  return <section className="wb-call-inspector" inert={blocked} aria-label={title} data-purpose={requestPurpose(selected)} data-request-id={requestId ?? undefined} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
   }}>
     <div className="wb-panel-heading"><strong>{title}</strong><span className="wb-subtle">{scope}</span><button ref={close} onClick={onClose} aria-label="关闭调用面板">×</button></div>
@@ -49,14 +64,14 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
         {!ids.length && <p className="wb-subtle">尚无可查看的调用记录。</p>}
         <div className="wb-call-list">{ids.map(id => {
           const metadata = reading.requests.filter(r => r.requestId === id);
-          const request = metadata.find(r => r.clientRequestIndex === null);
           const responses = reading.responses.filter(r => r.requestId === id);
           const reported = [...new Set(responses.flatMap(r => r.reportedModels))];
-          const model = reported.length ? reported.join(' / ') : request?.requestedModel || '模型未确认';
-          const purpose = request?.purpose || 'unknown';
+          const requested = [...new Set(metadata.flatMap(request => request.requestedModel ? [request.requestedModel] : []))];
+          const model = reported.length ? reported.join(' / ') : requested.join(' / ') || '模型未确认';
+          const purpose = requestPurpose(metadata);
           return <button className="wb-call-row" data-request-id={id} data-purpose={purpose} key={id} onClick={() => { onSelect(id); close.current?.focus(); }}>
-            <span className="wb-call-primary"><strong>{model}</strong><span className={`wb-call-purpose is-${purpose}`}>{purposes[purpose]}</span><span aria-hidden="true">›</span></span>
-            <span className="wb-call-id">{id.slice(0, 8)} · {reported.length ? '响应报告' : '请求模型'}{metadata.some(m => m.clientRequestIndex !== null) ? ' · WebSocket，关联未确认' : ''}</span>
+            <span className="wb-call-primary"><strong>{model}</strong><span className={`wb-call-purpose is-${purpose}`}>{purposeLabel(metadata)}</span><span aria-hidden="true">›</span></span>
+            <span className="wb-call-id">{id.slice(0, 8)} · {reported.length ? '响应报告' : '请求模型'}{socketAssociation(metadata)}</span>
             {responses.length ? responses.map(response => <span className="wb-call-metrics" key={response.responseId || 'unknown'}>
               {responses.length > 1 && <span className="wb-call-response-id">响应 {response.responseId || '身份未确认'}</span>}
               <span>{tokens(response)}</span><span>{historical && '保存时：'}{status(response, historical)}</span><span>{response.observedDurationMs == null ? '时长未提供' : `${(response.observedDurationMs / 1000).toFixed(2)} 秒`}</span>
@@ -65,19 +80,19 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
         })}</div>
       </> : <>
         <button className="wb-call-back" onClick={() => { onSelect(null); close.current?.focus(); }}>← 全部调用</button>
-        <p className="wb-subtle">{purposes[selected?.purpose || 'unknown']} · 请求 <code>{requestId}</code></p>
-        {reading.requests.filter(r => r.requestId === requestId).map(meta => <p className="wb-subtle" key={meta.clientRequestIndex ?? 'http'}>请求模型：{meta.requestedModel || '未确认'}{meta.clientRequestIndex !== null ? ` · WebSocket create ${meta.clientRequestIndex}，响应关联未确认` : ''}</p>)}
+        <p className="wb-subtle">{purposeLabel(selected)} · 请求 <code>{requestId}</code></p>
+        {selected.map(meta => <p className="wb-subtle" key={meta.clientRequestIndex ?? 'http'}>请求模型：{meta.requestedModel || '未确认'} · {purposes[effectivePurpose(meta)]}{meta.clientRequestIndex !== null ? ` · ${requestAssociation(meta.clientRequestIndex, meta)}` : ''}</p>)}
         {reading.items.filter(item => item.kind === 'notice' && itemRequestId(item) === requestId).map(item => item.kind === 'notice' && <p key={item.itemKey} className="wb-notice" role="status">{item.text}</p>)}
         {!!(unassignedModels.length + unassignedTools.length) && <details key={requestId} className="wb-call-unassigned"><summary>未进入对话的内容（{unassignedModels.length + unassignedTools.length}）</summary>
           <p className="wb-subtle">辅助或关联未确认的内容，仅在此处阅读。</p>
-          {unassignedModels.map(item => <ModelMessage key={item.itemKey} item={item} historical={historical} request={selected} response={reading.responses.find(r => r.requestId === requestId && r.responseId === item.key.responseId)} />)}
+          {unassignedModels.map(item => <ModelMessage key={item.itemKey} item={item} historical={historical} request={requestFor(reading, item)} response={reading.responses.find(r => r.requestId === requestId && r.responseId === item.key.responseId)} />)}
           {unassignedTools.map(tool => <ToolCard key={tool.itemKey} tool={tool} historical={historical} />)}
         </details>}
-        <RequestDetails epoch={epoch} requestId={requestId} responses={reading.responses.filter(r => r.requestId === requestId)} expanded historical={historical} before={before} />
+        <RequestDetails epoch={epoch} requestId={requestId} requests={selected} responses={reading.responses.filter(r => r.requestId === requestId)} expanded historical={historical} before={before} />
         <div className="wb-call-evidence">
-          {reading.toolContexts.filter(c => c.requestId === requestId).map(context => <div key={context.clientRequestIndex ?? 'http'}>{context.clientRequestIndex !== null && <p className="wb-subtle">WebSocket create {context.clientRequestIndex} · 响应关联未确认</p>}<ToolContextDetails context={context} /></div>)}
-          <NativeCommandDetails historical={historical} commands={reading.nativeCommands.filter(c => !!selected?.codexThreadId && !!selected.codexTurnId && c.key.codexThreadId === selected.codexThreadId && c.key.codexTurnId === selected.codexTurnId)} />
-          <NativeFileChangeDetails changes={reading.nativeFileChanges.filter(c => !!selected?.codexThreadId && !!selected.codexTurnId && c.key.codexThreadId === selected.codexThreadId && c.key.codexTurnId === selected.codexTurnId)} />
+          {reading.toolContexts.filter(c => c.requestId === requestId).map(context => <div key={context.clientRequestIndex ?? 'http'}>{context.clientRequestIndex !== null && <p className="wb-subtle">{requestAssociation(context.clientRequestIndex, selected.find(meta => meta.clientRequestIndex === context.clientRequestIndex))}</p>}<ToolContextDetails context={context} /></div>)}
+          <NativeCommandDetails historical={historical} commands={reading.nativeCommands.filter(c => hasTurn(c.key))} />
+          <NativeFileChangeDetails changes={reading.nativeFileChanges.filter(c => hasTurn(c.key))} />
         </div>
       </>}
     </div>
