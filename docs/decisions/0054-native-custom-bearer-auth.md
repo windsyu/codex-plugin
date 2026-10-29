@@ -3,6 +3,8 @@
 - Status：Accepted
 - Date：2026-09-23
 
+配置门禁与统一捕获职责现由 [ADR 0068](0068-shared-native-model-capture.md)修订；本文保留原决定与当时的验证背景。
+
 ## Context
 
 R6-E 从首页选择新项目后，启动器把 `requires_openai_auth=true` 一律当作未验证的 OpenAI 登录而拒绝，网页又将不同错误统一显示为“Codex 未能启动”。目录核验通过仍不能进入 V2；问题来自适配器的认证假设。

@@ -6,6 +6,33 @@ use crate::workbench::decode::tool::{
 use crate::workbench::decode::tool_context::{ToolCategory, ToolContext};
 use std::collections::HashMap;
 
+/// HTTP owns one request per connection; a WebSocket request owns only its
+/// proven response. Ambiguous bindings never borrow the latest create metadata.
+pub(super) fn request_for_key<'a>(state: &'a State, key: &TextKey) -> Option<&'a RequestView> {
+    let mut matches = state.requests.iter().filter(|request| {
+        request.request_id == key.request_id
+            && (request.info.client_request_index.is_none()
+                || (request.info.response_id.is_some()
+                    && request.info.response_id == key.response_id))
+    });
+    let request = matches.next()?;
+    matches.next().is_none().then_some(request)
+}
+
+fn request_for_context<'a>(state: &'a State, context: &ToolContextView) -> Option<&'a RequestView> {
+    let mut matches = state.requests.iter().filter(|request| {
+        request.request_id == context.request_id
+            && request.info.client_request_index == context.context.client_request_index
+            && (request.info.client_request_index.is_none() || request.info.response_id.is_some())
+    });
+    let request = matches.next()?;
+    matches.next().is_none().then_some(request)
+}
+
+#[cfg(test)]
+#[path = "tools_ws_tests.rs"]
+mod ws_tests;
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandPreview {
@@ -324,43 +351,33 @@ impl LiveHub {
     }
 
     pub(super) fn reconcile_tools(&self, state: &mut State, received_at: Instant) {
-        // Build the proven request domains and call/result index once. Repeated
-        // history in subsequent requests must not cause a cross-product scan of
-        // every tool, request and output on the observation thread.
-        let domains: HashMap<_, _> = state
-            .requests
-            .iter()
-            .filter_map(|request| {
-                if request.info.client_request_index.is_some()
-                    || request.info.purpose
-                        == super::super::decode::request::RequestPurpose::Unknown
-                {
-                    return None;
-                }
-                Some((request.request_id, request.info.codex_thread_id?))
-            })
-            .collect();
+        // Index results only within proven request domains. A connection may
+        // contain many WebSocket turns; its latest create is never a domain.
+        let domain = |request: &RequestView| {
+            (request.info.purpose != super::super::decode::request::RequestPurpose::Unknown)
+                .then_some(request.info.codex_thread_id)
+                .flatten()
+        };
         let mut candidates = HashMap::<(Uuid, blake3::Hash), usize>::new();
         for call in &state.tools {
             if !call.identity_conflict
-                && let (Some(thread), Some(fingerprint)) =
-                    (domains.get(&call.key.request_id), call.fingerprint)
+                && let (Some(thread), Some(fingerprint)) = (
+                    request_for_key(state, &call.key).and_then(domain),
+                    call.fingerprint,
+                )
             {
-                *candidates.entry((*thread, fingerprint)).or_default() += 1;
+                *candidates.entry((thread, fingerprint)).or_default() += 1;
             }
         }
         let mut outputs = HashMap::<_, Vec<_>>::new();
         for context in &state.tool_contexts {
-            if context.context.client_request_index.is_some() {
-                continue;
-            }
-            let Some(thread) = domains.get(&context.request_id) else {
+            let Some(thread) = request_for_context(state, context).and_then(domain) else {
                 continue;
             };
             for output in &context.context.outputs {
                 if let Some(fingerprint) = output.fingerprint {
                     outputs
-                        .entry((*thread, fingerprint))
+                        .entry((thread, fingerprint))
                         .or_default()
                         .push((context, output));
                 }
@@ -372,9 +389,12 @@ impl LiveHub {
         for index in 0..state.tools.len() {
             let before = &state.tools[index];
             let mut call = before.clone();
-            if let Some(context) = state.tool_contexts.iter().find(|context| {
-                context.request_id == call.key.request_id
-                    && context.context.client_request_index.is_none()
+            let request = request_for_key(state, &call.key);
+            if let Some(context) = request.and_then(|request| {
+                state.tool_contexts.iter().find(|context| {
+                    context.request_id == request.request_id
+                        && context.context.client_request_index == request.info.client_request_index
+                })
             }) {
                 call.category = ToolCategory::Other;
                 let matching: Vec<_> = context
@@ -418,7 +438,7 @@ impl LiveHub {
             } else {
                 call.command = None;
             }
-            let thread = domains.get(&call.key.request_id).copied();
+            let thread = request.and_then(domain);
             if let (Some(thread), Some(fingerprint)) = (thread, call.fingerprint) {
                 for (context, output) in outputs.get(&(thread, fingerprint)).into_iter().flatten() {
                     if output.companion.as_ref() != Some(&call.identity) {

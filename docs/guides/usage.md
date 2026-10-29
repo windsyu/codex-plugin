@@ -66,13 +66,11 @@ cd <project>
 
 整理状态随当前历史数据根持久保存，重启或重建派生目录不丢；并发修改或保存结果未确认时先重读核对，不自动重发。如果提示用户归类暂不可用，编辑禁用，但独立来源正文仍可读，可靠原生记录仍可按原目录继续。整理不向手机开放。只有已有项目可作为目标，本轮不提供批量整理、worktree 聚合或新项目别名。更多边界见[整理契约](../design/session-organization.md)。
 
-### 原生直连与模型捕获
+### 原生连接与模型捕获
 
-默认 OpenAI 配置可以直接启动，无须新增 `model_provider` 或修改现有凭证。工作台保留原生终端与历史阅读，由官方 CLI 决定认证、管理策略、路由和 HTTP/WS 传输。原生配置缺失、格式问题或未知字段由 CLI 在终端中诊断，工作台不复制整套配置校验。
+继续使用已有官方 CLI 配置与登录即可，不必为了工作台把 provider 改名为 custom 或补写原生可省略字段。工作台读取 CLI 提供的有效路由，只为本次进程接入已有模型代理，流式正文、用户/模型消息、工具、调用详情和用量使用同一条阅读与保存链路。原生 CLI 仍负责模型、权限、输入、审批和认证刷新。
 
-直连运行明确显示“模型实时捕获不可用”。请在原生终端查看回复，从首页“全部历史”阅读原生会话；本次工作台运行记录不包含模型正文、调用详情或用量，保存成功不表示完整捕获。这个状态也保留在历史记录中。不会自动把默认 OpenAI 改为已有的 custom provider。
-
-只有显式选择 `model_provider="custom"` 才进入已有模型捕获适配器。其固定上游及认证来源的安全门槛仍适用，但可省略 `wire_api`（原生默认 `responses`）和 `requires_openai_auth`（原生默认 `false`）；无关设置原样交 CLI。必要上游、认证或传输条件不受支持时给出捕获诊断，不静默切换 provider 或强制 SSE。详见[支持范围](support.md)与 [ADR 0067](../decisions/0067-native-direct-launch.md)。
+默认 ChatGPT 路由由官方账户查询给出，并与本次 Run 的账户和来源版本绑定。切换账户或路由策略后开始新 Run；工作台不自动重放未确认的输入。对于禁止代理覆写的管理策略或未能可靠读取的路由，CLI 仍可显示自己的配置/登录诊断，工作台明确提示捕获不可用，不把缺失用量当成零。旧无捕获运行的历史状态保留，不补造正文。边界见[支持范围](support.md)和 [ADR 0068](../decisions/0068-shared-native-model-capture.md)。
 
 ### 开始新对话或继续所选会话
 
@@ -106,7 +104,7 @@ macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系
 | `codex-view --project <directory> --resume <UUID>` | 同时验证指定目录与原生会话身份后恢复 |
 | `codex-view open [entryFile] [--relay]` | 打开现有应用；可用私有入口文件（新 v2 / 旧 v1）或当前配置作用域；`--relay` 打开本机接入设置，不创建 CLI |
 | `--profile <name>` | 使用原生 `$CODEX_HOME/<name>.config.toml`，不是另一份工作台配置 |
-| `--provider-profile unmanaged-custom` / `--codex-bin <path>` | 选择已验证接入适配器 / 已安装官方 CLI，不修改模型或安装程序 |
+| `--provider-profile unmanaged-custom` / `--codex-bin <path>` | 旧接入标识兼容 / 指定已安装官方 CLI，不修改模型或安装程序 |
 | `--config-dir <directory>` / `--data-dir <directory>` | 明确指定工作台 JSON 目录 / 私有历史根，目录说明见下文 |
 
 `--profile`、`--provider-profile`、`--codex-bin` 单独出现只定义应用启动偏好，不隐式创建 CLI。显式设置与已有实例冲突会报错；修改启动偏好需退出原应用后重新启动。命令行覆盖文件值但不反写。
@@ -115,11 +113,13 @@ macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系
 
 当前运行支持 macOS 和已安装的官方 CLI，版本号不作为启动白名单。受测版本和验证方式见支持文档。其他版本会提示尚未回归并继续检查配置，升级后无需降级或添加绕过参数。工作台不自动升级、降级或修改 CLI；版本回归不扩大 provider、Windows 或手机支持，当前支持边界以[支持范围](support.md)为准。
 
-模型接入使用受限的 `unmanaged-custom` 路由适配器。原生配置须已有 `custom` provider、Responses 和显式上游，并从两种互斥认证方式中选择一种：非空静态 bearer（`requires_openai_auth` 可为 `true` 或 `false`），或原生 `auth.command`（`requires_openai_auth=false`，可选字符串 `args`）。命令和动态 token 只由官方 CLI 执行、缓存及刷新，工作台不会执行命令或读取输出；为排除原生登录触发的 cloud-managed 路由变化，两种路径仍要求 File credential store，并检查缺失或 API-key 形状的 `auth.json`。其他 provider、ChatGPT/管理配置、环境认证、AWS 及真实 WS profile尚未纳入支持。无法确认路由或认证时，本次 CLI 启动失败并显示固定原因，历史首页仍保留；不调整模型、权限或原生传输。版本检查与配置检查分别处理，边界见[详细设计 §2](../design/workbench-detailed-design.md#2-启动与-provider-配置)。
+模型接入复用同一捕获适配器；`--provider-profile unmanaged-custom` 是旧工作台配置的兼容标识，不选择另一种原生 provider。View 不替 CLI 校验 TOML、认证命令参数或凭据组合；它只确认取得正确原上游、能安全接入代理和脱敏阅读。缺少捕获所需信息时保留原生启动，并明确提示观察不完整。具体原生接口、来源围栏与传输约束见[详细设计 §2](../design/workbench-detailed-design.md#2-启动与-provider-配置)。
 
 明确启动项目时，启动器保留原 `CODEX_HOME` 和指定 cwd，模型接入仅对本次 CLI 覆盖模型代理地址。网页中的原生 CLI 继续负责主题、目录信任、发送和设置；这些原生操作可能按 CLI 自身规则保存偏好。默认打开本机浏览器；`--no-open` 时用 `codex-view open <entryFile>` 打开输出中指定的私有配对文件。普通输出只有本机地址、应用 ID、存在时的 Run/PID 和 CLI 版本，以及文件位置，不包含配对密钥。可用 `--codex-bin <path>` 指定已安装 CLI；`--resume <UUID>` 只接受明确的原生会话 ID，不自动提交。
 
 网页终端保留原生 ANSI 颜色、加粗、斜体、代码与表格边框。为避免非交互启动环境把网页终端误判成无色日志，CLI 子进程使用 `TERM=xterm-256color` / `COLORTERM=truecolor` 并清除继承的 `NO_COLOR`；按 2026-09-19 用户要求传 `-c tui.animations=false`，关闭原生欢迎动画、微光与旋转提示。正式入口和 R1 调试入口一致，不添加动画识别/裁剪逻辑，不写全局配置；已有 CLI 进程需下次启动才使用这组显示选项。
+
+macOS 后台服务不会复制 Shell 的代理或密钥环境变量。模型捕获代理支持系统网络设置中的 HTTP/HTTPS 代理，连接本机字面 loopback 模型服务时直接连接；需要代理的后台使用者应配置系统 HTTP/HTTPS 代理。当前不据此承诺 PAC 或仅 SOCKS 系统代理支持，也不读取 macOS 系统代理例外列表；前台可沿用 reqwest 支持的代理环境变量与 `NO_PROXY`。系统代理在新 Run 建立出站客户端时读取。门户登录只授权远程工作台，模型服务认证仍由电脑上的官方 CLI 完成。
 
 输入确认丢失时提醒会跨重连/刷新保留，检查原生终端后可手动清除，不自动重发。正式入口后台保存安全观察副本，重启后可从首页或项目“历史记录”读取；未保存尾部可能丢失，异常退出和保存缺口会明确显示。
 

@@ -293,10 +293,7 @@ fn model_metadata(
     key: &TextKey,
     finalized: bool,
 ) -> (ModelAuthor, MessageStreamState) {
-    let request = state
-        .requests
-        .iter()
-        .find(|r| r.request_id == key.request_id && r.info.client_request_index.is_none());
+    let request = super::tools::request_for_key(state, key);
     let response = state
         .responses
         .iter()

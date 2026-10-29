@@ -70,26 +70,17 @@ interface CaptureProfile {
 }
 ```
 
-按 [ADR 0067](../decisions/0067-native-direct-launch.md)，启动与模型捕获分开。工作台对原 config 和命名 profile 作有界只读探测，仅当用户显式选择 `custom` 时启用下述捕获适配器；默认 OpenAI、其他 provider、缺失或无法安全解析的配置按原生直连启动。原生直连不检查 AuthSnapshot、JWT、credential store、未选 provider 或系统管理配置，不创建模型代理/Observer，不加 provider、base URL、认证或传输覆盖。原 home/profile/model/权限交 CLI；配置问题由 CLI 自己显示。保留现有终端显示选项，不写原生配置。
+按 [ADR 0068](../decisions/0068-shared-native-model-capture.md)，模型接入统一使用现有反向代理、Capture、Observer、decoder、LiveHub 和 Recorder。provider 名称不是捕获开关；配置语法、未知字段、默认值、认证形式、模型和权限由官方 CLI 处理。View 不执行凭据命令、不接管 token 刷新，不修改原生配置文件，也不强制降级 SSE。
 
-直连在启动记录器之前发布 run 级 `model_capture_unavailable` 诊断，`snapshot.capture="unavailable"`，usage 标记捕获不完整；状态不会被后续用户记录或 partial 事件覆盖。兼容 schema 2 的 notice 保留明确中文说明，journal checkpoint/replay 保留状态，既有 metadata gaps 的 reason 记录 `model_capture_unavailable`，历史覆盖保持 partial，无数据库迁移。模型正文、调用详情、用量不会被伪装为零或完整；原生历史仍由首页只读路径提供。旧 Preact 前端可解析 notice/gap，并把状态视为不完整；正式部署使用配套前端。运行生命周期、停止、文件阅读和历史入口不依赖模型代理存在。
+启动时通过已安装原版 CLI 的短命 stdio 辅助进程读取 `config/read`、配置 requirements 和必要的 `account/read`。辅助进程有输出、时限和生命周期边界，不创建 thread/turn 或提交模型任务；真正交互仍是普通官方 CLI 的 PTY。它提供官方有效配置和账户路由，避免 View 重写 TOML 合并器或根据 JWT 推断服务。内建 OpenAI 的进程覆写键为 `openai_base_url`，其他可接入 provider 使用 `model_providers.<id>.base_url`，保留原 provider 和传输选择。工作台配置中的 `providerProfile="unmanaged-custom"` 作为旧配置兼容标识保留，不再要求原生 provider 必须名为 custom。
 
-捕获适配器只记录已经确认的路由，不复制 credential 或重写官方配置合并器。固定转发目的、认证来源、系统/管理策略及项目层认证存储属于必要边界；未验证时拒绝显式 custom 捕获，不把问题误分类为配置读取/语法失败。只校验这些必要字段，未知与无关设置交给 CLI，不依据未选 provider 的字段推断当前路由。
+代理接入必须取得原始上游；只有正确目的地才能透明转发。内建 provider 定义、原生默认值、独立的显式端点和 workspace-bound 路由分别遵循官方读取结果，不能把未生效的 provider 表当作目的地，也不能因为存在 ChatGPT 登录就把独立上游改成 ChatGPT。selected provider 被 managed requirements 锁定、非文件来源无法建立一致性围栏或当前原生接口未导出必要路由时，不绕过原生策略接入代理。
 
-macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求显式 provider `custom`、Responses（`wire_api` 省略为 `responses`）、`requires_openai_auth` 按原生默认 `false`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
+默认 ChatGPT 以官方账户结果绑定本次 Run 的 backend origin、账户身份和地区覆盖字段。模型请求在转发前核对账户和来源版本；认证文件变化时重新读取官方路由，同路由 token 刷新可以继续，不同账户、目标或策略要求开始新 Run。已建立 WS 的上行也受来源围栏约束，不在未知结果后自动重放。启动查询前后和 spawn 前核对来源指纹，避免新配置的凭据被转发到旧目的地；不声称能原子锁定官方 CLI 的所有外部策略。
 
-- 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。取舍见 [ADR 0054](../decisions/0054-native-custom-bearer-auth.md)。
-- 命令认证：原生 `model_providers.custom.auth`，命令/参数/schema 交 CLI 处理，要求 `requires_openai_auth=false`（可省略）；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表与 args 由 CLI 按原生递归覆盖和数组替换语义处理。工作台只校验路由/认证来源冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
+已知秘密只用于观察脱敏，不作为认证合法性门禁。认证头不进入观察、详情和 journal；命令/keyring 动态 token 继续归 CLI，不能保证任意正文主动回显的未知 token 都能按值识别。不能读取有效路由时保留原 CLI 启动与原生错误诊断，运行记录明确 `capture="unavailable"`，不把用量缺失显示成零；该降级不算完整捕获验收通过。旧不可捕获记录仍可读，不补造旧正文，无数据库 migration。
 
-两条路径都拒绝 `env_key`、`env_http_headers`、AWS、系统/managed 路由来源及 `supports_websockets=true`，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置及认证快照未改变。检查不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。命令 token 不被工作台读取，不能按精确值脱敏上游/工具主动回显到正文的凭证；认证头始终排除观察、调用详情与 journal。
-
-项目路由字段仍由原生过滤，允许的项目推理设置在实机请求中验证；两条认证路径都拒绝未验证的项目层认证存储覆盖。配置不会由启动器复制或写回；CLI 自身的信任/设置写入照常，命名 profile 中可能新增 projects/trust。显式 resume 的新 Run 复用所选原生 Thread，终端恢复旧历史，新输入前不请求模型、不重放输入。实时阅读仍只展示本 Run；“历史记录”另读取本项目已保存的运行，选择历史不会触发原生 resume。
-
-只为本次子进程使用版本支持的覆盖参数/环境。保留真实用户 `CODEX_HOME`、原模型、权限、sandbox、OAuth 刷新和重试。自动化测试使用临时 home。API key 与 ChatGPT 登录的 URL、路径、WS upgrade 和辅助路由各有 fixture；保留 URL 后缀对官方 capability 判定的影响。安装版与研究源码不一致时以实测支持矩阵为准。
-
-显示策略：正式 launcher 与调试入口均设置 `TERM=xterm-256color`、`COLORTERM=truecolor`，清除 CLI 子进程继承的 `NO_COLOR`，并追加 `-c tui.animations=false`。`NO_COLOR=1` 曾来自调试启动环境，使原生色彩检测降级；这不是 ANSI 转发过滤造成的。关闭动画使用[官方配置项](https://learn.chatgpt.com/docs/config-file/config-reference)，涵盖欢迎页、微光和旋转提示，工作台不通过匹配字符图案或删帧实现。只影响新启动的本次 CLI；不写回配置，不改模型/权限/输入行为。
-
-模型代理是显式 base URL 路由，不安装根证书、不劫持系统 TLS。上游仍验证 TLS。代理只转发 CLI 提供的认证，不成为 token 刷新器；不把 header/body 认证材料存入浏览器或 journal。URL 映射、重定向与跨 origin 转发不允许把凭证带往另一个域名。
+HTTP/SSE 和原生默认 WS lane 共用聊天模型。WS `response.create` 的原请求序号保留；有连续、无歧义的响应生命周期证据时，附加可选 `responseId` 将响应关联到对应请求元数据。预热 `generate=false` 属于辅助请求，不创建用户气泡。显式响应身份、并发流、观察缺口和冲突不能按连接上的最后一条请求猜测；工具和原生执行证据须绑定相同请求/响应及 thread/turn。未确认内容保留在对应调用诊断中，不伪装为完整聊天。
 
 浏览器认证与模型代理分离。Web 使用运行期配对 Cookie、严格 Host/Origin 和 CSRF 防护；模型代理使用本次运行的不可猜路由能力，固定 upstream，拒绝浏览器 Origin/CORS、CONNECT 和任意转发目标。路由能力不进入日志或页面，可经 base URL 前缀注入，出站前剥离并保留原上游路径；它是本机临时能力，不替代模型 Authorization。若该版本支持安全的独立环境 header，可在同一契约下替代路由能力。不能静默降低为开放代理。首版信任同 OS 用户，不声称能抵御该用户读取本次进程参数/内存。
 
@@ -97,7 +88,7 @@ macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动�
 
 上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](device-access.md)及 [ADR 0051](../decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。真实手机按 §9.2 的 P14 单独验收，桌面视口不能代替实际设备。
 
-每个受支持的模型捕获 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
+每个受支持的模型捕获 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 的配置处理交 CLI，捕获验收仍按实际组合记录，未测组合标为 unverified。WS 转发未通过时不能强制 HTTP 以制造成功。
 
 ## 3. 转发与观察分离
 
@@ -231,6 +222,7 @@ type ViewItem = MessageItem | ToolCallItem | NoticeItem;
 interface RequestView {
   requestId: string;
   clientRequestIndex: number | null; // HTTP 为 null；WS 为本连接内 create 序号
+  responseId?: string | null; // WS 生命周期已唯一关联时发布；旧记录可缺省
   requestedModel: string | null;
   codexThreadId: string | null;
   codexTurnId: string | null;
@@ -258,9 +250,9 @@ interface ResponseUsage {
 }
 ```
 
-分类依据为 `client_metadata["x-codex-turn-metadata"]` 的 JSON 字符串：`request_kind=turn`、`thread_source=user` 且 thread/turn 有效才归为 conversation；prewarm/compaction/memory，或 turn 的 system/thread_title/guardian_review/memory_consolidation 来源归 auxiliary。`thread_title` 是 CLI 0.156.1 安装版合成实验实际观测到的标题来源，保留旧 system 兼容；这是已观测变体适配，不把未知来源按名称猜成辅助调用。缺失、未知或与扁平 thread/turn/session 字段冲突则 unknown；冲突时清除原生身份并记录安全诊断。不能按 `role:user`、输出 schema、短文本或 JSON `title` 猜用途。
+WS 的显式 `generate=false` 先归为辅助预热，不据它声明原生 thread/turn。其余分类依据为 `client_metadata["x-codex-turn-metadata"]` 的 JSON 字符串：`request_kind=turn`、`thread_source=user` 且 thread/turn 有效才归为 conversation；prewarm/compaction/memory，或 turn 的 system/thread_title/guardian_review/memory_consolidation 来源归 auxiliary。`thread_title` 是 CLI 0.156.1 安装版合成实验实际观测到的标题来源，保留旧 system 兼容；这是已观测变体适配，不把未知来源按名称猜成辅助调用。缺失、未知或与扁平 thread/turn/session 字段冲突则 unknown；冲突时清除原生身份并记录安全诊断。不能按 `role:user`、输出 schema、短文本或 JSON `title` 猜用途。
 
-仅白名单字段进入 DTO：模型/标识最多 128 字符且经过格式与脱敏检查；thread 为非 nil UUID，turn 不接受路径分隔符。HTTP 请求在完整、有界 JSON 到齐后发布；压缩请求暂不能解码时显示缺失，原请求转发不变。WS masked frame 可以提取 create metadata，但 create 序号没有证明 response 归属，当前所有 WS 正文保留请求级阅读，不能按到达次序冒充聊天。
+仅白名单字段进入 DTO：模型/标识最多 128 字符且经过格式与脱敏检查；thread 为非 nil UUID，turn 不接受路径分隔符。HTTP 请求在完整、有界 JSON 到齐后发布；支持 identity 和现代单帧 Zstd 观察副本，默认压缩输入和解压 JSON 各不超过 1 MiB，窗口最多 2 MiB，并在观察总预算中预留 3 MiB 解码工作区。旧版或 skippable 帧、截断、拼接和超限不发布完整请求。明确模型端点的成功 SSE 响应可在缺少 Content-Type 时按 [ADR 0068](../decisions/0068-shared-native-model-capture.md)的窄边界解码，原始请求和响应转发不变。WS masked frame 保留 create metadata 与序号；单一默认 lane 的连续 created→terminal 生命周期可建立明确的请求/响应关联，并发布可选 responseId。命名 lane、重叠、未知事件或任向缺口终止隐式关联，不能借用连接上的最后一个响应；有显式身份的内容仍可独立阅读。压缩 WS 扩展仍属于不完整捕获边界，不由 HTTP Zstd 验收推导支持。
 
 请求/响应 decoder 各自的活跃流上限默认 128，单 JSON/frame 默认 1MiB，共享 `push` 后保留缓冲上限 8MiB；这不是对单次输入解析期间峰值 RSS 的承诺。快照最多 256 条 request、256 条 response，淘汰会使阅读订阅重新快照。request metadata 只保存上述安全字段，不保留全量输入、header 或工作区；工具定义元信息与输出另走 §4.5.1 的有界 `toolContexts`。响应模型来自 response 报告，后续事件缺字段不清空已知值；报告冲突保留两个来源并标 partial。只有请求模型时明确标“请求模型”，两者不同同时显示。
 
@@ -285,7 +277,7 @@ interface ResponseUsage {
 - 首版只接已确认的文本，保留中文、空行和代码字符；非文本/未知内容以省略提示保留不完整性。进入 LiveStore 前脱敏，页面按转义文本呈现。单条预览最多 64KiB；未来 turn 的安全待关联记录最多 128 条/1MiB，LiveHub 用户区最多 256 条/4MiB，来源诊断最多 32 条。超限明确标缺口，淘汰网页用户项后订阅必须重新快照。
 - 用显式 thread/turn 将迟到用户证据放在对应回复前；不能通过正文、时间或位置推断归属。补齐不重挂终端、不抢焦点、不改变上滚阅读锚点；相同项的替换保留稳定 DOM key。
 
-以下 `UserRecord` 是原生 reader 与 LiveHub 之间的内部来源契约。对外已映射为 §4.3 的 user MessageItem，不再输出 userMessages 数组或 user.replace 事件；来源位置与省略标记完整保留，展示仍仅按明确 HTTP 轮次关系归组。
+以下 `UserRecord` 是原生 reader 与 LiveHub 之间的内部来源契约。对外已映射为 §4.3 的 user MessageItem，不再输出 userMessages 数组或 user.replace 事件；来源位置与省略标记完整保留，展示按 HTTP 或已确认 WS 响应关联中的明确轮次关系归组。
 
 ```ts
 interface UserRecord {
@@ -367,9 +359,9 @@ interface ToolCall {
 }
 ```
 
-- **生成与顺序。** function arguments/custom input 的 added、delta、done 和完整 output item 进入独立 decoder；完整参数替换预览，流中断标 incomplete，单次 response completed 不证明执行。正文与工具共享首次观察 `orderIndex`，结果只替换原卡；该顺序不承诺并发请求的原生全序。SSE 与带显式 response 身份的 WS 工具流可独立解码；WS create 归属未证明，仍留在请求级阅读且不跨请求关联结果。
+- **生成与顺序。** function arguments/custom input 的 added、delta、done 和完整 output item 进入独立 decoder；完整参数替换预览，流中断标 incomplete，单次 response completed 不证明执行。正文与工具共享首次观察 `orderIndex`，结果只替换原卡；该顺序不承诺并发请求的原生全序。SSE 与带显式 response 身份的 WS 工具流可独立解码；WS create 只有取得明确响应关联后才进入同一 thread/turn 工具域；预热、并发歧义或缺口保留未归属，不跨请求猜测结果。
 - **类别与参数。** 顶层 `tools`、developer `additional_tools` 与 namespace 均有安全元信息提取。原生 `exec_command` 的 function/object schema/string cmd 才映射命令；原生 grammar `exec` 映射代码、`apply_patch` 映射拟议修改，其余保留普通工具。缺 namespace 时仅允许无歧义定义匹配，外部 namespace 的同名工具不冒充原生命令。仅完整、未截断且无身份冲突的安全 JSON 提取 cmd/workdir，cwd 未给就显示未捕获。
-- **结果关联。** 只接受已确认用途、同一原生 thread 的 HTTP 请求域。后续请求必须含唯一的同 call ID、同工具类型/名称/namespace 的伴随调用，并与已观察调用的原始完整参数指纹一致；本 Run 中候选也必须唯一。指纹、原始参数和内部解析事实不随 DTO 输出。缺伴随调用、WS 或身份不明时，结果保留在对应请求上下文。先到结果可在调用补齐后关联；后续重复历史不新增卡片或重复 revision。
+- **结果关联。** 只接受已确认用途、同一原生 thread 的 HTTP 请求域或已唯一关联响应的 WS 请求域。后续请求必须含唯一的同 call ID、同工具类型/名称/namespace 的伴随调用，并与已观察调用的原始完整参数指纹一致；本 Run 中候选也必须唯一。指纹、原始参数和内部解析事实不随 DTO 输出。缺伴随调用、WS 响应未关联或身份不明时，结果保留在对应请求上下文。先到结果可在调用补齐后关联；后续重复历史不新增卡片或重复 revision。
 - **执行依据。** 后续请求中的直接命令结果只识别已验证且从输出首部开始的原生 `Wall time` / `Process exited with code` 或 `Process running with session ID` / `Output:` 格式；正文中出现相同字样不作为退出事实。Code Mode 返回的 JSON/文本不递归解析成子命令状态，只标 result_observed。运行中 envelope 保留进程 ID 供原生结果匹配；`write_stdin` 卡保留自身 call ID，原命令通过规范完成记录取得最终结果，不拼接两个不同调用的文本。
 - **原生补齐。** 按 [ADR 0041](../decisions/0041-native-command-result-evidence.md)，独立 RolloutReader 读取规范 `event_msg/item_completed/CommandExecution`。只接受明确 thread/turn/native item ID 和已知 source/status；同一 HTTP conversation 的 thread + turn + call ID 唯一匹配，已有进程 ID 时还须一致。已验证安装版命令在最后一次模型请求之后退出，原卡能取得最终合并输出、退出码、耗时和 cwd。未匹配子命令在同轮调用详情独立保留，不按 Code Mode 代码或 ID 前缀猜归属。`completed/failed/declined` 有封闭映射，受测原生流程未取得 declined 或可靠 started；规范支持不等于实际捕获。原生策略拒绝、参数错误与中断未必具有逐工具终态，UI 保持 result_observed/unobserved，turn_aborted/EOF 不生成工具取消。底层 declined 也可能来自运行准备拒绝，不默认标成“用户拒绝”。
 - **原生去重与冲突。** 原生结果同键同内容指纹不重复发布；相异最终记录保留各自 sourceRef/byteOffset，标冲突并撤销明确成败。网络旧运行中证据、重放或迟到 started 不降级已有最终状态；网络最终退出码与原生退出码矛盾、重复候选或进程不一致均不能静默覆盖。
@@ -409,7 +401,7 @@ interface ProposedFile {
 
 #### 4.5.3 原生文件修改结果（已实现）
 
-按 [ADR 0042](../decisions/0042-native-file-change-evidence.md)，同一只读后台 reader 提取规范 `event_msg/item_completed/FileChange`，仅接受明确 thread/turn/item ID 及 closed status。缺失/未知身份或状态发来源位置诊断。与模型调用的关联要求明确 HTTP conversation 域、唯一 call ID、已生成且类别已由工具声明确认的原生 custom apply_patch；Code Mode 和外部同名工具不猜归属。
+按 [ADR 0042](../decisions/0042-native-file-change-evidence.md)，同一只读后台 reader 提取规范 `event_msg/item_completed/FileChange`，仅接受明确 thread/turn/item ID 及 closed status。缺失/未知身份或状态发来源位置诊断。与模型调用的关联要求明确 HTTP conversation 域或已唯一关联响应的 WS conversation 域、唯一 call ID、已生成且类别已由工具声明确认的原生 custom apply_patch；Code Mode 和外部同名工具不猜归属。
 
 ```ts
 interface NativeFileChange {
@@ -549,7 +541,7 @@ interface RequestDetailsPage {
 }
 ```
 
-请求按白名单读取模型设置、instructions、input 和 tools；原始认证头、client metadata 和未知顶层扩展没有详情输出路径。响应读取 id/model/status/usage/service_tier/error/incomplete_details 与 output，缺失 output 明确标省略。HTTP 请求与各个 WS create、各 response 文档独立保留；create 序号不证明 response 归属，缺 ID 不借用上一次 WS 响应。相同来源及相同安全内容去重，相同来源不同内容同时保留并标冲突。请求中的 system/developer/user 历史不创建聊天气泡。
+请求按白名单读取模型设置、instructions、input 和 tools；原始认证头、client metadata 和未知顶层扩展没有详情输出路径。响应读取 id/model/status/usage/service_tier/error/incomplete_details 与 output，缺失 output 明确标省略。HTTP 请求与各个 WS create、各 response 文档独立保留；create 序号本身不证明 response 归属；只有连续单一默认 lane 的已确认生命周期才补足当前响应身份，缺口或并发时不借用上一次 WS 响应。相同来源及相同安全内容去重，相同来源不同内容同时保留并标冲突。请求中的 system/developer/user 历史不创建聊天气泡。
 
 开发者 `additional_tools` 与 namespace 按工具定义拆成独立项，`jsonPointer` 保留 `/input/N/tools/...` 或 `/tools/...` 原位置。集合父项不再重复承载全部子工具，`childrenSeparated=true` 提示向后查看。大集合回归证明，整组放入单项预览会把后面的 schema 截掉，因此按定义分页。安装版 Code Mode 的 exec 是 custom tool，保留其原始 format；内部 exec_command 的文本说明不转换成不存在的结构化 schema。直接命令模式则读取实际 function parameters。
 

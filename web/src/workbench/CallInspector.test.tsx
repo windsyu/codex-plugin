@@ -6,6 +6,27 @@ import { readSnapshot } from './reading';
 const root = document.createElement('div');
 const trigger = document.createElement('button');
 afterEach(() => { render(null, root); root.remove(); trigger.remove(); });
+it.each([false, true])('does not claim conversation purpose for unbound WebSocket creates (partiallyBound=%s)', partiallyBound => {
+  const reading = readSnapshot({ runEpoch: 'ws', schemaVersion: 2, viewSeq: 1, capture: 'ok', items: [], responses: [], requests: [
+    ...[1, 2].map(index => ({ requestId: 'socket', clientRequestIndex: index, responseId: partiallyBound && index === 1 ? 'response-1' : null, purpose: 'conversation', requestedModel: 'fixture', codexThreadId: 'thread', codexTurnId: `turn-${index}`, purposeBasis: 'codex_turn_metadata' })),
+  ] }, 'ws');
+  render(<CallInspector reading={reading} epoch="ws" requestId={null} onSelect={() => {}} onClose={() => {}} />, root);
+  expect(root.querySelector('.wb-call-row')?.getAttribute('data-purpose')).toBe('unknown');
+  expect(root.textContent).toContain(partiallyBound ? '多种用途' : '用途未确认');
+  expect(root.textContent).toContain(partiallyBound ? 'WebSocket，部分关联未确认' : 'WebSocket，关联未确认');
+  expect(root.textContent).not.toContain('各次 create 分别归属');
+});
+it('describes a socket containing prewarm and two bound turns without a false unknown-connection label', () => {
+  const reading = readSnapshot({ runEpoch: 'ws', schemaVersion: 2, viewSeq: 1, capture: 'ok', items: [], responses: [], requests: [
+    { requestId: 'socket', clientRequestIndex: 1, responseId: 'prewarm', purpose: 'auxiliary', requestedModel: 'fixture', codexThreadId: null, codexTurnId: null, purposeBasis: 'unknown_metadata' },
+    ...[2, 3].map(index => ({ requestId: 'socket', clientRequestIndex: index, responseId: `response-${index}`, purpose: 'conversation', requestedModel: 'fixture', codexThreadId: 'thread', codexTurnId: `turn-${index}`, purposeBasis: 'codex_turn_metadata' })),
+  ] }, 'ws');
+  render(<CallInspector reading={reading} epoch="ws" requestId={null} onSelect={() => {}} onClose={() => {}} />, root);
+  expect(root.querySelectorAll('.wb-call-row')).toHaveLength(1);
+  expect(root.textContent).toContain('多种用途');
+  expect(root.textContent).toContain('WebSocket，各次 create 分别归属');
+  expect(root.textContent).not.toContain('WebSocket，关联未确认');
+});
 it.each([false, true])('does not invent a model call for run-level direct diagnostics (historical=%s)', historical => {
   const reading = readSnapshot({ runEpoch: 'direct', schemaVersion: 2, viewSeq: 2, capture: 'unavailable', requests: [], responses: [], items: [], diagnostics: [{ requestId: '00000000-0000-0000-0000-000000000000', captureSeq: 0, code: 'model_capture_unavailable' }], toolContexts: [] }, 'direct');
   expect(callRequestIds(reading)).toEqual([]);

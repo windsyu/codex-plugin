@@ -210,3 +210,76 @@ async fn request_limits_interruption_and_compression_never_publish_partial_metad
         assert!(decoder.buffered_bytes() <= 128);
     }
 }
+
+#[tokio::test]
+async fn zstd_http_request_retains_canonical_metadata_after_complete_frame() {
+    let (sender, mut receiver) = capture::channel(4096, 8);
+    let mut stream = sender.stream(Source {
+        request_id: Uuid::new_v4(),
+        direction: Direction::Request,
+        transport: Transport::Http,
+        content_type: "application/json".into(),
+        content_encoding: "zstd".into(),
+    });
+    let encoded =
+        zstd::stream::encode_all(serde_json::to_vec(&body("user")).unwrap().as_slice(), 3).unwrap();
+    let mut decoder = Decoder::new(DecoderLimits::default(), policy());
+    let mut output = Vec::new();
+    for chunk in encoded.chunks(13) {
+        stream.offer(Bytes::copy_from_slice(chunk), Instant::now());
+        decoder.push(&receiver.recv().await.unwrap(), |event| output.push(event));
+    }
+    assert!(
+        !output
+            .iter()
+            .any(|event| matches!(event.change, Change::Request { .. }))
+    );
+    stream.finish();
+    decoder.push(&receiver.recv().await.unwrap(), |event| output.push(event));
+    assert!(output.iter().any(|event| matches!(&event.change, Change::Request { info } if info.purpose == RequestPurpose::Conversation && info.codex_turn_id.as_deref() == Some("turn_a"))));
+    assert!(
+        !output
+            .iter()
+            .any(|event| matches!(event.change, Change::Diagnostic { .. }))
+    );
+}
+
+#[tokio::test]
+async fn zstd_gap_interruption_and_stacked_encodings_never_publish_identity() {
+    for mode in ["gap", "interrupted", "zstd, gzip"] {
+        let (sender, mut receiver) = capture::channel(4096, 8);
+        let mut stream = sender.stream(Source {
+            request_id: Uuid::new_v4(),
+            direction: Direction::Request,
+            transport: Transport::Http,
+            content_type: "application/json".into(),
+            content_encoding: if mode == "zstd, gzip" { mode } else { "zstd" }.into(),
+        });
+        let encoded =
+            zstd::stream::encode_all(serde_json::to_vec(&body("user")).unwrap().as_slice(), 3)
+                .unwrap();
+        let mut decoder = Decoder::new(DecoderLimits::default(), policy());
+        let mut output = Vec::new();
+        stream.offer(Bytes::from(encoded), Instant::now());
+        let mut observation = receiver.recv().await.unwrap();
+        if mode == "gap" {
+            observation.sequence += 1;
+        }
+        decoder.push(&observation, |event| output.push(event));
+        if mode != "interrupted" {
+            stream.finish();
+        }
+        drop(stream);
+        decoder.push(&receiver.recv().await.unwrap(), |event| output.push(event));
+        assert!(
+            !output
+                .iter()
+                .any(|event| matches!(event.change, Change::Request { .. }))
+        );
+        assert!(
+            output
+                .iter()
+                .any(|event| matches!(event.change, Change::Diagnostic { .. }))
+        );
+    }
+}

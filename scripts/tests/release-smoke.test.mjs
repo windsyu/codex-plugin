@@ -3,13 +3,60 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { waitForSyntheticLaunches } from '../lib/release-smoke.mjs';
+import { spawnSync } from 'node:child_process';
+import { waitForSyntheticLaunches, writeSyntheticCli } from '../lib/release-smoke.mjs';
 
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'release-launch-ledger-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, 'launched-cwds');
 }
+
+test('release synthetic CLI answers metadata reads without recording a TUI launch', t => {
+  const ledger = fixture(t);
+  const home = fs.realpathSync(path.dirname(ledger));
+  const cli = path.join(home, 'synthetic-codex');
+  writeSyntheticCli(cli);
+  const options = { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: home }, encoding: 'utf8', timeout: 5000 };
+  const requests = [
+    { id: 1, method: 'initialize' },
+    { method: 'initialized' },
+    { id: 2, method: 'config/read' },
+    { id: 3, method: 'configRequirements/read' },
+    { id: 4, method: 'account/read' },
+    { id: 5, method: 'config/read' },
+  ];
+  const result = spawnSync(cli, ['-c', 'features.plugins=false', 'app-server', '--stdio'], {
+    ...options, input: requests.map(request => JSON.stringify(request)).join('\n') + '\n',
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  const responses = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(responses.map(response => response.id), [1, 2, 3, 4, 5]);
+  assert.deepEqual(responses[0].result, {});
+  const config = {
+    config: {
+      model: 'synthetic-release', model_provider: 'custom',
+      model_providers: { custom: {
+        name: 'synthetic', base_url: 'http://127.0.0.1:1/v1', wire_api: 'responses',
+        requires_openai_auth: false, experimental_bearer_token: 'synthetic-release-token',
+      } },
+    },
+    layers: [],
+  };
+  assert.deepEqual(responses[1].result, config);
+  assert.deepEqual(responses[4].result, config);
+  assert.deepEqual(responses[2].result, { requirements: null });
+  assert.deepEqual(responses[3].result, { account: null });
+  assert.equal(fs.existsSync(ledger), false, 'metadata helper is not a TUI launch');
+  const version = spawnSync(cli, ['--version'], options);
+  assert.equal(version.status, 0);
+  assert.equal(version.stdout, 'codex-cli 0.159.2\n');
+  assert.equal(fs.existsSync(ledger), false, 'version lookup is not a TUI launch');
+  const tui = spawnSync(cli, [], { ...options, input: 'synthetic terminal input\n' });
+  assert.equal(tui.status, 0, tui.error?.message || tui.stderr);
+  assert.equal(tui.stdout, 'synthetic terminal input\n');
+  assert.equal(fs.readFileSync(ledger, 'utf8'), `${home}\n`, 'ordinary TUI records cwd exactly once');
+});
 
 // Schedule the script's observable work after the verifier starts, just as a
 // spawned CLI may execute after the backend has already reported run-ready.

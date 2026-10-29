@@ -47,6 +47,7 @@ async fn browser_settings_expand_save_conflict_and_collapse_keep_reading_and_ter
         change: Change::Request {
             info: RequestInfo {
                 client_request_index: None,
+                response_id: None,
                 requested_model: Some(policy.scrub("synthetic-model")),
                 codex_thread_id: Some(Uuid::new_v4()),
                 codex_turn_id: Some("settings-demo".into()),

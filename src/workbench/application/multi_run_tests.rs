@@ -219,7 +219,7 @@ async fn an_observed_native_thread_cannot_be_resumed_in_another_live_project() {
                 received_at: std::time::Instant::now(),
                 change: Change::Request {
                     info: RequestInfo {
-                        client_request_index: None,
+                        client_request_index: None, response_id: None,
                         requested_model: None,
                         codex_thread_id: Some(thread),
                         codex_turn_id: Some("synthetic-turn".into()),

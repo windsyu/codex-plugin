@@ -31,9 +31,9 @@ node scripts/dev.mjs check --component workbench
 
 CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与工作台 `.codex-web` 分开。`--profile named` 选择 `$CODEX_HOME/named.config.toml`；工作台 JSON 只保存启动偏好，不能替代 provider 配置。不得把个人配置或认证文件提交仓库或复制到中转。
 
-工作台按原生配置选择模型路由，不修改原生配置或静默切换 provider。预检只读取本次代理转发、认证来源与策略安全所必需的字段；非必要配置交给官方 CLI 处理，可省略字段遵循已确认的原生默认语义。路由、认证方式与 CLI 版本的具体支持范围见[支持文档](support.md)，实现约束见[详细设计](../design/workbench-detailed-design.md)。
+工作台通过已安装 CLI 的有界只读接口取得有效配置和账户路由，为本次进程接入同一模型代理，不修改原生配置或切换 provider。TOML、未知字段、默认值及认证形式由官方 CLI 校验；无需为了捕获把 provider 改为 custom。具体已验证组合和接入边界见[支持文档](support.md)、[详细设计](../design/workbench-detailed-design.md)及 [ADR 0068](../decisions/0068-shared-native-model-capture.md)。
 
-模型认证继续由官方 CLI 持有，工作台不执行登录或 `auth.command`，不接管凭据刷新。认证头只用于透明转发，不进入网页、观察记录或普通日志。无法确定安全上游、管理策略来源或所需认证时，页面给出对应诊断；文件读取/语法失败与不支持的路由分开提示，历史首页仍可使用。版本探测只报告兼容信息，不因版本号不同而要求降级。
+模型认证继续由官方 CLI 持有，工作台不执行登录或 `auth.command`，不读取命令输出、不接管凭据刷新。认证头仅在转发链路使用，不进入网页、观察记录或普通日志。原生 ChatGPT 绑定官方读取的账户和路由；同路由刷新继续，账户或路由改变要求新 Run。管理策略禁止地址覆写或有效目标无法可靠读取时，捕获明确不可用，原 CLI 仍自行启动校验；这不能作为完整捕获成功。版本探测只报告兼容信息，不因版本号不同而要求降级。
 
 ## 3. 启动、复用和生命周期
 

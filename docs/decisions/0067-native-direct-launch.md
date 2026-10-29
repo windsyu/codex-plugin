@@ -8,6 +8,8 @@ Accepted。用户明确选择先交付原生直连兼容：保留终端和历史
 
 2026-10-29
 
+配置门禁与统一捕获职责现由 [ADR 0068](0068-shared-native-model-capture.md)修订；本文保留原决定与当时的验证背景。
+
 ## Context
 
 v1.0.0 将所有启动交给 custom 捕获适配器，要求显式 `model_provider="custom"`、`wire_api` 和 `requires_openai_auth`。原生合法的省略 provider 配置因此被拒绝，又被错误提示为读取权限或 TOML 语法问题。用户要求非必要原生配置不被工作台重复校验，并保留原生默认 OpenAI 路由。

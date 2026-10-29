@@ -36,6 +36,7 @@ async fn browser_reports_save_failure_and_recovery_while_terminal_and_reading_co
         change: Change::Request {
             info: RequestInfo {
                 client_request_index: None,
+                response_id: None,
                 requested_model: Some(RedactionPolicy::new(vec![]).unwrap().scrub("synthetic")),
                 codex_thread_id: Some(thread),
                 codex_turn_id: Some("r3-fixture".into()),
