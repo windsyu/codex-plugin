@@ -17,6 +17,13 @@ const saved = { currentRunEpoch: 'current', run, snapshot, uncertainTail: true, 
 HTMLDialogElement.prototype.showModal = function () { this.open = true; };
 HTMLDialogElement.prototype.close = function () { this.open = false; };
 async function click(text: string) { await act(async () => [...root.querySelectorAll('button')].find(b => b.textContent!.includes(text))!.click()); await act(async () => {}); }
+it('keeps native direct historical records explicitly unavailable for model capture', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(success(list)).mockResolvedValueOnce(success({ ...saved, snapshot: { ...snapshot, capture: 'unavailable' } })));
+  await act(async () => render(<HistoryPanel epoch="current" active onReturn={() => {}} />, root)); await act(async () => {});
+  await click('<svg');
+  expect(root.textContent).toContain('本次为原生直连：模型实时捕获不可用');
+  expect(root.textContent).toContain('原生历史仍可从首页阅读');
+});
 it('loads history on demand, escapes labels and keeps history separate from native input', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(success(list)).mockResolvedValueOnce(success(saved)); vi.stubGlobal('fetch', fetch);
   const onReturn = vi.fn();

@@ -6,7 +6,7 @@ import { TerminalPanel } from './TerminalPanel';
 import { RunEndedNotice, type TerminalExit } from './RunEndedNotice';
 import { UserMessage } from './UserMessage';
 import { ToolCard } from './ToolCard';
-import { conversationEntries, useReading, type TextItem } from './reading';
+import { conversationEntries, nativeDirect, useReading, type TextItem } from './reading';
 import { readAnchor, restoreAnchor, type ReadingAnchor } from './readingAnchor';
 import { userMessages } from './viewItems';
 import { CallInspector, type OpenCalls, type SavedCallSource } from './CallInspector';
@@ -154,7 +154,7 @@ export function App({ run, applicationHome = false, page }: { run: Run; applicat
             setFollowing(followRef.current);
           }
         }}>
-          {!chat.length && <div className="wb-empty"><span aria-hidden="true">{currentExit ? '■' : '✳'}</span><h1>{currentExit ? '本次运行已结束' : '等待对话回复'}</h1><p>{currentExit ? '本次没有捕获到可展示的对话，终端输出仍可查看。' : '在右侧终端直接输入，即可使用原生 Codex。'}<br />调用记录可从左下角的用量概览中查看。</p></div>}
+          {!chat.length && <div className="wb-empty"><span aria-hidden="true">{currentExit ? '■' : '✳'}</span><h1>{currentExit ? '本次运行已结束' : nativeDirect(reading) ? '原生直连模式' : '等待对话回复'}</h1><p>{nativeDirect(reading) ? '模型实时捕获不可用。请在原生终端查看回复；原生历史仍可从首页阅读。' : currentExit ? '本次没有捕获到可展示的对话，终端输出仍可查看。' : '在右侧终端直接输入，即可使用原生 Codex。'}{!nativeDirect(reading) && <><br />调用记录可从左下角的用量概览中查看。</>}</p></div>}
           {notices.filter(item => item.evidence.length === 0).map(item => <p key={item.itemKey} className="wb-notice" role="status">{item.text}</p>)}
           {chat.map(entry => <div key={entry.key} data-reading-key={entry.key}>{entry.kind === 'user'
             ? <UserMessage user={entry.user} orderUnconfirmed={entry.orderUnconfirmed} />
@@ -174,7 +174,7 @@ export function App({ run, applicationHome = false, page }: { run: Run; applicat
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDetails(); }
     }}>
       <div className="wb-panel-heading"><strong>用量概览</strong><button onClick={closeDetails} aria-label="关闭用量概览">×</button></div>
-      <UsageOverview summary={reading.usageSummary} connected={reading.connected} />
+      <UsageOverview summary={reading.usageSummary} connected={reading.connected} captureUnavailable={nativeDirect(reading)} />
       <button ref={callsButton} className="wb-view-calls" onClick={() => openCalls(null)}>查看调用记录 <span aria-hidden="true">→</span></button>
       <SaveOverview reading={reading} />
       <RunDiagnostics reading={reading} epoch={run.runEpoch} processId={run.processId} />

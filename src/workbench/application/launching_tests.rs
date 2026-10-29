@@ -125,31 +125,25 @@ async fn new_directory_with_native_api_key_auth_enters_scoped_workbench() {
 async fn native_launch_failure_codes_reach_operation_and_homepage_without_payloads() {
     for code in [
         "native_cli_not_found",
-        "native_config_invalid",
+        "native_capture_config_unsupported",
         "native_auth_unverified",
-        "native_provider_unsupported",
         "native_project_config_invalid",
     ] {
         let fixture = Fixture::new();
         let cli = fixture.cli();
         match code {
             "native_cli_not_found" => std::fs::remove_file(&cli).unwrap(),
-            "native_config_invalid" => std::fs::write(
-                fixture.home.join("config.toml"),
-                "secret=[synthetic-private-value",
-            )
-            .unwrap(),
+            "native_capture_config_unsupported" => {
+                let text = std::fs::read_to_string(fixture.home.join("config.toml"))
+                    .unwrap()
+                    .replace("wire_api=\"responses\"", "wire_api=\"synthetic-private-value\"");
+                std::fs::write(fixture.home.join("config.toml"), text).unwrap();
+            }
             "native_auth_unverified" => std::fs::write(
                 fixture.home.join("auth.json"),
                 r#"{"tokens":{"access_token":"synthetic-private-value"}}"#,
             )
             .unwrap(),
-            "native_provider_unsupported" => {
-                let text = std::fs::read_to_string(fixture.home.join("config.toml"))
-                    .unwrap()
-                    .replace("model_provider=\"custom\"", "model_provider=\"other\"");
-                std::fs::write(fixture.home.join("config.toml"), text).unwrap();
-            }
             _ => {
                 std::fs::create_dir(fixture.cwd.join(".codex")).unwrap();
                 std::fs::write(

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import type { ReadingView, ResponseView } from './reading';
+import { nativeDirect } from './reading';
 import { itemRequestId, modelItems, toolItems } from './viewItems';
 import { ModelMessage } from './ModelMessage';
 import { RequestDetails } from './RequestDetails';
@@ -10,7 +11,7 @@ export type OpenCalls = (requestId: string | null, source?: SavedCallSource) => 
 export const callRequestIds = (reading: ReadingView) => [...new Set([
   ...reading.requests.map(r => r.requestId), ...reading.responses.map(r => r.requestId),
   ...reading.items.map(itemRequestId).filter((id): id is string => id !== null),
-  ...reading.toolContexts.map(c => c.requestId), ...reading.diagnostics.map(d => d.requestId)
+  ...reading.toolContexts.map(c => c.requestId), ...reading.diagnostics.filter(d => d.code !== 'model_capture_unavailable').map(d => d.requestId)
 ])];
 const purposes = { conversation: '对话', auxiliary: '辅助', unknown: '用途未确认' };
 function tokens(response: ResponseView) {
@@ -43,7 +44,7 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
   }}>
     <div className="wb-panel-heading"><strong>{title}</strong><span className="wb-subtle">{scope}</span><button ref={close} onClick={onClose} aria-label="关闭调用面板">×</button></div>
     <div className="wb-call-body" ref={body}>
-      {requestId === null ? <>
+      {nativeDirect(reading) ? <p className="wb-notice" role="status">原生直连模式：模型实时捕获不可用，本次没有记录模型调用详情或用量。请在原生终端查看回复，原生历史仍可从首页阅读。</p> : requestId === null ? <>
         <p className="wb-subtle">{historical ? '此保存窗口内的调用，状态固定在保存时。' : '包含对话、辅助及用途未确认的请求。较早详情可能已移出预览，累计用量仍保留。'}时长仅为单次响应的观察时长。</p>
         {!ids.length && <p className="wb-subtle">尚无可查看的调用记录。</p>}
         <div className="wb-call-list">{ids.map(id => {

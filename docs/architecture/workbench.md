@@ -109,7 +109,9 @@ macOS 后台 Application 使用用户级 LaunchAgent，沿用相同实例作用�
 
 Application 的目录浏览器独立于固定根 WorkspaceReader，只为完整 owner 枚举当前层可读目录元信息。规范路径、分页快照、扫描/响应预算及并发限制避免全树扫描；不读正文、不执行 Shell，不影响 PTY/模型转发。选择目录仍走原目标校验与 spawn 前复查，不能通过浏览接口扩大配对设备或 Run 文件权限。
 
-模型认证由官方 CLI 独占。当前 `unmanaged-custom` 支持已验证的 Responses provider：静态 bearer 路径或原生 `auth.command` 路径互斥；command 路径要求 `requires_openai_auth=false`，排除 bearer/env/AWS 等冲突。两条路径均保留有效路由来源门禁：File credential store、缺失或 API-key 形状的 `auth.json`；拒绝 managed/system、ChatGPT token 和未验证的 keyring/auto。命令路径读取原生登录快照只为排除 cloud-managed 路由补值，spawn 前复查，不把该文件当命令 token，细节见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)。工作台不执行命令、不读取动态命令 token，只透明转发 CLI 的 Authorization；header 不进入观察/网页/journal。已知静态密钥用于脱敏，但未知动态 token 若被上游回显在正文，不能承诺按值识别。版本探测是有界诊断，不是精确版本 allowlist；真实版本/传输兼容以支持报告为准。
+模型认证、provider 选择与传输由官方 CLI 持有。启动分为原生直连和已验证的 custom 捕获路径：默认 OpenAI/ChatGPT 走原生直连，不覆盖 provider、base URL、认证或 WebSocket，也不执行本次直连无需的认证/可选字段预检；终端和原生历史仍可用，实时模型捕获及调用详情明确不可用，记录不能冒充完整捕获。直连保留原生账号后端发现与刷新行为，详见 [ADR 0067](../decisions/0067-native-direct-launch.md)。
+
+显式选择已支持的 custom 捕获时，预检只检查固定上游、认证与策略来源等必要边界，可省略字段遵循已确认的原生默认值；未知或与捕获无关的字段交给 CLI。静态 bearer 与原生 `auth.command` 的具体范围见[支持文档](../guides/support.md)和 [ADR 0060](../decisions/0060-native-provider-command-auth.md)，本次决定对旧有显式字段要求的修正以 ADR 0067 为准。工作台不执行认证命令、不读取动态命令 token，只透明转发 CLI 的 Authorization；header 不进入观察/网页/journal。已知静态密钥用于脱敏，未知动态 token 被上游回显到正文时仍不保证按值识别。版本探测是有界诊断，不是精确版本 allowlist。
 
 | 权限 | 作用域与排除项 |
 | --- | --- |

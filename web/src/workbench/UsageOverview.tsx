@@ -1,4 +1,5 @@
 import type { ReadingView, RecorderStatus } from './reading';
+import { nativeDirect } from './reading';
 import { saveLabel } from './RecorderStatus';
 import { compactTokens, fullTokens, usagePartial, type UsageMetric, type UsageSummary } from './usage';
 
@@ -13,11 +14,12 @@ export function UsageFooter({ reading, expanded, onToggle }: { reading: ReadingV
   const warning = reading.recorderStatus?.state === 'degraded' || !!reading.recorderStatus?.gapCount;
   return <footer className="wb-footer">
     <button className="wb-usage-toggle" aria-label="查看用量概览" aria-expanded={expanded} aria-controls="wb-run-overview" onClick={onToggle}>
-      <span className="wb-usage-footer-total" title={`已知 Token ${fullTokens(summary?.totalTokens)}`}>Token <strong>{compactTokens(summary?.totalTokens)}</strong></span>
+      {nativeDirect(reading) ? <span>原生直连 · 用量不可用</span> : <><span className="wb-usage-footer-total" title={`已知 Token ${fullTokens(summary?.totalTokens)}`}>Token <strong>{compactTokens(summary?.totalTokens)}</strong></span>
       <span title={`输入 ${fullTokens(summary?.inputTokens)}`}>输入 {compactTokens(summary?.inputTokens)}</span>
       <span title={`输出 ${fullTokens(summary?.outputTokens)}`}>输出 {compactTokens(summary?.outputTokens)}</span>
       <span className="wb-usage-footer-cache" title={`缓存命中 ${fullTokens(summary?.cachedInputTokens)}`}>缓存 {compactTokens(summary?.cachedInputTokens)}</span>
       {summary && usagePartial(summary) && <span className="wb-usage-partial">部分用量</span>}
+      </>}
       <span aria-hidden="true">{expanded ? '⌄' : '⌃'}</span>
     </button>
     <button className={`wb-save-summary ${warning ? 'is-warning' : ''}`} aria-label={`保存状态：${saveSummary(reading.recorderStatus, reading.viewSeq)}`} aria-expanded={expanded} aria-controls="wb-run-overview" onClick={onToggle}>{saveSummary(reading.recorderStatus, reading.viewSeq)}</button>
@@ -32,7 +34,8 @@ function Metric({ label, metric, note, responses }: { label: string; metric?: Us
     <small>{metric?.tokens == null ? (coverage ? '超出可显示范围' : '尚未提供') : coverage < responses ? `来自 ${coverage} / ${responses} 次响应` : note || 'Token'}</small>
   </div>;
 }
-export function UsageOverview({ summary, connected }: { summary?: UsageSummary; connected: boolean }) {
+export function UsageOverview({ summary, connected, captureUnavailable = false }: { summary?: UsageSummary; connected: boolean; captureUnavailable?: boolean }) {
+  if (captureUnavailable) return <section className="wb-usage-overview" aria-label="本次运行用量"><p>原生直连模式：模型实时捕获不可用，本次用量和调用详情未记录。请在原生终端查看回复。</p></section>;
   const count = summary?.responseCount || 0;
   const known = summary?.totalTokens.responses || 0;
   return <section className="wb-usage-overview" aria-label="本次运行用量">
@@ -61,7 +64,8 @@ export function SaveOverview({ reading }: { reading: ReadingView }) {
     <span>对话保存</span><strong className={status?.state === 'degraded' || status?.gapCount ? 'is-warning' : ''}>{saveSummary(status, reading.viewSeq)}</strong>
     {(!status || status.state === 'disabled') && <p>退出后无法在工作台恢复本次内容。</p>}
     {status?.state === 'degraded' && <p role="status">保存暂时失败，终端仍可使用。尚未保存的内容可能在退出后丢失。</p>}
-    {!!status?.gapCount && <p>部分历史未能保存；后续内容继续记录，缺失的中间过程没有被补齐。</p>}
+    {!!status?.gapCount && !nativeDirect(reading) && <p>部分历史未能保存；后续内容继续记录，缺失的中间过程没有被补齐。</p>}
+    {nativeDirect(reading) && <p>本次模型正文未捕获；工作台保存的运行记录不包含完整对话。原生历史仍可从首页阅读。</p>}
     {reading.capture === 'partial' && <p>部分内容未能完整显示；已保存的内容也可能不完整。</p>}
   </div>;
 }

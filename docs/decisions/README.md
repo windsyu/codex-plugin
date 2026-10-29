@@ -32,3 +32,5 @@ ADR 记录决定及其理由；适用边界以当前架构、专题契约和[支
 - [ADR 0064：任务识别与人类对话优先的历史呈现](0064-human-conversation-presentation.md)
 - [ADR 0065：以 main 为基础整合历史模块与公网中转 API 2](0065-main-history-relay-integration.md)
 - [ADR 0066：按 CLI Run 复用的加密中转通道](0066-run-scoped-encrypted-relay-channels.md)（Accepted；可信前端、API/wire 3、单 origin，无明文降级）
+
+- [ADR 0067：原生直连启动与可选模型捕获](0067-native-direct-launch.md)（Accepted；原生默认路由不覆盖，捕获不可用明确持久化，必要配置采用原生默认）

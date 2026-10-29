@@ -16,6 +16,15 @@ export const summaryFixture = (): UsageSummary => ({
   captureIncomplete: false, unidentifiedResponse: false, capacityExceeded: false,
 });
 const snapshot = () => ({ runEpoch: 'current', schemaVersion: 2, viewSeq: 2, items: [], requests: [], responses: [], diagnostics: [], toolContexts: [], nativeCommands: [], nativeFileChanges: [], userCapture: { enabled: true, diagnostics: [] }, capture: 'ok', usageSummary: summaryFixture() });
+it('labels native direct mode without implying zero model usage or a pending capture', () => {
+  const reading = readSnapshot({ ...snapshot(), capture: 'unavailable' }, 'current');
+  render(<><UsageFooter reading={reading} expanded onToggle={() => {}} /><UsageOverview captureUnavailable connected /><SaveOverview reading={reading} /><RunDiagnostics reading={reading} epoch="current" processId={1} /></>, root);
+  expect(root.textContent).toContain('原生直连 · 用量不可用');
+  expect(root.textContent).toContain('模型实时捕获不可用');
+  expect(root.textContent).toContain('原生历史仍可从首页阅读');
+  expect(root.textContent).not.toContain('等待模型返回用量');
+  expect(root.textContent).not.toContain('0 次模型响应');
+});
 it('puts tokens ahead of diagnostics, uses the reported total without adding its subsets, and opens on demand', () => {
   const reading = readSnapshot(snapshot(), 'current'), onToggle = vi.fn();
   render(<UsageFooter reading={reading} expanded={false} onToggle={onToggle} />, root);
