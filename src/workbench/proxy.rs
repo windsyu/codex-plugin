@@ -171,16 +171,28 @@ pub struct ProxyServer {
 
 impl ProxyServer {
     pub async fn bind(upstream: Upstream, capture: CaptureSender) -> Result<Self> {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
+            .connect_timeout(std::time::Duration::from_secs(30))
             // Feature unification must not silently enable decompression.
             .no_gzip()
             .no_brotli()
             .no_deflate()
-            .no_zstd()
-            .build()
-            .context("build model forwarding client")?;
+            .no_zstd();
+        // launchd does not inherit shell proxy variables. Reqwest's system-proxy
+        // feature supplies the user's OS HTTP(S) proxy for remote destinations.
+        // Its macOS implementation does not honor OS proxy exceptions, so keep
+        // the explicitly validated local upstream out of every network proxy.
+        if upstream
+            .base
+            .host_str()
+            .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
+        {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context("build model forwarding client")?;
         Self::bind_with_client(upstream, capture, client).await
     }
 
@@ -255,6 +267,31 @@ fn diagnostic(status: StatusCode, code: &'static str, request_id: Uuid) -> Respo
         axum::Json(serde_json::json!({
             "error": { "source": "model_proxy", "code": code, "requestId": request_id }
         })),
+    )
+        .into_response()
+}
+
+fn upstream_failure(error: &reqwest::Error, request_id: Uuid) -> Response {
+    // Never serialize Display/Debug, the URL, or a source error: they may contain
+    // credentials and private request paths. These predicates are fixed classes,
+    // not claims that e.g. a connect failure is specifically DNS or TLS.
+    let reason = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "other"
+    };
+    (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({"error": {
+            "source": "model_proxy", "code": "upstream_failed",
+            "requestId": request_id, "reason": reason
+        }})),
     )
         .into_response()
 }
@@ -459,10 +496,9 @@ async fn forward(State(state): State<Arc<ProxyState>>, mut request: Request<Body
         value = outgoing.send() => value,
         _ = shutdown.changed() => return diagnostic(StatusCode::SERVICE_UNAVAILABLE, "run_stopped", request_id),
     };
-    let Ok(upstream) = upstream else {
-        // reqwest errors contain URLs. Neither credentials nor capabilities may
-        // appear in errors sent to a client or general-purpose logs.
-        return diagnostic(StatusCode::BAD_GATEWAY, "upstream_failed", request_id);
+    let upstream = match upstream {
+        Ok(upstream) => upstream,
+        Err(error) => return upstream_failure(&error, request_id),
     };
     let status = upstream.status();
     if state.upstream.workspace.is_some() && status.is_redirection() {
