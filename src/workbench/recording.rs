@@ -388,7 +388,13 @@ fn record(
                             through_view_seq: checkpoint.sequence(),
                             after_record_seq: 0,
                             through_record_seq: checkpoint.record_seq,
-                            reason: fault.unwrap_or("late_recording_start").into(),
+                            reason: fault
+                                .unwrap_or(if checkpoint.snapshot["capture"] == "unavailable" {
+                                    "model_capture_unavailable"
+                                } else {
+                                    "late_recording_start"
+                                })
+                                .into(),
                         });
                     }
                     let created = Writer::create(&root, meta, checkpoint.clone())?;

@@ -31,14 +31,9 @@ node scripts/dev.mjs check --component workbench
 
 CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与工作台 `.codex-web` 分开。`--profile named` 选择 `$CODEX_HOME/named.config.toml`；工作台 JSON 只保存启动偏好，不能替代 provider 配置。不得把个人配置或认证文件提交仓库或复制到中转。
 
-当前模型适配器为 `unmanaged-custom`：原生 `custom` provider、Responses、显式上游、File credential store，并从两条互斥认证路径选一条：
+工作台按原生配置选择模型路由，不修改原生配置或静默切换 provider。预检只读取本次代理转发、认证来源与策略安全所必需的字段；非必要配置交给官方 CLI 处理，可省略字段遵循已确认的原生默认语义。路由、认证方式与 CLI 版本的具体支持范围见[支持文档](support.md)，实现约束见[详细设计](../design/workbench-detailed-design.md)。
 
-- 非空静态 bearer，`requires_openai_auth=true` 或 `false`；保留原生 File API Key。
-- 原生 `auth.command`，`requires_openai_auth=false`，可选字符串数组 `args`；命令/token 由官方 CLI 执行、缓存与刷新，工作台不执行命令或读取输出。与静态 bearer、env key/header、AWS 和 `true` 互斥。
-
-工作台检查缺失或 API-key 形状的 `auth.json` 以排除 cloud-managed 路由变化，不从中取得命令 token。managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 未纳入支持。无法确认路由时项目启动拒绝并说明原因，历史首页保留；不要修改模型/权限、关证书校验或改全局配置绕过。新增命令认证有安装版 CLI 0.162.1/合成 provider 证据，真实 provider 和公网发送仍待验，见[支持范围](support.md)与 [ADR 0060](../decisions/0060-native-provider-command-auth.md)。
-
-模型 Authorization 只在电脑上的原生模型路径透明转发，不进入观察、页面或 journal；中转账号登录不为模型登录。工作台不读取动态 token，不能保证按精确值脱敏正文主动回显的动态凭据，勿让模型/工具输出凭据。
+模型认证继续由官方 CLI 持有，工作台不执行登录或 `auth.command`，不接管凭据刷新。认证头只用于透明转发，不进入网页、观察记录或普通日志。无法确定安全上游、管理策略来源或所需认证时，页面给出对应诊断；文件读取/语法失败与不支持的路由分开提示，历史首页仍可使用。版本探测只报告兼容信息，不因版本号不同而要求降级。
 
 ## 3. 启动、复用和生命周期
 

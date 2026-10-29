@@ -112,7 +112,7 @@ function SavedReading({ value, reading, onInspect }: { value: SavedRun; reading:
     {value.uncertainTail && <p role="status" className="wb-notice">此服务未确认正常退出。曾显示但未保存的尾部可能已经丢失，无法确定丢失数量。</p>}
     {!!value.gaps.length && <p className="wb-notice">保存有 {value.gaps.length} 处缺口；恢复后的快照不代表缺失的中间过程已补齐。</p>}
     {value.detailsPartial && <p className="wb-notice">部分上下文超出保存预览范围，详情可能不完整。</p>}
-    {reading.capture !== 'ok' && <p className="wb-notice">保存的观察内容存在捕获缺口、截断或省略；已保存不等于完整捕获。</p>}
+    {reading.capture !== 'ok' && <p className="wb-notice">{reading.capture === 'unavailable' ? '本次为原生直连：模型实时捕获不可用，工作台记录不包含模型正文、调用详情或用量。原生历史仍可从首页阅读。' : '保存的观察内容存在捕获缺口、截断或省略；已保存不等于完整捕获。'}</p>}
     {reading.items.filter(item => item.kind === 'notice').map(item => <p key={item.itemKey} role="status" className="wb-notice">{item.text}</p>)}
     {!!value.issues.length && <ul className="wb-notice">{value.issues.map((issue, i) => <li key={i}>{historyIssue[issue.code] || '历史记录不完整'} · 分段 {issue.segment.slice(0, 8)} / {issue.byteOffset}</li>)}</ul>}
     <div className="wb-history-actions">{onInspect && <button onClick={() => inspect(null)}>查看此历史的调用记录</button>}</div>
