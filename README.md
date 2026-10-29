@@ -52,7 +52,7 @@ code-view       # 在当前项目启动 CLI 与网页工作台
 codex-view      # 仅打开项目 / 历史首页，不启动 CLI
 ```
 
-`v1.0.1` 发布包面向 macOS / Apple Silicon，包含后台服务与按 Run 加密的可选公网连接器，不附带独立 Relay 服务器；公网前端、电脑与 Relay 须配套使用 API/wire 3，无明文回退，仍信任自部署前端及授权方。模型路由、认证方式、CLI 版本和其他平台的受测边界见[支持范围](docs/guides/support.md)，主版本号不扩大受测范围。
+`v1.0.2` 发布包面向 macOS / Apple Silicon，包含后台服务与按 Run 加密的可选公网连接器，不附带独立 Relay 服务器；公网前端、电脑与 Relay 须配套使用 API/wire 3，无明文回退，仍信任自部署前端及授权方。模型路由、认证方式、CLI 版本和其他平台的受测边界见[支持范围](docs/guides/support.md)，主版本号不扩大受测范围。
 
 从源码运行或部署 Relay，请分别阅读[开发指南](docs/development/README.md)和[中继部署指南](docs/guides/public-relay-deployment.md)。安装、后台运行、配置与卸载的完整步骤均在 `docs/guides/`。
 

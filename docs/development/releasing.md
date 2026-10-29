@@ -4,7 +4,7 @@
 
 ## 本地打包
 
-当前版本 `1.0.1`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
+当前版本 `1.0.2`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
 
 ```sh
 node scripts/dev.mjs doctor
@@ -33,7 +33,7 @@ macOS 打包还需当前固定工具链配套的 `rust-docs` 与 `rust-src` 组�
 
 `manifest.json` 记录版本、target、sourceCommit 和 sourceDirty；本地工作树有改动时允许生成可试用包，明确标为本地来源，不伪装为已发布 main tag。包内与归档校验和分开，安装器校验包内内容。当前包没有 Apple 签名、notarization 或自动更新。
 
-将本地包替换到已有快速安装时，使用 `bash scripts/install-macos.sh --archive /absolute/path/code-view-1.0.1-aarch64-apple-darwin.tar.gz --prefix "$HOME/.codex-view" --force --no-path`，同目录保留打包生成的 `SHA256SUMS`。该入口不下载发布资产，并同步受管文件和卸载清单；保留原 PATH 登记。先确认并正常停止旧服务，安装后核对 manifest、文件哈希及新程序状态；不要只覆盖 binary 或通过手动包入口绕过快速安装清单。
+将本地包替换到已有快速安装时，使用 `bash scripts/install-macos.sh --archive /absolute/path/code-view-1.0.2-aarch64-apple-darwin.tar.gz --prefix "$HOME/.codex-view" --force --no-path`，同目录保留打包生成的 `SHA256SUMS`。该入口不下载发布资产，并同步受管文件和卸载清单；保留原 PATH 登记。先确认并正常停止旧服务，安装后核对 manifest、文件哈希及新程序状态；不要只覆盖 binary 或通过手动包入口绕过快速安装清单。
 
 ## 发布门槛
 
