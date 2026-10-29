@@ -47,33 +47,22 @@ pub(super) struct Evidence {
 }
 
 pub(super) fn call_indices(state: &State) -> HashMap<UserKey, Vec<usize>> {
-    let domains: HashMap<_, _> = state
-        .requests
-        .iter()
-        .filter_map(|request| {
-            if request.info.client_request_index.is_some()
-                || request.info.purpose != RequestPurpose::Conversation
-            {
-                return None;
-            }
-            Some((
-                request.request_id,
-                (
-                    request.info.codex_thread_id?,
-                    request.info.codex_turn_id.as_ref()?,
-                ),
-            ))
-        })
-        .collect();
     let mut calls: HashMap<UserKey, Vec<usize>> = HashMap::new();
     for (index, call) in state.tools.iter().enumerate() {
-        if let (Some((thread, turn)), Some(id)) =
-            (domains.get(&call.key.request_id), &call.identity.call_id)
-        {
+        let Some(request) = super::tools::request_for_key(state, &call.key)
+            .filter(|request| request.info.purpose == RequestPurpose::Conversation)
+        else {
+            continue;
+        };
+        if let (Some(thread), Some(turn), Some(id)) = (
+            request.info.codex_thread_id,
+            &request.info.codex_turn_id,
+            &call.identity.call_id,
+        ) {
             calls
                 .entry(UserKey {
-                    codex_thread_id: *thread,
-                    codex_turn_id: (*turn).clone(),
+                    codex_thread_id: thread,
+                    codex_turn_id: turn.clone(),
                     native_item_id: id.clone(),
                 })
                 .or_default()

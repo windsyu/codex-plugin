@@ -148,6 +148,7 @@ async fn browser_workspace_files_search_git_and_responsive_navigation_keep_termi
         change: Change::Request {
             info: crate::workbench::decode::request::RequestInfo {
                 client_request_index: None,
+                response_id: None,
                 requested_model: Some(policy.scrub("synthetic-model")),
                 codex_thread_id: Some(Uuid::new_v4()),
                 codex_turn_id: Some("workspace-demo".into()),

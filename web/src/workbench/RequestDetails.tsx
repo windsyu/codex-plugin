@@ -1,6 +1,6 @@
 import { workbenchFetch } from './context';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { ResponseView } from './reading';
+import { requestAssociation, type RequestView, type ResponseView } from './reading';
 import { responseLabel } from './ModelMessage';
 import { runApi } from './runApi';
 
@@ -16,8 +16,8 @@ const MAX_ENTRIES = 256;
 const MAX_BYTES = 2 * 1024 * 1024;
 const labels: Record<string, string> = { settings: '请求参数', instructions: '系统说明', input: '请求消息', tools: '工具定义', response: '响应信息', output: '响应输出' };
 const responseVersion = (responses: ResponseView[]) => JSON.stringify(responses.map(r => [r.responseId, r.status, r.usageConflict]));
-const sourceLabel = (source: Source) => source.kind === 'request'
-  ? (source.clientRequestIndex === null ? 'HTTP 请求' : `WebSocket create ${source.clientRequestIndex} · 响应关联未确认`)
+const sourceLabel = (source: Source, requests: RequestView[]) => source.kind === 'request'
+  ? (source.clientRequestIndex === null ? 'HTTP 请求' : requestAssociation(source.clientRequestIndex, requests.find(request => request.clientRequestIndex === source.clientRequestIndex)))
   : `响应 ${source.responseId || '身份未确认'}`;
 const count = (value: number | null | undefined) => value == null ? '未提供' : value.toLocaleString('zh-CN');
 
@@ -36,16 +36,16 @@ export function ResponseUsage({ response, historical = false }: { response: Resp
   </section>;
 }
 
-export function RequestDetails({ epoch, requestId, responses, expanded, onToggle, historical = false, before }: {
-  epoch: string; requestId: string; responses: ResponseView[]; expanded: boolean; onToggle?: () => void; historical?: boolean; before?: number | null;
+export function RequestDetails({ epoch, requestId, responses, requests = [], expanded, onToggle, historical = false, before }: {
+  epoch: string; requestId: string; responses: ResponseView[]; requests?: RequestView[]; expanded: boolean; onToggle?: () => void; historical?: boolean; before?: number | null;
 }) {
   return <section className="wb-request-context">
     {onToggle && <button className="wb-context-toggle" aria-expanded={expanded} onClick={onToggle}>{expanded ? '▾' : '▸'} 上下文与用量</button>}
-    {expanded && <ContextBody key={`${epoch}:${requestId}:${before ?? ''}`} epoch={epoch} requestId={requestId} responses={responses} historical={historical} before={before} />}
+    {expanded && <ContextBody key={`${epoch}:${requestId}:${before ?? ''}`} epoch={epoch} requestId={requestId} responses={responses} requests={requests.filter(request => request.requestId === requestId)} historical={historical} before={before} />}
   </section>;
 }
 
-function ContextBody({ epoch, requestId, responses, historical, before }: { epoch: string; requestId: string; responses: ResponseView[]; historical: boolean; before?: number | null }) {
+function ContextBody({ epoch, requestId, responses, requests, historical, before }: { epoch: string; requestId: string; responses: ResponseView[]; requests: RequestView[]; historical: boolean; before?: number | null }) {
   const [page, setPage] = useState<Page | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -92,7 +92,7 @@ function ContextBody({ epoch, requestId, responses, historical, before }: { epoc
     return () => { disposed.current = true; inFlight.current?.abort(); };
   }, [epoch, requestId]);
   return <div className="wb-context-body">
-    <p className="wb-subtle">{historical ? '按需读取此历史运行已保存的脱敏观察副本。' : '按需读取本次运行的脱敏观察副本。'}请求中的历史消息与系统上下文不代表新的用户提交；WebSocket create 与响应分别列出，不猜测对应关系。</p>
+    <p className="wb-subtle">{historical ? '按需读取此历史运行已保存的脱敏观察副本。' : '按需读取本次运行的脱敏观察副本。'}请求中的历史消息与系统上下文不代表新的用户提交；WebSocket create 仅在观察到明确对应关系后标注响应。</p>
     {responses.map(response => <ResponseUsage key={response.responseId || 'unknown'} response={response} historical={historical} />)}
     <p className="wb-subtle">用量属于各次模型响应，不汇总为整个任务，也不重复累加缓存或推理明细。</p>
     <div className="wb-context-actions"><button disabled={busy} onClick={() => void load()}>刷新上下文</button>{busy && <span role="status">正在读取…</span>}</div>
@@ -107,7 +107,7 @@ function ContextBody({ epoch, requestId, responses, historical, before }: { epoc
       {page.truncated && <p className="wb-notice">上下文超过观察或缓存限制，仅保留部分内容。</p>}
       {page.conflict && <p className="wb-notice">同一来源出现不同内容，各份观察独立保留。</p>}
       <div className="wb-context-entries">{entries.map((entry, index) => <details className="wb-context-entry" key={`${entry.captureSeq}:${entry.section}:${index}`}>
-        <summary>{labels[entry.section] || '未识别内容'}{entry.position === null ? '' : ` ${entry.position + 1}`} · {sourceLabel(entry.source)}{entry.truncated ? ' · 已截断' : ''}{entry.omitted ? ' · 有省略' : ''}</summary>
+        <summary>{labels[entry.section] || '未识别内容'}{entry.position === null ? '' : ` ${entry.position + 1}`} · {sourceLabel(entry.source, requests)}{entry.truncated ? ' · 已截断' : ''}{entry.omitted ? ' · 有省略' : ''}</summary>
         {entry.jsonPointer && <p className="wb-subtle wb-context-location">请求或响应中的位置：<code>{entry.jsonPointer}</code></p>}
         {entry.childrenSeparated && <p className="wb-subtle wb-context-location">内含工具定义已单独列出，可继续向后阅读。</p>}
         <pre>{entry.preview}</pre>

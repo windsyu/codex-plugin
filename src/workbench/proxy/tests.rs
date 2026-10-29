@@ -661,3 +661,248 @@ async fn disconnect_and_run_shutdown_release_streaming_connections() {
         assert!(capture.stats().interrupted_streams > 0);
     }
 }
+
+#[tokio::test]
+async fn workspace_route_binds_account_preserves_token_refresh_and_rejects_redirects() {
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let seen = forwarded.clone();
+    let upstream = fixture(move |request| {
+        let seen = seen.clone();
+        async move {
+            assert_eq!(request.headers()["chatgpt-account-id"], "synthetic-account");
+            assert_eq!(request.headers()["x-openai-account-routing-override"], "us");
+            seen.fetch_add(1, Ordering::SeqCst);
+            (
+                StatusCode::FOUND,
+                [(header::LOCATION, "https://untrusted.invalid")],
+                "redirect",
+            )
+                .into_response()
+        }
+    })
+    .await;
+    let (capture, _receiver) = capture::channel(1024 * 1024, 16);
+    let route = Upstream::parse(&format!("http://{}/v1", upstream.address))
+        .unwrap()
+        .with_workspace_route("synthetic-account".into(), Some("us".into()))
+        .unwrap();
+    let proxy = ProxyServer::bind_with_client(route, capture, client())
+        .await
+        .unwrap();
+    for token in ["synthetic-before-refresh", "synthetic-after-refresh"] {
+        let response = client()
+            .post(format!("{}/responses", proxy.child_base_url()))
+            .header("chatgpt-account-id", "synthetic-account")
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-openai-account-routing-override", "us_cr")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("native_workspace_redirect_rejected")
+        );
+    }
+    for account in [None, Some("different-account")] {
+        let mut request = client()
+            .post(format!("{}/responses", proxy.child_base_url()))
+            .body("{}");
+        if let Some(account) = account {
+            request = request.header("chatgpt-account-id", account);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("native_account_changed_start_new_run")
+        );
+    }
+    assert_eq!(forwarded.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn websocket_generation_fence_drops_new_uplink_bytes_after_auth_change() {
+    struct Fence(AtomicUsize);
+    impl WorkspaceFence for Fence {
+        fn unchanged(&self) -> bool {
+            self.0.load(Ordering::SeqCst) == 0
+        }
+    }
+    let fence = Arc::new(Fence(AtomicUsize::new(0)));
+    let (capture, _receiver) = capture::channel(1024, 16);
+    let mut stream = capture.stream(Source {
+        request_id: Uuid::new_v4(),
+        direction: Direction::Request,
+        transport: Transport::WebSocket,
+        content_type: String::new(),
+        content_encoding: String::new(),
+    });
+    let (mut input, mut read) = tokio::io::duplex(128);
+    let (mut write, mut output) = tokio::io::duplex(128);
+    let task_fence = fence.clone();
+    let task = tokio::spawn(async move {
+        tunnel_fenced(
+            &mut read,
+            &mut write,
+            &mut stream,
+            Some(task_fence.as_ref()),
+        )
+        .await
+    });
+    input.write_all(b"first-frame").await.unwrap();
+    let mut first = [0u8; 11];
+    output.read_exact(&mut first).await.unwrap();
+    assert_eq!(&first, b"first-frame");
+    fence.0.store(1, Ordering::SeqCst);
+    input.write_all(b"must-not-forward").await.unwrap();
+    assert!(task.await.unwrap().is_err());
+    let mut trailing = Vec::new();
+    output.read_to_end(&mut trailing).await.unwrap();
+    assert!(trailing.is_empty());
+}
+
+#[tokio::test]
+async fn zstd_request_wire_is_unchanged_and_observer_decodes_canonical_identity() {
+    use crate::workbench::{
+        decode::{Change, Decoder, DecoderLimits, request::RequestPurpose},
+        redaction::RedactionPolicy,
+    };
+    let body = serde_json::json!({"model":"fixture", "client_metadata":{"x-codex-turn-metadata":serde_json::json!({"thread_id":"11111111-1111-4111-8111-111111111111","turn_id":"turn_zstd","thread_source":"user","request_kind":"turn"}).to_string()}});
+    let encoded =
+        zstd::stream::encode_all(serde_json::to_vec(&body).unwrap().as_slice(), 3).unwrap();
+    let expected = encoded.clone();
+    let upstream = fixture(move |request| {
+        let expected = expected.clone();
+        async move {
+            assert_eq!(request.headers()[header::CONTENT_ENCODING], "zstd");
+            assert_eq!(axum::body::to_bytes(request.into_body(), 4096).await.unwrap().as_ref(), expected);
+            Response::builder().body(Body::from("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_zstd\",\"status\":\"completed\"}}\n\n")).unwrap()
+        }
+    }).await;
+    let (sender, mut receiver) = capture::channel(16 * 1024, 32);
+    let proxy = proxy_for(upstream.address, sender).await;
+    let response = client()
+        .post(format!("{}/responses", proxy.child_base_url()))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_ENCODING, "zstd")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(encoded)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::CONTENT_TYPE));
+    assert!(response.text().await.unwrap().contains("resp_zstd"));
+    let mut decoder = Decoder::new(
+        DecoderLimits::default(),
+        RedactionPolicy::new(vec![]).unwrap(),
+    );
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 2 {
+        let observation = timeout(DEADLINE, receiver.recv()).await.unwrap().unwrap();
+        if observation.end == Some(StreamEnd::Complete) {
+            completed += 1;
+        }
+        decoder.push(&observation, |event| events.push(event));
+    }
+    assert!(events.iter().any(|event| matches!(&event.change, Change::Request { info } if info.purpose == RequestPurpose::Conversation && info.codex_turn_id.as_deref() == Some("turn_zstd"))));
+    assert!(events.iter().any(|event| matches!(&event.change, Change::Response { response_id: Some(id), .. } if id == "resp_zstd")));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.change, Change::Diagnostic { .. }))
+    );
+}
+
+#[tokio::test]
+async fn missing_response_type_hint_does_not_guess_errors_unknown_routes_or_explicit_types() {
+    for (status, path, accept, content_type) in [
+        (StatusCode::BAD_REQUEST, "responses", true, None),
+        (StatusCode::OK, "other", true, None),
+        (StatusCode::OK, "responses", false, None),
+        (StatusCode::OK, "responses", true, Some("application/json")),
+    ] {
+        let upstream = fixture(move |_| async move {
+            let mut response = Response::builder().status(status);
+            if let Some(content_type) = content_type {
+                response = response.header(header::CONTENT_TYPE, content_type);
+            }
+            response
+                .body(Body::from("{\"fixture_error\":true}"))
+                .unwrap()
+        })
+        .await;
+        let (sender, mut receiver) = capture::channel(4096, 16);
+        let proxy = proxy_for(upstream.address, sender).await;
+        let mut request = client()
+            .post(format!("{}/{path}", proxy.child_base_url()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body("{}");
+        if accept {
+            request = request.header(header::ACCEPT, "text/event-stream");
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            content_type
+        );
+        assert_eq!(response.text().await.unwrap(), "{\"fixture_error\":true}");
+        loop {
+            let observation = timeout(DEADLINE, receiver.recv()).await.unwrap().unwrap();
+            if observation.source.direction == Direction::Response {
+                assert_ne!(observation.source.content_type, "text/event-stream");
+                if observation.end.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn observation_hints_reject_duplicate_or_oversized_encoding_and_media_type() {
+    for name in [header::CONTENT_ENCODING, header::CONTENT_TYPE] {
+        let mut headers = HeaderMap::new();
+        headers.append(name.clone(), "zstd".parse().unwrap());
+        headers.append(name.clone(), "identity".parse().unwrap());
+        let observed = source(
+            Uuid::new_v4(),
+            Direction::Request,
+            Transport::Http,
+            &headers,
+        );
+        let hint = if name == header::CONTENT_ENCODING {
+            observed.content_encoding
+        } else {
+            observed.content_type
+        };
+        assert_eq!(hint, "unsupported");
+        assert_eq!(headers.get_all(&name).iter().count(), 2);
+        headers.insert(name.clone(), "x".repeat(129).parse().unwrap());
+        let observed = source(
+            Uuid::new_v4(),
+            Direction::Request,
+            Transport::Http,
+            &headers,
+        );
+        let hint = if name == header::CONTENT_ENCODING {
+            observed.content_encoding
+        } else {
+            observed.content_type
+        };
+        assert_eq!(hint, "unsupported");
+    }
+}

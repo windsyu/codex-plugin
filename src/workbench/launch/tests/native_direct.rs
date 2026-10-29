@@ -8,6 +8,10 @@ use axum::{Router, routing::get};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::Notify;
+
+const INTERMEDIATE: &str = "DIRECT_NATIVE_INTERMEDIATE.";
+const FINAL_REPLY: &str = "DIRECT_NATIVE_INTERMEDIATE. DIRECT_NATIVE_OK";
 
 fn quote(value: &std::ffi::OsStr) -> String {
     format!("'{}'", value.to_str().unwrap().replace('\'', "'\\''"))
@@ -15,7 +19,7 @@ fn quote(value: &std::ffi::OsStr) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires installed official CLI and loopback/PTY; synthetic credentials and local WS only"]
-async fn installed_cli_native_direct_websocket_reply_and_native_history() {
+async fn installed_cli_native_openai_shared_capture_websocket_and_history() {
     let binary = std::env::var_os("WORKBENCH_TEST_CODEX")
         .expect("set WORKBENCH_TEST_CODEX to an installed official CLI absolute path");
     assert!(Path::new(&binary).is_absolute());
@@ -28,8 +32,11 @@ async fn installed_cli_native_direct_websocket_reply_and_native_history() {
     }
     let requests = Arc::new(AtomicUsize::new(0));
     let observed = requests.clone();
+    let release_final = Arc::new(Notify::new());
+    let model_gate = release_final.clone();
     let app = Router::new().route("/v1/responses", get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
         let observed = observed.clone();
+        let model_gate = model_gate.clone();
         async move {
             if headers.get(header::AUTHORIZATION).is_none_or(|value| value != "Bearer synthetic-direct-key") {
                 return StatusCode::UNAUTHORIZED.into_response();
@@ -39,18 +46,40 @@ async fn installed_cli_native_direct_websocket_reply_and_native_history() {
                     let body: Value = serde_json::from_str(&text).unwrap();
                     if body["type"] != "response.create" { continue; }
                     if body["generate"] == false {
+                        let created = json!({"type":"response.created","response":{"id":"direct_prewarm","model":"gpt-6-astra"}});
+                        if socket.send(Message::Text(created.to_string().into())).await.is_err() { break; }
                         let event = json!({"type":"response.completed","response":{"id":"direct_prewarm","status":"completed","output":[]}});
                         if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
+                        continue;
+                    }
+                    if body.pointer("/text/format/schema/properties/title").is_some() {
+                        let item = json!({"type":"message","role":"assistant","id":"direct_title_message","content":[{"type":"output_text","text":"{\"title\":\"Native capture fixture\"}"}]});
+                        for event in [
+                            json!({"type":"response.created","response":{"id":"direct_title_response","model":"gpt-6-astra"}}),
+                            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                            json!({"type":"response.completed","response":{"id":"direct_title_response","status":"completed","output":[item]}}),
+                        ] {
+                            if socket.send(Message::Text(event.to_string().into())).await.is_err() { return; }
+                        }
                         continue;
                     }
                     assert_eq!(body["model"], "gpt-6-astra");
                     assert!(body["input"].to_string().contains("DIRECT_NATIVE_PROMPT"));
                     observed.fetch_add(1, Ordering::SeqCst);
-                    let item = json!({"type":"message","role":"assistant","id":"direct_message","content":[{"type":"output_text","text":"DIRECT_NATIVE_OK"}]});
+                    let item = json!({"type":"message","role":"assistant","id":"direct_message","content":[{"type":"output_text","text":FINAL_REPLY}]});
                     for event in [
                         json!({"type":"response.created","response":{"id":"direct_response","model":"gpt-6-astra"}}),
                         json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":"direct_message","content":[]}}),
-                        json!({"type":"response.output_text.delta","item_id":"direct_message","output_index":0,"content_index":0,"delta":"DIRECT_NATIVE_OK"}),
+                        json!({"type":"response.output_text.delta","item_id":"direct_message","output_index":0,"content_index":0,"delta":INTERMEDIATE}),
+                    ] {
+                        if socket.send(Message::Text(event.to_string().into())).await.is_err() { return; }
+                    }
+                    // No response_id is invented for SSE-shaped events on the
+                    // native default WS lane. Completion waits for the reading
+                    // pipeline to expose the intermediate model card.
+                    model_gate.notified().await;
+                    for event in [
+                        json!({"type":"response.output_text.delta","item_id":"direct_message","output_index":0,"content_index":0,"delta":" DIRECT_NATIVE_OK"}),
                         json!({"type":"response.output_item.done","output_index":0,"item":item}),
                         json!({"type":"response.completed","response":{"id":"direct_response","status":"completed","output":[item],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}),
                     ] {
@@ -107,7 +136,7 @@ trust_level="trusted"
         data_dir: None,
     };
     let runtime = WorkbenchRuntime::start(options).await.unwrap();
-    assert!(runtime.proxy.is_none() && runtime._observer.is_none() && runtime._users.is_none());
+    assert!(runtime.proxy.is_some() && runtime._observer.is_some() && runtime._users.is_some());
     let handle = runtime.terminal();
     let mut attachment = handle.attach().await.unwrap();
     let connection_id = attachment.connection_id;
@@ -119,6 +148,9 @@ trust_level="trusted"
     let mut theme = false;
     let mut trust = false;
     let mut last_screen = String::new();
+    let mut intermediate_seen = false;
+    let mut released_final = false;
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let snapshot = handle.attach().await.unwrap().snapshot;
@@ -127,6 +159,23 @@ trust_level="trusted"
             parser.process(&snapshot.replay);
             let screen = parser.screen().contents();
             last_screen.clone_from(&screen);
+            let reading = runtime.hub.snapshot();
+            if reading
+                .model_items()
+                .iter()
+                .any(|item| item.text.contains(INTERMEDIATE))
+                && reading.responses.iter().any(|response| {
+                    response.response_id.as_deref() == Some("direct_response")
+                        && response.status == crate::workbench::decode::ResponseStatus::Receiving
+                })
+            {
+                intermediate_seen = true;
+            }
+            if !released_final && (intermediate_seen || started.elapsed() > Duration::from_secs(12))
+            {
+                released_final = true;
+                release_final.notify_one();
+            }
             if screen.contains("DIRECT_NATIVE_OK") {
                 break;
             }
@@ -164,12 +213,44 @@ trust_level="trusted"
     );
     assert_eq!(requests.load(Ordering::SeqCst), 1);
     let snapshot = runtime.hub.snapshot();
-    assert_eq!(snapshot.capture, "unavailable");
+    assert_ne!(snapshot.capture, "unavailable");
+    assert!(!snapshot.requests.is_empty() && !snapshot.responses.is_empty());
+    let captured = serde_json::to_string(&snapshot).unwrap();
+    assert!(captured.contains("DIRECT_NATIVE_OK"));
+    assert!(!captured.contains("synthetic-direct-key"));
+    assert_eq!(snapshot.usage_summary.total_tokens.tokens, Some(12));
     assert!(
-        snapshot.requests.is_empty()
-            && snapshot.responses.is_empty()
-            && snapshot.model_items().is_empty()
+        intermediate_seen,
+        "native WS content must become a model card before completion; diagnostic count={}",
+        snapshot.diagnostics.len()
     );
+    assert!(
+        snapshot
+            .model_items()
+            .iter()
+            .any(|item| item.text == FINAL_REPLY)
+    );
+    assert!(snapshot.requests.iter().any(|request| {
+        request.info.purpose == crate::workbench::decode::request::RequestPurpose::Conversation
+            && request.info.codex_thread_id.is_some()
+            && request.info.codex_turn_id.is_some()
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .hub
+                .snapshot()
+                .user_messages()
+                .iter()
+                .any(|user| user.text == "DIRECT_NATIVE_PROMPT")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("native WS conversation metadata must associate the actual user rollout record");
     drain.abort();
     drop(runtime);
     server.abort();

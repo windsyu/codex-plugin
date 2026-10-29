@@ -121,7 +121,7 @@ pub(crate) struct AuthSnapshot {
     api_key: Option<String>,
 }
 impl AuthSnapshot {
-    fn read(home: &Path) -> Result<Self> {
+    pub(crate) fn read(home: &Path) -> Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
         let file = match std::fs::OpenOptions::new()
             .read(true)
@@ -164,8 +164,24 @@ impl AuthSnapshot {
         })
     }
     pub(crate) fn redaction_secrets(&self) -> Vec<String> {
-        self.api_key.iter().cloned().collect()
+        let mut secrets: Vec<String> = self.api_key.iter().cloned().collect();
+        if let Some(value) = self
+            .bytes
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            && let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object)
+        {
+            secrets.extend(
+                tokens
+                    .values()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        secrets
     }
+    #[cfg(test)]
     pub(crate) fn unchanged(&self, home: &Path) -> Result<()> {
         let current = Self::read(home)?;
         ensure!(
@@ -187,7 +203,7 @@ fn auth_value(bytes: &[u8]) -> Result<serde_json::Value> {
 }
 
 #[cfg(target_os = "macos")]
-fn managed_preferences() -> Result<(bool, bool)> {
+pub(crate) fn managed_preferences() -> Result<(bool, bool)> {
     use std::ffi::{c_char, c_void};
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -238,7 +254,7 @@ fn managed_preferences() -> Result<(bool, bool)> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn managed_preferences() -> Result<(bool, bool)> {
+pub(crate) fn managed_preferences() -> Result<(bool, bool)> {
     // Do not claim an unmanaged host on an OS without a verified source inventory.
     bail!("this host configuration inventory has not been validated")
 }

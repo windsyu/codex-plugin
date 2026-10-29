@@ -20,13 +20,15 @@ use super::{
 };
 pub(crate) mod entry;
 pub(crate) mod failure;
+mod native_route;
 mod profile;
+mod route_guard;
 pub use entry::{BrowserEntry, read_entry};
 use failure::LaunchFailure;
 
 // Evidence for diagnostics, never a startup allowlist. Different releases can
 // use the same native flags and model protocol; the actual route checks remain.
-const CHECKED_CLI_VERSIONS: &[&str] = &["0.154.0", "0.155.1", "0.156.1", "0.159.2"];
+const CHECKED_CLI_VERSIONS: &[&str] = &["0.165.0"];
 
 pub struct LaunchOptions {
     pub cwd: PathBuf,
@@ -157,8 +159,10 @@ impl WorkbenchRuntime {
         if !CHECKED_CLI_VERSIONS.contains(&cli_version.as_str()) {
             eprintln!("codex-view: CLI {cli_version} 尚未完成本工作台的版本回归，继续启动。");
         }
-        let profile = profile::select_capture(&home, &cwd, options.native_profile.as_deref())
-            .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        let profile =
+            profile::resolve_capture(&binary, &home, &cwd, options.native_profile.as_deref())
+                .await
+                .map_err(|e| LaunchFailure::Config.wrap(e))?;
         let policy = match &profile {
             Some(profile) => profile.policy.clone(),
             None => super::redaction::RedactionPolicy::new(Vec::new())?,
@@ -230,11 +234,7 @@ impl WorkbenchRuntime {
         }
         if let (Some(profile), Some(proxy)) = (&profile, &proxy) {
             command.arg("-c");
-            command.arg(format!(
-                "model_providers.{}.base_url={}",
-                profile.provider,
-                toml::Value::String(proxy.child_base_url())
-            ));
+            command.arg(profile.child_override(proxy.child_base_url()));
         }
         command.args(["-c", "tui.animations=false"]);
         if let Some(id) = options.resume {
