@@ -33,6 +33,8 @@ macOS 打包还需当前固定工具链配套的 `rust-docs` 与 `rust-src` 组�
 
 `manifest.json` 记录版本、target、sourceCommit 和 sourceDirty；本地工作树有改动时允许生成可试用包，明确标为本地来源，不伪装为已发布 main tag。包内与归档校验和分开，安装器校验包内内容。当前包没有 Apple 签名、notarization 或自动更新。
 
+将本地包替换到已有快速安装时，使用 `bash scripts/install-macos.sh --archive /absolute/path/code-view-1.0.1-aarch64-apple-darwin.tar.gz --prefix "$HOME/.codex-view" --force --no-path`，同目录保留打包生成的 `SHA256SUMS`。该入口不下载发布资产，并同步受管文件和卸载清单；保留原 PATH 登记。先确认并正常停止旧服务，安装后核对 manifest、文件哈希及新程序状态；不要只覆盖 binary 或通过手动包入口绕过快速安装清单。
+
 ## 发布门槛
 
 [安装指南](../guides/installation.md#快速安装与-path)中的[快速安装脚本](../../scripts/install-macos.sh)是单独维护的 Bash 3.2 入口，通过匿名 HTTPS 下载公开稳定 release，解析 latest 后固定 tag 下载归档和校验文件，默认安装到 `~/.codex-view`，增加用户级 PATH 和卸载清单，不需要改写已发布的资产。它使用包内安装器在私有 staging 校验复制，再准备同目录临时文件并原子替换；安装失败按旧文件快照及已知新内容回滚。卸载使用固定路径范围的 SHA256 清单，保留未知文件与用户数据，不把整个前缀视为可删除目录。该脚本的合成归档、升级、卸载、shell 配置和故障测试纳入 `test-tools` / `check`；不会给已发布旧 binary 补装新运行时功能。

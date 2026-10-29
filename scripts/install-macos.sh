@@ -6,6 +6,7 @@ repository=windsyu/codex-plugin
 action=install
 prefix=${HOME:?HOME must be set}/.codex-view
 version=latest
+archive_path=
 force=false
 configure_path=true
 if [[ ${0##*/} == code-view-uninstall ]]; then
@@ -15,15 +16,16 @@ fi
 case ${1-} in install|uninstall) action=$1; shift ;; esac
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --prefix|--version)
+    --prefix|--version|--archive)
       [[ $# -ge 2 ]] || fail "$1 needs a value"
-      case $1 in --prefix) prefix=$2 ;; --version) version=$2 ;; esac
+      case $1 in --prefix) prefix=$2 ;; --version) version=$2 ;; --archive) [[ -n $2 ]] || fail '--archive needs a path'; archive_path=$2 ;; esac
       shift 2 ;;
     --force) force=true; shift ;;
     --no-path) configure_path=false; shift ;;
     -h|--help)
       printf '%s\n' 'Usage: bash install-macos.sh [install|uninstall] [--prefix ABSOLUTE_PATH]' \
-        '       install: [--version vx.y.z] [--force] [--no-path]' \
+        '       install: [--version vx.y.z] [--archive ABSOLUTE_PATH] [--force] [--no-path]' \
+        'Local archive: standard code-view-x.y.z-aarch64-apple-darwin.tar.gz plus adjacent SHA256SUMS.' \
         'Default: latest stable macOS arm64 release, ~/.codex-view, managed zsh/bash PATH.' \
         'Uninstall keeps user history/configuration and refuses modified owned files.'
       exit 0 ;;
@@ -31,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || fail 'requires macOS on Apple Silicon'
-[[ $action != uninstall || ($force == false && $configure_path == true && $version == latest) ]] || fail 'uninstall only accepts --prefix'
+[[ $action != uninstall || ($force == false && $configure_path == true && $version == latest && -z $archive_path) ]] || fail 'uninstall only accepts --prefix'
 valid_path() {
   case $1 in /*) ;; *) fail "absolute path required: $1" ;; esac
   case $1 in /|*//*|*/../*|*/..|*/./*|*/.|*$'\n'*|*$'\r'*|*$'\t'*) fail "unsupported path: $1" ;; esac
@@ -386,23 +388,43 @@ stable_version='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 if [[ $prefix == "$HOME/.codex-view" && ( -e $HOME/.local/share/code-view/.install-receipt || -L $HOME/.local/share/code-view/.install-receipt ) ]]; then
   fail 'previous ~/.local installation found; first run "$HOME/.local/bin/code-view-uninstall", then install again'
 fi
-command -v curl >/dev/null || fail 'curl is required to download the public release'
-# Ignore curlrc and use public HTTPS URLs; no GitHub account or API is needed.
-download() {
-  curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --connect-timeout 10 --max-time 120 "$@"
-}
-release_url=https://github.com/$repository/releases
-if [[ $version == latest ]]; then
-  resolved_url=$(download --head --output /dev/null --write-out '%{url_effective}' "$release_url/latest") || fail 'could not resolve the latest public release'
-  case $resolved_url in "$release_url/tag/"*) version=${resolved_url#"$release_url/tag/"} ;; *) fail 'release redirected to an unexpected URL' ;; esac
+if [[ -n $archive_path ]]; then
+  valid_path "$archive_path"
+  check_file "$archive_path"
+  [[ -f $archive_path ]] || fail 'missing local release archive'
+  archive_name=${archive_path##*/}
+  local_archive_pattern='^code-view-((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))-aarch64-apple-darwin\.tar\.gz$'
+  [[ $archive_name =~ $local_archive_pattern ]] || fail 'local archive must have the standard stable macOS arm64 release filename'
+  archive_version=v${BASH_REMATCH[1]}
+  [[ $version == latest || $version == "$archive_version" ]] || fail 'local archive version does not match --version'
+  version=$archive_version
+  bundle_name=${archive_name%.tar.gz}
+  archive_checksums=$(dirname -- "$archive_path")/SHA256SUMS
+  check_file "$archive_checksums"
+  [[ -f $archive_checksums ]] || fail 'missing local release SHA256SUMS'
+  # Snapshot local inputs in private staging; the shared checksum and member
+  # validation below apply equally to downloaded and local packages.
+  cp -- "$archive_path" "$work/$archive_name"
+  cp -- "$archive_checksums" "$work/SHA256SUMS"
+else
+  command -v curl >/dev/null || fail 'curl is required to download the public release'
+  # Ignore curlrc and use public HTTPS URLs; no GitHub account or API is needed.
+  download() {
+    curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 10 --max-time 120 "$@"
+  }
+  release_url=https://github.com/$repository/releases
+  if [[ $version == latest ]]; then
+    resolved_url=$(download --head --output /dev/null --write-out '%{url_effective}' "$release_url/latest") || fail 'could not resolve the latest public release'
+    case $resolved_url in "$release_url/tag/"*) version=${resolved_url#"$release_url/tag/"} ;; *) fail 'release redirected to an unexpected URL' ;; esac
+  fi
+  [[ $version =~ $stable_version ]] || fail 'release did not return a supported stable version'
+  archive_name=code-view-${version#v}-aarch64-apple-darwin.tar.gz
+  bundle_name=${archive_name%.tar.gz}
+  # Both files use the resolved tag even if latest changes during installation.
+  download --output "$work/$archive_name" "$release_url/download/$version/$archive_name" || fail 'could not download the release archive'
+  download --output "$work/SHA256SUMS" "$release_url/download/$version/SHA256SUMS" || fail 'could not download release checksums'
 fi
-[[ $version =~ $stable_version ]] || fail 'release did not return a supported stable version'
-archive_name=code-view-${version#v}-aarch64-apple-darwin.tar.gz
-bundle_name=${archive_name%.tar.gz}
-# Both files use the resolved tag even if latest changes during installation.
-download --output "$work/$archive_name" "$release_url/download/$version/$archive_name" || fail 'could not download the release archive'
-download --output "$work/SHA256SUMS" "$release_url/download/$version/SHA256SUMS" || fail 'could not download release checksums'
 check_file "$work/$archive_name"
 check_file "$work/SHA256SUMS"
 [[ -f $work/$archive_name && -f $work/SHA256SUMS ]] || fail 'missing release downloads'
