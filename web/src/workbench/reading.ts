@@ -18,6 +18,7 @@ export interface ResponseView {
 }
 export interface RequestView {
   requestId: string; clientRequestIndex: number | null; requestedModel: string | null;
+  responseId?: string | null;
   codexThreadId: string | null; codexTurnId: string | null;
   purpose: 'conversation' | 'auxiliary' | 'unknown';
   purposeBasis: 'codex_turn_metadata' | 'missing_metadata' | 'conflicting_metadata' | 'unknown_metadata';
@@ -54,14 +55,19 @@ export const keyOf = (key: TextKey) => JSON.stringify([key.requestId, key.respon
 const responseKey = (r: ResponseView) => JSON.stringify([r.requestId, r.responseId]);
 const empty = (): ReadingView => ({ items: [], toolContexts: [], nativeCommands: [], nativeFileChanges: [], responses: [], requests: [], diagnostics: [], userCapture: { enabled: false, diagnostics: [] }, capture: 'unavailable', connected: false, viewSeq: 0 });
 export const nativeDirect = (reading: ReadingView) => reading.capture === 'unavailable' && reading.viewSeq > 0;
-export const requestFor = (state: ReadingView, item: { key: TextKey }) => state.requests.find(request => request.requestId === item.key.requestId && request.clientRequestIndex === null);
+export const requestFor = (state: ReadingView, item: { key: TextKey }) => {
+  const matches = state.requests.filter(request => request.requestId === item.key.requestId
+    && (request.clientRequestIndex === null || (!!request.responseId && request.responseId === item.key.responseId)));
+  return matches.length === 1 ? matches[0] : undefined;
+};
+export const requestAssociation = (index: number, request?: RequestView) => `WebSocket create ${index} · ${request?.responseId ? `响应 ${request.responseId}` : '响应关联未确认'}`;
 export const conversationItems = (state: ReadingView) => modelItems(state).filter(item => requestFor(state, item)?.purpose === 'conversation');
 export const userKeyOf = (key: UserKey) => JSON.stringify([key.codexThreadId, key.codexTurnId, key.nativeItemId]);
 export type ConversationEntry = { kind: 'user'; key: string; user: UserRecord; orderUnconfirmed: boolean } | { kind: 'model'; key: string; item: TextItem; request: RequestView } | { kind: 'tool'; key: string; tool: ToolCall; request: RequestView };
 export function conversationEntries(state: ReadingView): ConversationEntry[] {
   const entries: ConversationEntry[] = [], turns = new Set<string>();
   for (const request of state.requests) {
-    if (request.purpose !== 'conversation' || request.clientRequestIndex !== null) continue;
+    if (request.purpose !== 'conversation' || (request.clientRequestIndex !== null && !request.responseId)) continue;
     const turn = JSON.stringify([request.codexThreadId, request.codexTurnId]);
     if (turns.has(turn)) continue;
     turns.add(turn);

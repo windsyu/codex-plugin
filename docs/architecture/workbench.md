@@ -81,6 +81,8 @@ Application 可以没有 CLI：历史首页与配置可用，缺少 CLI、native
 
 代理只连固定上游，使用随机能力路径，不提供 CONNECT 或任意 URL 转发。流转发不等待解码、LiveHub、磁盘或浏览器 ACK；有界观察溢出产生捕获缺口并重置 framing 边界，而不是丢转发字节或拼接虚假完整内容。PTY 输入和输出也不依赖观察/记录完成。
 
+模型出站使用 reqwest 的环境与系统 HTTP(S) 代理发现，使 macOS launchd 后台进程无需继承交互 Shell 的代理变量也能使用系统代理。已校验的字面 loopback 模型上游显式绕过所有网络代理；TLS 仍校验系统受信任证书。仅连接建立设 30 秒期限，不设置响应读取或整请求期限。`upstream_failed` 保留原错误码和 requestId，增加固定 `reason`（`timeout/connect/body/request/other`）；不输出底层错误文本、URL、认证头或环境值，`connect` 不进一步断言 DNS 或 TLS 原因。
+
 用户提交仅取原生 rollout 的明确 UserMessage 身份，不从 Enter、终端回显或模型请求 `role:user` 推断。工具参数表示模型生成；工具成功必须有匹配的原生执行/结果证据。关联要求明确调用域和身份，冲突/缺失保持不确定。`response.completed`、用户提交、工具完成、整轮完成和 CLI 退出分别表达。
 
 Live ViewItem schema 2 使用稳定 `itemKey`、revision、orderIndex 和 provenance：首次 `item.replace` 创建项，patch 必须满足基础 revision 与 contentKey，最终完整内容 replace，不再次 append。同一事件的文本、文件/图片上下文、详情与用量不能通过不同恢复路径重复计数。具体契约见[详细设计](../design/workbench-detailed-design.md)。
@@ -109,9 +111,11 @@ macOS 后台 Application 使用用户级 LaunchAgent，沿用相同实例作用�
 
 Application 的目录浏览器独立于固定根 WorkspaceReader，只为完整 owner 枚举当前层可读目录元信息。规范路径、分页快照、扫描/响应预算及并发限制避免全树扫描；不读正文、不执行 Shell，不影响 PTY/模型转发。选择目录仍走原目标校验与 spawn 前复查，不能通过浏览接口扩大配对设备或 Run 文件权限。
 
-模型认证、provider 选择与传输由官方 CLI 持有。启动分为原生直连和已验证的 custom 捕获路径：默认 OpenAI/ChatGPT 走原生直连，不覆盖 provider、base URL、认证或 WebSocket，也不执行本次直连无需的认证/可选字段预检；终端和原生历史仍可用，实时模型捕获及调用详情明确不可用，记录不能冒充完整捕获。直连保留原生账号后端发现与刷新行为，详见 [ADR 0067](../decisions/0067-native-direct-launch.md)。
+模型认证、配置合法性、provider 选择与传输由官方 CLI 持有。[ADR 0068](../decisions/0068-shared-native-model-capture.md)统一原生 OpenAI 与其他 provider 的捕获链路：启动辅助进程只读原生有效配置、requirements 和账户路由，不创建对话；实际会话继续由普通 CLI 的 PTY 承担。接入只覆写本次进程的代理地址，不要求原生 provider 命名为 custom，不重复校验未知字段、可省略字段或认证形状。代理目的地、来源一致性和内容安全仍有边界。
 
-显式选择已支持的 custom 捕获时，预检只检查固定上游、认证与策略来源等必要边界，可省略字段遵循已确认的原生默认值；未知或与捕获无关的字段交给 CLI。静态 bearer 与原生 `auth.command` 的具体范围见[支持文档](../guides/support.md)和 [ADR 0060](../decisions/0060-native-provider-command-auth.md)，本次决定对旧有显式字段要求的修正以 ADR 0067 为准。工作台不执行认证命令、不读取动态命令 token，只透明转发 CLI 的 Authorization；header 不进入观察/网页/journal。已知静态密钥用于脱敏，未知动态 token 被上游回显到正文时仍不保证按值识别。版本探测是有界诊断，不是精确版本 allowlist。
+原生 ChatGPT 的目的地与地区覆盖依据官方账户结果，绑定账户身份并对来源变化设围栏，避免把新凭据发往旧路由；同路由 token 刷新可继续，路由变化要求新 Run，不暗中重放请求。managed 策略禁止地址覆写或无法取得可靠目的地时，CLI 仍正常执行自己的配置检查，捕获明确不可用。WS 的确定请求/响应关联以附加 `responseId` 表达；正文、工具、用户证据、详情和用量共用既有 reducer 和异步保存。旧状态与历史格式继续兼容。
+
+工作台不执行认证命令、不读取命令输出，不缓存动态 token，只转发 CLI 的 Authorization；认证头不进入观察/网页/journal。已知秘密收集只为脱敏，未知动态 token 被上游回显到正文时仍不保证按值识别。版本探测是有界诊断，不是精确版本 allowlist；实际受测范围见[支持文档](../guides/support.md)。
 
 | 权限 | 作用域与排除项 |
 | --- | --- |

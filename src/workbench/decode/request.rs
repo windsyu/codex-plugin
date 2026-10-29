@@ -22,9 +22,10 @@ pub enum PurposeBasis {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestInfo {
-    /// HTTP has one request per capture ID. A WS create is not linked to a
-    /// response by arrival order; its ordinal remains explicitly unassigned.
+    /// HTTP has one request per capture ID. WS retains its create ordinal.
     pub client_request_index: Option<u64>,
+    /// Present only for a WS create linked by a continuous default-lane lifecycle.
+    pub response_id: Option<String>,
     pub requested_model: Option<SafeText>,
     pub codex_thread_id: Option<Uuid>,
     pub codex_turn_id: Option<String>,
@@ -49,12 +50,20 @@ pub(crate) fn safe_name(value: &Value, policy: &Arc<RedactionPolicy>) -> Option<
 fn metadata(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) -> RequestInfo {
     let mut info = RequestInfo {
         client_request_index: index,
+        response_id: None,
         requested_model: safe_name(&body["model"], policy),
         codex_thread_id: None,
         codex_turn_id: None,
         purpose: RequestPurpose::Unknown,
         purpose_basis: PurposeBasis::MissingMetadata,
     };
+    if index.is_some() && body["generate"] == false {
+        info.purpose = RequestPurpose::Auxiliary;
+        // The transport flag proves setup, not canonical turn metadata.
+        // Preserve the existing wire enum instead of claiming turn evidence.
+        info.purpose_basis = PurposeBasis::UnknownMetadata;
+        return info;
+    }
     let client = &body["client_metadata"];
     let Some(raw) = client["x-codex-turn-metadata"]
         .as_str()
@@ -105,6 +114,7 @@ fn metadata(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) -> 
 
 enum BodyFramer {
     Json(Vec<u8>),
+    ZstdJson(Vec<u8>),
     Ws(WebSocketFramer),
     Unavailable,
 }
@@ -134,7 +144,7 @@ impl Requests {
         self.streams
             .values()
             .map(|stream| match &stream.framer {
-                BodyFramer::Json(bytes) => bytes.capacity(),
+                BodyFramer::Json(bytes) | BodyFramer::ZstdJson(bytes) => bytes.capacity(),
                 BodyFramer::Ws(framer) => framer.buffered_bytes(),
                 BodyFramer::Unavailable => 0,
             })
@@ -168,7 +178,17 @@ impl Requests {
             }
             let source = &observation.source;
             let mut issue = None;
-            let framer = if !source.content_encoding.is_empty()
+            let json = source
+                .content_type
+                .split(';')
+                .next()
+                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"));
+            let framer = if source.transport == Transport::Http
+                && json
+                && source.content_encoding.eq_ignore_ascii_case("zstd")
+            {
+                BodyFramer::ZstdJson(Vec::new())
+            } else if !source.content_encoding.is_empty()
                 && !source.content_encoding.eq_ignore_ascii_case("identity")
             {
                 issue = Some(DiagnosticCode::UnsupportedCompression);
@@ -200,6 +220,18 @@ impl Requests {
                 },
             );
         }
+        let other_bytes = self
+            .streams
+            .iter()
+            .filter(|(key, _)| **key != id)
+            .map(|(_, stream)| match &stream.framer {
+                BodyFramer::Json(bytes) | BodyFramer::ZstdJson(bytes) => bytes.capacity(),
+                BodyFramer::Ws(framer) => framer.buffered_bytes(),
+                BodyFramer::Unavailable => 0,
+            })
+            .sum::<usize>();
+        let aggregate_budget = budget;
+        let budget = budget.saturating_sub(other_bytes);
         let stream = self.streams.get_mut(&id).unwrap();
         stream.tick = self.tick;
         if observation.sequence < stream.sequence {
@@ -207,7 +239,7 @@ impl Requests {
         }
         if observation.sequence != stream.sequence {
             match &mut stream.framer {
-                BodyFramer::Json(bytes) => {
+                BodyFramer::Json(bytes) | BodyFramer::ZstdJson(bytes) => {
                     bytes.clear();
                     stream.invalid = true;
                 }
@@ -275,6 +307,17 @@ impl Requests {
             } else {
                 None
             };
+            if index.is_some() && body.get("stream_id").is_some() {
+                // Multiplex lanes are preserved on the wire, but this observer
+                // currently proves association only for the implicit default.
+                emit_origin(
+                    observation,
+                    Change::Diagnostic {
+                        code: DiagnosticCode::MissingIdentity,
+                    },
+                    emit,
+                );
+            }
             let info = metadata(&body, index, policy);
             if info.purpose_basis == PurposeBasis::ConflictingMetadata {
                 emit_origin(
@@ -298,8 +341,9 @@ impl Requests {
                 emit_origin(observation, Change::ToolContext { context }, emit);
             }
         };
+        let compressed = matches!(stream.framer, BodyFramer::ZstdJson(_));
         match &mut stream.framer {
-            BodyFramer::Json(bytes) if !stream.invalid => {
+            BodyFramer::Json(bytes) | BodyFramer::ZstdJson(bytes) if !stream.invalid => {
                 if bytes.len().saturating_add(observation.bytes.len())
                     > self.limits.frame_bytes.min(budget)
                 {
@@ -311,9 +355,18 @@ impl Requests {
                     bytes.reserve_exact(observation.bytes.len());
                     bytes.extend_from_slice(&observation.bytes);
                     if observation.end == Some(StreamEnd::Complete) {
-                        message(Ok(WireMessage {
+                        let body = if compressed {
+                            zstd_request::decode(
+                                bytes,
+                                self.limits.frame_bytes,
+                                budget.saturating_sub(bytes.capacity()),
+                            )
+                        } else {
+                            Ok(std::mem::take(bytes))
+                        };
+                        message(body.map(|bytes| WireMessage {
                             kind: MessageKind::Text,
-                            bytes: std::mem::take(bytes),
+                            bytes,
                         }));
                     }
                 }
@@ -339,7 +392,7 @@ impl Requests {
                 );
             }
             self.streams.remove(&id);
-        } else if self.buffered_bytes() > budget {
+        } else if self.buffered_bytes() > aggregate_budget {
             self.streams.remove(&id);
             emit_origin(
                 observation,
@@ -351,6 +404,8 @@ impl Requests {
         }
     }
 }
+
+mod zstd_request;
 
 #[cfg(test)]
 mod tests;

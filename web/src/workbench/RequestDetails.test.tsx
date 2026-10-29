@@ -24,6 +24,16 @@ async function show(overrides: Partial<Parameters<typeof RequestDetails>[0]> = {
 }
 
 describe('on-demand request reading', () => {
+  it('labels only the proven WebSocket create response and preserves unmatched context', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(success(page({ entries: [
+      { ...entry(0), source: { kind: 'request', clientRequestIndex: 2 } },
+      { ...entry(1), source: { kind: 'request', clientRequestIndex: 3 } },
+    ] }))));
+    await show({ requests: [{ requestId: 'request', clientRequestIndex: 2, responseId: 'first', requestedModel: 'model', purpose: 'conversation', purposeBasis: 'codex_turn_metadata', codexThreadId: 'thread', codexTurnId: 'turn' }] });
+    const summaries = [...root.querySelectorAll('.wb-context-entry summary')].map(item => item.textContent);
+    expect(summaries[0]).toContain('WebSocket create 2 · 响应 first');
+    expect(summaries[1]).toContain('WebSocket create 3 · 响应关联未确认');
+  });
   it('fetches only on expansion, escapes context and preserves details and focus on streamed updates', async () => {
     const fetch = vi.fn().mockResolvedValue(success(page())); vi.stubGlobal('fetch', fetch);
     await show({ expanded: false });

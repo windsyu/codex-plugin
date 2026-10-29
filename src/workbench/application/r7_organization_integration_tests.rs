@@ -536,7 +536,11 @@ mod r7_organization_integration {
             .unwrap()
             .replace("http://127.0.0.1:1/v1", &format!("http://{address}/v1"));
         std::fs::write(fixture.home.join("config.toml"), config).unwrap();
-        let script = std::fs::read_to_string(&cli).unwrap().replace("#!/bin/sh\n","#!/bin/sh\nexport HOME=\"$CODEX_HOME\" USERPROFILE=\"$CODEX_HOME\"\n")
+        // The synthetic official metadata response must describe the same
+        // dynamic upstream as its native configuration.
+        let script = std::fs::read_to_string(&cli).unwrap()
+            .replace("http://127.0.0.1:1/v1", &format!("http://{address}/v1"))
+            .replace("#!/bin/sh\n","#!/bin/sh\nexport HOME=\"$CODEX_HOME\" USERPROFILE=\"$CODEX_HOME\"\n")
             .replace("exec /bin/cat","printf '%s\\n' \"$@\" > cli-args.txt\nstty -echo\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> inputs.txt; done");
         std::fs::write(&cli, script).unwrap();
         let thread = Uuid::new_v4();

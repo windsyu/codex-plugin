@@ -38,6 +38,27 @@ export async function waitForSyntheticLaunches(file, expected) {
     return true;
   }, 'synthetic CLI launch cwd records');
 }
+export function writeSyntheticCli(file) {
+  fs.writeFileSync(file, String.raw`#!/bin/sh
+if [ "$1" = --version ]; then echo "codex-cli 0.159.2"; exit 0; fi
+# Only the metadata reader uses this exact invocation; it never starts a TUI.
+if [ "$#" -eq 4 ] && [ "$1" = -c ] && [ "$2" = features.plugins=false ] && [ "$3" = app-server ] && [ "$4" = --stdio ]; then
+  config='{"config":{"model":"synthetic-release","model_provider":"custom","model_providers":{"custom":{"name":"synthetic","base_url":"http://127.0.0.1:1/v1","wire_api":"responses","requires_openai_auth":false,"experimental_bearer_token":"synthetic-release-token"}}},"layers":[]}'
+  while IFS= read -r line; do
+    case "$line" in
+      *'"id":1,'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+      *'"id":2,'*) printf '{"id":2,"result":%s}\n' "$config" ;;
+      *'"id":3,'*) printf '%s\n' '{"id":3,"result":{"requirements":null}}' ;;
+      *'"id":4,'*) printf '%s\n' '{"id":4,"result":{"account":null}}' ;;
+      *'"id":5,'*) printf '{"id":5,"result":%s}\n' "$config" ;;
+    esac
+  done
+  exit 0
+fi
+printf "%s\n" "$PWD" >> "$CODEX_HOME/launched-cwds"
+exec /bin/cat
+`, { mode: 0o755 });
+}
 export async function verifyRelease(archive, workspace, version) {
   const root = path.join(workspace, '安装验证 with spaces');
   fs.mkdirSync(root);
@@ -54,7 +75,7 @@ export async function verifyRelease(archive, workspace, version) {
   run('/bin/sh', [path.join(release, 'install.sh'), '--prefix', prefix], options);
   assert.equal(run('code-view', ['--version'], options), `codex-view ${version}`);
   const fakeCli = path.join(root, 'synthetic-codex');
-  fs.writeFileSync(fakeCli, '#!/bin/sh\nif [ "$1" = --version ]; then echo "codex-cli 0.159.2"; exit 0; fi\nprintf "%s\\n" "$PWD" >> "$CODEX_HOME/launched-cwds"\nexec /bin/cat\n', { mode: 0o755 });
+  writeSyntheticCli(fakeCli);
   fs.writeFileSync(path.join(native, 'config.toml'), 'model="synthetic-release"\nmodel_provider="custom"\n[model_providers.custom]\nname="synthetic"\nbase_url="http://127.0.0.1:1/v1"\nwire_api="responses"\nrequires_openai_auth=false\nexperimental_bearer_token="synthetic-release-token"\n');
   const entryFile = path.join(root, 'private-entry.json');
   const child = spawn('code-view', ['--no-open', '--codex-bin', fakeCli, '--entry-file', entryFile], { ...options, stdio: ['ignore', 'pipe', 'pipe'] });

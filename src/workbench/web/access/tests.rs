@@ -660,7 +660,7 @@ async fn browser_device_access_qr_http_stream_input_and_revocation() {
                     let request_id = Uuid::new_v4();
                     let policy = RedactionPolicy::new(vec![]).unwrap();
                     f.server.state.hub.apply(Decoded { request_id, capture_seq: 1, received_at: Instant::now(), change: Change::Request {
-                        info: crate::workbench::decode::request::RequestInfo { client_request_index: None, requested_model: Some(policy.scrub("synthetic-model")), codex_thread_id: Some(Uuid::new_v4()), codex_turn_id: Some("phone-test".into()), purpose: crate::workbench::decode::request::RequestPurpose::Conversation, purpose_basis: crate::workbench::decode::request::PurposeBasis::CodexTurnMetadata }
+                        info: crate::workbench::decode::request::RequestInfo { client_request_index: None, response_id: None, requested_model: Some(policy.scrub("synthetic-model")), codex_thread_id: Some(Uuid::new_v4()), codex_turn_id: Some("phone-test".into()), purpose: crate::workbench::decode::request::RequestPurpose::Conversation, purpose_basis: crate::workbench::decode::request::PurposeBasis::CodexTurnMetadata }
                     }});
                     f.server.state.hub.apply(Decoded { request_id, capture_seq: 2, received_at: Instant::now(), change: Change::TextDelta {
                         key: TextKey { request_id, response_id: Some("synthetic-response".into()), wire_item_id: "message".into(), content_index: 0 }, text: policy.scrub("手机流式中间内容：同一个运行与终端。")

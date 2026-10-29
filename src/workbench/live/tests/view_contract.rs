@@ -23,6 +23,7 @@ async fn one_typed_contract_replays_messages_tools_notices_and_metadata_into_the
     emit(Change::Request {
         info: RequestInfo {
             client_request_index: None,
+            response_id: None,
             requested_model: Some(policy.scrub("requested-model")),
             codex_thread_id: Some(thread),
             codex_turn_id: Some("turn".into()),
