@@ -769,3 +769,100 @@ test('an active Bash login profile symlink is refused without creating a shadow 
   assert.deepEqual(snapshot(f.home), before);
   assert.equal(fs.readFileSync(original, 'utf8'), '# valuable settings\n');
 });
+
+test('local archives install and force upgrade receipt, licenses and PATH without downloads', t => {
+  const f = fixture(t);
+  const local = version => path.join(f.downloads, `code-view-${version}-aarch64-apple-darwin.tar.gz`);
+  succeeds(f.run(['--archive', local('0.3.0')], { MOCK_CURL_FAIL: 'all' }));
+  const profile = fs.readFileSync(path.join(f.home, '.zshrc'));
+  fs.writeFileSync(path.join(f.share, 'user-extra'), 'preserve');
+  f.publish('0.3.1');
+  succeeds(f.run(['--archive', local('0.3.1'), '--version', 'v0.3.1', '--force', '--no-path'], { MOCK_CURL_FAIL: 'all' }));
+  assert.equal(command(path.join(f.prefix, 'bin/code-view'), ['--version'], { env: f.env }).stdout.trim(), 'codex-view 0.3.1');
+  assert.deepEqual(fs.readFileSync(path.join(f.home, '.zshrc')), profile);
+  assert.equal(fs.readFileSync(path.join(f.share, 'licenses/example/LICENSE'), 'utf8'), 'fixture licenses/example/LICENSE\n');
+  const receipt = fs.readFileSync(path.join(f.share, '.install-receipt'), 'utf8').trim().split('\n');
+  assert.equal(receipt.shift(), 'code-view-install-v1');
+  for (const row of receipt) {
+    const [digest, relative] = row.split('\t');
+    assert.equal(hash(fs.readFileSync(path.join(f.prefix, relative))), digest, relative);
+  }
+  assert.deepEqual(f.calls(), []);
+  succeeds(f.run([], {}, path.join(f.prefix, 'bin/code-view-uninstall')));
+  assert.equal(fs.existsSync(path.join(f.prefix, 'bin/code-view')), false);
+  assert.equal(fs.existsSync(path.join(f.home, '.zshrc')), false);
+  assert.equal(fs.readFileSync(path.join(f.share, 'user-extra'), 'utf8'), 'preserve');
+});
+
+test('local archive needs no curl executable or discovery', t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.tools, 'curl'), '#!/bin/sh\nexit 79\n', { mode: 0o755 });
+  // Shadow command so even an attempted curl availability check fails. Other
+  // command lookups retain Bash builtin behavior.
+  const script = 'command() { if [ "$1" = -v ] && [ "$2" = curl ]; then return 1; fi; builtin command "$@"; }; export -f command; exec /bin/bash "$@"';
+  succeeds(command('/bin/bash', ['-c', script, 'local-install', installer, '--archive', path.join(f.downloads, f.archive)], { cwd: f.root, env: f.env }));
+  assert.deepEqual(f.calls(), []);
+});
+
+test('invalid local archive inputs preserve the existing installation and shell profiles', t => {
+  for (const kind of ['missing-checksum', 'checksum', 'version', 'relative', 'filename', 'uninstall', 'empty']) {
+    const f = fixture(t);
+    succeeds(f.install());
+    const before = snapshot(f.home);
+    const callsBefore = f.calls().length;
+    const archive = path.join(f.downloads, f.archive);
+    const args = ['--force', '--archive', archive];
+    if (kind === 'missing-checksum') fs.unlinkSync(path.join(f.downloads, 'SHA256SUMS'));
+    if (kind === 'checksum') fs.writeFileSync(path.join(f.downloads, 'SHA256SUMS'), `${'0'.repeat(64)}  ${f.archive}\n`);
+    if (kind === 'version') args.push('--version', 'v0.3.1');
+    if (kind === 'relative') args[2] = path.relative(f.root, archive);
+    if (kind === 'filename') {
+      args[2] = path.join(f.downloads, 'other.tar.gz');
+      fs.copyFileSync(archive, args[2]);
+    }
+    if (kind === 'empty') args[2] = '';
+    if (kind === 'uninstall') args.splice(0, 1, 'uninstall');
+    fails(f.run(args));
+    assert.deepEqual(snapshot(f.home), before, kind);
+    assert.equal(f.calls().length, callsBefore, kind);
+  }
+});
+
+test('local force upgrades retain installed-file and active-service guards', t => {
+  for (const kind of ['modified', 'active']) {
+    const f = fixture(t);
+    succeeds(f.install());
+    if (kind === 'modified') fs.appendFileSync(path.join(f.prefix, 'bin/codex-view'), '# preserve edit\n');
+    const before = snapshot(f.home);
+    f.publish('0.3.1');
+    const result = f.run(['--archive', path.join(f.downloads, 'code-view-0.3.1-aarch64-apple-darwin.tar.gz'), '--force'], { MOCK_SERVICE_STATUS: kind === 'active' ? '1' : '0' });
+    fails(result);
+    assert.deepEqual(snapshot(f.home), before, kind);
+  }
+});
+
+test('local archives reuse unsafe member and package integrity rejection before installation writes', t => {
+  for (const kind of ['outside', 'traversal', 'link', 'package-checksum', 'archive-link', 'checksum-link']) {
+    const f = fixture(t);
+    const archive = path.join(f.downloads, f.archive);
+    if (['outside', 'traversal', 'link'].includes(kind)) f.unsafeArchive(kind);
+    if (kind === 'package-checksum') {
+      f.amendPackageInstaller('changed installer without matching package checksum');
+      // Rebuild the outer checksum after changing a member while intentionally
+      // retaining CHECKSUMS.sha256 from the otherwise valid package.
+      const source = path.join(f.root, f.archive.replace(/\.tar\.gz$/, ''));
+      fs.appendFileSync(path.join(source, 'install.sh'), '\n# invalid package bytes\n');
+      succeeds(command('/usr/bin/tar', ['-czf', archive, '-C', f.root, path.basename(source)]));
+      fs.writeFileSync(path.join(f.downloads, 'SHA256SUMS'), `${hash(fs.readFileSync(archive))}  ${f.archive}\n`);
+    }
+    if (kind === 'archive-link' || kind === 'checksum-link') {
+      const file = kind === 'archive-link' ? archive : path.join(f.downloads, 'SHA256SUMS');
+      fs.renameSync(file, `${file}.real`);
+      fs.symlinkSync(`${file}.real`, file);
+    }
+    const before = snapshot(f.home);
+    fails(f.run(['--archive', archive]));
+    assert.deepEqual(snapshot(f.home), before, kind);
+    assert.deepEqual(f.calls(), []);
+  }
+});

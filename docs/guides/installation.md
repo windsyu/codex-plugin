@@ -36,6 +36,15 @@ bash scripts/install-macos.sh --force
 bash scripts/install-macos.sh --no-path
 ```
 
+源码构建的本地包也可通过同一受管安装器升级，不下载 GitHub release：
+
+```sh
+bash scripts/install-macos.sh --archive /absolute/path/code-view-1.0.1-aarch64-apple-darwin.tar.gz \
+  --prefix "$HOME/.codex-view" --force --no-path
+```
+
+归档旁须有标准 `SHA256SUMS`。版本由归档的标准文件名确定；若同时传 `--version`，具体版本必须一致。该入口复用归档与包内校验、安装锁、服务检查、原子替换、回滚和卸载清单；`--no-path` 保留原安装已登记的 PATH 区块。升级前仍须先正常停止工作台；不直接用手动包安装器覆盖快速安装的文件，以免卸载清单哈希失配。
+
 默认在 `~/.codex-view/bin` 安装三个原有入口及 `code-view-uninstall`，许可与安装清单位于 `~/.codex-view/share/code-view`，无需 sudo。安装与升级只需系统 `curl`，卸载可以离线完成。
 
 脚本在 `${ZDOTDIR:-$HOME}/.zshrc` 与 Bash 当前生效的登录配置添加带 `code-view PATH` 标记的区块，保留其他内容。Bash 按 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 的顺序选择第一个已有文件；全部不存在时才创建 `.bash_profile`，避免遮蔽已有设置。路径通过 shell 转义写入，避免重复追加；已有 dotfile 使用原子替换并保留权限。新 zsh 交互终端或 Bash 登录终端自动加载。安装脚本不能改变父 shell，当前终端执行：
