@@ -53,6 +53,7 @@ export function applyRecorderStatus(state: ReadingView, value: RecorderStatus, e
 export const keyOf = (key: TextKey) => JSON.stringify([key.requestId, key.responseId, key.wireItemId, key.contentIndex]);
 const responseKey = (r: ResponseView) => JSON.stringify([r.requestId, r.responseId]);
 const empty = (): ReadingView => ({ items: [], toolContexts: [], nativeCommands: [], nativeFileChanges: [], responses: [], requests: [], diagnostics: [], userCapture: { enabled: false, diagnostics: [] }, capture: 'unavailable', connected: false, viewSeq: 0 });
+export const nativeDirect = (reading: ReadingView) => reading.capture === 'unavailable' && reading.viewSeq > 0;
 export const requestFor = (state: ReadingView, item: { key: TextKey }) => state.requests.find(request => request.requestId === item.key.requestId && request.clientRequestIndex === null);
 export const conversationItems = (state: ReadingView) => modelItems(state).filter(item => requestFor(state, item)?.purpose === 'conversation');
 export const userKeyOf = (key: UserKey) => JSON.stringify([key.codexThreadId, key.codexTurnId, key.nativeItemId]);
@@ -96,7 +97,7 @@ export function readSnapshot(snapshot: any, epoch: string): ReadingView {
   if (snapshot.runEpoch !== epoch || snapshot.schemaVersion !== VIEW_SCHEMA_VERSION || !Number.isSafeInteger(snapshot.viewSeq) || snapshot.viewSeq < 0 || !Array.isArray(snapshot.items)) throw new Error('incompatible reading snapshot');
   const items = snapshot.items.map(parseViewItem) as ViewItem[];
   if (new Set(items.map(item => item.itemKey)).size !== items.length) throw new Error('duplicate reading item');
-  return { ...empty(), ...snapshot, usageSummary: parseUsageSummary(snapshot.usageSummary), items, connected: false, capture: items.some(item => item.completeness !== 'observed') ? 'partial' : snapshot.capture };
+  return { ...empty(), ...snapshot, usageSummary: parseUsageSummary(snapshot.usageSummary), items, connected: false, capture: snapshot.capture === 'unavailable' ? 'unavailable' : items.some(item => item.completeness !== 'observed') ? 'partial' : snapshot.capture };
 }
 
 export function applyReadingEvent(state: ReadingView, event: ReadingEvent): ReadingView {
@@ -153,6 +154,7 @@ export function applyReadingEvent(state: ReadingView, event: ReadingEvent): Read
     diagnostics = [...diagnostics.filter(value => value.requestId !== diagnostic.requestId || value.code !== diagnostic.code), diagnostic];
     capture = 'partial';
   } else throw new Error('unknown reading event');
+  if (nativeDirect(state) || (event.kind === 'capture.gap' && event.diagnostic.code === 'model_capture_unavailable')) capture = 'unavailable';
   return { ...state, viewSeq: event.viewSeq, usageSummary, items, toolContexts, nativeCommands, nativeFileChanges, responses, requests, diagnostics, userCapture, capture };
 }
 

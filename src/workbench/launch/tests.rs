@@ -2,6 +2,9 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "tests/native_direct.rs"]
+mod native_direct;
+
 fn script(path: &Path, body: &str) {
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -15,6 +18,63 @@ struct Fixture {
     cwd: PathBuf,
     cli: PathBuf,
     entry: PathBuf,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_direct_keeps_cli_routes_and_records_capture_unavailable() {
+    let fixture = Fixture::new();
+    let native = "model='native-default'\nfuture_setting={enabled=true}\n[model_providers.custom]\nbase_url='ignored-invalid-url'\nrequires_openai_auth='ignored-unselected'\n";
+    std::fs::write(fixture.home.join("config.toml"), native).unwrap();
+    // Direct launch must never open or validate authentication metadata.
+    std::fs::create_dir(fixture.home.join("auth.json")).unwrap();
+    let options = fixture.options();
+    let history = options.workbench_paths.history_dir();
+    let runtime = WorkbenchRuntime::start(options).await.unwrap();
+    assert!(runtime.proxy.is_none() && runtime._observer.is_none());
+    assert!(runtime.healthy());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.home.join("fixture.pid").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let args = std::fs::read_to_string(fixture.home.join("fixture.args")).unwrap();
+    assert!(args.contains("--profile\nnamed\n"));
+    assert!(
+        !args.contains("base_url")
+            && !args.contains("model_provider")
+            && !args.contains("auth")
+            && !args.contains("websocket")
+    );
+    let snapshot = runtime.hub.snapshot();
+    assert_eq!(snapshot.capture, "unavailable");
+    assert!(snapshot.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == super::super::decode::DiagnosticCode::ModelCaptureUnavailable));
+    assert!(snapshot.usage_summary.capture_incomplete);
+    let epoch = runtime.epoch;
+    drop(runtime);
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            history
+                .join("runs")
+                .join(epoch.to_string())
+                .join("meta.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        meta["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["reason"] == "model_capture_unavailable")
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.home.join("config.toml")).unwrap(),
+        native
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -244,7 +304,8 @@ async fn launch_keeps_home_cwd_native_args_and_cleans_only_owned_resources() {
         fixture.cwd.canonicalize().unwrap().to_str().unwrap()
     );
     let entry = read_entry(&fixture.entry).unwrap();
-    let proxy_address = reqwest::Url::parse(&run.runtime.proxy.child_base_url()).unwrap();
+    let proxy_address =
+        reqwest::Url::parse(&run.runtime.proxy.as_ref().unwrap().child_base_url()).unwrap();
     assert_eq!(entry.cli_pid, pid);
     assert_eq!(
         std::fs::read(fixture.home.join("config.toml")).unwrap(),

@@ -236,6 +236,7 @@ struct State {
     user_capture: UserCapture,
     diagnostics: VecDeque<Diagnostic>,
     partial: bool,
+    model_capture_unavailable: bool,
     ring: VecDeque<Arc<Published>>,
     ring_bytes: usize,
     subscribers: Vec<Subscriber>,
@@ -288,6 +289,7 @@ impl LiveHub {
                 user_capture: UserCapture::default(),
                 diagnostics: VecDeque::new(),
                 partial: false,
+                model_capture_unavailable: false,
                 ring: VecDeque::new(),
                 ring_bytes: 0,
                 subscribers: Vec::new(),
@@ -338,7 +340,13 @@ impl LiveHub {
             requests: state.requests.iter().cloned().collect(),
             user_capture: state.user_capture.clone(),
             diagnostics: state.diagnostics.iter().cloned().collect(),
-            capture: if state.partial { "partial" } else { "ok" },
+            capture: if state.model_capture_unavailable {
+                "unavailable"
+            } else if state.partial {
+                "partial"
+            } else {
+                "ok"
+            },
             recorder: recorder.state,
             persisted_through_view_seq: recorder.persisted_through_view_seq,
             history_coverage: recorder.history_coverage,
@@ -604,6 +612,7 @@ impl LiveHub {
             Change::Diagnostic { code } => {
                 state.usage.diagnostic(code);
                 state.partial = true;
+                state.model_capture_unavailable |= code == DiagnosticCode::ModelCaptureUnavailable;
                 if state
                     .diagnostics
                     .iter()
@@ -819,6 +828,17 @@ impl LiveHub {
             Instant::now(),
             ViewChange::UserCapture { user_capture },
         );
+    }
+
+    pub(crate) fn model_capture_unavailable(&self) {
+        self.apply(Decoded {
+            request_id: Uuid::nil(),
+            capture_seq: 0,
+            received_at: Instant::now(),
+            change: Change::Diagnostic {
+                code: DiagnosticCode::ModelCaptureUnavailable,
+            },
+        });
     }
 
     pub fn capture_health(&self, stats: CaptureStats) {

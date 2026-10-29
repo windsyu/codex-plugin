@@ -11,6 +11,36 @@ use anyhow::{Result, bail, ensure};
 
 const CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Select capture only for the already supported explicit custom route. All
+/// other native configurations run unchanged, including configurations whose
+/// syntax or sources this bounded probe cannot understand. The CLI owns their
+/// validation. In particular, an unselected custom table says nothing about the
+/// effective default OpenAI route or its authentication.
+pub(super) fn select_capture(
+    home: &Path,
+    cwd: &Path,
+    named: Option<&str>,
+) -> Result<Option<Profile>> {
+    let probe = || -> Result<bool> {
+        let (base, _) = read(&home.join("config.toml"))?;
+        let overlay = if let Some(name) = named {
+            identifier(name)?;
+            read(&home.join(format!("{name}.config.toml")))?.0
+        } else {
+            toml::Value::Table(toml::Table::new())
+        };
+        let top = |key: &str| overlay.get(key).or_else(|| base.get(key));
+        Ok(top("profile").is_none()
+            && top("model_provider").and_then(toml::Value::as_str) == Some("custom"))
+    };
+    if !probe().unwrap_or(false) {
+        return Ok(None);
+    }
+    Profile::load(home, cwd, named)
+        .map(Some)
+        .map_err(|error| LaunchFailure::CaptureConfig.wrap(error))
+}
+
 pub(super) struct Profile {
     pub provider: String,
     pub upstream: Upstream,
@@ -18,28 +48,6 @@ pub(super) struct Profile {
     sources: Vec<(PathBuf, Vec<u8>)>,
     auth: config_sources::AuthSnapshot,
     home: PathBuf,
-}
-
-fn validate_command_auth(overlay: &toml::Table, base: Option<&toml::Table>) -> Result<()> {
-    let field = |key: &str| {
-        overlay
-            .get(key)
-            .or_else(|| base.and_then(|table| table.get(key)))
-    };
-    ensure!(
-        field("command")
-            .and_then(toml::Value::as_str)
-            .is_some_and(|command| !command.trim().is_empty()),
-        LaunchFailure::Auth
-    );
-    ensure!(
-        field("args").is_none_or(|args| {
-            args.as_array()
-                .is_some_and(|args| args.iter().all(|argument| argument.as_str().is_some()))
-        }),
-        LaunchFailure::Auth
-    );
-    Ok(())
 }
 
 pub(super) fn identifier(value: &str) -> Result<()> {
@@ -81,12 +89,12 @@ fn read(path: &Path) -> Result<(toml::Value, Vec<u8>)> {
 impl Profile {
     pub fn load(home: &Path, cwd: &Path, named: Option<&str>) -> Result<Self> {
         let base_path = home.join("config.toml");
-        let (base, bytes) = read(&base_path)?;
+        let (base, bytes) = read(&base_path).map_err(|error| LaunchFailure::Config.wrap(error))?;
         let mut sources = vec![(base_path, bytes)];
         let overlay = if let Some(name) = named {
             identifier(name)?;
             let path = home.join(format!("{name}.config.toml"));
-            let (value, bytes) = read(&path)?;
+            let (value, bytes) = read(&path).map_err(|error| LaunchFailure::Config.wrap(error))?;
             sources.push((path, bytes));
             value
         } else {
@@ -121,26 +129,16 @@ impl Profile {
         let profile_provider = provider_table(&overlay)?;
         let field = |key: &str| profile_provider.get(key).or_else(|| base_provider.get(key));
         ensure!(
-            field("wire_api").and_then(toml::Value::as_str) == Some("responses"),
+            field("wire_api").is_none_or(|value| value.as_str() == Some("responses")),
             "capture profile requires native Responses wire_api"
         );
         let requires_openai_auth = field("requires_openai_auth")
-            .and_then(toml::Value::as_bool)
-            .ok_or_else(|| {
-                anyhow::anyhow!("native requires_openai_auth must be an explicit boolean")
-            })?;
-        let base_auth = base_provider.get("auth");
-        let profile_auth = profile_provider.get("auth");
-        let command_auth = if let Some(value) = profile_auth {
-            let overlay = value.as_table().ok_or(LaunchFailure::Auth)?;
-            validate_command_auth(overlay, base_auth.and_then(toml::Value::as_table))?;
-            true
-        } else if let Some(value) = base_auth {
-            validate_command_auth(value.as_table().ok_or(LaunchFailure::Auth)?, None)?;
-            true
-        } else {
-            false
-        };
+            .map(|value| value.as_bool().ok_or(LaunchFailure::Auth))
+            .transpose()?
+            .unwrap_or(false);
+        // Only authentication precedence affects the capture route. The CLI
+        // validates and executes the command, args, cwd and refresh settings.
+        let command_auth = field("auth").is_some();
         if command_auth {
             // The CLI owns command execution, caching and retry. True would
             // additionally select the unrelated native OpenAI account manager.
@@ -183,18 +181,14 @@ impl Profile {
                 secrets.push(value.to_owned());
             }
             for key in ["http_headers", "query_params"] {
-                if let Some(value) = table.get(key) {
-                    let table = value
-                        .as_table()
-                        .ok_or_else(|| anyhow::anyhow!("invalid provider metadata table"))?;
-                    for value in table.values() {
-                        let value = value
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("invalid provider metadata value"))?;
-                        if !value.is_empty() {
-                            secrets.push(value.to_owned());
-                        }
-                    }
+                if let Some(values) = table.get(key).and_then(toml::Value::as_table) {
+                    secrets.extend(
+                        values
+                            .values()
+                            .filter_map(toml::Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
+                    );
                 }
             }
         }
@@ -259,6 +253,105 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn omitted_provider_keeps_native_route_and_ignores_unselected_custom_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            r#"
+model="native-model"
+future_setting={enabled=true}
+[model_providers.custom]
+base_url="https://unused.example/v1"
+wire_api="responses"
+experimental_bearer_token="synthetic-unused"
+"#,
+        )
+        .unwrap();
+        // A directory would fail AuthSnapshot::read: direct mode must not read it.
+        std::fs::create_dir(directory.path().join("auth.json")).unwrap();
+        assert!(
+            select_capture(directory.path(), &cwd, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn direct_launch_delegates_missing_unknown_and_malformed_native_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        assert!(
+            select_capture(directory.path(), &cwd, None)
+                .unwrap()
+                .is_none()
+        );
+        for config in [
+            "",
+            "model_provider='openai'",
+            "model_provider='future-provider'\nfuture={enabled=true}",
+            "model_provider = [ malformed",
+        ] {
+            std::fs::write(directory.path().join("config.toml"), config).unwrap();
+            assert!(
+                select_capture(directory.path(), &cwd, None)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        std::fs::write(
+            directory.path().join("config.toml"),
+            config("https://example.invalid/v1"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("native.config.toml"),
+            "model_provider='openai'",
+        )
+        .unwrap();
+        assert!(
+            select_capture(directory.path(), &cwd, Some("native"))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn capture_accepts_optional_native_defaults_and_unrelated_future_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let config = config("https://example.invalid/v1")
+            .replace("wire_api=\"responses\"\n", "")
+            .replace("requires_openai_auth=false\n", "");
+        std::fs::write(directory.path().join("config.toml"), format!("future_setting={{enabled=true}}\n{config}future_provider_setting={{mode='future'}}\n")).unwrap();
+        let profile = select_capture(directory.path(), &cwd, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.provider, "custom");
+        profile.unchanged().unwrap();
+    }
+    #[test]
+    fn capture_leaves_command_arguments_and_metadata_schema_to_native_cli() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let config = command_config("https://example.invalid/v1").replace(
+            "args=[\"private-command-argument\"]",
+            "args='native-validation-owned'",
+        );
+        std::fs::write(
+            directory.path().join("config.toml"),
+            format!("{config}http_headers={{example=42}}\nfuture={{enabled=true}}\n"),
+        )
+        .unwrap();
+        assert!(
+            select_capture(directory.path(), &cwd, None)
+                .unwrap()
+                .is_some()
+        );
+    }
     fn config(url: &str) -> String {
         format!(
             r#"model="gpt-6-astra"
@@ -380,15 +473,6 @@ auth={{command="/synthetic/not-executed",args=["private-command-argument"]}}
             format!("{base}env_key=\"PRIVATE_ENV\"\n"),
             format!("{base}env_http_headers={{x=\"PRIVATE_HEADER\"}}\n"),
             format!("{base}aws={{profile=\"PRIVATE_AWS\"}}\n"),
-            base.replace(
-                "auth={command=\"/synthetic/not-executed\",args=[\"private-command-argument\"]}",
-                "auth={args=[\"private-command-argument\"]}",
-            ),
-            base.replace(
-                "args=[\"private-command-argument\"]",
-                "args=\"private-command-argument\"",
-            ),
-            base.replace("/synthetic/not-executed", "   "),
             base.replace(
                 "cli_auth_credentials_store=\"file\"",
                 "cli_auth_credentials_store=\"keyring\"",

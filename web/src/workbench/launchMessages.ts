@@ -16,6 +16,7 @@ const messages: Record<string, string> = {
   native_cli_not_found: '未找到可运行的 Codex CLI，请检查安装位置及启动工作台时的 PATH。',
   native_cli_version_failed: '无法读取 Codex CLI 版本，请在本机终端检查 codex --version 是否正常。',
   native_config_invalid: '原生 Codex 配置无法读取或解析，请检查配置文件的格式和读取权限。',
+  native_capture_config_unsupported: '当前 custom 配置无法用于模型捕获；请检查必要的上游地址和传输配置。原生配置格式与读取权限可能正常。',
   native_provider_unsupported: '当前模型提供方配置暂不支持工作台代理，请检查所选提供方及其连接配置。',
   native_auth_unverified: '当前认证方式尚未通过工作台验证，请在原生 CLI 中核验登录与认证配置；如受组织策略管理，请联系管理员。',
   native_project_config_invalid: '项目中的 Codex 配置无法用于本次启动，请检查项目配置及原生 CLI 的配置诊断。',

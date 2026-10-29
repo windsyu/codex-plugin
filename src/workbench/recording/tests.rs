@@ -39,6 +39,46 @@ fn wait(mut predicate: impl FnMut() -> bool) {
 }
 
 #[tokio::test]
+async fn native_direct_capture_status_survives_journal_replay_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = LiveHub::new(LiveLimits::default());
+    hub.model_capture_unavailable();
+    let recorder = Recorder::start(&hub, options(dir.path())).unwrap();
+    let history = recorder.history.clone();
+    hub.enable_user_reader();
+    hub.user_issue(
+        Uuid::new_v4(),
+        0,
+        crate::workbench::rollout::UserIssue::ReadFailed,
+    );
+    wait(|| hub.recorder_status().saved_through_view_seq == hub.snapshot().view_seq);
+    assert_eq!(hub.snapshot().capture, "unavailable");
+    drop(recorder);
+    let read = history
+        .query(Query::Run { epoch: hub.epoch() })
+        .await
+        .unwrap();
+    assert_eq!(read["snapshot"]["capture"], "unavailable");
+    assert_eq!(read["run"]["historyCoverage"], "partial");
+    assert!(
+        read["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["reason"] == "model_capture_unavailable")
+    );
+    assert!(
+        read["snapshot"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("模型实时捕获不可用")))
+    );
+}
+
+#[tokio::test]
 async fn records_safe_content_and_replays_after_clean_exit_without_native_input() {
     let dir = tempfile::tempdir().unwrap();
     let hub = LiveHub::new(LiveLimits::default());

@@ -4,7 +4,7 @@
 
 ## 本地打包
 
-当前版本 `1.0.0`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
+当前版本 `1.0.1`，本机受测目标为 `aarch64-apple-darwin`。固定工具链、锁文件和前端优先顺序继续沿用标准入口：
 
 ```sh
 node scripts/dev.mjs doctor

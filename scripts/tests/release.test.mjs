@@ -97,6 +97,8 @@ for (const version of ['0.3.0', '1.0.0', '12.34.56']) test(`packaging ${version}
   assert.match(notes, /no plaintext fallback/);
   assert.match(notes, /Upgrade all three components together/);
   assert.match(notes, /CLI 0\.162\.1 command authentication was tested with a synthetic provider; real-provider command authentication remains unverified/);
+  assert.match(notes, /Default OpenAI\/ChatGPT launches use native direct mode/);
+  assert.match(notes, /live model capture and call inspection are unavailable/);
   assert.doesNotMatch(notes, /UI\/API 2|transport 2|relay is trusted and can read forwarded content/);
   const index = JSON.parse(fs.readFileSync(path.join(release.bundle, 'licenses/INDEX.json')));
   const runtimes = index.filter(entry => entry.ecosystem === 'toolchain-runtime');

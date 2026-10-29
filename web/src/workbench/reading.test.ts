@@ -20,6 +20,13 @@ const patch = (viewSeq: number, baseRevision: number, append: string): ReadingEv
 const unsafeEvent = (event: unknown) => event as ReadingEvent;
 
 describe('unified reading stream', () => {
+  it('keeps native direct capture unavailable across snapshots and later partial events', () => {
+    const unavailable = applyReadingEvent(empty(), { kind: 'capture.gap', viewSeq: 1, diagnostic: { requestId: 'run', captureSeq: 0, code: 'model_capture_unavailable' } });
+    expect(unavailable.capture).toBe('unavailable');
+    const later = applyReadingEvent(unavailable, { kind: 'user.capture', viewSeq: 2, userCapture: { enabled: true, diagnostics: [{ sourceRef: 'source', byteOffset: 0, code: 'read_failed' }] } });
+    expect(later.capture).toBe('unavailable');
+    expect(readSnapshot({ ...later, runEpoch: 'direct', schemaVersion: 2, items: [{ ...user('turn', 'id'), completeness: 'partial' }] }, 'direct').capture).toBe('unavailable');
+  });
   it('starts with a typed replacement, applies deltas once, and replaces the final content in place', () => {
     expect(() => applyReadingEvent(empty(), patch(1, 0, 'cannot invent role'))).toThrow();
     let state = applyReadingEvent(empty(), replace(1, model('中文')));

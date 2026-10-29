@@ -191,6 +191,10 @@ impl Serialize for ViewItem {
             }
             Self::Notice(item) => {
                 let (code, text) = match item.code {
+                    DiagnosticCode::ModelCaptureUnavailable => (
+                        "capture_gap",
+                        "原生直连模式：模型实时捕获不可用。请在原生终端查看回复，原生历史仍可阅读；本次工作台不记录模型正文、调用详情或用量。",
+                    ),
                     DiagnosticCode::UnknownEvent => (
                         "unknown_type",
                         "未识别的事件；未将其解释为用户、模型或工具。",
@@ -213,10 +217,14 @@ impl Serialize for ViewItem {
                 map.serialize_entry("text", text)?;
                 map.serialize_entry(
                     "evidence",
-                    &[Evidence::Diagnostic {
-                        request_id: item.request_id,
-                        capture_seq: item.capture_seq,
-                    }],
+                    &if item.code == DiagnosticCode::ModelCaptureUnavailable {
+                        Vec::new()
+                    } else {
+                        vec![Evidence::Diagnostic {
+                            request_id: item.request_id,
+                            capture_seq: item.capture_seq,
+                        }]
+                    },
                 )?;
             }
             Self::Tool(_) => unreachable!(),
