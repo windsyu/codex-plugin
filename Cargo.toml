@@ -36,7 +36,7 @@ notify = "8"
 portable-pty = "0.9"
 rand = "0.9"
 ring = "0.17.14"
-reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "http2", "rustls-tls-native-roots", "system-proxy"] }
 rusqlite = { version = "0.37", features = ["bundled", "hooks", "limits"] }
 # Keep the built UI and API together in local trial binaries as well as releases.
 codex-workbench-assets = { path = "crates/workbench-assets" }

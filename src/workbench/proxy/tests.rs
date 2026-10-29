@@ -58,6 +58,119 @@ async fn proxy_for(address: SocketAddr, capture: CaptureSender) -> ProxyServer {
     .unwrap()
 }
 
+#[tokio::test]
+async fn production_client_keeps_loopback_upstreams_out_of_network_proxies() {
+    const CHILD: &str = "CODEX_TEST_LOOPBACK_MODEL_PROXY";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "workbench::proxy::tests::production_client_keeps_loopback_upstreams_out_of_network_proxies", "--nocapture"])
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("CODEX_HOME", home.path().join("native"))
+            .env(CHILD, "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("NO_PROXY", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated proxy regression failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    for ip in [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ] {
+        let listener = TcpListener::bind((ip, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(|| async { "synthetic local model" });
+        let upstream = Fixture {
+            address,
+            task: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+        };
+        let (capture, _observations) = capture::channel(128 * 1024, 32);
+        let proxy = ProxyServer::bind(
+            Upstream::parse(&format!("http://{}/v1", upstream.address)).unwrap(),
+            capture,
+        )
+        .await
+        .unwrap();
+        let response = client()
+            .post(format!("{}/responses", proxy.child_base_url()))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "synthetic local model");
+    }
+}
+
+#[tokio::test]
+async fn failed_upstream_exposes_only_fixed_reason_and_request_identity() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let (capture, _observations) = capture::channel(128 * 1024, 32);
+    let proxy = proxy_for(address, capture).await;
+    let response = client()
+        .post(format!(
+            "{}/responses?private=synthetic-secret",
+            proxy.child_base_url()
+        ))
+        .header("Authorization", "Bearer synthetic-secret")
+        .body("synthetic-private-body")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let text = response.text().await.unwrap();
+    let diagnostic: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(diagnostic["error"]["code"], "upstream_failed");
+    assert_eq!(diagnostic["error"]["reason"], "connect");
+    assert_eq!(diagnostic["error"]["source"], "model_proxy");
+    assert!(Uuid::parse_str(diagnostic["error"]["requestId"].as_str().unwrap()).is_ok());
+    assert_eq!(diagnostic["error"].as_object().unwrap().len(), 4);
+    assert!(!text.contains("synthetic"));
+    assert!(!text.contains(&address.to_string()));
+    assert!(!text.contains(&proxy.state.capability));
+}
+
+#[tokio::test]
+async fn upstream_timeout_has_a_distinct_safe_reason() {
+    let upstream = fixture(|_| std::future::pending::<Response>()).await;
+    let error = client()
+        .get(format!(
+            "http://{}/synthetic-private-path",
+            upstream.address
+        ))
+        .timeout(Duration::from_millis(30))
+        .send()
+        .await
+        .unwrap_err();
+    let request_id = Uuid::new_v4();
+    let response = upstream_failure(&error, request_id);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let diagnostic: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        diagnostic,
+        serde_json::json!({"error": {
+            "source": "model_proxy", "code": "upstream_failed",
+            "requestId": request_id, "reason": "timeout"
+        }})
+    );
+}
+
 #[test]
 fn upstream_is_fixed_and_rejects_credentials_insecure_remote_and_path_escape() {
     for url in [

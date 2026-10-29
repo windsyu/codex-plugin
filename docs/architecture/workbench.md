@@ -81,6 +81,8 @@ Application 可以没有 CLI：历史首页与配置可用，缺少 CLI、native
 
 代理只连固定上游，使用随机能力路径，不提供 CONNECT 或任意 URL 转发。流转发不等待解码、LiveHub、磁盘或浏览器 ACK；有界观察溢出产生捕获缺口并重置 framing 边界，而不是丢转发字节或拼接虚假完整内容。PTY 输入和输出也不依赖观察/记录完成。
 
+模型出站使用 reqwest 的环境与系统 HTTP(S) 代理发现，使 macOS launchd 后台进程无需继承交互 Shell 的代理变量也能使用系统代理。已校验的字面 loopback 模型上游显式绕过所有网络代理；TLS 仍校验系统受信任证书。仅连接建立设 30 秒期限，不设置响应读取或整请求期限。`upstream_failed` 保留原错误码和 requestId，增加固定 `reason`（`timeout/connect/body/request/other`）；不输出底层错误文本、URL、认证头或环境值，`connect` 不进一步断言 DNS 或 TLS 原因。
+
 用户提交仅取原生 rollout 的明确 UserMessage 身份，不从 Enter、终端回显或模型请求 `role:user` 推断。工具参数表示模型生成；工具成功必须有匹配的原生执行/结果证据。关联要求明确调用域和身份，冲突/缺失保持不确定。`response.completed`、用户提交、工具完成、整轮完成和 CLI 退出分别表达。
 
 Live ViewItem schema 2 使用稳定 `itemKey`、revision、orderIndex 和 provenance：首次 `item.replace` 创建项，patch 必须满足基础 revision 与 contentKey，最终完整内容 replace，不再次 append。同一事件的文本、文件/图片上下文、详情与用量不能通过不同恢复路径重复计数。具体契约见[详细设计](../design/workbench-detailed-design.md)。
