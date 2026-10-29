@@ -4,6 +4,7 @@ pub(crate) enum LaunchFailure {
     Executable,
     Version,
     Config,
+    CaptureConfig,
     Provider,
     Auth,
     ProjectConfig,
@@ -14,10 +15,11 @@ pub(crate) enum LaunchFailure {
     ConfigChanged,
 }
 impl LaunchFailure {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Executable,
         Self::Version,
         Self::Config,
+        Self::CaptureConfig,
         Self::Provider,
         Self::Auth,
         Self::ProjectConfig,
@@ -32,6 +34,7 @@ impl LaunchFailure {
             Self::Executable => "native_cli_not_found",
             Self::Version => "native_cli_version_failed",
             Self::Config => "native_config_invalid",
+            Self::CaptureConfig => "native_capture_config_unsupported",
             Self::Provider => "native_provider_unsupported",
             Self::Auth => "native_auth_unverified",
             Self::ProjectConfig => "native_project_config_invalid",

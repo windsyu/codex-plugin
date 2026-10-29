@@ -10,7 +10,7 @@
 
 ## 1. 运行单元与模块
 
-一个 Run 对应一次目录启动，一个官方交互 CLI、一套 PTY、一组模型连接和一份观察记录。Run 不是 Codex Thread：原生 resume/fork、子代理和多轮任务可关联多个 Thread/Response。新服务不启动外部 `codex app-server`，不发 `turn/start`，不管理 Codex 的原生交互协议。
+一个 Run 对应一次目录启动，一个官方交互 CLI、一套 PTY、可选的一组模型代理连接和一份观察记录。Run 不是 Codex Thread：原生 resume/fork、子代理和多轮任务可关联多个 Thread/Response。新服务不启动外部 `codex app-server`，不发 `turn/start`，不管理 Codex 的原生交互协议。
 
 | 模块 | 职责 | 不依赖 |
 | --- | --- | --- |
@@ -43,7 +43,7 @@ codex-view --project . --codex-bin <installed-cli> --resume <explicit-thread-uui
 codex-view open <private-entry-file>
 ```
 
-命令由独立 [binary](../../src/bin/codex-view.rs) 和 [Launcher](../../src/workbench/launch.rs)实现。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务并独立绑定模型代理，再启动普通官方 CLI 的 PTY。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。记录器在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
+命令由独立 [binary](../../src/bin/codex-view.rs) 和 [Launcher](../../src/workbench/launch.rs)实现。显式项目启动时 WorkbenchRuntime 固定 canonical cwd/home、检查安装版，创建随机 `runEpoch`，沿用 Application 的 loopback 网页服务在捕获路径独立绑定模型代理，然后启动普通官方 CLI 的 PTY；原生直连路径不创建模型代理或解码观察线程。`--resume` 与网页恢复先在只读路径中核验 canonical rollout 文件名、`SessionMeta.id`、cwd、nativeHome 与文件身份，再探测版本或创建 PTY，并在 spawn 前复查；不满足这些条件的记录仍可阅读但不提供恢复。记录器在 `~/.codex-web/history` 建立按 runEpoch 分隔的观察历史，可用 `--data-dir` 指定独立目录；项目身份使用 canonical cwd 的摘要。它不是原生 Thread 身份或可恢复的 CLI 控制状态。记录器异步建目录；不可写时运行继续并提示保存失败。
 
 工作台使用独立 JSON 配置与 `--config-dir`，现有显式参数覆盖文件值；上述命令与数据默认值继续兼容。具体目录、字段与下次启动生效规则见[配置契约](history-settings.md#2-配置目录与文件契约)。
 
@@ -70,12 +70,16 @@ interface CaptureProfile {
 }
 ```
 
-这里只记录已确认的模型路由，不复制 credential、不重写官方配置合并器。接入适配器必须验证 profile 与 CLI 最终生效 provider/config 的核对方法，覆盖命令参数/profile/管理配置的优先级；无法证明时拒绝该 profile，要求显式配置原 upstream，不猜默认地址。配置核对覆盖命名 profile、本次路由覆盖和项目层：项目允许的推理设置生效，但 `model_provider`/`model_providers` 等路由认证字段被原生过滤。当前必要 unmanaged custom profile 增加了启动前来源检查：检测到系统/管理层、非 File 认证存储或可能的云管理时拒绝；只输出存在性，不覆盖策略。Launcher 必须复用该边界并保持原 home，不能用通用 TOML 合并推导 provider，也不能将合成配置实验扩为全 profile 支持。
+按 [ADR 0067](../decisions/0067-native-direct-launch.md)，启动与模型捕获分开。工作台对原 config 和命名 profile 作有界只读探测，仅当用户显式选择 `custom` 时启用下述捕获适配器；默认 OpenAI、其他 provider、缺失或无法安全解析的配置按原生直连启动。原生直连不检查 AuthSnapshot、JWT、credential store、未选 provider 或系统管理配置，不创建模型代理/Observer，不加 provider、base URL、认证或传输覆盖。原 home/profile/model/权限交 CLI；配置问题由 CLI 自己显示。保留现有终端显示选项，不写原生配置。
 
-macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求 provider `custom`、`wire_api=responses`、显式布尔 `requires_openai_auth`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
+直连在启动记录器之前发布 run 级 `model_capture_unavailable` 诊断，`snapshot.capture="unavailable"`，usage 标记捕获不完整；状态不会被后续用户记录或 partial 事件覆盖。兼容 schema 2 的 notice 保留明确中文说明，journal checkpoint/replay 保留状态，既有 metadata gaps 的 reason 记录 `model_capture_unavailable`，历史覆盖保持 partial，无数据库迁移。模型正文、调用详情、用量不会被伪装为零或完整；原生历史仍由首页只读路径提供。旧 Preact 前端可解析 notice/gap，并把状态视为不完整；正式部署使用配套前端。运行生命周期、停止、文件阅读和历史入口不依赖模型代理存在。
+
+捕获适配器只记录已经确认的路由，不复制 credential 或重写官方配置合并器。固定转发目的、认证来源、系统/管理策略及项目层认证存储属于必要边界；未验证时拒绝显式 custom 捕获，不把问题误分类为配置读取/语法失败。只校验这些必要字段，未知与无关设置交给 CLI，不依据未选 provider 的字段推断当前路由。
+
+macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动白名单。适配器从原 `config.toml` 与可选 `<name>.config.toml` 选择路由和认证形状，再把原 home/profile 交给 CLI。要求显式 provider `custom`、Responses（`wire_api` 省略为 `responses`）、`requires_openai_auth` 按原生默认 `false`、显式 base URL，认证按以下互斥路径接入，不覆盖模型、推理、权限或重试。
 
 - 静态 bearer：非空 `experimental_bearer_token`；`requires_openai_auth=true/false` 均可，true 不推断为 ChatGPT 登录。显式 provider bearer 的原生优先级保持，File 认证中的 API Key 额外纳入观察副本脱敏。此路径继续拒绝 managed/cloud/ChatGPT tokens/非 File 存储；spawn 前复查 `auth.json` 快照。取舍见 [ADR 0054](../decisions/0054-native-custom-bearer-auth.md)。
-- 命令认证：非空 `model_providers.custom.auth.command`，可选 `args` 为字符串数组，要求 `requires_openai_auth=false`；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表按原生递归覆盖语义检查，args 数组替换而非拼接。工作台只校验配置形状和路由/冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
+- 命令认证：原生 `model_providers.custom.auth`，命令/参数/schema 交 CLI 处理，要求 `requires_openai_auth=false`（可省略）；与存在的 `experimental_bearer_token`（包括空值或错误类型）、`env_key`、`env_http_headers`、AWS 互斥。命名 profile 的 `auth` 子表与 args 由 CLI 按原生递归覆盖和数组替换语义处理。工作台只校验路由/认证来源冲突，不执行命令、不读取命令程序/输出、不获取、缓存或记录生成的 token，也不记录命令/参数。命令 token 不来自 `auth.json`，但原生登录状态可能独立启用 cloud-managed 配置并补入 provider 字段，因此此路径仍要求 File credential store，接受缺失或 API-key 形状的 `auth.json`，拒绝 malformed/ChatGPT token 文件及 `keyring/auto`；读取的登录文件只用于有效路由门禁、启动快照和已知 API key 的观察脱敏。命令执行、缓存和 401 刷新完全归官方 CLI，代理透明转发其 `Authorization`。见 [ADR 0060](../decisions/0060-native-provider-command-auth.md)；安装版与真实 provider 须独立验证，配置接入不代表端到端成功。
 
 两条路径都拒绝 `env_key`、`env_http_headers`、AWS、系统/managed 路由来源及 `supports_websockets=true`，不强制降级。配置文件最多 2MiB、认证元数据最多 1MiB，按 nofollow/nonblock 普通文件读取；spawn 前复查已读配置及认证快照未改变。检查不声称锁住所有配置源或消除最后检查之后及运行中的并发编辑竞态。命令 token 不被工作台读取，不能按精确值脱敏上游/工具主动回显到正文的凭证；认证头始终排除观察、调用详情与 journal。
 
@@ -93,7 +97,7 @@ macOS 的接入适配器为 `unmanaged-custom`，不以 CLI 版本作为启动�
 
 上述为当前本机入口。2026-09-21 用户要求的 IP/MagicDNS 与扫码配对见[接入契约](device-access.md)及 [ADR 0051](../decisions/0051-workbench-device-access.md)：Application 共用设备监听，按 runId 选择对应 Router/WebState，IP 与 MagicDNS 同时访问该端口；没有互斥模式或强制 Serve。前端相对 API/WS 保持，后端用已知地址集合及本次 Host/Origin 对应校验替换固定来源。同 Run 的 IP/MagicDNS 共用固定配对码与授权，不同 Run 独立；共享设置仅电脑 owner 可用，撤销贯穿 WS/SSE、终端排队操作与重连资格，模型代理不开放。已落在 web/access、共享 permission 与 AccessPanel；可选 access.port 只影响下次开启，状态与凭证不保存。真实手机按 §9.2 的 P14 单独验收，桌面视口不能代替实际设备。
 
-每个受支持 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
+每个受支持的模型捕获 profile 均须验证：配置不污染、实际认证、CLI 会用到的 HTTP/SSE 或 WS、首轮/多轮/工具/取消、原生初始化与恢复；另用合成服务覆盖 SSE/WS 传输契约。其他 profile 通过同等实机验收后再加入支持清单，未测 provider 标为 unverified，不能默认启用。WS 转发未通过时不能强制 HTTP 以制造成功。
 
 ## 3. 转发与观察分离
 

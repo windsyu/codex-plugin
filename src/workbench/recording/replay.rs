@@ -62,6 +62,9 @@ impl Checkpoint {
         }
     }
     pub fn event(&mut self, event: &Value) -> Result<(), &'static str> {
+        let capture_unavailable = self.snapshot["capture"] == "unavailable"
+            || (event["kind"] == "capture.gap"
+                && event["diagnostic"]["code"] == "model_capture_unavailable");
         if event["runEpoch"] != self.snapshot["runEpoch"] {
             return Err("wrong_epoch");
         }
@@ -180,6 +183,9 @@ impl Checkpoint {
         }
         if let Some(summary) = event.get("usageSummary") {
             self.snapshot["usageSummary"] = summary.clone();
+        }
+        if capture_unavailable {
+            self.snapshot["capture"] = json!("unavailable");
         }
         self.snapshot["viewSeq"] = json!(seq);
         Ok(())

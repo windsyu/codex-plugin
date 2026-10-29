@@ -1,6 +1,6 @@
 # 原生 CLI 工作台：支持范围与使用边界
 
-本页汇总实际验证过的环境、产品限制及尚未实测的组合，范围记录截至 2026-10-16。当前实现契约见[本机架构](../architecture/workbench.md)、[本机交互](../interactions/workbench.md)和[中转架构](../architecture/relay.md)；构建通过不等于新平台、provider 或真实设备已经支持。历史逐次验证可从[清理前固定版本](https://github.com/windsyu/codex-plugin/tree/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/validation)追溯。
+本页汇总实际验证过的环境、产品限制及尚未实测的组合，范围记录截至 2026-10-29。当前实现契约见[本机架构](../architecture/workbench.md)、[本机交互](../interactions/workbench.md)和[中转架构](../architecture/relay.md)；构建通过不等于新平台、provider 或真实设备已经支持。历史逐次验证可从[清理前固定版本](https://github.com/windsyu/codex-plugin/tree/f686d4a3e1ba2847a2530fc78540bea773b54b19/docs/validation)追溯。
 
 ## 1. 运行环境与模型接入
 
@@ -9,13 +9,16 @@
 | 本机工作台 | macOS 26.5.2 / Apple Silicon 已验证；Linux、Windows 尚未完成本机工作台运行验收。Windows 的 `.codex-web` 路径约定不等于平台已支持 |
 | 公网中转 | 静态 `x86_64-unknown-linux-musl` 产物已在现有 Linux 服务验证，包含 TLS 门户、电脑出站连接与目录浏览；该结果不代表 Linux 本机 CLI/PTY 工作台已支持 |
 | 官方 CLI | 0.154.0、0.155.1、0.156.1、0.159.2 有原生交互及历史相关验证；0.159.2 综合回归覆盖审批、追问、取消、工具、恢复、多项目隔离与退出。版本号不是启动白名单，其他版本提示后继续检查实际配置和路由；不自动升降级 |
-| 静态凭据接入 | `unmanaged-custom`：原生 `custom` provider、Responses、显式 upstream、静态 bearer；支持 `requires_openai_auth=true/false`，保留 File API Key。现有 HTTPS/SSE 配置已有真实模型证据，独立 API Key 等新增组合另有合成 provider 验证；不自动改模型、权限或全局配置 |
+| 原生直连 | 默认 OpenAI（省略或显式 `model_provider="openai"`）及未选择 custom 捕获的原生配置直接交给官方 CLI；保留终端、原生认证、动态路由、传输与历史阅读。不设置 provider/base URL/auth/WS 覆盖，不读取认证文件作为启动门槛；模型实时捕获、调用详情、用量及工作台模型正文记录不可用。见 [ADR 0067](../decisions/0067-native-direct-launch.md) |
+| 静态凭据接入 | `unmanaged-custom`：原生显式 `custom` provider、Responses、显式 upstream、静态 bearer；`wire_api` 省略采用 `responses`，`requires_openai_auth` 省略采用 `false`；支持 `requires_openai_auth=true/false`，保留 File API Key。现有 HTTPS/SSE 配置已有真实模型证据，独立 API Key 等新增组合另有合成 provider 验证；不自动改模型、权限或全局配置 |
 | 命令认证接入 | 原生 `auth.command`：Responses、显式 upstream、`requires_openai_auth=false`；命令和 token 由本机 CLI 执行、缓存及刷新。工作台要求 File credential store，并快照缺失或 API-key 形状的 `auth.json`，以排除 cloud-managed 路由补值；不从中取得命令 token。与静态 bearer、env key/header、AWS、`requires_openai_auth=true` 互斥。CLI 0.162.1 与系统 Chrome 的合成 provider 回归已通过，真实 provider/公网发送仍待验，见 [ADR 0060](../decisions/0060-native-provider-command-auth.md) |
-| 未纳入的模型路由 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入支持。通用 WS 字节转发的合成验证不能替代真实接入验证 |
+| 未纳入的模型捕获 | managed/ChatGPT、其他 provider、环境认证、AWS 和真实 provider WS 尚未纳入模型代理捕获；原生直连不声称支持其捕获。显式 custom 的必要安全门槛未通过时仍拒绝捕获启动，不换 provider 或降级 WS。通用 WS 字节转发的合成验证不能替代真实接入验证 |
 | 浏览器 | 系统 Chrome 153/154 系列已有验证，覆盖原生交互、历史、二维码和桌面/窄屏布局；Safari、Firefox 没有完整验收 |
 | 手机 | 用户已确认单 Run 局域网接入和输入成功；多 Run 授权与窄屏布局有合成验证，真手机尚未复测。具体系统、锁屏恢复、双网络及移动网络组合未逐项确认，进一步体验优化暂缓 |
 
 CLI 0.161.0 另有公开 no-daemon profile（`--no-daemon` / `[features].daemon_auto_start=false`）验证：跨展示项目整理后仍恢复原线程、原 cwd，工具与零自动重放通过。这不代替 0.159.2 综合回归，也不承诺 0.161 默认共享 daemon 模式或完整新版本兼容。
+
+CLI 0.165.0 已通过独立临时 HOME/USERPROFILE/CODEX_HOME 的原生直连专项：省略 `model_provider`，由原生配置指定合成 loopback OpenAI endpoint 和 API key，原生 WebSocket 回复进入终端，实际 rollout 可经历史库读取；工作台未创建模型代理，捕获状态保持不可用。该结果不扩大综合兼容清单，也不代表真实 ChatGPT、云端动态路由、工具或恢复均已实测。
 
 中转账号登录只保护网页和网关访问，不为模型服务登录。本机官方 CLI 按 provider 配置提供模型认证，代理透明转发 `Authorization`，认证头不进入观察、页面或 journal。工作台不读取动态命令 token，无法保证按精确值脱敏任意正文主动回显的 token；不要要求模型或工具输出凭据。
 
@@ -24,7 +27,7 @@ CLI 0.161.0 另有公开 no-daemon profile（`--no-daemon` / `[features].daemon_
 - `codex-view` 无参数打开零 CLI 的项目概览，全部历史在 `/history`；同配置/数据根复用应用。已有项目或输入的目录先做只读检查，再明确新建或恢复；同项目已运行时进入已有工作台。`--project .` 可直接从当前项目启动普通官方 CLI；右侧原生终端处理对话、Slash、初始化、审批与追问。
 - 本机支持 macOS 原生文件夹窗口，并保留手动输入；远端完整 owner 可通过网页浏览电脑当前系统用户可读的目录。选择后填回规范路径并校验，不直接启动 CLI；浏览权限不等于项目启动资格，也不扩大 Run 文件访问范围。旧后端缺少目录能力字段时保留手动输入。
 - 目录窗口使用完整临时 AppKit 应用包，中文侧栏、取消、选择和键盘操作已有实际验证。启动采用标准事件循环、异步显示后激活；首次冷启动的焦点延迟尚未稳定复现，不能保证全部系统状态下均已消除。
-- 中央区分用户输入、模型正文、工具参数和执行结果；流式中间态可见，取消或缺失不会伪装为完整。调用详情和用量展示脱敏后的请求、工具定义、响应及覆盖范围，不承诺无限保留原始上下文。
+- 通过模型捕获接入的运行，中央区分用户输入、模型正文、工具参数和执行结果；流式中间态可见，取消或缺失不会伪装为完整。调用详情和用量展示脱敏后的请求、工具定义、响应及覆盖范围，不承诺无限保留原始上下文。
 - 刷新、切换文件或历史、打开设置不另启 CLI。每个 Run 同时只有一个终端输入者，重复页面可能需要点击“在此输入”；未确认输入不自动重发，不承诺无缝自动接管。
 - 当前项目的文件、搜索和 Git 均只读；文件/Diff 支持连续滚动、全文查找、行号跳转、跨屏复制及长行横向阅读，只渲染视口附近内容，关闭后释放文档实例。
 - 历史首页提供项目搜索、稳定路径摘要及主要/辅助/运行记录分层，未确认类型不隐藏；有明确身份的来源可折叠展示，正文与用量仍独立。完整 owner 可单条归入已有项目、设为未归类或恢复自动；展示归属不改变原 cwd 或恢复身份。
@@ -74,7 +77,7 @@ macOS 用户级 LaunchAgent 提供 `start/status/open/stop/autostart`，见[后�
 
 应用页为 `/`、`/history`、`/launch`、`/settings` 和仅本机提供的 `/relay`；Run 页为 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`，单 origin 中转加 `/g/{gatewayId}` 前缀。旧 `/?run=<runId>` 兼容并规范化，同 Run 页面切换保留终端，不启动 CLI 或重放输入。
 
-`1.0.0` 提供 macOS / Apple Silicon View 安装包，包含上述后台服务、历史整理与按 Run 加密的可选公网连接器，不附带独立 Relay 服务器。`code-view` 无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0) 为准；旧安装包不会自动获得加密通道能力，公网三端必须配套升级至 API/wire 3。发布版本号不扩大本页的受测范围，原生历史与旧 Observer 不迁移；派生 catalog、独立归类库及跨端版本限制仍按上文处理。
+`1.0.1` 提供 macOS / Apple Silicon View 安装包，包含上述后台服务、历史整理与按 Run 加密的可选公网连接器，不附带独立 Relay 服务器。`code-view` 无参数明确启动当前目录，也支持指定目录；`code-view --history` 和 `codex-view` 保留无 CLI 入口。安装见[安装指南](installation.md)，正式资产以 [GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v1.0.1) 为准；旧安装包不会自动获得加密通道能力，公网三端必须配套升级至 API/wire 3。发布版本号不扩大本页的受测范围，原生历史与旧 Observer 不迁移；派生 catalog、独立归类库及跨端版本限制仍按上文处理。
 
 `codex-view` 统一读取原生、工作台及 Observer schema 20/25 的目录、搜索和正文。旧库使用独立零写 reader，不调用迁移；实际 schema 25 只做过限定正文抽查，不代表全库完整性验证，缺必要 WAL/SHM 或需修复时返回来源不可用。独立 `codex-observerd serve/import` 的迁移上限仍为 20，不能直接打开 schema 25，见[旧 Observer 兼容参考](../architecture/observer-compatibility.md)。
 

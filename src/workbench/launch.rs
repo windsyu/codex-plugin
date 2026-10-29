@@ -115,9 +115,9 @@ async fn version(path: &Path, home: &Path) -> Result<String> {
 /// One CLI and its independent data path. No application listener or credentials.
 pub struct WorkbenchRuntime {
     terminal: TerminalHost,
-    proxy: ProxyServer,
-    _observer: Observer,
-    _users: RolloutReader,
+    proxy: Option<ProxyServer>,
+    _observer: Option<Observer>,
+    _users: Option<RolloutReader>,
     _recorder: Recorder,
     pub(crate) hub: std::sync::Arc<LiveHub>,
     pub(crate) workspace: super::workspace::Handle,
@@ -157,16 +157,22 @@ impl WorkbenchRuntime {
         if !CHECKED_CLI_VERSIONS.contains(&cli_version.as_str()) {
             eprintln!("codex-view: CLI {cli_version} 尚未完成本工作台的版本回归，继续启动。");
         }
-        let profile = profile::Profile::load(&home, &cwd, options.native_profile.as_deref())
+        let profile = profile::select_capture(&home, &cwd, options.native_profile.as_deref())
             .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        let policy = match &profile {
+            Some(profile) => profile.policy.clone(),
+            None => super::redaction::RedactionPolicy::new(Vec::new())?,
+        };
         let hub = LiveHub::new(LiveLimits::default());
+        if profile.is_none() {
+            hub.model_capture_unavailable();
+        }
         let epoch = hub.epoch();
         let data_dir = options
             .data_dir
             .unwrap_or_else(|| options.workbench_paths.history_dir());
         let default_history = data_dir == options.workbench_paths.history_dir();
-        let project_name = profile
-            .policy
+        let project_name = policy
             .scrub(
                 cwd.file_name()
                     .and_then(|s| s.to_str())
@@ -186,18 +192,32 @@ impl WorkbenchRuntime {
         }
         let recorder =
             Recorder::start(&hub, recording).map_err(|e| LaunchFailure::Recording.wrap(e))?;
-        let (capture, receiver) = capture::channel(8 * 1024 * 1024, 256);
-        let proxy = ProxyServer::bind(profile.upstream.clone(), capture)
-            .await
-            .map_err(|e| LaunchFailure::Proxy.wrap(e))?;
-        let observer = Observer::start(
-            receiver,
-            hub.clone(),
-            profile.policy.clone(),
-            DecoderLimits::default(),
-        )?;
-        let users = RolloutReader::start(&home, hub.clone(), profile.policy.clone())
-            .map_err(|e| LaunchFailure::Config.wrap(e))?;
+        let (proxy, observer) = if let Some(profile) = &profile {
+            let (capture, receiver) = capture::channel(8 * 1024 * 1024, 256);
+            let proxy = ProxyServer::bind(profile.upstream.clone(), capture)
+                .await
+                .map_err(|e| LaunchFailure::Proxy.wrap(e))?;
+            let observer = Observer::start(
+                receiver,
+                hub.clone(),
+                policy.clone(),
+                DecoderLimits::default(),
+            )?;
+            (Some(proxy), Some(observer))
+        } else {
+            (None, None)
+        };
+        // The run reader associates native evidence with model-observed IDs.
+        // Direct mode has none; the application's independent history library
+        // remains the reader for complete native sessions.
+        let users = if profile.is_some() {
+            Some(
+                RolloutReader::start(&home, hub.clone(), policy.clone())
+                    .map_err(|e| LaunchFailure::Config.wrap(e))?,
+            )
+        } else {
+            None
+        };
         let mut command = CommandBuilder::new(binary);
         command.cwd(&cwd);
         command.env("CODEX_HOME", &home);
@@ -208,20 +228,24 @@ impl WorkbenchRuntime {
         if let Some(name) = &options.native_profile {
             command.args(["--profile", name]);
         }
-        command.arg("-c");
-        command.arg(format!(
-            "model_providers.{}.base_url={}",
-            profile.provider,
-            toml::Value::String(proxy.child_base_url())
-        ));
+        if let (Some(profile), Some(proxy)) = (&profile, &proxy) {
+            command.arg("-c");
+            command.arg(format!(
+                "model_providers.{}.base_url={}",
+                profile.provider,
+                toml::Value::String(proxy.child_base_url())
+            ));
+        }
         command.args(["-c", "tui.animations=false"]);
         if let Some(id) = options.resume {
             command.args(["resume".to_owned(), id.to_string()]);
         }
         verify()?;
-        profile
-            .unchanged()
-            .map_err(|e| LaunchFailure::ConfigChanged.wrap(e))?;
+        if let Some(profile) = &profile {
+            profile
+                .unchanged()
+                .map_err(|e| LaunchFailure::ConfigChanged.wrap(e))?;
+        }
         let terminal = TerminalHost::spawn(epoch, command, 45, 120)
             .map_err(|e| LaunchFailure::Terminal.wrap(e))?;
         let workspace =
@@ -241,7 +265,7 @@ impl WorkbenchRuntime {
     }
     #[cfg(test)]
     pub(crate) fn abort_proxy_for_test(&self) {
-        self.proxy.abort_for_test();
+        self.proxy.as_ref().expect("capture run").abort_for_test();
     }
     pub fn process_id(&self) -> u32 {
         self.terminal.process_id()
@@ -250,7 +274,7 @@ impl WorkbenchRuntime {
         self.terminal.handle()
     }
     pub fn healthy(&self) -> bool {
-        !self.proxy.is_finished() && !self.terminal.is_finished()
+        self.proxy.as_ref().is_none_or(|proxy| !proxy.is_finished()) && !self.terminal.is_finished()
     }
 }
 

@@ -2,9 +2,9 @@
 
 [使用指南](usage.md) · [支持范围](support.md) · [发布维护](../development/releasing.md)
 
-`1.0.0` 发布包面向已验证的 macOS / Apple Silicon，包含后台服务、历史整理和按 Run 加密的可选公网连接器，不包含独立 Relay 服务器。网页和原生目录选择助手已嵌入程序，运行时不需要源码、Rust 或 Node.js。启动项目仍需自行安装并配置官方 Codex CLI；当前模型接入限 `unmanaged-custom` Responses，静态 bearer 与原生 `auth.command` 的受测范围见[支持文档](support.md)。代码搜索需要 `rg`，Git 阅读需要 `git`。
+`1.0.1` 发布包面向已验证的 macOS / Apple Silicon，包含后台服务、历史整理和按 Run 加密的可选公网连接器，不包含独立 Relay 服务器。网页和原生目录选择助手已嵌入程序，运行时不需要源码、Rust 或 Node.js。启动项目仍需自行安装并配置官方 Codex CLI；模型路由与认证的受测范围见[支持文档](support.md)，启动预检只检查本次代理转发和安全边界必需的配置。代码搜索需要 `rg`，Git 阅读需要 `git`。
 
-公网使用者须将电脑、Relay 和中央前端配套升级至 API/wire 3，并从门户重新打开工作台；不提供明文降级。仅保留单 origin，账号、登记和 schema 3 数据保留，服务器升级前按[中转指南](public-relay-deployment.md)备份。加密不防御被恶意修改的前端或授权方；`1.0.0` 不表示真实手机、全部 CLI 版本或其他平台已完成验收。
+公网使用者须将电脑、Relay 和中央前端配套升级至 API/wire 3，并从门户重新打开工作台；不提供明文降级。仅保留单 origin，账号、登记和 schema 3 数据保留，服务器升级前按[中转指南](public-relay-deployment.md)备份。加密不防御被恶意修改的前端或授权方；`1.0.1` 不表示真实手机、全部 CLI 版本或其他平台已完成验收。
 
 ## 快速安装与 PATH
 
@@ -29,7 +29,7 @@
 ```sh
 bash scripts/install-macos.sh
 # 可固定版本或指定绝对安装前缀
-bash scripts/install-macos.sh --version v1.0.0 --prefix "$HOME/.codex-view"
+bash scripts/install-macos.sh --version v1.0.1 --prefix "$HOME/.codex-view"
 # 明确升级已有安装：后台先 code-view stop，前台先 Ctrl-C
 bash scripts/install-macos.sh --force
 # 只安装程序，由自己管理 PATH
@@ -75,14 +75,14 @@ code-view-uninstall
 
 ## 手动安装发布包
 
-从 [v1.0.0 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v1.0.0) 下载安装包与 `SHA256SUMS`。正式资产的 manifest 记录发布 tag 对应的源码提交，`sourceDirty` 为 `false`。
+从 [v1.0.1 GitHub Release](https://github.com/windsyu/codex-plugin/releases/tag/v1.0.1) 下载安装包与 `SHA256SUMS`。正式资产的 manifest 记录发布 tag 对应的源码提交，`sourceDirty` 为 `false`。
 
-将 `code-view-1.0.0-aarch64-apple-darwin.tar.gz` 和同目录的 `SHA256SUMS` 放在一起，校验并解压：
+将 `code-view-1.0.1-aarch64-apple-darwin.tar.gz` 和同目录的 `SHA256SUMS` 放在一起，校验并解压：
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-tar -xzf code-view-1.0.0-aarch64-apple-darwin.tar.gz
-cd code-view-1.0.0-aarch64-apple-darwin
+tar -xzf code-view-1.0.1-aarch64-apple-darwin.tar.gz
+cd code-view-1.0.1-aarch64-apple-darwin
 ./install.sh --prefix "$HOME/.codex-view"
 export PATH="$HOME/.codex-view/bin:$PATH"
 code-view --version
