@@ -84,7 +84,7 @@ export function RelayPanel({ instanceId, open, onClose }: { instanceId: string; 
   const write = async (action: 'bind' | 'enable' | 'disable' | 'forget') => {
     if (busy || !relay) return;
     const origin = serverOrigin(serverUrl);
-    if (action === 'bind' && (!origin || !name.trim())) { setNotice('请填写 HTTPS 服务根地址和工作台名称。'); return; }
+    if (action === 'bind' && (!origin || !name.trim())) { setNotice('请填写 HTTPS 中转站根地址和本机名称。'); return; }
     setBusy(true); setNotice('');
     if (action === 'disable' || action === 'forget') { try { if (popup.current?.location.href === 'about:blank') popup.current.close(); } catch { /* Do not close an already navigated page. */ } popup.current = null; }
     if (action === 'bind') { try { popup.current = window.open('about:blank', '_blank'); if (popup.current) popup.current.opener = null; } catch { popup.current = null; } }
@@ -117,8 +117,8 @@ export function RelayPanel({ instanceId, open, onClose }: { instanceId: string; 
       {relay?.gatewayId && <p>工作台：{relay.name || relay.gatewayId}{gatewayUrl && <> · <a href={gatewayUrl} target="_blank" rel="noopener noreferrer">打开公网入口</a></>}</p>}
       {relay?.binding && <div className="wb-relay-binding"><p>在浏览器登录账号，核对电脑名称并确认。验证成功后自动开启公网接入；若新窗口未打开，请使用下方链接。</p><strong aria-label="绑定码">{relay.binding.userCode}</strong><p>有效期约 {Math.ceil(relay.binding.expiresInSeconds / 60)} 分钟。</p>{verificationUrl && <a href={verificationUrl} target="_blank" rel="noopener noreferrer">打开账号验证页面 ↗</a>}<button disabled={busy} onClick={() => void write('disable')}>取消登录</button></div>}
       {(!relay?.gatewayId || relay.state === 'authenticationRequired') && <form onSubmit={event => { event.preventDefault(); void write('bind'); }}>
-        <label>服务地址<input type="url" value={serverUrl} onInput={event => setServerUrl(event.currentTarget.value)} placeholder="https://app.example.com" autoComplete="url" required /></label>
-        <label>工作台名称<input value={name} onInput={event => setName(event.currentTarget.value)} maxLength={80} required /></label>
+        <label>中转站地址<input type="url" value={serverUrl} onInput={event => setServerUrl(event.currentTarget.value)} placeholder="https://app.example.com" autoComplete="url" required /></label>
+        <label>本机名称<input value={name} onInput={event => setName(event.currentTarget.value)} maxLength={80} required /></label>
         <button type="submit" disabled={busy || !relay || relay.state === 'binding' || !!relay.binding}>登录并开启公网接入</button>
       </form>}
       {relay?.gatewayId && <div className="wb-relay-actions">{relay.state !== 'authenticationRequired' && <button type="button" disabled={busy} onClick={() => void write(relay.enabled ? 'disable' : 'enable')}>{relay.enabled ? '关闭公网接入' : '开启公网接入'}</button>}<button type="button" disabled={busy} onClick={() => void write('forget')}>退出登录并撤销接入</button></div>}

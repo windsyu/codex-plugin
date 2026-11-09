@@ -52,11 +52,20 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 class SettingsError extends Error {
   constructor(readonly code: string, field?: string) { super(errorText(code, field)); }
 }
+const settingsSections = [
+  { id: 'sources', title: '历史来源' },
+  { id: 'cleanup', title: '历史清理' },
+  { id: 'storage', title: '记录与日志' },
+  { id: 'launch', title: '启动设置' },
+] as const;
+type SettingsSection = typeof settingsSections[number]['id'];
 
 export function SettingsPanel({ epoch, instanceId, open, managementAvailable = false, onClose, onDirtyChange, onViewHistory, embedded = false }: {
   epoch: string; instanceId?: string; open: boolean; managementAvailable?: boolean; onClose: (restoreFocus: boolean) => void; onDirtyChange: (dirty: boolean) => void; onViewHistory?: () => void; embedded?: boolean;
 }) {
   const endpoint = instanceId ? '/workbench/v1/application/settings' : runApi('/settings');
+  const sections = settingsSections.filter(item => instanceId || item.id !== 'sources');
+  const [activeSection, setActiveSection] = useState<SettingsSection>(instanceId ? 'sources' : 'cleanup');
   const [previewDays, setPreviewDays] = useState<number | null>(null);
   const [info, setInfo] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<WorkbenchConfig | null>(null);
@@ -146,6 +155,16 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
       if (alive.current) setSaving(false);
     }
   }
+  function submit(form: HTMLFormElement) {
+    const invalid = form.querySelector<HTMLInputElement>('input:invalid, select:invalid');
+    if (invalid) {
+      setActiveSection(invalid.closest<HTMLElement>('[role="tabpanel"]')!.dataset.section as SettingsSection);
+      invalid.closest('details')?.setAttribute('open', '');
+      requestAnimationFrame(() => invalid.reportValidity());
+      return;
+    }
+    void save();
+  }
   const label = (name: string) => <span>{fieldNames[name]}{info?.cliOverrides.includes(name) && <small className="wb-settings-override">本次由启动参数覆盖</small>}</span>;
   return <section id="wb-settings-panel" ref={section} className="wb-settings-panel" aria-label="工作台设置" hidden={!open} onKeyDown={event => {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(true); }
@@ -158,8 +177,20 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
         {info.errors.map(error => <p className="wb-notice" role="alert" key={`${error.field}:${error.code}`}>{errorText(error.code, error.field)}{error.line != null ? `（第 ${error.line} 行）` : ''} 请修复文件后重新加载。</p>)}
         {!!info.errors.length && <p className="wb-subtle">需要修复的配置文件：<code>{info.configPath}</code></p>}
       </>}
-      {draft && info && <form id="wb-settings-form" onSubmit={event => { event.preventDefault(); void save(); }}>
-        {instanceId && <fieldset disabled={saving}><HistorySources value={draft.history.library ?? libraryDefaults()} onChange={library => edit(c => { c.history.library = library; c.schemaVersion = 2; })} /></fieldset>}
+      {draft && info && <form id="wb-settings-form" noValidate onSubmit={event => { event.preventDefault(); submit(event.currentTarget); }}>
+        <div className="wb-settings-tabs" role="tablist" aria-label="设置分类">
+          {sections.map((item, index) => <button key={item.id} type="button" role="tab" id={`wb-settings-tab-${item.id}`} aria-controls={`wb-settings-section-${item.id}`} aria-selected={activeSection === item.id} tabIndex={activeSection === item.id ? 0 : -1} onClick={() => setActiveSection(item.id)} onKeyDown={event => {
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? sections.length - 1 : event.key === 'ArrowRight' ? (index + 1) % sections.length : event.key === 'ArrowLeft' ? (index + sections.length - 1) % sections.length : null;
+            if (next == null) return;
+            event.preventDefault();
+            setActiveSection(sections[next].id);
+            document.getElementById(`wb-settings-tab-${sections[next].id}`)?.focus();
+          }}>{item.title}</button>)}
+        </div>
+        {instanceId && <div role="tabpanel" id="wb-settings-section-sources" data-section="sources" aria-labelledby="wb-settings-tab-sources" hidden={activeSection !== 'sources'} tabIndex={0}>
+          <fieldset disabled={saving}><HistorySources value={draft.history.library ?? libraryDefaults()} onChange={library => edit(c => { c.history.library = library; c.schemaVersion = 2; })} /></fieldset>
+        </div>}
+        <div role="tabpanel" id="wb-settings-section-cleanup" data-section="cleanup" aria-labelledby="wb-settings-tab-cleanup" hidden={activeSection !== 'cleanup'} tabIndex={0}>
         <fieldset disabled={saving}><legend>历史清理</legend>
           <label className="wb-settings-toggle">允许清理历史记录<input aria-label="允许清理历史记录" aria-describedby="wb-cleanup-help" type="checkbox" checked={draft.history.cleanup.enabled} disabled={!info.capabilities.manualCleanup} onChange={event => edit(c => { c.history.cleanup.enabled = event.currentTarget.checked; if (!c.history.cleanup.enabled) c.history.cleanup.retention.enabled = false; })} /></label>
           <p id="wb-cleanup-help" className="wb-settings-help">关闭时保留全部记录。开启并保存后，可在历史列表中删除单条记录，或批量选择后确认删除。</p>
@@ -172,15 +203,19 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
           {managementAvailable && <button type="button" onClick={() => setPreviewDays(draft.history.cleanup.retention.days)}>预览到期记录</button>}
           {previewDays != null && <CleanupPreviewPanel epoch={epoch} retentionDays={previewDays} onClose={() => setPreviewDays(null)} />}
         </fieldset>
+        </div>
+        <div role="tabpanel" id="wb-settings-section-storage" data-section="storage" aria-labelledby="wb-settings-tab-storage" hidden={activeSection !== 'storage'} tabIndex={0}>
         <fieldset disabled={saving}><legend>历史记录与日志</legend>
           <dl className="wb-settings-locations">
             <dt>历史记录文件夹</dt><dd><code>{info.effectiveDataDir.replace(/\/$/, '')}/runs</code></dd>
           </dl>
           <p className="wb-settings-help">工作台历史按每次运行分文件夹保存。</p>
           {!instanceId && <details className="wb-settings-paths"><summary>本次运行日志的位置</summary><p><code>{info.effectiveDataDir.replace(/\/$/, '')}/runs/{epoch}</code></p><p className="wb-subtle">本次运行已保存的对话和日志在此文件夹中，日志会分段保存。</p></details>}
-          {managementAvailable && <><HistoryStorage key={info.revision || 'invalid'} epoch={epoch} active={open} />{onViewHistory && <button type="button" onClick={onViewHistory}>查看历史</button>}</>}
+          {managementAvailable && <><HistoryStorage key={info.revision || 'invalid'} epoch={epoch} active={open && activeSection === 'storage'} />{onViewHistory && <button type="button" onClick={onViewHistory}>查看历史</button>}</>}
         </fieldset>
-        <fieldset disabled={saving}><legend>启动偏好 <small>下次启动生效</small></legend>
+        </div>
+        <div role="tabpanel" id="wb-settings-section-launch" data-section="launch" aria-labelledby="wb-settings-tab-launch" hidden={activeSection !== 'launch'} tabIndex={0}>
+        <fieldset disabled={saving}><legend>启动设置 <small>下次启动生效</small></legend>
           <label className="wb-settings-toggle">{label('launch.openBrowser')}<input type="checkbox" aria-label="启动时自动打开浏览器" checked={draft.launch.openBrowser} onChange={event => edit(c => { c.launch.openBrowser = event.currentTarget.checked; })} /></label>
           {draft.launch.openBrowser !== info.effective.launch.openBrowser && <p className="wb-subtle">本次启动：{info.effective.launch.openBrowser ? '自动打开浏览器' : '不自动打开浏览器'}。</p>}
           <details className="wb-settings-paths"><summary>高级启动设置</summary>
@@ -193,6 +228,7 @@ export function SettingsPanel({ epoch, instanceId, open, managementAvailable = f
             <p className="wb-settings-help">下次启动后，新记录将保存在所填位置的 runs 文件夹中。留空使用默认位置；已有记录不会搬迁。</p>
           <label>本地局域网接入端口<input aria-label="本地局域网接入端口" type="number" min={0} max={65535} step={1} value={draft.access?.port ?? 0} onInput={event => edit(c => { c.access = { port: Number(event.currentTarget.value) }; })} /></label><p className="wb-settings-help">0 自动选择，或填写 1024–65535。保存后下次开启本地局域网接入生效，不会自动开放网络。</p></details>
         </fieldset>
+        </div>
         {!!info.restartRequired.length && <p className="wb-notice">已保存，待下次启动生效：{info.restartRequired.map(field => fieldNames[field] || field).join('、')}。</p>}
       </form>}
       <button type="button" disabled={saving || loading} onClick={() => void load(true)}>{dirty ? '重新加载（放弃草稿）' : '重新加载'}</button>
