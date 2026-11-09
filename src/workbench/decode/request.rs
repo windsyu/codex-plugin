@@ -31,6 +31,8 @@ pub struct RequestInfo {
     pub codex_turn_id: Option<String>,
     pub purpose: RequestPurpose,
     pub purpose_basis: PurposeBasis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_summary: Option<crate::workbench::context::ContextSummary>,
 }
 
 pub(crate) fn safe_name(value: &Value, policy: &Arc<RedactionPolicy>) -> Option<SafeText> {
@@ -56,6 +58,7 @@ fn metadata(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) -> 
         codex_turn_id: None,
         purpose: RequestPurpose::Unknown,
         purpose_basis: PurposeBasis::MissingMetadata,
+        context_summary: None,
     };
     if index.is_some() && body["generate"] == false {
         info.purpose = RequestPurpose::Auxiliary;
@@ -318,7 +321,7 @@ impl Requests {
                     emit,
                 );
             }
-            let info = metadata(&body, index, policy);
+            let mut info = metadata(&body, index, policy);
             if info.purpose_basis == PurposeBasis::ConflictingMetadata {
                 emit_origin(
                     observation,
@@ -328,13 +331,12 @@ impl Requests {
                     emit,
                 );
             }
-            emit_origin(
-                observation,
-                Change::Document {
-                    document: details::request(&body, index, policy),
-                },
-                emit,
-            );
+            let document = details::request(&body, index, policy);
+            info.context_summary = document
+                .context_analysis
+                .as_ref()
+                .map(|a| a.summary.clone());
+            emit_origin(observation, Change::Document { document }, emit);
             emit_origin(observation, Change::Request { info }, emit);
             let context = tool_context::extract(&body, index, policy);
             if !context.definitions.is_empty() || !context.outputs.is_empty() || context.partial {

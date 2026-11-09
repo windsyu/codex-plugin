@@ -4,6 +4,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use crate::workbench::decode::details::{
+    DetailDocument,
+    page::{self, DetailError, DetailRead, DetailSelection, DocumentRef},
+};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -39,6 +43,7 @@ pub enum Query {
         request: Uuid,
         cursor: Option<String>,
         before: Option<u64>,
+        selection: DetailSelection,
     },
 }
 struct Job {
@@ -137,7 +142,10 @@ fn execute(
     }
     let restored = journal::recover(&dir, &meta, before).map_err(|_| HistoryError::Unavailable)?;
     if let Query::Details {
-        request, cursor, ..
+        request,
+        cursor,
+        selection,
+        ..
     } = query
     {
         return details(
@@ -146,6 +154,8 @@ fn execute(
             request,
             cursor.as_deref(),
             !restored.issues.is_empty(),
+            before,
+            &selection,
         );
     }
     let mut snapshot = restored.checkpoint.snapshot;
@@ -318,20 +328,9 @@ fn details(
     request: Uuid,
     cursor: Option<&str>,
     damaged: bool,
+    before: Option<u64>,
+    selection: &DetailSelection,
 ) -> Result<Value, HistoryError> {
-    let revision = checkpoint.record_seq;
-    let prefix = format!("{}.{}.{revision}", meta.run_epoch, request);
-    let offset = if let Some(cursor) = cursor {
-        let (key, offset) = cursor.rsplit_once('.').ok_or(HistoryError::InvalidCursor)?;
-        if key != prefix {
-            return Err(HistoryError::StaleCursor);
-        }
-        offset
-            .parse::<usize>()
-            .map_err(|_| HistoryError::InvalidCursor)?
-    } else {
-        0
-    };
     let documents: Vec<_> = checkpoint
         .documents
         .iter()
@@ -341,44 +340,77 @@ fn details(
         .as_array()
         .is_some_and(|a| a.iter().any(|r| r["requestId"] == request.to_string()));
     if !known && documents.is_empty() {
-        return Err(HistoryError::NotFound);
-    }
-    let mut entries = Vec::new();
-    let mut conflict = false;
-    for (i, d) in documents.iter().enumerate() {
-        conflict |= documents[..i].iter().any(|old| {
-            old.document["source"] == d.document["source"] && old.document != d.document
+        return Err(if cursor.is_some() {
+            HistoryError::StaleCursor
+        } else {
+            HistoryError::NotFound
         });
-        if let Some(parts) = d.document["entries"].as_array() {
-            for part in parts {
-                let mut entry = part.clone();
-                entry["source"] = d.document["source"].clone();
-                entry["captureSeq"] = json!(d.capture_seq);
-                entries.push(entry);
-            }
-        }
     }
-    if offset > entries.len() {
-        return Err(HistoryError::InvalidCursor);
+    let conflict = documents.iter().enumerate().any(|(i, d)| {
+        documents[..i]
+            .iter()
+            .any(|old| old.document["source"] == d.document["source"] && old.document != d.document)
+    });
+    let decoded: Vec<DetailDocument> = documents
+        .iter()
+        .map(|d| serde_json::from_value(d.document.clone()).map_err(|_| HistoryError::Unavailable))
+        .collect::<Result<_, _>>()?;
+    let history_gap = damaged || !meta.gaps.is_empty();
+    let mut issues = if history_gap {
+        vec!["history_gap".to_owned()]
+    } else {
+        Vec::new()
+    };
+    if let Some(diagnostics) = checkpoint.snapshot["diagnostics"].as_array() {
+        issues.extend(
+            diagnostics
+                .iter()
+                .filter(|d| {
+                    d["requestId"] == request.to_string()
+                        || d["requestId"] == Uuid::nil().to_string()
+                })
+                .filter_map(|d| d["code"].as_str().map(str::to_owned))
+                .take(16),
+        );
     }
-    let mut end = offset;
-    let mut bytes = 1024;
-    while end < entries.len() && end - offset < 16 {
-        let cost = entries[end].to_string().len();
-        if bytes + cost > 128 * 1024 {
-            break;
-        }
-        bytes += cost;
-        end += 1;
-    }
-    Ok(
-        json!({"runEpoch":meta.run_epoch,"requestId":request,"revision":revision,
-        "availability":if documents.is_empty(){"unavailable"}else{"captured"},
-        "requestCaptured":documents.iter().any(|d|d.document["source"]["kind"]=="request"),
-        "responseCaptured":documents.iter().any(|d|d.document["source"]["kind"]=="response"),
-        "truncated":checkpoint.details_partial||documents.iter().any(|d|d.document["truncated"]==true),
-        "omitted":documents.iter().any(|d|d.document["omitted"]==true),"conflict":conflict,
-        "captureIssues":if damaged||!meta.gaps.is_empty(){vec!["history_gap"]}else{Vec::<&str>::new()},
-        "totalEntries":entries.len(),"entries":&entries[offset..end],"nextCursor":(end<entries.len()).then(||format!("{prefix}.{end}"))}),
-    )
+    let responses = checkpoint.snapshot["responses"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let sources_partial = history_gap
+        || checkpoint
+            .details_partial_requests()
+            .as_ref()
+            .map_or(checkpoint.details_partial, |requests| {
+                requests.contains(&request)
+            });
+    let page = page::read_page(DetailRead {
+        epoch: meta.run_epoch,
+        request_id: request,
+        revision: checkpoint.record_seq,
+        before,
+        documents: decoded
+            .iter()
+            .zip(&documents)
+            .map(|(document, d)| DocumentRef {
+                document,
+                capture_seq: d.capture_seq,
+            })
+            .collect(),
+        responses,
+        cursor,
+        selection,
+        truncated: sources_partial || decoded.iter().any(|d| d.truncated),
+        omitted: decoded.iter().any(|d| d.omitted),
+        conflict,
+        capture_issues: issues,
+        sources_partial,
+    })
+    .map_err(|error| match error {
+        DetailError::NotFound => HistoryError::NotFound,
+        DetailError::Evicted => HistoryError::Deleted,
+        DetailError::InvalidCursor => HistoryError::InvalidCursor,
+        DetailError::StaleCursor => HistoryError::StaleCursor,
+    })?;
+    serde_json::to_value(page).map_err(|_| HistoryError::Unavailable)
 }

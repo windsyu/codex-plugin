@@ -1,5 +1,6 @@
 //! On-demand, paired, memory-only context reading. No capture or disk I/O here.
 use super::*;
+use crate::workbench::decode::details::page::DetailSelection;
 use crate::workbench::live::DetailError;
 
 #[derive(Deserialize)]
@@ -7,6 +8,9 @@ use crate::workbench::live::DetailError;
 pub(super) struct DetailsQuery {
     epoch: Uuid,
     cursor: Option<String>,
+    document: Option<String>,
+    category: Option<String>,
+    item: Option<String>,
 }
 
 pub(super) async fn read(
@@ -30,6 +34,14 @@ pub(super) async fn read(
     if query.epoch != state.hub.epoch() {
         return fail(StatusCode::CONFLICT, "run_epoch_changed");
     }
+    let selection = DetailSelection {
+        document: query.document,
+        category: query.category,
+        item: query.item,
+    };
+    if !selection.valid() {
+        return fail(StatusCode::BAD_REQUEST, "invalid_context_selection");
+    }
     if query
         .cursor
         .as_ref()
@@ -40,21 +52,24 @@ pub(super) async fn read(
     let Ok(permit) = state.snapshot_slots.clone().try_acquire_owned() else {
         return fail(StatusCode::SERVICE_UNAVAILABLE, "reading_busy");
     };
-    let page = match state
-        .hub
-        .request_details(request_id, query.cursor.as_deref())
-    {
-        Ok(page) => page,
-        Err(reason) => {
-            let (status, code) = match reason {
-                DetailError::NotFound => (StatusCode::NOT_FOUND, "request_not_observed"),
-                DetailError::Evicted => (StatusCode::GONE, "request_details_evicted"),
-                DetailError::InvalidCursor => (StatusCode::BAD_REQUEST, "invalid_details_cursor"),
-                DetailError::StaleCursor => (StatusCode::CONFLICT, "request_details_changed"),
-            };
-            return fail(status, code);
-        }
-    };
+    let page =
+        match state
+            .hub
+            .request_details_selected(request_id, query.cursor.as_deref(), &selection)
+        {
+            Ok(page) => page,
+            Err(reason) => {
+                let (status, code) = match reason {
+                    DetailError::NotFound => (StatusCode::NOT_FOUND, "request_not_observed"),
+                    DetailError::Evicted => (StatusCode::GONE, "request_details_evicted"),
+                    DetailError::InvalidCursor => {
+                        (StatusCode::BAD_REQUEST, "invalid_details_cursor")
+                    }
+                    DetailError::StaleCursor => (StatusCode::CONFLICT, "request_details_changed"),
+                };
+                return fail(status, code);
+            }
+        };
     let (parts, body) = Json(page).into_response().into_parts();
     let stream = async_stream::stream! {
         let _permit = permit;

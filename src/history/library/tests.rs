@@ -1412,6 +1412,7 @@ fn three_source_kinds_schema20_and25_read_together_without_writes() {
                 codex_turn_id: Some("turn".into()),
                 purpose: RequestPurpose::Conversation,
                 purpose_basis: PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     });

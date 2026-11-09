@@ -76,11 +76,13 @@ sequenceDiagram
 | `GET /run` | 当前 runEpoch、终端/文件/历史/设置/管理 capability；不可把页面按钮当服务端授权 |
 | `GET /live/snapshot` | 内存阅读快照与当前 viewSeq/捕获/保存状态 |
 | `GET /live/events?epoch=…&after=…` | SSE `view`、`recorder.status`、`snapshot_required`；逐事件验证并应用后才推进游标 |
-| `GET /requests/{id}?epoch=…&cursor=…` | 有界调用详情分片，不用 token 级 HTTP 轮询替代实时流 |
+| `GET /requests/{id}?epoch=…&cursor=…&document=…&category=…&item=…` | 有界调用详情分片，不用 token 级 HTTP 轮询替代实时流 |
 | `GET /history` 与历史 epoch 下正文/详情/状态接口 | 当前项目已保存运行；选择过去记录不改变当前终端或恢复 CLI |
 | `GET /workspace/...` | 文件、搜索、Git 的固定项目根只读查询；精确路径/参数见 Workspace API 模块 |
 
 SSE epoch/游标落在窗口外或丢失 item revision 时重新取 snapshot，不从数据库追每个 token。item.replace 首次创建角色/类型，patch 必须匹配 base revision 和 contentKey；最终 replace 不再追加重复文本。显示捕获缺口、未归属身份、被省略内容和 unknown，不把看见 response completed 当“整个 CLI 已完成”。阅读状态实现见 [reading.ts](../../web/src/workbench/reading.ts)、[viewItems.ts](../../web/src/workbench/viewItems.ts)、[live/view.rs](../../src/workbench/live/view.rs)。
+
+调用详情可选择 HTTP 请求或各 WS create 文档，显示系统、工具定义、技能、指令/记忆、读取文件、其他工具结果、对话七类线性占比及条目。分类和条目下钻必须带文档选择器，返回同源脱敏 entry；不将 captureSeq 当选择器，不将原 entry 冒充精确文本切片。首屏返回来源列表、当前选择和展示摘要，续页可沿用同 revision；旧记录显示“未记录分类摘要”，不从预览重建。各类数字是估算，满足明确 HTTP 关联和完整合法用量条件时按报告总输入量校准，运行累计用量继续使用原口径。完整字段和校准条件见[详细设计 §5.1.1](../design/workbench-detailed-design.md#511-r2-按需上下文与响应用量已实现)。
 
 调用面板独立显示模型请求/响应、上下文和详情覆盖；工具参数不表示执行成功。用量区分实时/已保存来源与计数不确定性；不能把原生 user 条目、模型上下文和关联来源重复加入同一总数。文件/Markdown/图片引用使用受控阅读路径，不把来源内容注入页面 HTML 或执行 shell。
 

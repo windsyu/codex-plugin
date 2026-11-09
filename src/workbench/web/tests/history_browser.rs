@@ -42,6 +42,7 @@ async fn browser_reports_save_failure_and_recovery_while_terminal_and_reading_co
                 codex_turn_id: Some("r3-fixture".into()),
                 purpose: RequestPurpose::Conversation,
                 purpose_basis: PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     });

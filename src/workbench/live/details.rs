@@ -1,11 +1,14 @@
 //! Memory-only on-demand context. Large documents never enter the live ring.
 use super::*;
-use crate::workbench::decode::details::{DetailDocument, DetailEntry, DetailSource};
+use crate::workbench::decode::details::DetailDocument;
+use crate::workbench::decode::details::page::{self, DetailRead, DetailSelection, DocumentRef};
+pub use crate::workbench::decode::details::page::{DetailError, RequestDetailsPage};
 
 const REQUESTS: usize = 64;
 const TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const REQUEST_BYTES: usize = 2 * 1024 * 1024;
-const PAGE_BYTES: usize = 128 * 1024;
+#[cfg(test)]
+const PAGE_BYTES: usize = page::PAGE_BYTES;
 
 struct StoredDocument {
     document: DetailDocument,
@@ -19,6 +22,7 @@ struct Bundle {
     truncated: bool,
     omitted: bool,
     conflict: bool,
+    sources_partial: bool,
 }
 #[derive(Default)]
 pub(super) struct DetailStore {
@@ -26,38 +30,7 @@ pub(super) struct DetailStore {
     bytes: usize,
     revision: u64,
     evicted: VecDeque<Uuid>,
-}
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextEntry {
-    pub source: DetailSource,
-    pub capture_seq: u64,
-    #[serde(flatten)]
-    pub entry: DetailEntry,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestDetailsPage {
-    pub run_epoch: Uuid,
-    pub request_id: Uuid,
-    pub revision: u64,
-    pub availability: &'static str,
-    pub request_captured: bool,
-    pub response_captured: bool,
-    pub truncated: bool,
-    pub omitted: bool,
-    pub conflict: bool,
-    pub total_entries: usize,
-    pub capture_issues: Vec<DiagnosticCode>,
-    pub entries: Vec<ContextEntry>,
-    pub next_cursor: Option<String>,
-}
-#[derive(Debug, PartialEq, Eq)]
-pub enum DetailError {
-    NotFound,
-    Evicted,
-    InvalidCursor,
-    StaleCursor,
+    diagnostics_partial: bool,
 }
 
 impl DetailStore {
@@ -77,7 +50,21 @@ impl DetailStore {
             .collect()
     }
     pub(super) fn partial(&self) -> bool {
-        !self.evicted.is_empty() || self.bundles.iter().any(|b| b.truncated)
+        self.diagnostics_partial
+            || !self.evicted.is_empty()
+            || self.bundles.iter().any(|b| b.sources_partial)
+    }
+    pub(super) fn partial_requests(&self) -> Option<Vec<Uuid>> {
+        (!self.diagnostics_partial).then(|| {
+            let mut requests: Vec<_> = self.evicted.iter().copied().collect();
+            requests.extend(
+                self.bundles
+                    .iter()
+                    .filter(|b| b.sources_partial)
+                    .map(|b| b.request_id),
+            );
+            requests
+        })
     }
     pub fn insert(&mut self, request_id: Uuid, capture_seq: u64, document: DetailDocument) {
         let index = self
@@ -94,6 +81,7 @@ impl DetailStore {
                 truncated: self.evicted.contains(&request_id),
                 omitted: false,
                 conflict: false,
+                sources_partial: self.evicted.contains(&request_id),
             });
         self.bytes -= bundle.bytes;
         if !bundle
@@ -118,6 +106,7 @@ impl DetailStore {
                 });
             } else {
                 bundle.truncated = true;
+                bundle.sources_partial = true;
             }
         }
         self.bytes += bundle.bytes;
@@ -129,103 +118,91 @@ impl DetailStore {
             self.evicted.push_back(removed.request_id);
             if self.evicted.len() > 256 {
                 self.evicted.pop_front();
+                self.diagnostics_partial = true;
+                self.invalidate(None);
             }
         }
     }
 
+    pub(super) fn invalidate(&mut self, request: Option<Uuid>) {
+        self.revision += 1;
+        for bundle in &mut self.bundles {
+            if request.is_none_or(|id| bundle.request_id == id) {
+                bundle.revision = self.revision;
+            }
+        }
+    }
+
+    pub(super) fn lose_diagnostic(&mut self, request: Uuid) {
+        self.revision += 1;
+        let unscoped = request.is_nil()
+            || !self
+                .bundles
+                .iter()
+                .any(|bundle| bundle.request_id == request);
+        self.diagnostics_partial |= unscoped;
+        for bundle in &mut self.bundles {
+            if unscoped || bundle.request_id == request {
+                bundle.sources_partial = true;
+                bundle.revision = self.revision;
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn page(
         &self,
         epoch: Uuid,
         request_id: Uuid,
         cursor: Option<&str>,
     ) -> Result<RequestDetailsPage, DetailError> {
-        let Some(bundle) = self
-            .bundles
-            .iter()
-            .find(|bundle| bundle.request_id == request_id)
-        else {
+        self.page_with(
+            epoch,
+            request_id,
+            cursor,
+            &DetailSelection::default(),
+            &[],
+            Vec::new(),
+        )
+    }
+
+    fn page_with(
+        &self,
+        epoch: Uuid,
+        request_id: Uuid,
+        cursor: Option<&str>,
+        selection: &DetailSelection,
+        responses: &[serde_json::Value],
+        issues: Vec<String>,
+    ) -> Result<RequestDetailsPage, DetailError> {
+        let Some(bundle) = self.bundles.iter().find(|b| b.request_id == request_id) else {
             return Err(if self.evicted.contains(&request_id) {
                 DetailError::Evicted
             } else {
                 DetailError::NotFound
             });
         };
-        let offset = if let Some(cursor) = cursor {
-            let fields: Vec<_> = cursor.split('.').collect();
-            if fields.len() != 4
-                || fields[0].parse::<Uuid>().ok() != Some(epoch)
-                || fields[1].parse::<Uuid>().ok() != Some(request_id)
-            {
-                return Err(DetailError::InvalidCursor);
-            }
-            let revision = fields[2]
-                .parse::<u64>()
-                .map_err(|_| DetailError::InvalidCursor)?;
-            let offset = fields[3]
-                .parse::<usize>()
-                .map_err(|_| DetailError::InvalidCursor)?;
-            if revision != bundle.revision {
-                return Err(DetailError::StaleCursor);
-            }
-            offset
-        } else {
-            0
-        };
-        let total_entries = bundle
-            .documents
-            .iter()
-            .map(|entry| entry.document.entries.len())
-            .sum();
-        if offset > total_entries {
-            return Err(DetailError::InvalidCursor);
-        }
-        let mut entries = Vec::new();
-        let mut bytes = 1024; // Reserve the envelope as well as each entry's source.
-        for (document, entry) in bundle
-            .documents
-            .iter()
-            .flat_map(|document| {
-                document
-                    .document
-                    .entries
-                    .iter()
-                    .map(move |entry| (document, entry))
-            })
-            .skip(offset)
-        {
-            let cost = entry.preview.len() * 2 + 768;
-            if entries.len() >= 16 || bytes + cost > PAGE_BYTES {
-                break;
-            }
-            bytes += cost;
-            entries.push(ContextEntry {
-                source: document.document.source.clone(),
-                capture_seq: document.capture_seq,
-                entry: entry.clone(),
-            });
-        }
-        let next = offset + entries.len();
-        Ok(RequestDetailsPage {
-            run_epoch: epoch,
+        page::read_page(DetailRead {
+            epoch,
             request_id,
             revision: bundle.revision,
-            availability: "captured",
-            request_captured: bundle
+            before: None,
+            documents: bundle
                 .documents
                 .iter()
-                .any(|entry| matches!(entry.document.source, DetailSource::Request { .. })),
-            response_captured: bundle
-                .documents
-                .iter()
-                .any(|entry| matches!(entry.document.source, DetailSource::Response { .. })),
+                .map(|d| DocumentRef {
+                    document: &d.document,
+                    capture_seq: d.capture_seq,
+                })
+                .collect(),
+            responses,
+            cursor,
+            selection,
             truncated: bundle.truncated,
             omitted: bundle.omitted,
             conflict: bundle.conflict,
-            total_entries,
-            capture_issues: Vec::new(),
-            entries,
-            next_cursor: (next < total_entries)
-                .then(|| format!("{epoch}.{request_id}.{}.{next}", bundle.revision)),
+            capture_issues: issues,
+            sources_partial: self.diagnostics_partial || bundle.sources_partial,
         })
     }
 }
@@ -236,8 +213,43 @@ impl LiveHub {
         request_id: Uuid,
         cursor: Option<&str>,
     ) -> Result<RequestDetailsPage, DetailError> {
+        self.request_details_selected(request_id, cursor, &DetailSelection::default())
+    }
+
+    pub(crate) fn request_details_selected(
+        &self,
+        request_id: Uuid,
+        cursor: Option<&str>,
+        selection: &DetailSelection,
+    ) -> Result<RequestDetailsPage, DetailError> {
         let state = self.state.lock().unwrap();
-        let mut result = match state.details.page(self.epoch, request_id, cursor) {
+        let issues: Vec<String> = state
+            .diagnostics
+            .iter()
+            .filter(|d| d.request_id == request_id || d.request_id.is_nil())
+            .take(16)
+            .map(|d| {
+                serde_json::to_value(d.code)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let responses: Vec<_> = state
+            .responses
+            .iter()
+            .filter(|r| r.request_id == request_id)
+            .map(|r| serde_json::to_value(r).expect("closed response"))
+            .collect();
+        match state.details.page_with(
+            self.epoch,
+            request_id,
+            cursor,
+            selection,
+            &responses,
+            issues.clone(),
+        ) {
             Err(DetailError::NotFound)
                 if state
                     .requests
@@ -252,7 +264,7 @@ impl LiveHub {
                         .iter()
                         .any(|entry| entry.request_id == request_id) =>
             {
-                if cursor.is_some() {
+                if cursor.is_some() || selection.document.is_some() {
                     return Err(DetailError::StaleCursor);
                 }
                 let unavailable = state
@@ -281,23 +293,18 @@ impl LiveHub {
                     omitted: false,
                     conflict: false,
                     total_entries: 0,
-                    capture_issues: Vec::new(),
+                    capture_issues: issues,
                     entries: Vec::new(),
                     next_cursor: None,
+                    context: Some(page::ContextMetadata {
+                        context_sources: Vec::new(),
+                        selected_context: None,
+                        context_summary: None,
+                    }),
                 })
             }
             result => result,
-        };
-        if let Ok(page) = &mut result {
-            page.capture_issues = state
-                .diagnostics
-                .iter()
-                .filter(|entry| entry.request_id == request_id)
-                .take(16)
-                .map(|entry| entry.code)
-                .collect();
         }
-        result
     }
 }
 
@@ -374,5 +381,145 @@ mod tests {
         }
         assert!(store.page(epoch, first, None).unwrap().truncated);
         assert!(store.bytes <= TOTAL_BYTES && store.bundles.len() <= REQUESTS);
+    }
+
+    #[test]
+    fn diagnostic_eviction_does_not_restore_calibration_or_keep_old_cursors_valid() {
+        for global in [false, true] {
+            let hub = LiveHub::new(Default::default());
+            let request = Uuid::new_v4();
+            let policy = RedactionPolicy::new(vec![]).unwrap();
+            let apply = |request_id, change| {
+                hub.apply(Decoded {
+                    request_id,
+                    capture_seq: 1,
+                    received_at: Instant::now(),
+                    change,
+                })
+            };
+            apply(
+                request,
+                Change::Document {
+                    document: details::request(
+                        &json!({"input":vec![json!({"role":"user","content":"hello"});40]}),
+                        None,
+                        &policy,
+                    ),
+                },
+            );
+            apply(
+                request,
+                Change::Document {
+                    document: details::response(&json!({"id":"completed","output":[]}), &policy),
+                },
+            );
+            apply(
+                request,
+                Change::Response {
+                    response_id: Some("completed".into()),
+                    status: ResponseStatus::Completed,
+                    model: None,
+                    usage: details::usage(&json!({"input_tokens":101})),
+                },
+            );
+            assert!(
+                hub.request_details(request, None)
+                    .unwrap()
+                    .context
+                    .unwrap()
+                    .context_summary
+                    .unwrap()
+                    .calibrated
+            );
+            apply(
+                if global { Uuid::nil() } else { request },
+                Change::Diagnostic {
+                    code: DiagnosticCode::ObservationGap,
+                },
+            );
+            let incomplete = hub.request_details(request, None).unwrap();
+            assert!(
+                !incomplete
+                    .context
+                    .unwrap()
+                    .context_summary
+                    .unwrap()
+                    .calibrated
+            );
+            let cursor = incomplete.next_cursor.unwrap();
+            for _ in 0..128 {
+                apply(
+                    Uuid::new_v4(),
+                    Change::Diagnostic {
+                        code: DiagnosticCode::InvalidJson,
+                    },
+                );
+            }
+            let page = hub.request_details(request, None).unwrap();
+            assert!(!page.context.unwrap().context_summary.unwrap().calibrated);
+            assert_eq!(
+                hub.request_details(request, Some(&cursor)).err(),
+                Some(DetailError::StaleCursor)
+            );
+            assert!(hub.recording_checkpoint().details_partial);
+        }
+    }
+
+    #[test]
+    fn diagnostics_lost_before_any_document_keep_later_sources_uncertain() {
+        for global in [false, true] {
+            let hub = LiveHub::new(Default::default());
+            let request = Uuid::new_v4();
+            let apply = |request_id, change| {
+                hub.apply(Decoded {
+                    request_id,
+                    capture_seq: 1,
+                    received_at: Instant::now(),
+                    change,
+                })
+            };
+            apply(
+                if global { Uuid::nil() } else { request },
+                Change::Diagnostic {
+                    code: DiagnosticCode::ObservationGap,
+                },
+            );
+            for _ in 0..128 {
+                apply(
+                    Uuid::new_v4(),
+                    Change::Diagnostic {
+                        code: DiagnosticCode::InvalidJson,
+                    },
+                );
+            }
+            let policy = RedactionPolicy::new(vec![]).unwrap();
+            apply(
+                request,
+                Change::Document {
+                    document: details::request(&json!({"input":"hello"}), None, &policy),
+                },
+            );
+            apply(
+                request,
+                Change::Document {
+                    document: details::response(&json!({"id":"completed","output":[]}), &policy),
+                },
+            );
+            apply(
+                request,
+                Change::Response {
+                    response_id: Some("completed".into()),
+                    status: ResponseStatus::Completed,
+                    model: None,
+                    usage: details::usage(&json!({"input_tokens":101})),
+                },
+            );
+            let page = hub.request_details(request, None).unwrap();
+            assert!(!page.context.unwrap().context_summary.unwrap().calibrated);
+            assert_eq!(page.capture_issues, ["context_sources_partial"]);
+            let checkpoint = hub.recording_checkpoint();
+            assert!(checkpoint.details_partial);
+            assert!(checkpoint.details_partial_requests().is_none());
+        }
     }
 }

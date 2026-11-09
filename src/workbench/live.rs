@@ -381,10 +381,13 @@ impl LiveHub {
         Ok(self.checkpoint_locked(&state))
     }
     fn checkpoint_locked(&self, state: &State) -> super::recording::replay::Checkpoint {
+        let mut snapshot =
+            serde_json::to_value(self.snapshot_locked(state)).expect("safe snapshot DTO");
+        snapshot["detailsPartialRequests"] = serde_json::json!(state.details.partial_requests());
         super::recording::replay::Checkpoint {
             earlier_before: None,
             record_seq: state.recorder.as_ref().map_or(0, |r| r.sequence()),
-            snapshot: serde_json::to_value(self.snapshot_locked(state)).expect("safe snapshot DTO"),
+            snapshot,
             documents: state.details.checkpoint(),
             details_partial: state.details.partial(),
         }
@@ -578,7 +581,9 @@ impl LiveHub {
                 } else {
                     state.responses.push_back(response.clone());
                     if state.responses.len() > 256 {
-                        state.responses.pop_front();
+                        if let Some(removed) = state.responses.pop_front() {
+                            state.details.invalidate(Some(removed.request_id));
+                        }
                         invalidate(&mut state);
                     }
                 }
@@ -588,6 +593,7 @@ impl LiveHub {
                 {
                     state.partial = true;
                 }
+                state.details.invalidate(Some(decoded.request_id));
                 ViewChange::Response { response }
             }
             Change::Request { info } => {
@@ -620,6 +626,9 @@ impl LiveHub {
                 {
                     return;
                 }
+                state
+                    .details
+                    .invalidate((!decoded.request_id.is_nil()).then_some(decoded.request_id));
                 let diagnostic = Diagnostic {
                     request_id: decoded.request_id,
                     capture_seq: decoded.capture_seq,
@@ -628,7 +637,9 @@ impl LiveHub {
                 };
                 state.diagnostics.push_back(diagnostic.clone());
                 if state.diagnostics.len() > 128 {
-                    state.diagnostics.pop_front();
+                    if let Some(removed) = state.diagnostics.pop_front() {
+                        state.details.lose_diagnostic(removed.request_id);
+                    }
                     invalidate(&mut state);
                 }
                 ViewChange::Diagnostic { diagnostic }
