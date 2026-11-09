@@ -121,6 +121,26 @@
 .wb-context-entry summary { cursor:pointer; color:var(--ui-text); background:var(--ui-surface-2); padding:9px; font-size:12px; overflow-wrap:anywhere; }
 .wb-context-entry pre { margin:0; padding:12px; background:var(--ui-surface-1); max-height:360px; font-size:11px; line-height:1.7; }
 .wb-context-location { margin:8px 10px; overflow-wrap:anywhere; }
+.wb-context-source { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:12px 0; font-size:12px; }
+.wb-context-source select { min-width:0; max-width:100%; flex:1; }
+.wb-context-summary { padding:12px; margin:12px 0; border:1px solid var(--ui-line); border-radius:var(--ui-radius-sm); min-width:0; }
+.wb-context-summary-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; font-size:12px; }
+.wb-context-stack { display:flex; height:10px; border-radius:4px; overflow:hidden; background:var(--ui-surface-2); margin:12px 0; }
+.wb-context-summary .is-system { --context-color:#7786c8; } .wb-context-summary .is-tools { --context-color:#5196a5; }
+.wb-context-summary .is-skills { --context-color:#9a76b9; } .wb-context-summary .is-memory { --context-color:#b78a50; }
+.wb-context-summary .is-files { --context-color:#5b9d77; } .wb-context-summary .is-results { --context-color:#bb747a; }
+.wb-context-summary .is-chat { --context-color:#668fc5; }
+.wb-context-stack span,.wb-context-part i { background:var(--context-color); }
+.wb-context-legend { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin:12px 0; }
+.wb-context-part,.wb-context-items button { display:flex; flex-wrap:wrap; align-items:center; gap:5px 10px; width:100%; min-width:0; text-align:left; font-size:11px; font-variant-numeric:tabular-nums; }
+.wb-context-part-name { display:flex; align-items:center; gap:6px; margin-right:auto; }
+.wb-context-part i { display:inline-block; width:8px; height:8px; border-radius:2px; }
+.wb-context-summary button[aria-pressed="true"] { border-color:var(--ui-accent); background:var(--ui-accent-soft); }
+.wb-context-summary small { width:100%; color:var(--ui-text-3); overflow-wrap:anywhere; }
+.wb-context-items { list-style:none; padding:0; margin:10px 0 0; max-height:320px; overflow:auto; }
+.wb-context-items li + li { margin-top:6px; }
+.wb-context-item-name { flex:1 1 140px; min-width:0; overflow-wrap:anywhere; }
+@media(max-width:650px) { .wb-context-legend { grid-template-columns:minmax(0,1fr); } }
 .wb-response-usage { border-bottom:1px solid var(--ui-line); margin:12px 0; padding-bottom:3px; font-size:12px; }
 .wb-response-usage strong { display:block; overflow-wrap:anywhere; font-weight:500; color:var(--ui-text); }
 .wb-response-usage dl { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto; gap:8px 12px; font-size:11px; }
@@ -184,6 +204,13 @@
 .wb-settings-panel[hidden] { display:none; }
 .wb-settings-panel>.wb-panel-heading { flex-shrink:0; }
 .wb-settings-body { padding:0 14px 14px; min-height:0; overflow:auto; overscroll-behavior:contain; overflow-wrap:anywhere; }
+.wb-settings-tabs { display:flex; gap:4px; margin:16px 0; padding:4px; border:1px solid var(--ui-line); border-radius:var(--ui-radius-md); background:var(--ui-surface-1); }
+.wb-settings-tabs button { flex:1; min-width:0; padding:8px 6px; border:1px solid transparent; border-radius:var(--ui-radius-sm); background:transparent; color:var(--ui-text-3); font:inherit; font-weight:500; line-height:1.5; white-space:nowrap; }
+.wb-settings-tabs button:hover { color:var(--ui-text); background:var(--ui-surface-2); }
+.wb-settings-tabs button[aria-selected=true] { color:var(--ui-text); background:var(--ui-surface-3); border-color:var(--ui-line-strong); box-shadow:var(--ui-shadow-1); }
+.wb-settings-tabs button:focus-visible { outline:2px solid var(--ui-focus); outline-offset:2px; }
+.wb-settings-panel [role=tabpanel] { outline-offset:2px; }
+@media (max-width:480px) { .wb-settings-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .wb-settings-panel fieldset { min-width:0; margin:16px 0; padding:0; border:0; }
 .wb-settings-panel legend { margin-bottom:9px; color:var(--ui-text); font-weight:600; }
 .wb-settings-panel legend small { margin-left:8px; font-weight:400; color:var(--ui-text-3); }

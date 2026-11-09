@@ -53,6 +53,7 @@ async fn browser_settings_expand_save_conflict_and_collapse_keep_reading_and_ter
                 codex_turn_id: Some("settings-demo".into()),
                 purpose: RequestPurpose::Conversation,
                 purpose_basis: PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     });

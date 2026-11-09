@@ -25,8 +25,12 @@ setTimeout(() => { process.stdout.write(JSON.stringify({ stage: 'failed', check:
     assert.equal(new URL(page.url()).pathname, '/settings');
     const panel = page.getByRole('region', { name: '工作台设置', exact: true });
     await expect(panel).toBeVisible();
-    await expect(panel.getByLabel('允许清理历史记录', { exact: true })).not.toBeChecked();
     await expect(panel.getByRole('button', { name: '收起', exact: true })).toBeFocused();
+    await expect(panel.getByRole('tab')).toHaveCount(4);
+    await panel.getByRole('tab', { name: '历史来源', exact: true }).click();
+    await expect(panel.getByRole('tabpanel')).toHaveCount(1);
+    for (const tab of await panel.getByRole('tab').all()) await expect(tab).toBeInViewport();
+    await expect(panel.getByLabel('允许清理历史记录', { exact: true })).not.toBeChecked();
     await panel.getByRole('button', { name: '保存', exact: true }).scrollIntoViewIfNeeded();
     await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeInViewport();
     await expect(panel).not.toContainText('本次运行日志的位置');
@@ -54,10 +58,12 @@ setTimeout(() => { process.stdout.write(JSON.stringify({ stage: 'failed', check:
     await settingsLink.focus(); await expect(settingsLink).toBeFocused();
     await settingsLink.press('Enter');
     await expect(panel.getByRole('button', { name: '收起', exact: true })).toBeFocused();
+    await panel.getByRole('tab', { name: '启动设置', exact: true }).click();
     const draft = panel.getByLabel('启动时自动打开浏览器', { exact: true });
     const original = await draft.isChecked(); await draft.setChecked(!original);
     await page.locator('.wb-page-nav a[href="/"]').click();
     await settingsLink.click(); await expect(draft).toBeChecked({ checked: !original });
+    await expect(panel.getByRole('tab', { name: '启动设置', exact: true })).toHaveAttribute('aria-selected', 'true');
     await draft.setChecked(original);
     await page.locator('.wb-page-nav a[href="/"]').click();
   }

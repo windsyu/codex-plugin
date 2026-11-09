@@ -1,5 +1,7 @@
 //! Components of the native CLI workbench, independent of the legacy controller.
 
+mod context_envelope;
+
 pub mod workbench;
 
 #[cfg(unix)]

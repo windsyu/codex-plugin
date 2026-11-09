@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'preact/hooks';
 import type { ReadingView, RequestView, ResponseView } from './reading';
 import { nativeDirect, requestAssociation, requestFor } from './reading';
 import { itemRequestId, modelItems, toolItems } from './viewItems';
@@ -43,6 +43,11 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
 }) {
   const close = useRef<HTMLButtonElement>(null);
   const body = useRef<HTMLDivElement>(null);
+  // Request metadata contains the small seven-category summary, never analysis
+  // items or message payloads. Token streaming retains the requests array.
+  const metadataVersion = useMemo(() => JSON.stringify(reading.requests
+    .filter(request => request.requestId === requestId)
+    .map(request => [request.clientRequestIndex, request.contextSummary])), [reading.requests, requestId]);
   useLayoutEffect(() => { close.current?.focus({ preventScroll: true }); }, []);
   useEffect(() => { if (body.current) body.current.scrollTop = 0; }, [epoch, before, requestId]);
   const ids = callRequestIds(reading);
@@ -88,7 +93,7 @@ export function CallInspector({ reading, epoch, historical = false, before, requ
           {unassignedModels.map(item => <ModelMessage key={item.itemKey} item={item} historical={historical} request={requestFor(reading, item)} response={reading.responses.find(r => r.requestId === requestId && r.responseId === item.key.responseId)} />)}
           {unassignedTools.map(tool => <ToolCard key={tool.itemKey} tool={tool} historical={historical} />)}
         </details>}
-        <RequestDetails epoch={epoch} requestId={requestId} requests={selected} responses={reading.responses.filter(r => r.requestId === requestId)} expanded historical={historical} before={before} />
+        <RequestDetails epoch={epoch} requestId={requestId} requests={selected} responses={reading.responses.filter(r => r.requestId === requestId)} metadataVersion={metadataVersion} expanded historical={historical} before={before} />
         <div className="wb-call-evidence">
           {reading.toolContexts.filter(c => c.requestId === requestId).map(context => <div key={context.clientRequestIndex ?? 'http'}>{context.clientRequestIndex !== null && <p className="wb-subtle">{requestAssociation(context.clientRequestIndex, selected.find(meta => meta.clientRequestIndex === context.clientRequestIndex))}</p>}<ToolContextDetails context={context} /></div>)}
           <NativeCommandDetails historical={historical} commands={reading.nativeCommands.filter(c => hasTurn(c.key))} />

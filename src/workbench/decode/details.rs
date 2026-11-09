@@ -1,12 +1,15 @@
 //! Bounded, sanitized request/response documents for on-demand reading.
 //! Headers, opaque metadata and binary/encrypted content have no output path.
 use super::*;
+use serde::Deserialize;
 use serde_json::{Map, json};
+
+pub(crate) mod page;
 
 const PREVIEW_BYTES: usize = 24 * 1024;
 const DOCUMENT_BYTES: usize = 512 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -17,25 +20,29 @@ pub enum DetailSource {
     Response { response_id: Option<String> },
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailEntry {
-    pub section: &'static str,
+    pub section: String,
     pub position: Option<u32>,
+    #[serde(default)]
     pub json_pointer: String,
+    #[serde(default)]
     pub children_separated: bool,
     pub preview: String,
     pub truncated: bool,
     pub omitted: bool,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailDocument {
     pub source: DetailSource,
     pub entries: Vec<DetailEntry>,
     pub truncated: bool,
     pub omitted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_analysis: Option<crate::workbench::context::ContextAnalysis>,
 }
 impl DetailDocument {
     pub fn bytes(&self) -> usize {
@@ -43,6 +50,9 @@ impl DetailDocument {
             .iter()
             .map(|entry| entry.preview.len() * 2 + 512)
             .sum::<usize>()
+            + self.context_analysis.as_ref().map_or(0, |analysis| {
+                serde_json::to_vec(analysis).map_or(0, |bytes| bytes.len())
+            })
             + 256
     }
 }
@@ -230,6 +240,7 @@ impl<'a> DocumentBuilder<'a> {
                 entries: Vec::new(),
                 truncated: false,
                 omitted: false,
+                context_analysis: None,
             },
             scrubber: Scrubber {
                 policy,
@@ -277,7 +288,7 @@ impl<'a> DocumentBuilder<'a> {
         self.document.truncated |= truncated;
         self.document.omitted |= omitted;
         self.document.entries.push(DetailEntry {
-            section,
+            section: section.into(),
             position,
             json_pointer,
             children_separated,
@@ -356,12 +367,16 @@ impl<'a> DocumentBuilder<'a> {
 }
 
 pub fn request(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) -> DetailDocument {
+    let mut analysis = crate::workbench::context::analyze(body, policy);
     let mut builder = DocumentBuilder::new(
         DetailSource::Request {
             client_request_index: index,
         },
         policy,
     );
+    builder.bytes = serde_json::to_vec(&analysis)
+        .expect("closed context analysis")
+        .len();
     let fields = [
         "model",
         "previous_response_id",
@@ -394,6 +409,22 @@ pub fn request(body: &Value, index: Option<u64>, policy: &Arc<RedactionPolicy>) 
                 && !["instructions", "input", "tools", "type"].contains(&key.as_str())
         })
     });
+    // Preview budgets may drop whole entries after analysis has measured them.
+    // Keep navigation limited to retained scrubbed entries without changing the
+    // original measurements or their eligibility for query-time calibration.
+    let retained: std::collections::HashSet<_> = builder
+        .document
+        .entries
+        .iter()
+        .map(|entry| entry.json_pointer.as_str())
+        .collect();
+    for item in &mut analysis.items {
+        let count = item.references.len();
+        item.references
+            .retain(|reference| retained.contains(reference.as_str()));
+        item.references_partial |= item.references.len() != count;
+    }
+    builder.document.context_analysis = Some(analysis);
     builder.document
 }
 

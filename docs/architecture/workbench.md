@@ -26,6 +26,7 @@
 | [terminal.rs](../../src/workbench/terminal.rs)、[control.rs](../../src/workbench/control.rs)、[terminal/screen.rs](../../src/workbench/terminal/screen.rs) | PTY actor、输入控制代际、输出与 VT 快照；许可检查落到排队命令处理点 |
 | [proxy.rs](../../src/workbench/proxy.rs)、[capture.rs](../../src/workbench/capture.rs) | 固定上游转发、HTTP/SSE/WS 与有界观察副本；不能等待页面或磁盘 |
 | [framing.rs](../../src/workbench/framing.rs)、[decode.rs](../../src/workbench/decode.rs)、[redaction.rs](../../src/workbench/redaction.rs)、[observe.rs](../../src/workbench/observe.rs) | framing、身份/内容解码、脱敏、安全诊断和捕获缺口；unknown 不静默丢弃或阻断转发 |
+| `workbench::context`（私有） | 请求上下文 Analyzer 与查询 Presenter；七类估算和有条件的输入总量校准，不持有 I/O、运行生命周期或累计用量 |
 | [live.rs](../../src/workbench/live.rs)、[live/view.rs](../../src/workbench/live/view.rs) | 内存 LiveHub、typed ViewItem、revision、用量和调用详情；不是持久保存事实源 |
 | [rollout.rs](../../src/workbench/rollout.rs)、[rollout](../../src/workbench/rollout) | 原生 rollout 后台阅读、用户/工具证据；不绑定 Codex 私有 SQLite 表 |
 | [recording.rs](../../src/workbench/recording.rs)、[recording](../../src/workbench/recording) | 异步 journal/blob/snapshot、恢复和历史清理；fsync 后才能公布保存水位 |
@@ -86,6 +87,8 @@ Application 可以没有 CLI：历史首页与配置可用，缺少 CLI、native
 用户提交仅取原生 rollout 的明确 UserMessage 身份，不从 Enter、终端回显或模型请求 `role:user` 推断。工具参数表示模型生成；工具成功必须有匹配的原生执行/结果证据。关联要求明确调用域和身份，冲突/缺失保持不确定。`response.completed`、用户提交、工具完成、整轮完成和 CLI 退出分别表达。
 
 Live ViewItem schema 2 使用稳定 `itemKey`、revision、orderIndex 和 provenance：首次 `item.replace` 创建项，patch 必须满足基础 revision 与 contentKey，最终完整内容 replace，不再次 append。同一事件的文本、文件/图片上下文、详情与用量不能通过不同恢复路径重复计数。具体契约见[详细设计](../design/workbench-detailed-design.md)。
+
+请求 decoder 在预览裁剪前对解析后的 JSON 运行上下文 Analyzer，轻量摘要随 request metadata/snapshot，完整分析随请求 DetailDocument 进入详情缓存和异步保存。实时与历史查询共用纯 Presenter：仅明确关联的 HTTP、合法 completed usage 且统计完整时校准，其他情况保留估算和不完整说明；分类不改变运行累计用量。旧记录没有摘要时不反解析预览。筛选、边界和降级契约见[详细设计 §5.1.1](../design/workbench-detailed-design.md#511-r2-按需上下文与响应用量已实现)。
 
 ### 4.2 保存、恢复与历史来源
 

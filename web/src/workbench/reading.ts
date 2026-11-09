@@ -5,6 +5,7 @@ import { modelItems, toolItems, userMessages, parseViewItem, sameItemType, VIEW_
 import type { NativeCommand, NativeFileChange, ToolCall, ToolContext } from './toolTypes';
 import { parseUsageSummary, type UsageSummary } from './usage';
 import { runApi } from './runApi';
+import type { ContextSummary } from './contextSummary';
 
 export interface TextKey { requestId: string; responseId: string | null; wireItemId: string; contentIndex: number }
 export interface TextItem { key: TextKey; text: string; revision: number; truncated: boolean; orderIndex?: number; itemKey?: string; author?: ModelItem['author'] }
@@ -17,6 +18,7 @@ export interface ResponseView {
   usage?: ResponseUsage | null; usageConflict?: boolean; observedDurationMs?: number | null;
 }
 export interface RequestView {
+  contextSummary?: ContextSummary | null;
   requestId: string; clientRequestIndex: number | null; requestedModel: string | null;
   responseId?: string | null;
   codexThreadId: string | null; codexTurnId: string | null;

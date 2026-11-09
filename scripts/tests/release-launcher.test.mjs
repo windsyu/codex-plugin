@@ -63,6 +63,9 @@ test('launcher preserves cwd and passes arguments exactly', t => {
     [['status', '--json'], ['status', '--json']],
     [['stop'], ['stop']],
     [['open', '--relay'], ['open', '--relay']],
+    [['open', '--print-url'], ['open', '--print-url']],
+    [['open', '/tmp/private entry', '--relay', '--print-url'], ['open', '/tmp/private entry', '--relay', '--print-url']],
+    [['--config-dir', '/tmp/config', 'open', '--print-url'], ['--config-dir', '/tmp/config', 'open', '--print-url']],
     [['autostart', 'on'], ['autostart', 'on']],
     [['autostart', 'off'], ['autostart', 'off']],
     [['./start'], ['--project', './start']],
@@ -87,6 +90,7 @@ test('launcher preserves cwd and passes arguments exactly', t => {
     assert.deepEqual(result.argv, ['--help']);
     assert.match(result.stdout, /Usage: code-view/);
     assert.match(result.stdout, /--history/);
+    assert.match(result.stdout, /--print-url/);
   }
 });
 

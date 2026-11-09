@@ -154,6 +154,7 @@ async fn browser_workspace_files_search_git_and_responsive_navigation_keep_termi
                 codex_turn_id: Some("workspace-demo".into()),
                 purpose: crate::workbench::decode::request::RequestPurpose::Conversation,
                 purpose_basis: crate::workbench::decode::request::PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     });
