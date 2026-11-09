@@ -92,7 +92,7 @@ export function LaunchPanel({
         {!onPick && browserInstanceId && onDirectorySelect && <button type="button" className="wb-launch-pick" onClick={() => setBrowsing(true)} disabled={locked}>浏览电脑目录</button>}
       </div>}
 
-      {pathEditable && <button type="submit" className="wb-launch-validate" disabled={locked || !path.trim()}>检查目录</button>}
+      {pathEditable && <button type="submit" className="wb-launch-validate" disabled={locked || !path.trim()}>确认文件夹</button>}
       {readyHref && <p className="wb-launch-state" role="status">工作台已就绪。<a href={readyHref} target="_blank" rel="noopener">打开工作台</a></p>}
       {error && <p className="wb-launch-error" role="alert">{error}</p>}
       {busy && <p className="wb-launch-state" role="status">正在检查目录…</p>}

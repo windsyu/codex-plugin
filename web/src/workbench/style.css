@@ -204,6 +204,13 @@
 .wb-settings-panel[hidden] { display:none; }
 .wb-settings-panel>.wb-panel-heading { flex-shrink:0; }
 .wb-settings-body { padding:0 14px 14px; min-height:0; overflow:auto; overscroll-behavior:contain; overflow-wrap:anywhere; }
+.wb-settings-tabs { display:flex; gap:4px; margin:16px 0; padding:4px; border:1px solid var(--ui-line); border-radius:var(--ui-radius-md); background:var(--ui-surface-1); }
+.wb-settings-tabs button { flex:1; min-width:0; padding:8px 6px; border:1px solid transparent; border-radius:var(--ui-radius-sm); background:transparent; color:var(--ui-text-3); font:inherit; font-weight:500; line-height:1.5; white-space:nowrap; }
+.wb-settings-tabs button:hover { color:var(--ui-text); background:var(--ui-surface-2); }
+.wb-settings-tabs button[aria-selected=true] { color:var(--ui-text); background:var(--ui-surface-3); border-color:var(--ui-line-strong); box-shadow:var(--ui-shadow-1); }
+.wb-settings-tabs button:focus-visible { outline:2px solid var(--ui-focus); outline-offset:2px; }
+.wb-settings-panel [role=tabpanel] { outline-offset:2px; }
+@media (max-width:480px) { .wb-settings-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .wb-settings-panel fieldset { min-width:0; margin:16px 0; padding:0; border:0; }
 .wb-settings-panel legend { margin-bottom:9px; color:var(--ui-text); font-weight:600; }
 .wb-settings-panel legend small { margin-left:8px; font-weight:400; color:var(--ui-text-3); }
