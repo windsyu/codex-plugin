@@ -224,7 +224,7 @@ async fn an_observed_native_thread_cannot_be_resumed_in_another_live_project() {
                         codex_thread_id: Some(thread),
                         codex_turn_id: Some("synthetic-turn".into()),
                         purpose: RequestPurpose::Conversation,
-                        purpose_basis: PurposeBasis::CodexTurnMetadata,
+                        purpose_basis: PurposeBasis::CodexTurnMetadata, context_summary: None,
                     },
                 },
             });

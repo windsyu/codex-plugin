@@ -21,6 +21,11 @@ pub(crate) struct Checkpoint {
     pub details_partial: bool,
 }
 impl Checkpoint {
+    /// Additive snapshot metadata scopes retention gaps without changing the
+    /// closed journal/checkpoint envelope. Older snapshots use the global flag.
+    pub fn details_partial_requests(&self) -> Option<Vec<Uuid>> {
+        serde_json::from_value(self.snapshot.get("detailsPartialRequests")?.clone()).ok()
+    }
     pub fn sequence(&self) -> u64 {
         self.snapshot["viewSeq"].as_u64().unwrap_or(0)
     }
@@ -57,8 +62,22 @@ impl Checkpoint {
             .map(|d| d.document.to_string().len())
             .sum();
         while bytes > 16 * 1024 * 1024 || self.documents.len() > 512 {
-            bytes -= self.documents.remove(0).document.to_string().len();
+            let removed = self.documents.remove(0);
+            bytes -= removed.document.to_string().len();
             self.details_partial = true;
+            if let Some(requests) = self
+                .snapshot
+                .get_mut("detailsPartialRequests")
+                .and_then(Value::as_array_mut)
+            {
+                let id = json!(removed.request_id);
+                if !requests.contains(&id) {
+                    requests.push(id);
+                }
+                if requests.len() > 320 {
+                    self.snapshot["detailsPartialRequests"] = Value::Null;
+                }
+            }
         }
     }
     pub fn event(&mut self, event: &Value) -> Result<(), &'static str> {

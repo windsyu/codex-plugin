@@ -6,6 +6,7 @@ pub mod capture;
 #[cfg(unix)]
 pub mod config;
 pub mod config_sources;
+mod context;
 pub mod control;
 pub mod decode;
 pub mod framing;

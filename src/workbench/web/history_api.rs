@@ -1,4 +1,5 @@
 use super::*;
+use crate::workbench::decode::details::page::DetailSelection;
 use crate::workbench::recording::history::{HistoryError, Query as HistoryQuery};
 
 #[derive(Deserialize)]
@@ -6,6 +7,16 @@ use crate::workbench::recording::history::{HistoryError, Query as HistoryQuery};
 pub(super) struct Page {
     cursor: Option<String>,
     before: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DetailsPage {
+    cursor: Option<String>,
+    before: Option<u64>,
+    document: Option<String>,
+    category: Option<String>,
+    item: Option<String>,
 }
 
 async fn query(state: Arc<WebState>, headers: Auth, query: HistoryQuery) -> Response {
@@ -105,12 +116,20 @@ pub(super) async fn details(
     State(state): State<Arc<WebState>>,
     headers: Auth,
     Path((epoch, request)): Path<(Uuid, Uuid)>,
-    params: Result<Query<Page>, axum::extract::rejection::QueryRejection>,
+    params: Result<Query<DetailsPage>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
-    let params = match page(params) {
-        Ok(p) => p,
-        Err(code) => return error(StatusCode::BAD_REQUEST, code),
+    let params = match params {
+        Ok(Query(p)) if p.cursor.as_ref().is_none_or(|s| s.len() <= 200) => p,
+        _ => return error(StatusCode::BAD_REQUEST, "invalid_history_cursor"),
     };
+    let selection = DetailSelection {
+        document: params.document,
+        category: params.category,
+        item: params.item,
+    };
+    if !selection.valid() {
+        return error(StatusCode::BAD_REQUEST, "invalid_context_selection");
+    }
     query(
         state,
         headers,
@@ -119,6 +138,7 @@ pub(super) async fn details(
             request,
             cursor: params.cursor,
             before: params.before,
+            selection,
         },
     )
     .await
