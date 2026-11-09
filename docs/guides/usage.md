@@ -16,6 +16,7 @@ code-view status
 code-view status --json
 code-view open
 code-view open --relay
+code-view open --print-url
 code-view autostart on
 code-view autostart off
 code-view stop
@@ -26,6 +27,10 @@ code-view stop
 关闭终端或浏览器后后台服务仍运行；`autostart on/off` 只控制下次登录，不改变当前运行。注销后服务停止，睡眠期间不保证在线；唤醒后重连。异常退出可重启工作台，但不会恢复 CLI 或重放输入。`stop` 结束该作用域的所有项目、代理和连接，等待完整退出；它保留电脑绑定、自启偏好和用户历史，不影响其他独立 Codex。
 
 `--config-dir`、`--data-dir`、`--codex-bin`、`--profile`、`--provider-profile` 可在服务命令前后指定；后续命令须使用同一配置/数据作用域。重复 `start` 复用后台实例；存在前台实例时提示先正常退出，不自动接管。原有 `code-view [目录]` 可向后台实例明确启动项目；名为 `start`、`status`、`stop`、`open`、`autostart` 的项目目录使用 `./start` 等显式路径。
+
+`open` 默认将带配对能力的链接直接交给系统浏览器，不把密钥打印到终端。系统浏览器、Codex 内置浏览器、不同浏览器配置和无痕窗口的 Cookie 相互独立；在另一浏览器只打开本机地址，可能出现 `pairing_required`。此时运行 `code-view open --print-url`，将输出的完整链接粘贴到需要配对的浏览器。该模式仅向 stdout 输出一行私有 URL，不打开浏览器、不创建 CLI；也支持 `code-view open <entryFile> --print-url` 和 `code-view open --relay --print-url`，后者进入本机公网接入页。
+
+输出中 `#pair=` 后的 64 位十六进制字符串就是原始配对密钥，属于当前应用实例，执行 `open` 不会生成新密钥。配对页捕获它后立即清除地址栏 fragment，再换取当前浏览器的 Cookie；之后复制地址栏不包含密钥，不能为另一个浏览器配对。保留命令输出的完整链接（包括已有的 `run` 查询）；`--relay` 与普通打开接入页一样移除 Run 选择。`--print-url` 是显式输出秘密的例外，链接可授予本机 owner 访问，不应粘贴进公开聊天、工单或日志。已安装旧版本若不识别此参数，需使用包含此功能的新构建。
 
 再次运行未指定启动偏好的 `start` 会沿用已登记的偏好；显式修改偏好先停止服务。已开启登录自启时若需要修改登记参数，先 `autostart off`，停止并以新参数启动，核对后再开启自启，避免悄悄替换已有登录任务。安装操作期间暂时拒绝后台启动和 `autostart on`，仍可关闭自启；遇到遗留安装锁应先检查安装进程及失败提示，不靠删服务锁接管实例。
 
@@ -103,6 +108,7 @@ macOS 系统文件夹窗口支持 `⌘⇧G` 输入路径，按钮与侧栏随系
 | `codex-view --resume <UUID>` | 验证并恢复启动 cwd 中的指定原生会话，不自动输入 |
 | `codex-view --project <directory> --resume <UUID>` | 同时验证指定目录与原生会话身份后恢复 |
 | `codex-view open [entryFile] [--relay]` | 打开现有应用；可用私有入口文件（新 v2 / 旧 v1）或当前配置作用域；`--relay` 打开本机接入设置，不创建 CLI |
+| `codex-view open [entryFile] [--relay] --print-url` | 仅输出完整私有配对 URL，供另一个浏览器配对；不打开浏览器 |
 | `--profile <name>` | 使用原生 `$CODEX_HOME/<name>.config.toml`，不是另一份工作台配置 |
 | `--provider-profile unmanaged-custom` / `--codex-bin <path>` | 旧接入标识兼容 / 指定已安装官方 CLI，不修改模型或安装程序 |
 | `--config-dir <directory>` / `--data-dir <directory>` | 明确指定工作台 JSON 目录 / 私有历史根，目录说明见下文 |

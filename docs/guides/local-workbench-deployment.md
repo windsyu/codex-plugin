@@ -49,11 +49,15 @@ CLI 原生配置位于其 `CODEX_HOME`（未设置时使用原生默认），与
   --codex-bin /path/to/codex --profile named --no-open
 # 重新打开已运行应用的私有入口，不创建新 CLI
 /path/to/repository/target/release/codex-view open /path/to/private/instance.json
+# 只打印完整私有配对 URL，粘贴到另一个浏览器（不自动打开）
+/path/to/repository/target/release/codex-view open --print-url
 ```
 
 默认概览为 `/`，历史 `/history`，明确启动 `/launch`，共享设置 `/settings`，公网连接设置仅本机 `/relay`。具体 Run 使用 `/runs/{runId}/{chat|terminal|files|search|git|history|usage|settings|access}`。CLI flags 还包括 `--provider-profile unmanaged-custom`、`--resume <UUID>`、`--entry-file <新私有文件>`、`--config-dir <目录>`、`--data-dir <目录>`；只有明确项目/恢复请求创建 CLI，启动偏好 flag 本身不会。恢复核验原生会话来源和目录，不自动续最近任务、不重放历史或输入。
 
-同配置目录与数据根重复启动会核验私有实例入口并复用，不靠删除锁来强制第二个实例。输出的 `entryFile` 是私有认证材料位置，不是可公开分享的文件；`open` 用它打开页面。不要读取/打印其内容或传播带配对凭据的 URL。自定义 `--entry-file` 须为新的私有文件，正常退出移除。
+同配置目录与数据根重复启动会核验私有实例入口并复用，不靠删除锁来强制第二个实例。输出的 `entryFile` 是私有认证材料位置，不是可公开分享的文件；`open` 用它打开系统浏览器，普通输出不含配对密钥。需要在 Codex 内置浏览器、不同浏览器配置或无痕窗口打开时，使用 `open [entryFile] --print-url` 显式输出一行完整私有链接，也可组合 `--relay` 进入本机接入页；该模式不打开浏览器。当前作用域发现仍核验运行锁和应用身份，显式文件仍执行原有私有入口校验。自定义 `--entry-file` 须为新的私有文件，正常退出移除。
+
+不同浏览器不共享配对 Cookie，仅输入本机地址可能得到 `pairing_required`。将完整 `--print-url` 输出粘贴到目标浏览器；`#pair=` 后是当前应用实例的原始配对密钥，`open` 不刷新它。页面捕获密钥后立即从地址栏清除 fragment，因此配对后的地址栏链接不能用于另一个浏览器首次配对。仅在显式 `--print-url` 时将密钥写入 stdout；不要把输出或私有入口文件内容传播到公开聊天、工单或日志。完整操作见[使用指南](usage.md#后台开启远程注册和退出)。
 
 已安装包的 `code-view` 默认把当前目录作为明确项目启动请求；`code-view /path/to/project` 指定目录，`code-view --history` 只读首页。它与无参数 `codex-view` 语义不同，不要在自动化中混淆。
 
