@@ -8,13 +8,14 @@ case "${1-}" in
 Usage: code-view [DIRECTORY] [OPTIONS]
        code-view --history [OPTIONS]
        code-view start|status|stop [OPTIONS]
-       code-view open [ENTRY_FILE] [--relay] [OPTIONS]
+       code-view open [ENTRY_FILE] [--relay] [--print-url] [OPTIONS]
        code-view autostart on|off [OPTIONS]
 
 With no directory, start Codex in the current working directory.
 DIRECTORY selects another project. --history opens the history home.
 Other options are passed to codex-view; --project overrides the default.
 start runs the workbench in the background; stop ends all its projects.
+open --print-url prints the private pairing URL without opening a browser.
 Use ./start (or another explicit path) for directories named like commands.
 
 Backend options:
