@@ -11,6 +11,7 @@ const fail = (code: string, field?: string) => ({ ok: false, json: async () => (
 const root = document.createElement('div');
 const button = (text: string) => [...root.querySelectorAll('button')].find(b => b.textContent === text)!;
 const input = (text: string) => root.querySelector(`[aria-label="${text}"]`) as HTMLInputElement;
+const visiblePanels = () => [...root.querySelectorAll<HTMLElement>('[role="tabpanel"]')].filter(panel => !panel.hidden);
 async function click(text: string) { await act(async () => button(text).click()); await act(async () => {}); }
 async function submit() {
   await act(async () => { root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
@@ -30,6 +31,7 @@ it('loads only when expanded and preserves unsaved fields across collapse withou
   const fetch = vi.fn().mockResolvedValue(ok()); vi.stubGlobal('fetch', fetch); await show();
   expect(fetch).not.toHaveBeenCalled(); const native = input('native');
   await click('设置'); expect(input('允许清理历史记录').disabled).toBe(true); expect(input('保留天数').disabled).toBe(true);
+  await click('启动设置');
   expect(input('本地局域网接入端口').value).toBe('0');
   expect(root.textContent).toContain('下次开启本地局域网接入生效');
   await type('Codex 启动配置', 'future'); expect(root.querySelector('[data-dirty]')!.textContent).toBe('true');
@@ -44,6 +46,7 @@ it('writes the same full JSON with revision and preserves current effective sett
     if (!init.method) return ok();
     const next = data(); next.saved = JSON.parse(init.body).config; next.revision = 'b'.repeat(64); next.restartRequired = ['launch.profile']; return ok(next);
   }); vi.stubGlobal('fetch', fetch); await show(); await click('设置');
+  await click('启动设置');
   await type('Codex 启动配置', 'future');
   await submit();
   const call = fetch.mock.calls.find(([, init]) => init.method === 'PUT')!;
@@ -56,7 +59,7 @@ it('writes the same full JSON with revision and preserves current effective sett
 it('keeps conflict drafts, requires explicit reload, and treats defaults as a draft', async () => {
   let server = data();
   const fetch = vi.fn().mockImplementation(async (_url, init) => init.method ? fail('config_changed') : ok(server));
-  vi.stubGlobal('fetch', fetch); await show(); await click('设置'); await type('Codex 启动配置', 'draft');
+  vi.stubGlobal('fetch', fetch); await show(); await click('设置'); await click('启动设置'); await type('Codex 启动配置', 'draft');
   await submit();
   expect(input('Codex 启动配置').value).toBe('draft'); expect(button('保存').disabled).toBe(true);
   server = { ...data(), revision: 'b'.repeat(64), saved: { ...config, launch: { ...config.launch, profile: 'external' } } };
@@ -67,7 +70,7 @@ it('keeps conflict drafts, requires explicit reload, and treats defaults as a dr
 });
 it('allows correcting a rejected field without discarding the draft', async () => {
   const fetch = vi.fn().mockImplementation(async (_url, init) => init.method ? fail('invalid_field', 'storage.dataDir') : ok());
-  vi.stubGlobal('fetch', fetch); await show(); await click('设置'); await type('历史保存位置', 'relative');
+  vi.stubGlobal('fetch', fetch); await show(); await click('设置'); await click('启动设置'); await type('历史保存位置', 'relative');
   await submit();
   expect(root.textContent).toContain('历史保存位置：填写的内容不符合要求');
   await type('历史保存位置', '/synthetic/new'); expect(button('保存').disabled).toBe(false);
@@ -104,6 +107,7 @@ it('keeps actual history and log locations after saving a future directory and s
     return ok(server);
   });
   vi.stubGlobal('fetch', fetch); await show(); await click('设置');
+  await click('启动设置');
   await type('历史保存位置', '/synthetic/next'); await submit();
   expect(input('历史保存位置').value).toBe('/synthetic/next');
   expect(root.querySelector('.wb-settings-locations')!.textContent).toContain('/synthetic/<img src=x>/history/runs');
@@ -111,6 +115,65 @@ it('keeps actual history and log locations after saving a future directory and s
   expect(root.textContent).toContain('待下次启动生效：历史保存位置');
   expect(root.textContent).toContain('本次由启动参数覆盖');
   expect(root.querySelector('img')).toBeNull();
+});
+it('shows one section at a time and supports keyboard selection without saving', async () => {
+  const fetch = vi.fn().mockResolvedValue(ok()); vi.stubGlobal('fetch', fetch); await show(); await click('设置');
+  expect([...root.querySelectorAll('[role="tab"]')].map(tab => tab.textContent)).toEqual(['历史清理', '记录与日志', '启动设置']);
+  expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['cleanup']);
+  const press = async (title: string, key: string) => act(async () => { button(title).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); });
+  await press('历史清理', 'ArrowRight');
+  expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['storage']);
+  expect(document.activeElement).toBe(button('记录与日志'));
+  expect(button('记录与日志').getAttribute('aria-selected')).toBe('true');
+  expect(button('历史清理').tabIndex).toBe(-1);
+  await press('记录与日志', 'End'); expect(document.activeElement).toBe(button('启动设置'));
+  await press('启动设置', 'ArrowRight'); expect(document.activeElement).toBe(button('历史清理'));
+  await press('历史清理', 'ArrowLeft'); expect(document.activeElement).toBe(button('启动设置'));
+  await press('启动设置', 'Home'); expect(document.activeElement).toBe(button('历史清理'));
+  expect(fetch.mock.calls.every(([, init]) => !init.method)).toBe(true);
+});
+
+it('preserves application source editor and drafts across sections, then saves them together', async () => {
+  const fetch = vi.fn().mockImplementation(async (_url, init) => {
+    const value = data();
+    if (init.method) value.saved = JSON.parse(init.body).config;
+    return { ok: true, json: async () => ({ instanceId: 'application', settings: value }) };
+  }); vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<SettingsPanel epoch="application" instanceId="application" open onClose={() => {}} onDirtyChange={() => {}} />, root));
+  await act(async () => {});
+  await vi.waitFor(() => expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['sources']));
+  expect(root.querySelectorAll('[role="tab"]')).toHaveLength(4);
+  await click('接入旧历史'); await type('历史文件位置', '/synthetic/old.db');
+  const sourceEditor = input('历史文件位置');
+  await click('启动设置'); await type('Codex 启动配置', 'future');
+  await click('历史来源'); expect(input('历史文件位置')).toBe(sourceEditor);
+  expect(input('历史文件位置').value).toBe('/synthetic/old.db');
+  await toggle('汇总已接入的历史');
+  await click('记录与日志'); expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['storage']);
+  expect(fetch.mock.calls.every(([, init]) => !init.method)).toBe(true);
+  await submit();
+  const writes = fetch.mock.calls.filter(([, init]) => init.method === 'PUT');
+  expect(writes).toHaveLength(1);
+  const saved = JSON.parse(writes[0][1].body).config;
+  expect(saved.launch.profile).toBe('future');
+  expect(saved.history.library.enabled).toBe(false);
+  expect(saved.history.library.sources).toEqual([]);
+  expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['storage']);
+});
+
+it('reveals an invalid field in another section before saving', async () => {
+  const fetch = vi.fn().mockResolvedValue(ok()); vi.stubGlobal('fetch', fetch); await show(); await click('设置');
+  await click('启动设置'); await type('Codex 启动配置', 'invalid profile');
+  const invalid = input('Codex 启动配置');
+  const reportValidity = vi.spyOn(invalid, 'reportValidity').mockReturnValue(false);
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 0; });
+  await click('历史清理'); await submit();
+  expect(visiblePanels().map(panel => panel.dataset.section)).toEqual(['launch']);
+  expect(invalid.closest('details')!.open).toBe(true);
+  expect(reportValidity).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.every(([, init]) => !init.method)).toBe(true);
+  await type('Codex 启动配置', 'valid_profile'); await submit();
+  expect(fetch.mock.calls.filter(([, init]) => init.method === 'PUT')).toHaveLength(1);
 });
 it('shows the configuration file only when needed to repair invalid settings', async () => {
   const server = data(); server.saved = null; server.revision = null; server.errors = [{ code: 'invalid_config', field: '$', line: 3 }];
@@ -129,6 +192,7 @@ it('edits application settings without a Run and does not invent a run log locat
   await act(async () => {});
   await vi.waitFor(() => expect(input('Codex 启动配置'), root.textContent || '').not.toBeNull());
   expect(root.textContent).not.toContain('本次运行日志的位置');
+  await click('启动设置');
   await type('Codex 启动配置', 'future'); await submit();
   const call = fetch.mock.calls.find(([, init]) => init.method === 'PUT')!;
   expect(call[0]).toBe('/workbench/v1/application/settings');

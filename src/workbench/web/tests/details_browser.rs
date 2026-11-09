@@ -16,6 +16,8 @@ async fn browser_reads_context_on_demand_without_losing_terminal_or_reading_stat
     let mut command = CommandBuilder::new("/bin/cat");
     command.cwd(&workspace);
     command.env("CODEX_HOME", directory.path());
+    command.env("HOME", directory.path());
+    command.env("USERPROFILE", directory.path());
     let host =
         crate::workbench::terminal::TerminalHost::spawn(hub.epoch(), command, 24, 80).unwrap();
     let server = ReadingServer::bind_with_terminal(hub.clone(), host.handle())

@@ -24,6 +24,8 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await page.locator('.wb-message-list').getByRole('button', { name: '调用详情', exact: true }).first().click();
   const context = page.locator('.wb-request-context');
   await expect(context.locator('.wb-context-entry')).toHaveCount(16);
+  await expect(context.getByRole('region', { name: '上下文分类摘要' })).toBeVisible();
+  await expect(context.locator('.wb-context-part')).toHaveCount(7);
   assert.equal(fetches, 1);
   const system = context.locator('.wb-context-entry').filter({ has: page.locator('summary', { hasText: '系统说明' }) });
   await system.locator('summary').press('Enter');
@@ -42,7 +44,29 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await expect(context).toContainText('上下文或运行已更新');
   await expect(context.locator('.wb-context-entry')).toHaveCount(16);
   await context.getByRole('button', { name: '刷新上下文' }).click();
+  await expect(context.getByRole('button', { name: '刷新上下文' })).toBeEnabled();
   await expect(context).not.toContainText('上下文或运行已更新');
+  stage = 'context-category-request';
+  const selectedDocument = await context.getByLabel('上下文来源').inputValue();
+  const categoryRead = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.searchParams.get('document') === selectedDocument && url.searchParams.get('category') === 'tools';
+  });
+  await context.locator('.wb-context-part.is-tools').click(); await categoryRead;
+  stage = 'context-category-content';
+  await expect(context).toContainText('原消息可能包含其他分类');
+  await expect(context.locator('.wb-context-items')).toContainText('read_fixture');
+  stage = 'context-item-request';
+  const itemRead = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.searchParams.get('document') === selectedDocument && url.searchParams.has('item');
+  });
+  await context.locator('.wb-context-items button').first().click(); await itemRead;
+  stage = 'context-item-content';
+  await expect(context).toContainText('正在阅读所选条目');
+  stage = 'context-all-sources';
+  await context.getByRole('button', { name: '查看全部请求与响应' }).click();
+  await expect(context.getByRole('button', { name: '刷新上下文' })).toBeEnabled();
   for (let n = 0; n < 5 && await context.getByRole('button', { name: '加载后续内容' }).count(); n++) {
     await context.getByRole('button', { name: '加载后续内容' }).click();
     await expect(context.getByRole('button', { name: '刷新上下文' })).toBeEnabled();
@@ -81,6 +105,6 @@ setTimeout(() => { report({ stage: 'failed', check: stage, reason: 'deadline' })
   await page.locator('.wb-message-list').getByRole('button', { name: '调用详情', exact: true }).first().click();
   await expect(page.locator('.wb-context-entry')).toHaveCount(16);
   assert.equal(errors, 0);
-  report({ stage: 'complete', onDemand: true, staleCursorProtected: true, samePtyProcess: true, contextLiteralAndRedacted: true, userMessages: 0, perResponseUsage: true, pageErrors: errors, browser: browser.version() });
+  report({ stage: 'complete', onDemand: true, staleCursorProtected: true, contextSummaryDrilldown: true, samePtyProcess: true, contextLiteralAndRedacted: true, userMessages: 0, perResponseUsage: true, pageErrors: errors, browser: browser.version() });
   await close(0);
 })().catch(async () => { await screenshot('failed').catch(() => {}); report({ stage: 'failed', check: stage, reason: 'assertion (private URL/output suppressed)' }); close(1); });

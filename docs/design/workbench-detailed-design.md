@@ -229,6 +229,7 @@ interface RequestView {
   purpose: "conversation" | "auxiliary" | "unknown";
   purposeBasis: "codex_turn_metadata" | "missing_metadata"
     | "conflicting_metadata" | "unknown_metadata";
+  contextSummary?: ContextSummary; // §5.1.1：此请求裁剪前的轻量分类估算
 }
 interface ResponseView {
   requestId: string;
@@ -508,7 +509,7 @@ rollout 原生事件顶层 requestId=null，不伪造网络 ID。所有项目与
 
 #### 5.1.1 R2 按需上下文与响应用量（已实现）
 
-`GET /workbench/v1/runs/{runId}/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>` 读取明确 Run 的脱敏内存副本。沿用配对 Cookie、严格 Host/Origin/Fetch-Site 边界和 `Cache-Control: no-store`；epoch 必填，未知/重复 query 字段和无效 UUID 拒绝，cursor 最长 160 字节。此 API 不读取磁盘、不访问模型、不取得终端输入权。
+`GET /workbench/v1/runs/{runId}/requests/{requestId}?epoch=<runEpoch>&cursor=<opaque>` 读取明确 Run 的脱敏内存副本；可加 `document`、`category`、`item` 选择请求上下文来源及分类条目。沿用配对 Cookie、严格 Host/Origin/Fetch-Site 边界和 `Cache-Control: no-store`；epoch 必填，未知/重复 query 字段和无效 UUID 拒绝，cursor 最长 160 字节。此 API 不读取磁盘、不访问模型、不取得终端输入权。
 
 ```ts
 type DetailSource =
@@ -526,6 +527,14 @@ interface RequestDetailsPage {
   conflict: boolean;
   captureIssues: string[];       // 本请求最多 16 个安全诊断码
   totalEntries: number;          // 当前保留项数，不冒充源文档完整项数
+  contextSources?: Array<{      // 首屏提供；续页省略表示沿用同 revision
+    id: string;                 // revision + ordinal 的 opaque 文档选择器
+    clientRequestIndex: number | null;
+    captureSeq: number;
+    available: boolean;          // 有可识别的分类摘要；false 时原文仍可读取
+  }>;
+  selectedContext?: string | null;
+  contextSummary?: ContextPresentation | null;
   entries: Array<{
     source: DetailSource;
     captureSeq: number;
@@ -543,13 +552,25 @@ interface RequestDetailsPage {
 
 请求按白名单读取模型设置、instructions、input 和 tools；原始认证头、client metadata 和未知顶层扩展没有详情输出路径。响应读取 id/model/status/usage/service_tier/error/incomplete_details 与 output，缺失 output 明确标省略。HTTP 请求与各个 WS create、各 response 文档独立保留；create 序号本身不证明 response 归属；只有连续单一默认 lane 的已确认生命周期才补足当前响应身份，缺口或并发时不借用上一次 WS 响应。相同来源及相同安全内容去重，相同来源不同内容同时保留并标冲突。请求中的 system/developer/user 历史不创建聊天气泡。
 
+上下文分类在独立的私有 `workbench::context` 纯模块完成：Analyzer 接收 decoder 已解析、尚未裁剪预览的请求 JSON，不重新解析 `preview`。七类按 `system`（系统）、`tools`（工具定义）、`skills`（技能）、`memory`（指令/记忆）、`files`（读取文件）、`results`（其他工具结果）、`chat`（对话）排列。分类沿用已确认的闭合 AGENTS/环境包装和工具标识规则；多文件 shell/Code Mode 读取保留为一组，分类不构成文件已成功读取或工具已执行的证据。未知结构、opaque/加密内容、观察缺口、遍历或条目上限均显式说明不完整；不为未知图像填入固定 1600 Token。
+
+文本估算按 ASCII 字符数除以 4、每个非 ASCII Unicode scalar 计 1；结构化内容按 compact JSON 字节数除以 4。分项均是估算，不是模型 tokenizer 结果。轻量 `contextSummary` 随 `RequestInfo` 的 request metadata 与 snapshot 发布；完整 `contextAnalysis` 随请求 `DetailDocument` 进入既有详情缓存、Recorder 和保存历史，不把完整分析加入 live ring。
+
+Presenter 在后端查询时以纯函数生成 `ContextPresentation`，实时和保存历史共用。仅当 HTTP 请求/响应明确关联、completed 的 usage 合法且统计完整时，按报告的输入 Token 总量分层整数校准类别和条目，保留原始估计；总量依据报告，类别比例仍是估算。WS、服务端持有历史、关联未知或统计缺口保留估算及原因，不新增 seal/撤销状态机。上下文分类不改写 §5.1.2 的运行累计用量口径。
+
+正文预览截断与来源丢失分别表达：前者不改变裁剪前分析的校准资格，后者保持独立估算。保存快照的可选 `detailsPartialRequests` 记录已有缓存缺口影响的请求，避免一份请求的来源丢失影响其他请求的历史校准；该字段位于既有开放的 snapshot 对象内，不改变 journal/checkpoint 外层格式。诊断已淘汰且无法归属到现有请求，或有界缺口集合已不足以保留范围时，使用原有全局 `detailsPartial` 保守降级。旧快照缺少该字段时仍沿用原有全局规则，不从正文重建事实。
+
+首屏 `contextSources` 列出 HTTP 请求或同一 WS 连接各 create 文档，`selectedContext` 和 `contextSummary` 描述当前选择；续页可省略这三项以沿用同一 revision。`document` 是绑定文档 revision 和 ordinal 的不透明选择器，不是 `captureSeq`；`category`/`item` 必须同时带 `document`，类别只能取上述七类，条目须属于选中文档及类别。分页游标还绑定该筛选，失效或跨版本选择不拼接。分类/条目下钻返回包含相应 `jsonPointer` 来源的原脱敏 entry，不声称返回精确的字符串切片。认证、原有 entries 分页和错误边界沿用本节契约。
+
+调用详情增加七类线性占比条、分类条目及同源原文下钻，可选择 HTTP 请求或各 WS create；不另建独立上下文页面。旧记录缺少 `contextAnalysis`/`contextSummary` 时显示“未记录分类摘要”，已有脱敏详情仍可阅读，不从预览反推分类。新增字段均可选，不新增数据库迁移、journal kind、schemaVersion 或中转协议版本。算法来源与改写范围见[第三方声明](../../THIRD_PARTY_NOTICES.md#magpie-上下文分类)。
+
 开发者 `additional_tools` 与 namespace 按工具定义拆成独立项，`jsonPointer` 保留 `/input/N/tools/...` 或 `/tools/...` 原位置。集合父项不再重复承载全部子工具，`childrenSeparated=true` 提示向后查看。大集合回归证明，整组放入单项预览会把后面的 schema 截掉，因此按定义分页。安装版 Code Mode 的 exec 是 custom tool，保留其原始 format；内部 exec_command 的文本说明不转换成不存在的结构化 schema。直接命令模式则读取实际 function parameters。
 
 每项先处理已知凭证和常见敏感字段，再限制预览为 24KiB；单文档估算 512KiB、最多 1024 项，树遍历最多 8192 节点/12 层、数组/对象各 256 项。媒体/文件数据、加密内容省略；schema 保留字段声明，default/examples/未知扩展不展示，敏感参数声明只保留类型、说明等元信息。JSON/HTML/ANSI 均作为不可信内容，网页使用转义的 `<pre>`，不执行其中脚本。不能承诺识别任意代码、未知编码或未配置的秘密。
 
 缓存最多 64 个请求/连接 bundle，总估算 16MiB，每 bundle 2MiB/128 份文档；淘汰保留最多 256 个 tombstone，再出现时说明截断。每页最多 16 项/128KiB，与 snapshot 共用 2 个读取配额，响应 body 消费或丢弃后才释放。没有文档但仍接收的已知响应返回 pending；存在诊断或已无法取得的已知文档返回 unavailable；有部分文档时返回 captured，并分别说明 request/response、省略、截断与诊断。unknown 为 404、已知淘汰为 410、非法 cursor 为 400、epoch 或文档版本变化为 409、读取繁忙为 503。cursor 绑定 epoch/request/revision/offset，不能跨来源或拼接不同版本。
 
-文档不进入 snapshot 或 live ring，不分配 viewSeq；先放入详情缓存，再发布 request metadata / response 终态，因此客户端看到终态后可读取对应文档。观察解析和缓存仍在独立后台路径，网络/PTY 不等待它们；记录器另外保存安全文档并分配 recordSeq，仍不分配 viewSeq；详情缓存本身不冒充已保存历史。
+完整文档及 `contextAnalysis` 不进入 snapshot 或 live ring，不分配 viewSeq；轻量 `contextSummary` 随 request metadata/snapshot 提供。先放入详情缓存，再发布 request metadata / response 终态，因此客户端看到终态后可读取对应文档。观察解析和缓存仍在独立后台路径，网络/PTY 不等待它们；记录器另外保存安全文档并分配 recordSeq，仍不分配 viewSeq；详情缓存本身不冒充已保存历史。
 
 页面通过模型回复/工具卡的“调用详情”直接读取，或从“用量概览 → 查看调用记录”选择请求。独立“模型请求/网络”页面与重复导航已移除，列表不复制对话正文/工具卡；仅辅助及未归属内容在详情折叠保留。中央侧面板同一时间保留一个请求的详情，原终端持续可用；单次模型调用只有工具卡时同样可进入。普通 token 更新不触发 GET，新响应状态提示手动刷新；失效分页保留旧内容并提示刷新，不混入新版本。前端每组最多 256 项/2MiB，达到上限可替换当前组继续阅读后续页。关闭详情/换请求释放内容并取消在途请求；旧 epoch/request 的返回不得覆盖当前选择。
 

@@ -33,6 +33,7 @@ pub(super) fn request_domain(hub: &LiveHub, thread: Uuid, turn: &str) -> Uuid {
                 codex_turn_id: Some(turn.into()),
                 purpose: RequestPurpose::Conversation,
                 purpose_basis: PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     );

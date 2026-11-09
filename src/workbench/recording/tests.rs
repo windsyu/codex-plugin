@@ -556,7 +556,7 @@ async fn durable_context_blobs_keep_sources_cursor_boundaries_and_workspace_isol
         },
         entries: (0..24)
             .map(|position| DetailEntry {
-                section: "input",
+                section: "input".into(),
                 position: Some(position),
                 json_pointer: format!("/input/{position}"),
                 children_separated: false,
@@ -567,6 +567,7 @@ async fn durable_context_blobs_keep_sources_cursor_boundaries_and_workspace_isol
             .collect(),
         truncated: false,
         omitted: true,
+        context_analysis: None,
     };
     hub.apply(Decoded {
         request_id: key.request_id,
@@ -582,6 +583,7 @@ async fn durable_context_blobs_keep_sources_cursor_boundaries_and_workspace_isol
             request: key.request_id,
             cursor: None,
             before: None,
+            selection: Default::default(),
         })
         .await
         .unwrap();
@@ -595,6 +597,7 @@ async fn durable_context_blobs_keep_sources_cursor_boundaries_and_workspace_isol
             request: key.request_id,
             cursor: Some(cursor.clone()),
             before: None,
+            selection: Default::default(),
         })
         .await
         .unwrap();
@@ -621,12 +624,273 @@ async fn durable_context_blobs_keep_sources_cursor_boundaries_and_workspace_isol
                 epoch: hub.epoch(),
                 request: Uuid::new_v4(),
                 cursor: Some(cursor),
-                before: None
+                before: None,
+                selection: Default::default(),
             })
             .await
             .unwrap_err(),
         HistoryError::StaleCursor
     );
+}
+
+#[tokio::test]
+async fn observed_context_summary_and_drilldown_survive_recording_with_the_same_calibration() {
+    use crate::workbench::{
+        capture::{self, Direction, Source, Transport},
+        decode::{DecoderLimits, details::page::DetailSelection},
+        observe::Observer,
+    };
+    use axum::body::Bytes;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = LiveHub::new(LiveLimits::default());
+    let recorder = Recorder::start(&hub, options(dir.path())).unwrap();
+    let history = recorder.history.clone();
+    let (sender, receiver) = capture::channel(2 * 1024 * 1024, 32);
+    let observer = Observer::start(
+        receiver,
+        hub.clone(),
+        RedactionPolicy::new(vec!["synthetic-context-secret".into()]).unwrap(),
+        DecoderLimits::default(),
+    )
+    .unwrap();
+    let request_id = Uuid::new_v4();
+    let source = Source {
+        request_id,
+        direction: Direction::Request,
+        transport: Transport::Http,
+        content_type: "application/json".into(),
+        content_encoding: String::new(),
+    };
+    let mut request = sender.stream(source.clone());
+    let body = json!({"instructions":"base synthetic-context-secret","input":[
+        {"role":"developer","content":"<skills>Read SKILL.md</skills>"},
+        {"role":"user","content":"# AGENTS.md instructions for /fixture\n<INSTRUCTIONS>Use tests.</INSTRUCTIONS>\nActual request"},
+        {"role":"user","content":"long original context ".repeat(5000)},
+        {"type":"function_call","call_id":"read","name":"exec_command","arguments":"{\"cmd\":\"cat fixture.rs\"}"},
+        {"type":"function_call_output","call_id":"read","output":"FILE_BODY synthetic-context-secret"},
+        {"type":"function_call_output","call_id":"other","output":"TEST_OUTPUT"}
+    ],"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]});
+    request.offer(Bytes::from(body.to_string()), Instant::now());
+    request.finish();
+    wait(|| !hub.snapshot().requests.is_empty());
+    let initial = serde_json::to_value(hub.request_details(request_id, None).unwrap()).unwrap();
+    assert_eq!(initial["contextSummary"]["calibrated"], false);
+    assert_eq!(initial["contextSummary"]["coverage"]["complete"], true);
+    assert_eq!(
+        initial["contextSummary"]["parts"].as_array().unwrap().len(),
+        7
+    );
+    assert_eq!(initial["truncated"], true);
+    let before = hub.snapshot().view_seq;
+    let response = json!({"type":"response.completed","response":{"id":"context-saved","status":"completed","output":[],"usage":{"input_tokens":101,"output_tokens":3,"total_tokens":104}}});
+    let mut stream = sender.stream(Source {
+        direction: Direction::Response,
+        content_type: "text/event-stream".into(),
+        ..source
+    });
+    stream.offer(Bytes::from(format!("data: {response}\n\n")), Instant::now());
+    stream.finish();
+    wait(|| {
+        hub.snapshot()
+            .responses
+            .iter()
+            .any(|r| r.response_id.as_deref() == Some("context-saved"))
+    });
+    let live = serde_json::to_value(hub.request_details(request_id, None).unwrap()).unwrap();
+    assert_eq!(live["contextSummary"]["calibrated"], true);
+    assert_eq!(live["contextSummary"]["tokens"], 101);
+    assert_eq!(
+        live["contextSummary"]["estimatedTokens"],
+        initial["contextSummary"]["estimatedTokens"]
+    );
+    assert!(
+        !hub.recording_checkpoint().details_partial,
+        "preview clipping is separate from losing a document source"
+    );
+    drop(observer);
+    drop(recorder);
+    let saved = history
+        .query(Query::Details {
+            epoch: hub.epoch(),
+            request: request_id,
+            cursor: None,
+            before: None,
+            selection: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved["contextSummary"], live["contextSummary"]);
+    let snapshot = history
+        .query(Query::Run { epoch: hub.epoch() })
+        .await
+        .unwrap();
+    let summary = serde_json::to_value(
+        hub.snapshot().requests[0]
+            .info
+            .context_summary
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot["snapshot"]["requests"][0]["contextSummary"],
+        summary
+    );
+    let earlier = history
+        .query(Query::Details {
+            epoch: hub.epoch(),
+            request: request_id,
+            cursor: None,
+            before: Some(before),
+            selection: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(earlier["contextSummary"]["calibrated"], false);
+    let selection = DetailSelection {
+        document: saved["selectedContext"].as_str().map(str::to_owned),
+        category: Some("files".into()),
+        item: None,
+    };
+    let file = history
+        .query(Query::Details {
+            epoch: hub.epoch(),
+            request: request_id,
+            cursor: None,
+            before: None,
+            selection,
+        })
+        .await
+        .unwrap();
+    assert_eq!(file["entries"].as_array().unwrap().len(), 1);
+    assert!(
+        file["entries"][0]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("FILE_BODY [已脱敏]")
+    );
+    assert!(!file.to_string().contains("synthetic-context-secret"));
+    assert_eq!(sender.stats().dropped_chunks, 0);
+}
+
+#[tokio::test]
+async fn saved_context_retains_request_scoped_gaps_without_degrading_unrelated_requests() {
+    use crate::workbench::decode::{DiagnosticCode, ResponseStatus, details};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = LiveHub::new(Default::default());
+    let mut recorder_options = options(dir.path());
+    // Each diagnostic also creates a reading notice. This case tests retained
+    // capture scope; queue saturation has its own fault-injection coverage.
+    recorder_options.queue_events = 1024;
+    let recorder = Recorder::start(&hub, recorder_options).unwrap();
+    let history = recorder.history.clone();
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let policy = RedactionPolicy::new(vec![]).unwrap();
+    let apply = |request_id, change| {
+        hub.apply(Decoded {
+            request_id,
+            capture_seq: 1,
+            received_at: Instant::now(),
+            change,
+        })
+    };
+    for id in [a, b] {
+        apply(
+            id,
+            Change::Document {
+                document: details::request(&json!({"input":"hello"}), None, &policy),
+            },
+        );
+        apply(
+            id,
+            Change::Document {
+                document: details::response(&json!({"id":id,"output":[]}), &policy),
+            },
+        );
+        apply(
+            id,
+            Change::Response {
+                response_id: Some(id.to_string()),
+                status: ResponseStatus::Completed,
+                model: None,
+                usage: details::usage(&json!({"input_tokens":101})),
+            },
+        );
+    }
+    apply(
+        a,
+        Change::Diagnostic {
+            code: DiagnosticCode::ObservationGap,
+        },
+    );
+    for _ in 0..128 {
+        apply(
+            Uuid::new_v4(),
+            Change::Diagnostic {
+                code: DiagnosticCode::InvalidJson,
+            },
+        );
+    }
+    let expected_a = serde_json::to_value(hub.request_details(a, None).unwrap()).unwrap();
+    let expected_b = serde_json::to_value(hub.request_details(b, None).unwrap()).unwrap();
+    assert_eq!(expected_a["contextSummary"]["calibrated"], false);
+    assert_eq!(expected_b["contextSummary"]["calibrated"], true);
+    drop(recorder);
+    let run = history
+        .query(Query::Run { epoch: hub.epoch() })
+        .await
+        .unwrap();
+    assert_eq!(run["gaps"], json!([]));
+    assert_eq!(run["issues"], json!([]));
+    assert_eq!(run["snapshot"]["detailsPartialRequests"], json!([a]));
+    for (id, expected) in [(a, expected_a), (b, expected_b)] {
+        let saved = history
+            .query(Query::Details {
+                epoch: hub.epoch(),
+                request: id,
+                cursor: None,
+                before: None,
+                selection: Default::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            saved["contextSummary"], expected["contextSummary"],
+            "issues: {}, conflict: {}",
+            saved["captureIssues"], saved["conflict"]
+        );
+        if id == b {
+            assert_eq!(saved["truncated"], false);
+        }
+    }
+}
+
+#[test]
+fn old_checkpoint_coverage_falls_back_and_replay_retention_never_forgets_gaps() {
+    let hub = LiveHub::new(Default::default());
+    let mut value = serde_json::to_value(hub.recording_checkpoint()).unwrap();
+    value["snapshot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("detailsPartialRequests");
+    value["detailsPartial"] = serde_json::json!(true);
+    let old: replay::Checkpoint = serde_json::from_value(value).unwrap();
+    assert!(old.details_partial && old.details_partial_requests().is_none());
+    let mut checkpoint = hub.recording_checkpoint();
+    for index in 0..834 {
+        let request_id = Uuid::from_u128(index + 1);
+        checkpoint.document(replay::Document { request_id, capture_seq: 1, document: serde_json::json!({"source":{"kind":"request","clientRequestIndex":null},"entries":[],"truncated":false,"omitted":false}) });
+        if index == 512 {
+            assert_eq!(
+                checkpoint.details_partial_requests().unwrap(),
+                [Uuid::from_u128(1)]
+            );
+        }
+    }
+    assert_eq!(checkpoint.documents.len(), 512);
+    assert!(checkpoint.details_partial && checkpoint.details_partial_requests().is_none());
 }
 
 #[tokio::test]

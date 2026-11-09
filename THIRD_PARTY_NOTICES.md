@@ -6,6 +6,7 @@
 | --- | --- |
 | vt100 0.16.2 本地补丁 | 来源、原始 checksum、补丁范围与移除条件见 [PATCH.md](vendor/vt100/PATCH.md)，原 [MIT 许可证](vendor/vt100/LICENSE) 必须保留 |
 | Microsoft Codicons 子集 | 来源 commit、作者、20 个图形的提取方式见[图标说明](web/src/workbench/icons/README.md)，保留原 [CC BY 4.0 许可证](web/src/workbench/icons/LICENSE)及归属声明 |
+| magpie 上下文分类 | 改写固定 commit 的请求分类与文本估算算法，完整来源、修改说明及 MIT 原文见[下节](#magpie-上下文分类) |
 | Rust 依赖 | 精确解析版本见 `Cargo.lock`；发布者需根据实际分发的依赖保留其要求的版权、许可和通知 |
 | Web 依赖 | 精确解析版本见 `web/package-lock.json`；前端会嵌入 binary，发布前应核对随包分发要求 |
 | macOS Rust 运行库 | 从实际 `rustc --print sysroot` 保留 `share/doc/rust/COPYRIGHT-library.html`、MIT/Apache-2.0/Unicode-3.0/BSD-2-Clause/LLVM-exception 原许可文本，以及同工具链 `rust-src` 的 `lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt` 和其明确引用的 `libm/LICENSE.txt`；Cargo metadata 不覆盖这些静态链接的运行库 |
@@ -22,3 +23,33 @@
 目标专用静态包装通过 `writeLicenses` 的显式 `runtimeLicenses` 输入保留运行库原文件，索引类别为 `toolchain-runtime`，并纳入全包校验和。macOS 包自动从实际 sysroot 收集上表材料；索引中的运行库版本指构建用的 Rust 工具链版本。标准库通知包含上游跨平台材料，原文完整保留不表示所有列出的组件均链接到 macOS binary。compiler-builtins 自带的许可声明为 `MIT AND Apache-2.0 WITH LLVM-exception`，不能用项目 MIT 许可替代。缺少对应 `rust-src`、空文件、未知通知格式、符号链接或二进制通知时拒绝打包，须准备匹配工具链的原始材料后重试。
 
 Linux 测试包保守附带 musl/工具链相关原始文本以完整保留单文件通知；Rust 使用 `COPYRIGHT-library.html` 及原许可文本，不把编译器文档清单中的跨平台或可选组件认定为当前二进制依赖。此收集不会安装、链接或执行附带源码，也不代表新增平台发布支持。macOS 与 Linux 运行库按各自实际 sysroot 独立核查，不能相互替代。
+
+## magpie 上下文分类
+
+来源为 [yetone/magpie](https://github.com/yetone/magpie)，固定 commit `1c45645b59e944b0446772a6786f1a31dd410a80` 的 [internal/gateway/prompt.go](https://github.com/yetone/magpie/blob/1c45645b59e944b0446772a6786f1a31dd410a80/internal/gateway/prompt.go) 与 [internal/gateway/prompt_text.go](https://github.com/yetone/magpie/blob/1c45645b59e944b0446772a6786f1a31dd410a80/internal/gateway/prompt_text.go)。本项目在 Rust 中改写其七类上下文分类、文本估算及占比分配思路，适配 Responses/Responses Lite、闭合 AGENTS/环境包装、既有工具标识和脱敏来源定位；拆为纯 Analyzer/Presenter，限制校准到可证明的 HTTP 完整输入范围，未知媒体不使用固定 Token 猜测，不依赖源仓库或保留未脱敏正文。
+
+以下完整保留该 commit 的原始 MIT 许可证。本声明随本机与中转分发包保留；独立中转不因此链接本机分类实现。
+
+```text
+MIT License
+
+Copyright (c) 2026 yetone
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

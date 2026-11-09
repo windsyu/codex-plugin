@@ -62,6 +62,9 @@ enum Action {
         entry_file: Option<PathBuf>,
         #[arg(long)]
         relay: bool,
+        /// Print the private pairing URL to stdout instead of opening a browser.
+        #[arg(long)]
+        print_url: bool,
     },
     /// Fully stop this workbench and all CLI processes it owns.
     Stop,
@@ -91,10 +94,11 @@ async fn run(mut args: Args) -> Result<()> {
     if let Some(Action::Open {
         entry_file: Some(entry_file),
         relay,
+        print_url,
     }) = &action
     {
         let entry = read_entry(entry_file)?;
-        return open_entry(&entry, *relay).await;
+        return open_entry(&entry, *relay, *print_url).await;
     }
     let cwd = std::env::current_dir()?;
     let home =
@@ -180,7 +184,7 @@ async fn run(mut args: Args) -> Result<()> {
                     &status,
                     std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
                     args.no_open,
-                    || open_entry(&entry, true),
+                    || open_entry(&entry, true, false),
                 )
                 .await;
             }
@@ -327,13 +331,41 @@ async fn registration_guidance<F, Fut>(
 async fn open_entry(
     entry: &codex_local_observer::workbench::launch::BrowserEntry,
     relay: bool,
+    print_url: bool,
 ) -> Result<()> {
+    present_entry(
+        entry,
+        relay,
+        print_url,
+        &mut std::io::stdout(),
+        |url| async move { open_browser(&url).await },
+    )
+    .await
+}
+
+async fn present_entry<F, Fut>(
+    entry: &codex_local_observer::workbench::launch::BrowserEntry,
+    relay: bool,
+    print_url: bool,
+    output: &mut impl std::io::Write,
+    open: F,
+) -> Result<()>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let mut url = reqwest::Url::parse(&entry.url)?;
     if relay {
         url.set_path("/relay");
         url.set_query(None);
     }
-    open_browser(url.as_str()).await
+    if print_url {
+        // The explicit flag is the only stdout path for this private capability.
+        writeln!(output, "{url}")?;
+        Ok(())
+    } else {
+        open(url.into()).await
+    }
 }
 
 async fn existing_action(action: Action, manager: &service::Manager, home: PathBuf) -> Result<()> {
@@ -388,12 +420,14 @@ async fn existing_action(action: Action, manager: &service::Manager, home: PathB
                 );
             }
         }
-        Action::Open { relay, .. } => {
+        Action::Open {
+            relay, print_url, ..
+        } => {
             let entry = manager
                 .running_entry()?
                 .ok_or_else(|| anyhow::anyhow!("workbench is not running; use code-view start"))?;
             management::control(&entry, management::Action::Status).await?;
-            open_entry(&entry, relay).await?;
+            open_entry(&entry, relay, print_url).await?;
         }
         Action::Autostart {
             mode: AutoStart::Off,
@@ -470,6 +504,14 @@ mod tests {
                 "/tmp/history",
             ],
             vec!["code-view", "open", "--relay"],
+            vec!["code-view", "open", "--print-url"],
+            vec![
+                "code-view",
+                "open",
+                "/tmp/private-entry.json",
+                "--relay",
+                "--print-url",
+            ],
             vec!["code-view", "stop"],
             vec!["code-view", "autostart", "on"],
             vec!["code-view", "autostart", "off"],
@@ -481,7 +523,8 @@ mod tests {
             args.command,
             Some(Action::Open {
                 entry_file: Some(_),
-                relay: false
+                relay: false,
+                print_url: false,
             })
         ));
         let args =
@@ -489,6 +532,51 @@ mod tests {
         assert!(args.command.is_none());
         assert_eq!(args.project, Some(PathBuf::from("./start")));
         assert!(Args::try_parse_from(["code-view", "autostart", "invalid"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn pairing_url_print_is_explicit_and_never_launches_the_browser() {
+        let entry = codex_local_observer::workbench::launch::BrowserEntry {
+            url: format!(
+                "http://127.0.0.1:12345/?run={}#pair={}",
+                uuid::Uuid::new_v4(),
+                "a".repeat(64)
+            ),
+            ..Default::default()
+        };
+        for relay in [false, true] {
+            let mut expected = reqwest::Url::parse(&entry.url).unwrap();
+            if relay {
+                expected.set_path("/relay");
+                expected.set_query(None);
+            }
+            let mut output = Vec::new();
+            present_entry(&entry, relay, true, &mut output, |_| async {
+                panic!("print-only mode must not launch the browser")
+            })
+            .await
+            .unwrap();
+            assert_eq!(String::from_utf8(output).unwrap(), format!("{expected}\n"));
+
+            let mut output = Vec::new();
+            let opened = std::cell::RefCell::new(None);
+            present_entry(&entry, relay, false, &mut output, |url| async {
+                *opened.borrow_mut() = Some(url);
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert!(output.is_empty(), "ordinary open must not print a secret");
+            assert_eq!(opened.into_inner().unwrap(), expected.as_str());
+        }
+        let mut output = Vec::new();
+        let error = present_entry(&entry, false, false, &mut output, |_| async {
+            anyhow::bail!("synthetic browser failure")
+        })
+        .await
+        .unwrap_err();
+        assert!(output.is_empty());
+        assert!(!error.to_string().contains("pair="));
     }
 
     #[test]

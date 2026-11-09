@@ -221,3 +221,103 @@ async fn details_responses_share_bounded_reading_slots_until_body_drop_and_pages
     drop(third);
     assert_eq!(request().await.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn live_and_saved_details_routes_select_context_sources_categories_and_items() {
+    use crate::workbench::recording::{Recorder, RecorderOptions};
+    let directory = tempfile::tempdir().unwrap();
+    let hub = LiveHub::new(Default::default());
+    let recorder = Recorder::start(
+        &hub,
+        RecorderOptions::new(
+            directory.path().join("history"),
+            directory.path(),
+            "Synthetic context selection".into(),
+        ),
+    )
+    .unwrap();
+    let id = Uuid::new_v4();
+    for index in 1..=2 {
+        context(
+            &hub,
+            id,
+            json!({"input":format!("create {index}"),"tools":[{"type":"function","name":format!("read_{index}"),"parameters":{}}]}),
+            Some(index),
+        );
+    }
+    drop(recorder);
+    let server = ReadingServer::bind(hub.clone()).await.unwrap();
+    let client = client();
+    let paired = cookie(&client, &server).await;
+    let bases = [
+        format!(
+            "{}/workbench/v1/requests/{id}?epoch={}",
+            server.state.origin,
+            hub.epoch()
+        ),
+        format!(
+            "{}/workbench/v1/history/{}/requests/{id}?",
+            server.state.origin,
+            hub.epoch()
+        ),
+    ];
+    for base in bases {
+        let get = |suffix: &str| {
+            client
+                .get(format!("{base}&{suffix}"))
+                .header(header::COOKIE, &paired)
+                .send()
+        };
+        assert_eq!(
+            client.get(&base).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let first: Value =
+            serde_json::from_slice(&get("").await.unwrap().bytes().await.unwrap()).unwrap();
+        let sources = first["contextSources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_ne!(sources[0]["id"], sources[1]["id"]);
+        assert_eq!(first["contextSummary"]["calibrated"], false);
+        let source = sources[0]["id"].as_str().unwrap();
+        let selection = format!("document={source}&category=tools");
+        let selected = get(&selection).await.unwrap();
+        assert_eq!(selected.status(), StatusCode::OK);
+        assert_eq!(selected.headers()[header::CACHE_CONTROL], "no-store");
+        let selected: Value = serde_json::from_slice(&selected.bytes().await.unwrap()).unwrap();
+        assert_eq!(selected["entries"].as_array().unwrap().len(), 1);
+        assert!(
+            selected["entries"][0]["preview"]
+                .as_str()
+                .unwrap()
+                .contains("read_1")
+        );
+        let item = selected["contextSummary"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"] == "tools")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let item_page: Value = serde_json::from_slice(
+            &get(&format!("{selection}&item={item}"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(item_page["entries"], selected["entries"]);
+        for suffix in [
+            "category=tools".to_owned(),
+            format!("document={source}&category=PRIVATE_UNKNOWN"),
+            format!("document={source}&item=missing"),
+            format!("document={source}&document={source}"),
+        ] {
+            let response = get(&suffix).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(!response.text().await.unwrap().contains("PRIVATE_UNKNOWN"));
+        }
+    }
+}

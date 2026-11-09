@@ -48,10 +48,15 @@ it('focuses the page close action when launch input is unavailable', () => {
 it('keeps manual path entry, validates through Enter, and offers the folder picker when available', async () => {
   const props = renderPanel({ onPick: vi.fn() });
   const input = root.querySelector('input[aria-label="项目目录"]') as HTMLInputElement;
+  const confirm = root.querySelector('.wb-launch-validate') as HTMLButtonElement;
+  expect(confirm.textContent).toBe('确认文件夹');
   await act(async () => { input.value = '/tmp/example'; input.dispatchEvent(new Event('input', { bubbles: true })); });
   expect(props.onPathChange).toHaveBeenCalledWith('/tmp/example');
   await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); (root.querySelector('form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
   expect(props.onValidate).toHaveBeenCalledTimes(1);
+  await act(async () => { confirm.click(); });
+  expect(props.onValidate).toHaveBeenCalledTimes(2);
+  expect(props.onStart).not.toHaveBeenCalled();
   await act(async () => { (root.querySelector('.wb-launch-pick') as HTMLButtonElement).click(); });
   expect(props.onPick).toHaveBeenCalledTimes(1);
 });

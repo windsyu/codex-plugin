@@ -29,6 +29,7 @@ async fn one_typed_contract_replays_messages_tools_notices_and_metadata_into_the
             codex_turn_id: Some("turn".into()),
             purpose: RequestPurpose::Conversation,
             purpose_basis: PurposeBasis::CodexTurnMetadata,
+            context_summary: None,
         },
     });
     hub.apply(event(request_id, "text", "中", false));

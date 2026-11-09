@@ -60,6 +60,7 @@ fn target(hub: &LiveHub, thread: Uuid, turn: &str) {
                 codex_turn_id: Some(turn.into()),
                 purpose: RequestPurpose::Conversation,
                 purpose_basis: PurposeBasis::CodexTurnMetadata,
+                context_summary: None,
             },
         },
     });
