@@ -690,6 +690,150 @@ fn classification_cache_upgrade_rebuilds_unchanged_rollout_and_preserves_identit
 }
 
 #[test]
+fn fork_metadata_cache_upgrade_restores_auxiliary_classification_and_child_resume_identity() {
+    let (temp, home, data, config, library) = fixture();
+    let parent = uuid::Uuid::new_v4();
+    let child = uuid::Uuid::new_v4();
+    let parent_cwd = temp.path().join("parent-project");
+    let child_cwd = temp.path().join("child-project");
+    fs::create_dir_all(&parent_cwd).unwrap();
+    fs::create_dir_all(&child_cwd).unwrap();
+    let parent_meta =
+        json!({"type":"session_meta","payload":{"id":parent,"source":"cli","cwd":parent_cwd}});
+    let child_meta = json!({"type":"session_meta","payload":{"id":child,"forked_from_id":parent,"parent_thread_id":parent,"cwd":child_cwd,"source":{"subagent":{"thread_spawn":{"parent_thread_id":parent}}}}});
+    let parent_file = home.join(format!(
+        "sessions/rollout-2026-11-17T00-00-00-{parent}.jsonl"
+    ));
+    let child_file = home.join(format!(
+        "sessions/rollout-2026-11-17T00-00-01-{child}.jsonl.zst"
+    ));
+    fs::create_dir_all(parent_file.parent().unwrap()).unwrap();
+    fs::write(&parent_file, format!("{parent_meta}\n")).unwrap();
+    let child_text = format!("{child_meta}\n{parent_meta}\n");
+    fs::write(
+        &child_file,
+        zstd::stream::encode_all(child_text.as_bytes(), 1).unwrap(),
+    )
+    .unwrap();
+    let before = [
+        fs::read(&parent_file).unwrap(),
+        fs::read(&child_file).unwrap(),
+    ];
+    refresh(&library);
+    let page = wait(&library, 2);
+    let entry_id = page["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["nativeThreadId"] == child.to_string())
+        .unwrap()["entryId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(library);
+    // Recreate the old classification and checkpoint for an unchanged source.
+    let db = Connection::open(data.join("library/catalog.sqlite")).unwrap();
+    db.execute("UPDATE catalog_entries SET metadata=json_set(metadata,'$.conversationKind','unknown','$.kindBasis','metadata_conflict_v1','$.capabilities.resume',json('false'),'$.coverage.reasons',json('[\"conflicting_session_identity\"]')) WHERE id=?1", [&entry_id]).unwrap();
+    db.execute_batch("PRAGMA user_version=5;").unwrap();
+    drop(db);
+    let policy = config.clone();
+    let library = HistoryLibrary::with_policy(
+        home.clone(),
+        data.clone(),
+        Arc::new(move || Ok(policy.read().unwrap().clone())),
+    )
+    .unwrap();
+    let rebuilt = wait(&library, 2);
+    let entry = rebuilt["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entryId"] == entry_id)
+        .unwrap();
+    assert_eq!(entry["conversationKind"], "subagent");
+    assert_eq!(entry["recordedCwd"], child_cwd.to_str().unwrap());
+    assert_eq!(
+        entry["projectPath"],
+        child_cwd.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(entry["parentThreadId"], parent.to_string());
+    assert!(entry["capabilities"]["resume"].as_bool().unwrap());
+    let sources = library.handle.shared.policy().unwrap().1;
+    let groups = groups::list(&library.handle.shared, &sources, GroupQuery::default()).unwrap();
+    assert_eq!(groups["counts"]["primary"]["records"], 1);
+    assert_eq!(groups["counts"]["auxiliary"]["records"], 1);
+    let selection = launch::resolve(
+        &library.handle.shared,
+        &sources,
+        None,
+        Some((entry_id, entry["sourceRevision"].as_str().unwrap().into())),
+    )
+    .unwrap();
+    assert_eq!(selection.path, child_cwd.canonicalize().unwrap());
+    let resume = selection.resume.unwrap();
+    assert_eq!(resume.id, child);
+    resume.verify().unwrap();
+    assert_eq!(
+        [
+            fs::read(&parent_file).unwrap(),
+            fs::read(&child_file).unwrap()
+        ],
+        before
+    );
+    let db = Connection::open(data.join("library/catalog.sqlite")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        CATALOG_VERSION
+    );
+}
+
+#[test]
+fn an_invalid_initial_metadata_id_is_readable_but_rejected_by_both_launch_paths() {
+    for first_id in [Value::Null, json!("invalid"), json!(uuid::Uuid::nil())] {
+        let (temp, home, _data, _config, library) = fixture();
+        let cwd = temp.path().canonicalize().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let file = home.join(format!("sessions/rollout-2026-11-17T00-00-00-{id}.jsonl"));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":first_id,"source":"cli","cwd":cwd}}),
+                json!({"type":"session_meta","payload":{"id":id,"source":"cli","cwd":cwd}}),
+            ),
+        )
+        .unwrap();
+        let before = fs::read(&file).unwrap();
+        refresh(&library);
+        let page = wait(&library, 1);
+        let entry = &page["records"][0];
+        assert!(entry["capabilities"]["read"].as_bool().unwrap());
+        assert!(!entry["capabilities"]["resume"].as_bool().unwrap());
+        let sources = library.handle.shared.policy().unwrap().1;
+        assert_eq!(
+            launch::resolve(
+                &library.handle.shared,
+                &sources,
+                None,
+                Some((
+                    entry["entryId"].as_str().unwrap().into(),
+                    entry["sourceRevision"].as_str().unwrap().into()
+                ))
+            )
+            .unwrap_err(),
+            "resume_unavailable"
+        );
+        assert_eq!(
+            launch::NativeResume::direct(&home, id, &cwd).unwrap_err(),
+            "resume_identity_changed"
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+}
+
+#[test]
 fn human_metadata_v3_cache_rebuilds_without_source_changes() {
     let (_temp, home, data, config, library) = fixture();
     let path = home.join("sessions/human.jsonl");
@@ -731,6 +875,88 @@ fn human_metadata_v3_cache_rebuilds_without_source_changes() {
         json!({"text":"构建清晰的会话列表","role":"user"})
     );
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn guardian_v4_cache_rebuilds_into_auxiliary_without_source_changes() {
+    let (_temp, home, data, config, library) = fixture();
+    let path = home.join("sessions/guardian.jsonl");
+    let id = uuid::Uuid::new_v4();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let raw = [
+        json!({"type":"session_meta","payload":{"id":id,"source":{"subagent":{"other":"guardian"}},"cwd":"/synthetic/review"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"Synthetic automated review request"}]}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"{\"risk_level\":\"low\",\"outcome\":\"allow\"}"}]}}),
+    ].iter().map(|v| format!("{v}\n")).collect::<String>();
+    fs::write(&path, &raw).unwrap();
+    let before = (
+        fs::read(&path).unwrap(),
+        crate::history::files::signature(&fs::metadata(&path).unwrap()),
+    );
+    refresh(&library);
+    wait(&library, 1);
+    drop(library);
+    let db = Connection::open(data.join("library/catalog.sqlite")).unwrap();
+    db.execute_batch("UPDATE catalog_entries SET metadata=json_set(metadata,'$.conversationKind','unknown','$.kindBasis','source_unknown_v1','$.title','Synthetic automated review request','$.preview',json('{\"text\":\"automated verdict\",\"role\":\"assistant\"}')); PRAGMA user_version=4;").unwrap();
+    drop(db);
+    let policy = config.clone();
+    let library = HistoryLibrary::with_policy(
+        home,
+        data,
+        Arc::new(move || Ok(policy.read().unwrap().clone())),
+    )
+    .unwrap();
+    let rebuilt = wait(&library, 1);
+    let entry = &rebuilt["records"][0];
+    assert_eq!(entry["conversationKind"], "background_review");
+    assert_eq!(entry["title"], "未命名会话");
+    assert!(entry["preview"].is_null());
+    assert_eq!(entry["projectPath"], "/synthetic/review");
+    let primary = query(
+        &library.handle.shared,
+        Operation::Groups(GroupQuery::default()),
+    )
+    .unwrap();
+    assert!(primary["records"].as_array().unwrap().is_empty());
+    assert_eq!(primary["counts"]["auxiliary"]["records"], 1);
+    let auxiliary = query(
+        &library.handle.shared,
+        Operation::Groups(GroupQuery {
+            section: Some("auxiliary".into()),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        auxiliary["records"][0]["conversationKind"],
+        "background_review"
+    );
+    let body = query(
+        &library.handle.shared,
+        Operation::Body(
+            entry["entryId"].as_str().unwrap().into(),
+            Query {
+                window: true,
+                limit: Some(16),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    assert!(
+        body["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["presentation"] != "conversation")
+    );
+    assert_eq!(
+        (
+            fs::read(&path).unwrap(),
+            crate::history::files::signature(&fs::metadata(&path).unwrap())
+        ),
+        before
+    );
 }
 
 #[test]
@@ -2467,7 +2693,7 @@ fn compressed_windows_keep_mirror_state_and_detail_cursor_does_not_cross_entries
 }
 
 #[test]
-fn existing_v4_catalog_reopens_without_resetting_records_or_organization() {
+fn existing_current_catalog_reopens_without_resetting_records_or_organization() {
     let (_temp, home, data, _config, library) = fixture();
     let source = home.join("sessions/preserved.jsonl");
     rollout(
@@ -2499,7 +2725,8 @@ fn existing_v4_catalog_reopens_without_resetting_records_or_organization() {
     let before_intent = fs::read(&intent_path).unwrap();
     let expected: (String, String) = {
         let db = Connection::open(db_path(&shared)).unwrap();
-        db.pragma_update(None, "user_version", 4).unwrap();
+        db.pragma_update(None, "user_version", CATALOG_VERSION)
+            .unwrap();
         db.query_row(
             "SELECT generation,metadata FROM catalog_entries WHERE id=?1",
             [entry],
@@ -2507,7 +2734,7 @@ fn existing_v4_catalog_reopens_without_resetting_records_or_organization() {
         )
         .unwrap()
     };
-    let (_dir, _lock, db) = open_cache(&shared).expect("an existing v4 catalog must be supported");
+    let (_dir, _lock, db) = open_cache(&shared).expect("the current catalog must be supported");
     let actual: (String, String) = db
         .query_row(
             "SELECT generation,metadata FROM catalog_entries WHERE id=?1",
@@ -2519,7 +2746,7 @@ fn existing_v4_catalog_reopens_without_resetting_records_or_organization() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        CATALOG_VERSION
     );
     assert_eq!(fs::read(source).unwrap(), before_source);
     assert_eq!(fs::read(intent_path).unwrap(), before_intent);

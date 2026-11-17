@@ -66,7 +66,7 @@ it('never displays a different run returned for a device document', async () => 
 it('loads a deep-linked run once and keeps page navigation in the same run without launch requests', async () => {
   document.body.innerHTML = '<div id="workbench-root"></div>';
   history.replaceState(null, '', `/runs/${runId}/files`);
-  const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/application')
+  const fetch = vi.fn(async (url: string, _init?: RequestInit) => ({ ok: true, json: async () => url.endsWith('/application')
     ? { instanceId: 'app', runs: [{ runId }], sources: [], launchError: null }
     : { runEpoch: runId, projectName: '项目 A', terminalAvailable: true } }));
   vi.stubGlobal('fetch', fetch);
@@ -79,7 +79,8 @@ it('loads a deep-linked run once and keeps page navigation in the same run witho
   history.replaceState(history.state, '', `/runs/${runId}/chat`);
   window.dispatchEvent(new PopStateEvent('popstate'));
   await vi.waitFor(() => expect(rendered.app.mock.calls.at(-1)?.[0]).toMatchObject({ page: 'chat' }));
-  expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/workbench/v1/application', `/workbench/v1/runs/${runId}/run`]);
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/workbench/v1/application', `/workbench/v1/runs/${runId}/run`, '/workbench/v1/application/relay']);
+  expect(fetch.mock.calls.every(([, init]) => !init?.method)).toBe(true);
 });
 
 it('rejects an unknown document before any application or run fetch', async () => {

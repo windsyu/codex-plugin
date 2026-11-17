@@ -1,6 +1,8 @@
 use super::*;
 #[path = "groups_perf_tests.rs"]
 mod performance;
+#[path = "project_scope_tests.rs"]
+mod project_scope;
 
 fn catalog() -> (
     tempfile::TempDir,

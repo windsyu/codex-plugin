@@ -2,9 +2,9 @@ import { endpoint, useWorkspaceQuery, type FileContent, type FileSelection } fro
 import { ReadStamp } from './WorkspacePanel';
 import { FileDocument } from './FileDocument';
 
-export function FileReading({ selection, onOpen, onClose, blocked }: { selection: FileSelection; onOpen: (file: FileSelection) => void; onClose: () => void; blocked: boolean }) {
+export function FileReading({ selection, onOpen, onClose, blocked, active = true }: { selection: FileSelection; onOpen: (file: FileSelection) => void; onClose: () => void; blocked: boolean; active?: boolean }) {
   const { path, scope } = selection;
-  const query = useWorkspaceQuery<FileContent>(endpoint(scope ? 'git/diff' : 'file', { path, scope }), true, true);
+  const query = useWorkspaceQuery<FileContent>(endpoint(scope ? 'git/diff' : 'file', { path, scope }), active, true);
   return <section className="wb-file-reading" aria-label="文件阅读" inert={blocked}>
     <div className="wb-file-title"><code>{path}</code><button onClick={onClose} aria-label="关闭文件阅读">×</button></div>
     <div className="wb-file-toolbar"><div className="wb-workspace-actions"><button aria-pressed={!scope} onClick={() => onOpen({ path })}>当前文件</button><button aria-pressed={scope === 'working'} onClick={() => onOpen({ path, scope: 'working' })}>未暂存</button><button aria-pressed={scope === 'staged'} onClick={() => onOpen({ path, scope: 'staged' })}>已暂存</button><button onClick={query.refresh}>重新读取</button></div>
