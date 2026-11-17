@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Icon } from './Icons';
 import { ExchangePreview } from './ExchangePreview';
-import { dateLabel, failure, projectName, readSessionGroup, sourceNames, type GroupMember, type SessionGroup } from './library';
+import { dateLabel, failure, projectName, projectParent, readSessionGroup, sourceNames, type GroupMember, type SessionGroup } from './library';
 type Source = { id: string; identity?: string };
 export function SessionGroupList({ groups, revision, sources, onOpen, showProject = true }: { groups: SessionGroup[]; revision: string; sources: Source[]; onOpen: (member: GroupMember) => void; showProject?: boolean }) {
   return <div className="wb-library-session-groups">{groups.map(group => <GroupRow key={`${revision}:${group.groupId}`} group={group} revision={revision} sources={sources} onOpen={onOpen} showProject={showProject} />)}</div>;
@@ -30,7 +30,7 @@ function GroupRow({ group, revision, sources, onOpen, showProject }: { group: Se
       <span className="wb-library-entry-text"><strong>{preferred.title}</strong>
         <ExchangePreview preview={preferred.preview} />
         {preferred.match && <small className="wb-library-hit">搜索命中：{preferred.match.text}</small>}
-        {showProject && <span className="wb-library-entry-project">{group.projectId ? projectName(group.projectPath) : '未归类会话'}</span>}
+        {showProject && <span className="wb-library-entry-project" title={group.projectPath || undefined}>{group.projectId ? projectName(group.projectPath) : '未归类会话'}{group.projectId && projectParent(group.projectPath) && <span> · {projectParent(group.projectPath)}</span>}</span>}
       </span><time>{dateLabel(group.latestRecordedAt)}</time><Icon name="chevron" />
     </button>
     <details className="wb-library-entry-info"><summary aria-label={`记录信息 · ${preferred.title}`} title="查看来源与记录信息">⋯{members.length > 1 && <span>{members.length} 份</span>}</summary><div className="wb-library-group-sources">

@@ -25,6 +25,37 @@ async function expand() {
 }
 afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+it.each([
+  ['cwd_inferred', '按工作目录推断，未取得官方项目关联'],
+  ['workbench_explicit', '工作台启动时选择的项目目录'],
+  ['user_assigned', '你设置的项目归属'],
+  ['future', '归属依据未确认'],
+])('explains %s ownership using existing metadata without extra requests', async (basis, text) => {
+  const fetch = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ records: [], nextCursor: null, entry: { ...entry, projectBasis: basis }, revision: 'v1', coverage: entry.coverage }) }));
+  vi.stubGlobal('fetch', fetch); await mount();
+  expect(root.querySelector('.wb-library-identity')?.textContent).toContain(`归属依据：${text}`);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ['automatic', '按工作目录推断，未取得官方项目关联'],
+  ['user_assigned', '你设置的项目归属'],
+  ['user_unassigned', '你设置为未归类'],
+])('uses the effective organization basis for %s while retaining the automatic evidence', async (basis, text) => {
+  const organization = {
+    automatic: { projectId: 'p', projectPath: '/synthetic/app', basis: 'cwd_inferred' },
+    effective: { projectId: basis === 'user_unassigned' ? null : 'p', projectPath: basis === 'user_unassigned' ? null : '/synthetic/app', basis },
+    overrideState: basis === 'automatic' ? 'none' : 'applied',
+    unassignedReason: basis === 'user_unassigned' ? 'user_unassigned' : null,
+    conversationKind: 'ordinary', kindBasis: 'known',
+  };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ records: [], nextCursor: null, entry: { ...entry, projectId: organization.effective.projectId, projectPath: organization.effective.projectPath, projectBasis: 'automatic', organization }, revision: 'v1', coverage: entry.coverage }) })));
+  await mount();
+  const identity = root.querySelector('.wb-library-identity')?.textContent;
+  expect(identity).toContain(`归属依据：${text}`);
+  if (basis !== 'automatic') expect(identity).not.toContain('按工作目录推断');
+});
+
 it('moves detail focus without scrolling the virtual reader and restores it after closing', async () => {
   mock(() => ({ records: [user], nextCursor: null })); await mount();
   const opener = root.querySelector<HTMLButtonElement>('[data-role=user] button')!;

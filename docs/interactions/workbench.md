@@ -12,6 +12,16 @@
 
 下文用 `A=/workbench/v1`，`R=/workbench/v1/runs/{runId}`。Application API 使用 `instanceId`，Run API 使用当前 `runEpoch`；两者不能互换。配对设备只能访问指定 Run，不因为能读页面就获得 Application 权限。RemoteOwner 是完整自有电脑 V2 权限，但不能管理中转连接器或打开本机 picker，详见架构权限表。
 
+### 视觉与可访问性
+
+工作台采用 Open Design 商业版设计的石墨灰视觉，生产映射见[前端设计](../design/frontend/workbench-ui.md)：`#14161b` 页面底、`#191b21` 顶栏/侧栏、`#16181e` 阅读区、`#20232b` 表面与 `#292e38` 悬停；边界为 `#2c313c` / `#424b5c`。浅蓝用于链接和选中，主操作蓝为 `#3869e8`；绿、琥珀、红表达状态。控件圆角 6px，面板 8–10px，界面 12–14px，模型正文 16px / 1.8；内容页最大宽度 1200px。历史阅读和门户同步 token，原生终端调色板独立。
+
+颜色和间距入口为 [tokens.css](../../web/src/workbench/tokens.css)，中转门户的 [portal.css](../../relay/static/portal.css) 保持同一份颜色 token。键盘焦点使用蓝色描边与暗色背景间隔；表单保留禁用、加载、错误及空内容提示，状态徽标同时有文字与标记。窄屏沿用页面断点，减少动态效果偏好关闭动画和过渡；原生终端调色板及 OSC 颜色协议保持独立。
+
+[WorkbenchFrame.tsx](../../web/src/workbench/WorkbenchFrame.tsx)统一产品导航、目标电脑身份和当前应用打开的项目；名称是可选显示 metadata，不能用来选择授权。Application 状态复用 bootstrap 并串行只读轮询，`instanceId` 改变时保留旧阅读并要求重新打开。PairedRun 不查询应用连接器，也不显示全局历史/启动/共享设置；被配对 Run 已开放的项目历史、文件、用量等继续可达。
+
+`files/search/git` 仍是同 Run 的有效地址，实际布局是在对话或历史下方打开辅助面板；直接进入默认保留实时阅读，关闭返回先前阅读并恢复焦点。独立单 Run 根入口的工具文件链接进入该 Run 的 files 地址。终端默认右侧并排，可折叠、移到底部并用指针或键盘分隔线调整；低于 1200px 使用底部布局，低于 768px 在完整阅读/终端区域间切换。同 Run 切页及显示切换保留 xterm，不提交输入；隐藏的文件/目录/Git 选择停止轮询，显示后再读取。返回应用首页可卸载浏览器终端，CLI 生命周期不变。
+
 ## 2. 启动应用与浏览器 bootstrap
 
 `codex-view` 先建立私有实例锁、配置服务、历史目录与共享网页。重复启动通过私有 entry 和 `/application/connect` 握手连接已有应用，校验实例能力及启动默认值冲突，不凭 PID 杀进程。首页不要求先启动 CLI；用户显式选择项目或原生历史后再启动。
@@ -88,7 +98,9 @@ SSE epoch/游标落在窗口外或丢失 item revision 时重新取 snapshot，�
 
 应用历史走 `A/library/sources`、`/projects`、`/entries`、`/entries/{entry}` 和 `/details`；分页/搜索游标包含来源与已发布修订，来源变更需重查，来源撤销不得继续返回缓存正文。`POST /library/refresh` 只触发后台工作；`POST /library/preview` 有界预览现有 observer TOML 来源，随后由用户保存配置，不隐式扫描导入或创建 writer。目录/搜索有覆盖说明，不能把首屏命中当完整正文或全部来源已扫描。
 
-主线历史模块另提供 `GET A/library/session-groups`、`GET A/library/session-groups/{id}` 与 `GET/PUT A/library/entries/{entry}/organization`，只允许 Application owner/RemoteOwner。派生 catalog 为 v4；用户归类单独存于 `organization/state.sqlite` schema 1，不随索引重建。远程中央前端使用 API 3 配套升级，业务走独立 Application 加密通道；Run 终端/事件/文件/停止走对应 Run 通道，同 Run 切页复用，原生 Thread 改变不重连。查询、更新状态轮询及归类写入均沿用固定电脑授权，阅读/分页位置继续按账号会话、电脑及 Application 实例隔离。具体请求、强 ETag 和降级契约见[项目会话整理](../design/session-organization.md)和 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
+历史项目导航默认向 `/library/projects` 传 `projectScope=primary`，可显式切为 all；省略参数的旧请求保持 all。该参数只作用于项目导航的服务端聚合/分页与未归类数量，不发送到会话或正文接口；切换时保留项目、右侧筛选和阅读状态。guardian 的受测精确来源归辅助区，自动审查交流按 activity 保留，任务标题及预览不由审查提示或 verdict 生成。
+
+主线历史模块另提供 `GET A/library/session-groups`、`GET A/library/session-groups/{id}` 与 `GET/PUT A/library/entries/{entry}/organization`，只允许 Application owner/RemoteOwner。派生 catalog 为 v6；用户归类单独存于 `organization/state.sqlite` schema 1，不随索引重建。远程中央前端使用 API 3 配套升级，业务走独立 Application 加密通道；Run 终端/事件/文件/停止走对应 Run 通道，同 Run 切页复用，原生 Thread 改变不重连。查询、更新状态轮询及归类写入均沿用固定电脑授权，阅读/分页位置继续按账号会话、电脑及 Application 实例隔离。具体请求、强 ETag 和降级契约见[项目会话整理](../design/session-organization.md)和 [ADR 0066](../decisions/0066-run-scoped-encrypted-relay-channels.md)。
 
 历史删除与共享设置是不同操作：cleanup 预览、确认、job 查询只在开放的既有作用域内执行，不允许任意路径/当前运行数据。删除默认关闭，源记录不可安全确认或已变化时拒绝；历史清理不删除原生数据或构建产物。精确 preview/job/保留策略见[设置与历史管理](../design/history-settings.md)、[management_api.rs](../../src/workbench/web/management_api.rs)。
 

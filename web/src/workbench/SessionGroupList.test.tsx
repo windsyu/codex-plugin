@@ -37,6 +37,14 @@ it('does not borrow the latest exchange from another source or invent a completi
   expect(row.textContent).not.toContain('另一来源的回复');
   expect(row.textContent).not.toContain('已完成');
 });
+it('shows the parent directory beside a project name across projects and omits it inside the selected project', async () => {
+  const value = { ...group, projectPath: '/synthetic/client/project' };
+  await mount(vi.fn(), value);
+  expect(root.querySelector('.wb-library-entry-project')?.textContent).toContain('project');
+  expect(root.querySelector('.wb-library-entry-project')?.textContent).toContain('/synthetic/client');
+  await act(async () => render(<SessionGroupList groups={[value]} revision="catalog-v" sources={sources} onOpen={vi.fn()} showProject={false} />, root));
+  expect(root.querySelector('.wb-library-entry-project')).toBeNull();
+});
 it('loads all related metadata only on explicit click without inheriting match or filters', async () => {
   const fetch = vi.fn(async (_url: string) => ({ ok: true, text: async () => JSON.stringify({ ...group, members: [observer, member] }) })); vi.stubGlobal('fetch', fetch);
   const onOpen = await mount(); expect(fetch).not.toHaveBeenCalled(); await click('查看全部关联来源');

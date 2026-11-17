@@ -32,8 +32,9 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-// Version 4 derives human-readable titles/previews; rebuild checkpoints only.
-const CATALOG_VERSION: i64 = 4;
+// Version 6 keeps explicitly inherited fork metadata separate from the owning
+// thread. Rebuild derived checkpoints only, never the organization store.
+const CATALOG_VERSION: i64 = 6;
 
 type Result<T> = std::result::Result<T, &'static str>;
 type Policy = Arc<dyn Fn() -> Result<LibraryConfig> + Send + Sync>;
@@ -333,7 +334,7 @@ fn open_cache(shared: &Shared) -> Result<(Directory, std::fs::File, Connection)>
         db.execute_batch("BEGIN IMMEDIATE; DROP TABLE IF EXISTS catalog_checkpoints; DROP TABLE IF EXISTS catalog_locators; DROP TABLE IF EXISTS catalog_records; DROP TABLE IF EXISTS catalog_entries; DROP TABLE IF EXISTS catalog_sources; PRAGMA user_version=0; COMMIT;")
             .map_err(|_| "cache_rebuilding")?;
     }
-    let initialize = db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-4096; PRAGMA max_page_count=262144;
+    let initialize = db.execute_batch(&format!("PRAGMA auto_vacuum=INCREMENTAL;PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-4096; PRAGMA max_page_count=262144;
         CREATE TABLE IF NOT EXISTS catalog_sources(id TEXT PRIMARY KEY,identity TEXT NOT NULL,generation TEXT NOT NULL,revision TEXT NOT NULL,issues TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS catalog_entries(generation TEXT NOT NULL,id TEXT NOT NULL,source TEXT NOT NULL,project TEXT,kind TEXT NOT NULL,time TEXT NOT NULL,metadata TEXT NOT NULL,search TEXT NOT NULL,PRIMARY KEY(generation,id));
         CREATE INDEX IF NOT EXISTS catalog_order ON catalog_entries(generation,time,id);
@@ -345,7 +346,7 @@ fn open_cache(shared: &Shared) -> Result<(Directory, std::fs::File, Connection)>
         DELETE FROM catalog_cwds WHERE generation NOT IN(SELECT generation FROM catalog_sources);DELETE FROM catalog_locators WHERE generation NOT IN(SELECT generation FROM catalog_sources);DELETE FROM catalog_checkpoints WHERE generation NOT IN(SELECT generation FROM catalog_sources);
         DELETE FROM catalog_records WHERE generation NOT IN(SELECT generation FROM catalog_sources);
         DELETE FROM catalog_entries WHERE generation NOT IN(SELECT generation FROM catalog_sources);
-        PRAGMA user_version=4;");
+        PRAGMA user_version={CATALOG_VERSION};"));
     if let Err(error) = initialize {
         if matches!(
             error.sqlite_error_code(),
@@ -979,6 +980,9 @@ fn catalog_query(
             .as_ref()
             .is_some_and(|s| s.chars().count() > 512)
         || (query.project_q.is_some() && (!projects || entry.is_some() || query.q.is_some()))
+        || query.project_scope.as_deref().is_some_and(|scope| {
+            !projects || entry.is_some() || !matches!(scope, "primary" | "all")
+        })
         || query.cursor.as_ref().is_some_and(|s| s.len() > 4096)
         || query.limit.is_some_and(|v| v == 0 || v > 200)
         || query
@@ -1023,6 +1027,7 @@ fn catalog_query(
         return Err("invalid_query");
     }
     let cursor = query.cursor.take();
+    let primary_projects = query.project_scope.as_deref() == Some("primary");
     let limit = query.limit.unwrap_or(50);
     query.limit = Some(limit);
     let binding = digest(&json!([query, entry, projects, details]).to_string());
@@ -1155,11 +1160,13 @@ fn catalog_query(
         .collect::<Result<_>>()?
     } else {
         let sql = if projects {
-            "SELECT json_object('projectId',project,'path',min(json_extract(metadata,'$.projectPath')),'latestRecordedAt',nullif(max(time),''),'entries',count(*)) FROM catalog_entries WHERE project IS NOT NULL AND generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND (?8 IS NULL OR instr(lower(json_extract(metadata,'$.projectPath')),lower(?8))>0) GROUP BY project ORDER BY max(time) DESC,min(json_extract(metadata,'$.projectPath')),project LIMIT ?5 OFFSET ?6"
+            format!(
+                "SELECT json_object('projectId',project,'path',min(json_extract(metadata,'$.projectPath')),'latestRecordedAt',nullif(max(time),''),'entries',count(*)) FROM catalog_entries WHERE project IS NOT NULL AND generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND (?8 IS NULL OR instr(lower(json_extract(metadata,'$.projectPath')),lower(?8))>0) AND (NOT ?9 OR ({PRIMARY_SECTION_SQL})) GROUP BY project ORDER BY max(time) DESC,min(json_extract(metadata,'$.projectPath')),project LIMIT ?5 OFFSET ?6"
+            )
         } else {
-            "SELECT metadata FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND ?8 IS NULL ORDER BY time DESC,id LIMIT ?5 OFFSET ?6"
+            "SELECT metadata FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND (?2 IS NULL OR project=?2 OR (?2='unassigned' AND project IS NULL)) AND (?3 IS NULL OR kind=?3) AND (?4='' OR instr(lower(metadata||search),lower(?4))>0) AND (?7 IS NULL OR (?7='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?7='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND ?8 IS NULL AND ?9=0 ORDER BY time DESC,id LIMIT ?5 OFFSET ?6".to_owned()
         };
-        let mut stmt = db.prepare(sql).map_err(|_| "cache_unavailable")?;
+        let mut stmt = db.prepare(&sql).map_err(|_| "cache_unavailable")?;
         stmt.query_map(
             params![
                 generations,
@@ -1169,7 +1176,8 @@ fn catalog_query(
                 limit + 1,
                 offset,
                 query.group,
-                query.project_q
+                query.project_q,
+                primary_projects
             ],
             |r| r.get::<_, String>(0),
         )
@@ -1227,7 +1235,7 @@ fn catalog_query(
         }
     });
     if entry.is_none() && projects {
-        let count: u64 = db.query_row("SELECT count(*) FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND project IS NULL AND (?2 IS NULL OR kind=?2) AND (?3='' OR instr(lower(metadata||search),lower(?3))>0) AND (?4 IS NULL OR (?4='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?4='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL))",params![generations,query.kind,pattern,query.group],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
+        let count: u64 = db.query_row(&format!("SELECT count(*) FROM catalog_entries WHERE generation IN(SELECT value FROM json_each(?1)) AND project IS NULL AND (?2 IS NULL OR kind=?2) AND (?3='' OR instr(lower(metadata||search),lower(?3))>0) AND (?4 IS NULL OR (?4='agents' AND (json_extract(metadata,'$.isSubagent')=1 OR json_extract(metadata,'$.parentThreadId') IS NOT NULL)) OR (?4='main' AND coalesce(json_extract(metadata,'$.isSubagent'),0)=0 AND json_extract(metadata,'$.parentThreadId') IS NULL)) AND (NOT ?5 OR ({PRIMARY_SECTION_SQL}))"),params![generations,query.kind,pattern,query.group,primary_projects],|r|r.get(0)).map_err(|_| "cache_unavailable")?;
         result["unassignedRecords"] = json!(count);
     }
     if entry.is_none() && !projects {

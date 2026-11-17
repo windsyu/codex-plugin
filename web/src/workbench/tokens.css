@@ -1,61 +1,78 @@
-/* Design tokens for the workbench UI. The relay portal keeps an identical
-   copy in relay/static/portal.css; both must stay in sync. */
+/* Open Design commercial prototype palette. Keep the portal tokens in sync. */
 :root {
-  /* Surfaces: opaque base + alpha overlays for layering */
-  --ui-bg: #0c0e12;
-  --ui-surface-1: #12151b;
-  --ui-surface-2: #171b22;
-  --ui-surface-3: #1d232c;
-  --ui-overlay-hover: rgb(255 255 255 / 0.045);
+  --color-deep-slate: #14161b;
+  --color-slate-800: #20232b;
+  --color-slate-700: #424b5c;
+  --color-primary-blue: #3869e8;
+  --color-state-green: #22c55e;
+  --color-state-amber: #f59e0b;
+  --color-state-red: #ef4444;
+
+  /* Three surface levels; borders carry the hierarchy. */
+  --ui-bg: var(--color-deep-slate);
+  --ui-surface-1: #16181e;
+  --ui-surface-2: #191b21;
+  --ui-surface-3: #292e38;
+  --ui-card: #20232b;
+  --ui-overlay-hover: rgb(255 255 255 / 0.04);
   --ui-overlay-active: rgb(255 255 255 / 0.08);
-  --ui-backdrop: rgb(4 6 9 / 0.66);
+  --ui-backdrop: rgb(8 10 15 / 0.7);
+  --ui-line: #2c313c;
+  --ui-line-strong: #424b5c;
+  --ui-scrollbar: #485365;
+  --ui-text: #edf0f6;
+  --ui-text-2: #bec5d1;
+  --ui-text-3: #9aa4b5;
 
-  /* Borders */
-  --ui-line: rgb(255 255 255 / 0.075);
-  --ui-line-strong: rgb(255 255 255 / 0.14);
+  /* The primary fill is one step deeper for readable small button labels. */
+  --ui-accent: #a3bfff;
+  --ui-accent-strong: #3869e8;
+  --ui-accent-strong-hover: #2e5ed5;
+  --ui-accent-on-strong: #ffffff;
+  --ui-accent-soft: #26344f;
+  --ui-accent-soft-hover: #2e4062;
+  --ui-accent-line: #466190;
+  --ui-selection: rgb(109 150 255 / 0.28);
+  --ui-success: #8bd3b0;
+  --ui-success-soft: #1b3028;
+  --ui-warning: #edc78a;
+  --ui-warning-soft: #332b20;
+  --ui-danger: #ffa6b3;
+  --ui-danger-soft: #35232b;
+  --ui-danger-strong: #b91c1c;
+  --ui-danger-strong-hover: #991b1b;
+  --ui-danger-on-strong: #f1f5f9;
 
-  /* Text */
-  --ui-text: #e4e8ee;
-  --ui-text-2: #a3acb9;
-  --ui-text-3: #949eac;
-
-  /* Accent (links, focus, selection, primary actions) */
-  --ui-accent: #7fb0f7;
-  --ui-accent-strong: #2f65c7;
-  --ui-accent-strong-hover: #2760bf;
-  --ui-accent-on-strong: #f4f8ff;
-  --ui-accent-soft: rgb(100 148 236 / 0.16);
-  --ui-accent-soft-hover: rgb(100 148 236 / 0.24);
-  --ui-accent-line: rgb(127 176 247 / 0.38);
-
-  /* Semantic */
-  --ui-success: #83c99a;
-  --ui-success-soft: rgb(88 164 112 / 0.14);
-  --ui-warning: #dcba72;
-  --ui-warning-soft: rgb(197 152 74 / 0.14);
-  --ui-danger: #e89a92;
-  --ui-danger-soft: rgb(197 92 84 / 0.16);
-  --ui-danger-strong: #b34540;
-  --ui-danger-strong-hover: #c7554f;
-
-  /* Radius */
   --ui-radius-sm: 6px;
-  --ui-radius-md: 8px;
-  --ui-radius-lg: 12px;
-  --ui-radius-xl: 16px;
-
-  /* Elevation */
-  --ui-shadow-1: 0 2px 10px rgb(0 0 0 / 0.3);
-  --ui-shadow-2: 0 10px 32px rgb(0 0 0 / 0.45);
-  --ui-shadow-3: 0 24px 80px rgb(0 0 0 / 0.6);
-
-  /* Motion */
-  --ui-t-fast: 120ms ease;
-  --ui-t-med: 200ms ease;
-
-  /* Focus */
+  --ui-radius-md: 6px;
+  --ui-radius-lg: 8px;
+  --ui-radius-xl: 10px;
+  --ui-shadow-1: none;
+  --ui-shadow-2: none;
+  --ui-shadow-3: none;
+  --ui-shadow-inset: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  --ui-shadow-pressed: inset 0 2px 4px rgb(0 0 0 / 0.3);
+  --ui-shadow-focus: 0 0 0 2px rgb(59 130 246 / 0.3);
+  --ui-button-highlight: inset 0 1px 0 rgb(255 255 255 / 0.15);
+  --ui-card-hover-shadow: none;
+  --ui-t-fast: 180ms ease-out;
+  --ui-t-med: 180ms ease-out;
   --ui-focus: var(--ui-accent);
-
-  /* Type */
+  --ui-font-sans: "SF Pro Text", "PingFang SC", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --ui-font-mono: "SF Mono", Menlo, monospace;
+  --ui-page-width: 1200px;
+  --text-display: 60px;
+  --text-heading-lg: 40px;
+  --text-heading: 30px;
+  --text-subheading: 20px;
+  --text-body-lg: 16px;
+  --text-body: 14px;
+  --text-label: 12px;
+  --spacing-8: 8px;
+  --spacing-16: 16px;
+  --spacing-24: 24px;
+  --spacing-32: 32px;
+  --spacing-48: 48px;
+  --spacing-64: 64px;
+  --spacing-96: 96px;
 }

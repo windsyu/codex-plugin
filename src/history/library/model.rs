@@ -299,6 +299,9 @@ impl Entry {
     pub fn native_path(&mut self, cwd: Option<&str>, originator: Option<&str>) {
         let Some(cwd) = cwd else {
             self.record_cwd(None);
+            self.project_id = None;
+            self.project_path = None;
+            self.project_basis = "unknown".into();
             return;
         };
         self.record_cwd(Some(cwd));
@@ -361,6 +364,23 @@ fn missing_kind_basis() -> String {
     "source_missing_v1".into()
 }
 
+pub(super) fn section(entry: &Entry) -> &'static str {
+    if entry.kind == "workbench" {
+        "runs"
+    } else if matches!(
+        entry.conversation_kind.as_str(),
+        "subagent" | "background_review"
+    ) {
+        "auxiliary"
+    } else {
+        "primary"
+    }
+}
+
+// Project navigation uses the same section rule before aggregation/pagination.
+// A synthetic cross-product regression compares this SQL with section().
+pub(super) const PRIMARY_SECTION_SQL: &str = "kind != 'workbench' AND coalesce(json_extract(metadata,'$.conversationKind'),'unknown') NOT IN ('subagent','background_review')";
+
 /// Closed evidence adapter, not a claim about every official source variant.
 pub(super) fn native_conversation_kind(payload: &Value) -> (&'static str, &'static str) {
     let source = payload.get("source").filter(|v| !v.is_null());
@@ -396,7 +416,11 @@ pub(super) fn native_conversation_kind(payload: &Value) -> (&'static str, &'stat
             }
         }
         Some(Value::Object(s)) => {
-            if s.len() == 1
+            // Observed rollout SessionMeta evidence, not a model name or a
+            // prompt-text heuristic. Unknown subagent variants stay visible.
+            if s.len() == 1 && s.get("subagent") == Some(&serde_json::json!({"other":"guardian"})) {
+                ("background_review", "native_source_guardian_v1")
+            } else if s.len() == 1
                 && s.get("subagent")
                     .and_then(Value::as_object)
                     .is_some_and(|a| a.len() == 1 && a.contains_key("thread_spawn"))
@@ -461,6 +485,7 @@ pub(super) fn unassigned_reason(entry: &Value) -> Option<&'static str> {
     let has = |code: &str| reasons.is_some_and(|r| r.iter().any(|v| v.as_str() == Some(code)));
     if [
         "conflicting_session_identity",
+        "conflicting_session_metadata",
         "event_identity_conflict",
         "conflicting_parent_identity",
     ]
@@ -513,6 +538,7 @@ pub struct Query {
     pub record: Option<u64>,
     pub q: Option<String>,
     pub project_q: Option<String>,
+    pub project_scope: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub source_revision: Option<String>,
