@@ -6,10 +6,12 @@ import '@xterm/xterm/css/xterm.css';
 import { CODEX_TERMINAL_THEME } from '../terminal/terminalTheme';
 import { TerminalClient, initialTerminalView } from './terminalClient';
 import type { TerminalExit } from './RunEndedNotice';
+import type { ComponentChildren } from 'preact';
 
-export function TerminalPanel({ epoch, onExit }: { epoch: string; onExit?: (exit: TerminalExit) => void }) {
+export function TerminalPanel({ epoch, onExit, actions, focusRequest = 0 }: { epoch: string; onExit?: (exit: TerminalExit) => void; actions?: ComponentChildren; focusRequest?: number }) {
   const host = useRef<HTMLDivElement>(null);
   const client = useRef<TerminalClient>();
+  const terminalRef = useRef<Terminal>();
   const [view, setView] = useState(initialTerminalView);
   useEffect(() => { if (view.exit) onExit?.(view.exit); }, [view.exit, onExit]);
   useLayoutEffect(() => {
@@ -19,6 +21,7 @@ export function TerminalPanel({ epoch, onExit }: { epoch: string; onExit?: (exit
       fontFamily: '"SF Mono", Menlo, "PingFang SC", monospace', fontSize: 13, lineHeight: 1.18,
       scrollback: 3000, theme: CODEX_TERMINAL_THEME, minimumContrastRatio: 1
     });
+    terminalRef.current = terminal;
     const fit = new FitAddon(); terminal.loadAddon(fit);
     terminal.loadAddon(new Unicode11Addon()); terminal.unicode.activeVersion = '11';
     terminal.open(host.current);
@@ -30,12 +33,13 @@ export function TerminalPanel({ epoch, onExit }: { epoch: string; onExit?: (exit
     });
     observer.observe(host.current);
     void document.fonts?.ready.then(() => connection.resize());
-    return () => { cancelAnimationFrame(frame); observer.disconnect(); data.dispose(); connection.dispose(); terminal.dispose(); };
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); data.dispose(); connection.dispose(); terminal.dispose(); terminalRef.current = undefined; };
   }, [epoch]);
+  useEffect(() => { if (focusRequest) { const frame = requestAnimationFrame(() => terminalRef.current?.focus()); return () => cancelAnimationFrame(frame); } }, [focusRequest]);
   const ended = !!view.exit || view.control?.ended;
   const otherPage = view.ready && !view.owned && (view.control?.controllerConnection || view.control?.reconnectReserved);
   return <section className="wb-terminal" aria-label="原生 Codex 终端" data-owned={view.owned} data-ready={view.ready}>
-    <div className="wb-panel-heading"><span>›_ 原生终端</span><span className="wb-terminal-status">{ended ? '已结束' : view.owned ? '已连接' : otherPage ? '只读' : '连接中'}</span></div>
+    <div className="wb-panel-heading"><span>›_ 原生终端</span><span className="wb-terminal-status">{ended ? '已结束' : view.owned ? '已连接' : otherPage ? '只读' : '连接中'}</span>{actions && <span className="wb-terminal-actions">{actions}</span>}</div>
     {!ended && otherPage && <p className="wb-notice">同一工作台的另一页面正在使用此终端。切换只影响此终端，其他项目可同时输入。 <button onClick={() => client.current?.takeover()}>在此输入</button></p>}
     {view.issue && <p className="wb-notice" role="status">{view.issue}</p>}
     {view.inputUncertain && <p className="wb-notice" role="status">部分输入的送达情况未确认；请检查终端，输入不会自动重发。 <button onClick={() => client.current?.acknowledgeInputUncertainty()}>已检查终端</button></p>}

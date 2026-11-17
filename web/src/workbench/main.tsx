@@ -11,9 +11,13 @@ import { App } from './App';
 import { parseRoute, runPath } from './routes';
 import { navigatePage, useRoute } from './navigation';
 import './pages.css';
+import { WorkbenchFrame, useApplicationStatus } from './WorkbenchFrame';
+import './session.css';
 
 function Router({ application, initialRun }: { application: ApplicationInfo | null; initialRun?: Run }) {
   const route = useRoute();
+  const status = useApplicationStatus(application);
+  const info = status.info;
   const selected = route.kind === 'run' ? route.runId : !application && route.kind === 'home' && route.page === 'overview' ? initialRun?.runEpoch : undefined;
   const [run, setRun] = useState(initialRun);
   const [error, setError] = useState('');
@@ -29,11 +33,12 @@ function Router({ application, initialRun }: { application: ApplicationInfo | nu
     }).catch(error => { if (!controller.signal.aborted) setError(error.message); });
     return () => controller.abort();
   }, [selected]);
-  if (route.kind === 'missing') return <main className="wb-unavailable"><h1>页面不存在</h1><p>此工作台地址无效。</p></main>;
-  if (route.kind === 'home' && application) return <HistoryHome initial={application} page={route.page} />;
-  if (error) return <main className="wb-unavailable"><h1>无法打开运行</h1><p role="alert">{error}</p></main>;
-  if (!run || run.runEpoch !== selected) return <main className="wb-unavailable" role="status">正在打开工作台…</main>;
-  return <App key={run.runEpoch} run={run} applicationHome={!!application} page={route.kind === 'run' ? route.page : undefined} />;
+  const content = route.kind === 'missing' ? <main className="wb-unavailable"><h1>页面不存在</h1><p>此工作台地址无效。</p></main>
+    : route.kind === 'home' && info ? <HistoryHome initial={info} applicationState={{ info, error: status.error }} page={route.page} framed />
+    : error ? <main className="wb-unavailable"><h1>无法打开运行</h1><p role="alert">{error}</p></main>
+    : !run || run.runEpoch !== selected ? <main className="wb-unavailable" role="status">正在打开工作台…</main>
+    : <App key={run.runEpoch} run={run} applicationHome={!!application} page={route.kind === 'run' ? route.page : undefined} framed />;
+  return <WorkbenchFrame application={info} route={route} run={run} error={status.error}>{content}</WorkbenchFrame>;
 }
 
 function unavailable(message: string) {

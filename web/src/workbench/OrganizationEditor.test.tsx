@@ -26,6 +26,7 @@ it('requires explicit target and confirmation and sends only trusted IDs with qu
   const { fetch, onSaved } = await mount((_url, request) => request.method === 'PUT' ? response(result) : undefined);
   expect(fetch.mock.calls.filter(([, request]) => request.method === 'PUT')).toHaveLength(0);
   expect(root.textContent).toContain('继续此会话仍使用原工作目录：/original/execution');
+  expect(root.textContent).toContain('自动归属依据：按工作目录推断，未取得官方项目关联');
   expect(Array.from(root.querySelectorAll('button')).find(button => button.textContent === '保存归属')?.disabled).toBe(true);
   await click('/target/project'); await confirm(); await click('保存归属');
   const save = fetch.mock.calls.find(([, request]) => request.method === 'PUT')![1];

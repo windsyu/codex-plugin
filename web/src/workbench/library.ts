@@ -33,7 +33,27 @@ export interface LibraryPage<T> { revision: string; records: T[]; nextCursor: st
 export interface LibraryRecord { kind: string; role?: string | null; presentation?: 'conversation' | 'context' | 'activity' | 'attention'; text?: string; label?: string; status?: string; truncated?: boolean; detailCursor: string; usage?: Record<string, number | null> | null }
 export const sourceNames: Record<string, string> = { native: '原生会话', workbench: '工作台记录', observer: '旧版历史' };
 export const projectName = (path: string | null) => path?.split(/[\\/]/).filter(Boolean).pop() || '未归属项目';
+export function projectParent(path: string | null): string {
+  if (!path) return '';
+  const clean = path.replace(/[\\/]+$/, '');
+  const split = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+  if (split < 0) return '';
+  return clean.slice(0, split === 0 ? 1 : split === 2 && clean[1] === ':' ? 3 : split);
+}
 export const unassignedReasonText = (reason?: UnassignedReason | null) => ({ desktop_generated: '应用生成的工作目录', source_unassigned: '来源未记录项目', missing_cwd: '工作目录未记录', invalid_metadata: '元数据无法解释', identity_conflict: '身份信息冲突', user_unassigned: '用户设为未归类', unknown: '归属未确认' }[reason || 'unknown'] || '归属未确认');
+const projectBasisLabels: Record<string, string> = {
+  cwd_inferred: '按工作目录推断，未取得官方项目关联',
+  workbench_explicit: '工作台启动时选择的项目目录',
+  legacy_recorded: '来源记录的项目归属',
+  desktop_generated: '应用生成的工作目录，项目归属未确认',
+  user_assigned: '你设置的项目归属',
+  user_unassigned: '你设置为未归类',
+};
+export const projectBasisText = (basis?: string) => projectBasisLabels[basis || 'unknown'] || '归属依据未确认';
+export function entryProjectBasisText(entry: LibraryEntry): string {
+  const effective = entry.organization?.effective.basis;
+  return projectBasisText(effective === 'automatic' ? entry.organization?.automatic.basis : effective || entry.projectBasis);
+}
 export const dateLabel = (time: string | null) => time && Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '时间未记录';
 export class LibraryError extends Error { constructor(public status: number, message: string) { super(message); } }
 async function readLibraryJSON(path: string, parameters: URLSearchParams, signal: AbortSignal, request?: RequestInit): Promise<unknown> {
@@ -87,8 +107,8 @@ export function coverageText(coverage: Coverage): string {
   if (r.filter(s => s !== 'windowed_read').length) return '此来源含缺口或未识别内容，已保存的记录仍可阅读。';
   return '';
 }
-export interface HistoryRoute { project: string; source: string; group: string; q: string; entry: string; revision: string; match: string; projectQ?: string; view?: string; section?: string }
-const keys = ['project', 'source', 'group', 'q', 'entry', 'revision', 'match', 'projectQ', 'view', 'section'] as const;
+export interface HistoryRoute { project: string; source: string; group: string; q: string; entry: string; revision: string; match: string; projectQ?: string; projectScope?: string; view?: string; section?: string }
+const keys = ['project', 'source', 'group', 'q', 'entry', 'revision', 'match', 'projectQ', 'projectScope', 'view', 'section'] as const;
 export const historyView = (route: HistoryRoute) => route.view === 'records' || (!route.view && (route.group === 'main' || route.group === 'agents')) ? 'records' : 'groups';
 export function routeFromURL(): HistoryRoute {
   const params = new URLSearchParams(workbenchContext().gateway ? location.hash.slice(1) : location.search);

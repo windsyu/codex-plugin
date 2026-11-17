@@ -122,18 +122,6 @@ fn group_ids(sources: &[Source], entries: &[Candidate]) -> Vec<String> {
     }
     ids
 }
-fn section(entry: &Entry) -> &'static str {
-    if entry.kind == "workbench" {
-        "runs"
-    } else if matches!(
-        entry.conversation_kind.as_str(),
-        "subagent" | "background_review"
-    ) {
-        "auxiliary"
-    } else {
-        "primary"
-    }
-}
 fn priority(member: &Value) -> (bool, bool, u8, &str) {
     (
         !member["capabilities"]["read"].as_bool().unwrap_or(false),

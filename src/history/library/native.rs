@@ -16,6 +16,9 @@ pub(super) struct NativeFile {
     discarding: bool,
     bytes: usize,
     identity: bool,
+    forked_from_id: Option<uuid::Uuid>,
+    metadata_pinned: bool,
+    owner_metadata: Option<Value>,
     kind_evidence: Option<Value>,
     last_message: Option<(String, String, String)>,
 }
@@ -48,6 +51,9 @@ impl NativeFile {
             discarding: false,
             bytes: 0,
             identity: false,
+            forked_from_id: None,
+            metadata_pinned: false,
+            owner_metadata: None,
             kind_evidence: None,
             last_message: None,
         })
@@ -128,9 +134,49 @@ impl NativeFile {
         let safe = sanitize(&raw, key);
         let payload = &safe["payload"];
         let top = safe["type"].as_str().unwrap_or("");
-        if top == "session_meta" {
+        let metadata_id = (top == "session_meta")
+            .then(|| {
+                payload["id"]
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .filter(|id| !id.is_nil())
+            })
+            .flatten();
+        // A fork can copy its declared parent's SessionMeta into the rollout.
+        // Keep that row as context; it cannot redefine this file's identity,
+        // project, source, or parent. Undeclared foreign IDs still conflict.
+        let inherited_metadata = metadata_id.is_some() && metadata_id == self.forked_from_id;
+        let mut apply_metadata =
+            top == "session_meta" && !self.metadata_pinned && !inherited_metadata;
+        if apply_metadata && self.identity {
+            let same_id = metadata_id.is_some_and(|id| {
+                self.document.entry.native_thread_id.as_deref() == Some(&id.to_string())
+            });
+            let code = if !same_id {
+                Some("conflicting_session_identity")
+            } else if self.owner_metadata.as_ref() != Some(&owner_metadata(payload)) {
+                Some("conflicting_session_metadata")
+            } else {
+                None
+            };
+            if let Some(code) = code {
+                self.document.entry.issue_at(code, self.offset);
+                self.document.entry.capabilities.resume = false;
+                self.document.entry.conversation_kind = "unknown".into();
+                self.document.entry.kind_basis = "metadata_conflict_v1".into();
+            }
+            // Even malformed/repeated metadata cannot replace the first
+            // reliable owner's project or cwd. Preserve the row as context.
+            apply_metadata = false;
+        }
+        if apply_metadata {
+            if metadata_id.is_none() {
+                self.document
+                    .entry
+                    .issue_at("invalid_session_identity", self.offset);
+            }
             let agent = &payload["source"]["subagent"]["thread_spawn"];
-            let evidence = json!({"source":payload["source"],"parent":payload["parent_thread_id"],"nestedParent":agent["parent_thread_id"]});
+            let evidence = json!({"source":payload["source"],"parent":payload["parent_thread_id"],"nestedParent":agent["parent_thread_id"],"forkedFrom":payload["forked_from_id"]});
             let (kind, basis) = native_conversation_kind(payload);
             let conflict = self
                 .kind_evidence
@@ -164,25 +210,22 @@ impl NativeFile {
                     self.document.entry.issue_at(basis, self.offset);
                 }
             }
-            if let Some(id) = payload["id"]
-                .as_str()
-                .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            {
-                if self.identity
-                    && self.document.entry.native_thread_id.as_deref() != Some(&id.to_string())
-                {
-                    self.document
-                        .entry
-                        .issue_at("conflicting_session_identity", self.offset);
-                    self.document.entry.capabilities.resume = false;
-                    self.document.entry.conversation_kind = "unknown".into();
-                    self.document.entry.kind_basis = "metadata_conflict_v1".into();
-                    return;
-                }
+            if let Some(id) = metadata_id {
+                self.forked_from_id = payload["forked_from_id"]
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .filter(|parent| !parent.is_nil() && *parent != id);
+                self.owner_metadata = Some(owner_metadata(payload));
                 self.identity = true;
                 self.document.entry.entry_id = Entry::new(source, &id.to_string()).entry_id;
                 self.document.entry.native_thread_id = Some(id.to_string());
-                self.document.entry.capabilities.resume = true;
+                self.document.entry.capabilities.resume = !self
+                    .document
+                    .entry
+                    .coverage
+                    .reasons
+                    .iter()
+                    .any(|code| code == "invalid_session_identity");
             }
             self.document
                 .entry
@@ -332,6 +375,14 @@ impl NativeFile {
             self.document.entry.recorded_at = Some(time);
         }
         let mut record = serde_json::json!({"kind":kind,"text":summary,"offset":self.offset,"recordId":self.offset.saturating_sub(bytes.len() as u64),"raw":safe});
+        // Guardian exchanges are automated review activity. Keep their full
+        // source records readable without treating the prompt/verdict as a
+        // human request or exchange preview. Never infer this from content.
+        if self.document.entry.conversation_kind == "background_review"
+            && matches!(kind.as_str(), "user_message" | "agent_message")
+        {
+            record["presentation"] = "activity".into();
+        }
         // Metadata keeps advancing even after the bounded body cache fills.
         let projected = presentation::normalize(&record);
         presentation::observe_view(&mut self.document.entry, &projected);
@@ -353,6 +404,18 @@ impl NativeFile {
                 .issue_at("body_cache_limit", self.offset);
         }
     }
+}
+
+/// Only immutable fields used for ownership, classification and restore. Tool
+/// definitions or instructions may be updated independently and are not keys.
+fn owner_metadata(payload: &Value) -> Value {
+    json!({
+        "source":payload["source"], "cwd":payload["cwd"],
+        "originator":payload["originator"], "timestamp":payload["timestamp"],
+        "parent":payload["parent_thread_id"], "forkedFrom":payload["forked_from_id"],
+        "agentNickname":payload["agent_nickname"], "agentRole":payload["agent_role"],
+        "historyBase":payload["history_base"],
+    })
 }
 
 fn timestamp(value: &str) -> Option<String> {
@@ -411,6 +474,9 @@ pub(super) fn window(
     }
     file.document.entry = entry.clone();
     file.identity = entry.native_thread_id.is_some();
+    // Window reads use the catalog's source-revision-pinned metadata. A window
+    // can start inside inherited history and must not infer identity afresh.
+    file.metadata_pinned = true;
     file.offset = offset;
     file.last_message = serde_json::from_value(state["mirror"].clone())
         .ok()

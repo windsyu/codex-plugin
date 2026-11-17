@@ -9,9 +9,9 @@ import { useRoute } from './navigation';
 let reading: ReadingView;
 let reportExit: ((exit: { code: number; signal: string | null }) => void) | undefined;
 vi.mock('./reading', async original => ({ ...await original<typeof import('./reading')>(), useReading: () => reading }));
-vi.mock('./TerminalPanel', () => ({ TerminalPanel: ({ onExit }: { onExit?: typeof reportExit }) => {
+vi.mock('./TerminalPanel', () => ({ TerminalPanel: ({ onExit, actions }: { onExit?: typeof reportExit; actions?: preact.ComponentChildren }) => {
   reportExit = onExit;
-  return <textarea aria-label="Native terminal" />;
+  return <section>{actions}<textarea aria-label="Native terminal" /></section>;
 } }));
 const run = { runEpoch: 'live', terminalAvailable: true, projectName: 'Synthetic project', processId: 42, historyAvailable: true };
 const metadata = (id: string, purpose: RequestView['purpose'] = 'conversation'): RequestView => ({ requestId: id, clientRequestIndex: null, requestedModel: 'model', codexThreadId: 'thread', codexTurnId: 'turn', purpose, purposeBasis: 'codex_turn_metadata' });
@@ -48,7 +48,139 @@ beforeEach(() => {
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() });
   document.body.append(root); reading = readSnapshot(snapshot('live'), 'live');
 });
-afterEach(() => { render(null, root); root.remove(); vi.unstubAllGlobals(); });
+afterEach(() => { render(null, root); root.remove(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it('opens a tool file link from the framed standalone root through its Run file route', async () => {
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  const key = { requestId: 'chat', responseId: 'chat', wireItemId: 'tool-file', contentIndex: 0 };
+  reading.items = [{ kind: 'tool_call', itemKey: 'tool-file', key, revision: 1, orderIndex: 1, completeness: 'observed', evidence: [{ origin: 'model', key, captureSeq: 1 }], captureSeq: 1, truncated: false, toolKind: 'function', callId: 'file-call', name: 'read_file', namespace: 'functions', category: 'command', arguments: '{"path":"code.ts"}', argumentsState: 'generated', command: null, execution: 'unobserved', result: null, proposedPatch: null, identityConflict: false, resultConflict: false }];
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => success(url.includes('/workspace/files') ? { entries: [], readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 } : { path: 'code.ts', text: 'standalone file content', revision: 'one', readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 })));
+  function Routed() { const route = useRoute(); return <App run={{ ...run, runEpoch: epoch, workspaceRoot: '/synthetic' }} page={route.kind === 'run' ? route.page : undefined} framed />; }
+  await act(async () => render(<Routed />, root));
+  const terminal = root.querySelector('textarea');
+  await click(root.querySelector('.wb-tool-path .wb-file-link') as HTMLElement);
+  expect(location.pathname).toBe(`/runs/${epoch}/files`);
+  expect((root.querySelector('.wb-session-context') as HTMLElement).hidden).toBe(false);
+  await vi.waitFor(() => expect(root.querySelector('.wb-file-reading')?.textContent).toContain('standalone file content'));
+  expect(root.querySelector('textarea')).toBe(terminal);
+});
+
+it('pauses hidden mobile workspace polling and resumes when reading becomes visible at either breakpoint', async () => {
+  vi.useFakeTimers(); vi.stubGlobal('innerWidth', 390);
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  history.replaceState(null, '', `/runs/${epoch}/files`);
+  const fetch = vi.fn(async (url: string) => success(url.includes('/workspace/files')
+    ? { entries: [{ path: 'code.ts', name: 'code.ts', kind: 'file' }], readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 }
+    : { path: 'code.ts', text: 'visible selection', revision: 'one', readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<App run={{ ...run, runEpoch: epoch, workspaceRoot: '/synthetic' }} page="files" framed />, root));
+  await act(async () => {});
+  await click(root.querySelector('.wb-file-row') as HTMLElement);
+  const fileReads = () => fetch.mock.calls.filter(([url]) => url.includes('/workspace/file?')).length;
+  expect(fileReads()).toBe(1);
+  const terminal = root.querySelector('textarea');
+  await click(root.querySelector('#wb-view-terminal') as HTMLElement);
+  const hiddenReads = fetch.mock.calls.length;
+  await act(async () => { vi.advanceTimersByTime(6000); });
+  await act(async () => {});
+  expect(fetch.mock.calls).toHaveLength(hiddenReads);
+  vi.stubGlobal('innerWidth', 1440);
+  await act(async () => { window.dispatchEvent(new Event('resize')); });
+  await act(async () => {});
+  expect(fileReads()).toBe(2);
+  vi.stubGlobal('innerWidth', 390);
+  await act(async () => { window.dispatchEvent(new Event('resize')); });
+  const narrowReads = fetch.mock.calls.length;
+  await act(async () => { vi.advanceTimersByTime(6000); });
+  await act(async () => {});
+  expect(fetch.mock.calls).toHaveLength(narrowReads);
+  await click(root.querySelector('#wb-view-reading') as HTMLElement);
+  await act(async () => {});
+  expect(fileReads()).toBe(3);
+  expect(root.querySelector('textarea')).toBe(terminal);
+});
+
+it('keeps framed reading, workspace selections and the same terminal across in-session routes', async () => {
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  history.replaceState({ retained: true }, '', `/runs/${epoch}/chat`);
+  const fetch = vi.fn(async (url: string, _init?: RequestInit) => success(url.includes('git/status')
+    ? { branch: 'work', entries: [{ path: 'code.ts', index: ' ', working: 'M' }], readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 }
+    : url.includes('/workspace/files') ? { entries: [{ path: 'code.ts', name: 'code.ts', kind: 'file' }], readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 }
+    : url.endsWith('/history') ? { currentRunEpoch: epoch, runs: [], diagnostics: [], indexState: 'ready', nextCursor: null }
+    : { path: 'code.ts', text: 'export const answer = 42;', patch: '@@ -1 +1 @@\n-old\n+new', revision: 'one', readAt: '2026-11-17T00:00:00Z', elapsedMs: 1 }));
+  vi.stubGlobal('fetch', fetch);
+  function Routed() {
+    const route = useRoute();
+    return <App run={{ ...run, runEpoch: epoch, workspaceRoot: '/synthetic' }} page={route.kind === 'run' ? route.page : 'chat'} framed />;
+  }
+  await act(async () => render(<Routed />, root));
+  const terminal = root.querySelector('textarea')!;
+  terminal.value = 'unsent native draft';
+  const messages = root.querySelector('.wb-message-list') as HTMLElement;
+  const link = (page: string) => root.querySelector(`.wb-session-tools a[href="/runs/${epoch}/${page}"]`) as HTMLAnchorElement;
+  for (const page of ['files', 'search', 'git']) {
+    await click(link(page));
+    expect(messages.hidden).toBe(false);
+    expect((root.querySelector('.wb-session-context') as HTMLElement).hidden).toBe(false);
+    expect((root.querySelector('.wb-terminal-container') as HTMLElement).hidden).toBe(false);
+    expect(root.querySelector('textarea')).toBe(terminal);
+    expect(terminal.value).toBe('unsent native draft');
+  }
+  await click(root.querySelector('.wb-git-row button') as HTMLElement);
+  await vi.waitFor(() => expect(root.querySelector('.wb-file-reading')?.textContent).toContain('+new'));
+  expect(messages.hidden).toBe(false);
+  await click('关闭辅助面板');
+  await vi.waitFor(() => expect(document.activeElement).toBe(link('git')));
+  expect(location.pathname).toBe(`/runs/${epoch}/chat`);
+  await click(link('history'));
+  expect(messages.hidden).toBe(true);
+  await click(link('files'));
+  expect((root.querySelector('.wb-history') as HTMLElement).hidden).toBe(false);
+  expect(messages.hidden).toBe(true);
+  await click('关闭辅助面板');
+  expect(location.pathname).toBe(`/runs/${epoch}/history`);
+  await click(link('chat'));
+  expect(root.querySelector('.wb-message-list')).toBe(messages);
+  expect(messages.hidden).toBe(false);
+  expect(root.querySelector('textarea')).toBe(terminal);
+  expect(terminal.value).toBe('unsent native draft');
+  expect(history.state.retained).toBe(true);
+  expect(fetch.mock.calls.every(([url, init]) => url.startsWith(`/workbench/v1/runs/${epoch}/`) && !init?.method)).toBe(true);
+  history.replaceState(null, '', '/');
+});
+
+it('changes framed terminal presentation without submitting or replacing the native input', async () => {
+  const epoch = '11111111-1111-4111-8111-111111111111';
+  localStorage.removeItem('codex-view:terminal-dock:v1');
+  const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+  await act(async () => render(<App run={{ ...run, runEpoch: epoch }} page="chat" framed />, root));
+  const terminal = root.querySelector('textarea')!;
+  terminal.value = 'draft with approval left to CLI';
+  await click('切换为底部终端');
+  expect(root.querySelector('.wb-dock-bottom')).not.toBeNull();
+  await click('收起终端');
+  expect((root.querySelector('.wb-terminal-container') as HTMLElement).hidden).toBe(true);
+  expect((root.querySelector('.wb-columns') as HTMLElement).dataset.terminalVisible).toBe('false');
+  await click(root.querySelector('.wb-reading-continue button') as HTMLElement);
+  expect((root.querySelector('.wb-terminal-container') as HTMLElement).hidden).toBe(false);
+  expect(root.querySelector('.wb-mobile-terminal')).not.toBeNull();
+  await click(root.querySelector('#wb-view-reading') as HTMLElement);
+  expect(root.querySelector('.wb-mobile-reading')).not.toBeNull();
+  expect(root.querySelector('textarea')).toBe(terminal);
+  expect(terminal.value).toBe('draft with approval left to CLI');
+  expect(fetch).not.toHaveBeenCalled();
+  localStorage.removeItem('codex-view:terminal-dock:v1');
+});
+
+it('does not reserve a terminal column or offer terminal switching when no terminal is available', async () => {
+  await act(async () => render(<App run={{ ...run, terminalAvailable: false }} page="chat" framed />, root));
+  expect((root.querySelector('.wb-columns') as HTMLElement).dataset.terminalVisible).toBe('false');
+  expect(root.querySelector('.wb-mobile-workspace-tabs')).toBeNull();
+  expect(root.querySelector('.wb-session-actions>button')).toBeNull();
+  expect(root.querySelector('textarea')).toBeNull();
+  await act(async () => render(<App run={{ ...run, terminalAvailable: false }} page="terminal" framed />, root));
+  expect(root.textContent).toContain('这次运行没有可用的原生终端');
+});
 
 it('routes between separate run pages without replacing the native terminal or replaying its draft', async () => {
   const epoch = '11111111-1111-4111-8111-111111111111';
