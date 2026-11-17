@@ -31,7 +31,7 @@
 
 ## 2. 设计依据与兼容限制
 
-官方协议研究固定于 `633ab199cfd724aa78013c006b27a2b3d049fc3b`；运行时不依赖参考 checkout。历史运行单元、恢复身份和只读边界必须分别处理：
+初始官方协议研究固定于 `633ab199cfd724aa78013c006b27a2b3d049fc3b`；项目映射与继承元数据追加核对 `c0cc9fc820f62e4dbdde68214dd6d792d6c8a7ee`，见[源码研究](../references/codex-history-project-mapping.md)。运行时不依赖参考 checkout。历史运行单元、恢复身份和只读边界必须分别处理：
 
 | 依据 | 对设计的约束 |
 | --- | --- |
@@ -344,7 +344,7 @@ Application 已独立持有网页、随机 instanceId、本机 owner 配对、�
 
 `src/history/library` 已接入 Application 的独立后台索引与查询线程。默认读取当前 nativeHome 和有效历史根，可额外登记最多 8 个来源。原生 reader 共享旧 importer 使用的纯分类/结构脱敏函数，并补充当前 typed UserMessage、用户/模型/系统上下文的区分及工作台文字凭证脱敏；不实例化 Importer，不访问 Codex 私有 SQLite。原生身份只使用 `SessionMeta.id`，不使用文件名或根 `session_id` 替代。
 
-目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=4`（C 初始版本为 1，F.1 为 2；R7 的 3/4 仅重建派生目录，独立用户归类不变，见[整理契约](session-organization.md)），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
+目录库为 `history/library/catalog.sqlite`，当前派生格式 `user_version=6`（C 初始版本为 1，F.1 为 2；R7 的 3/4/5 与 fork 元数据修补的 6 仅重建派生目录，独立用户归类不变，见[整理契约](session-organization.md)），与 Observer schema 无关。正文缓存按独立记录存放在同库，不另建 previews 文件夹。`catalog_sources` 指向已提交 generation，条目/记录/原生文件检查点写入新 generation 后原子发布。未完成 generation 在重启后丢弃；保留已提交目录与检查点。原生检查点包含源配置身份、相对路径、设备/inode、长度、mtime/ctime（含纳秒）；未变化文件复用脱敏结果，追加/替换/归档后重新验证。JSONL 半行不作为有效记录提交，下一次变化重读时补齐；gzip 不在当前支持列表，支持 `.jsonl` / `.jsonl.zst`。遍历保留迭代器，最多 32 个目录项一批；原生每批最多 4 MiB 或 100ms，坏行/未知/压缩错误只影响该来源的覆盖说明。
 
 自动重扫间隔从整轮扫描及工作台补全结束后计算，至少等待 30 秒；明确刷新或来源配置变化可提前触发。开始一轮时消费已有刷新请求，避免启动后无故再扫一轮。来源正在更新时保留同一来源身份已发布的 revision，暖启动从已提交目录恢复 revision；只读实例也报告已发布 revision/条目数。原生检查点复用仍推进本轮已整理条目数，不能长时间把有效工作显示为 0。
 

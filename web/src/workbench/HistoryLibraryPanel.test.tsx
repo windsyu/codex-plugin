@@ -130,7 +130,7 @@ it('discards late list responses after changing a source', async () => {
     if (u.pathname.endsWith('/entries') && !u.searchParams.has('sourceId')) return await new Promise(r => resolve = r);
     return { ok: true, text: async () => JSON.stringify(page(u.pathname.endsWith('/projects') ? [] : [{ ...entry, title: '新来源记录' }])) };
   }); vi.stubGlobal('fetch', fetch); await mount();
-  await act(async () => { const select = root.querySelector('select')!; select.value = 's'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  await act(async () => { const select = root.querySelector<HTMLSelectElement>('[aria-label="历史来源筛选"]')!; select.value = 's'; select.dispatchEvent(new Event('change', { bubbles: true })); });
   await act(async () => resolve({ ok: true, text: async () => JSON.stringify(page([{ ...entry, title: '迟到的旧记录' }])) }));
   await flush(); expect(root.textContent).toContain('新来源记录'); expect(root.textContent).not.toContain('迟到的旧记录');
 });
@@ -174,6 +174,15 @@ it('keeps unassigned navigation outside project pagination with record counts', 
   expect(nav.querySelector('.wb-library-project-list')?.textContent).not.toContain('未归类会话');
   await click('未归类会话');
   expect(location.search).toContain('project=unassigned');
+});
+it('distinguishes same-name projects by their parent directories in navigation and across-project rows', async () => {
+  const projects = [{ projectId: 'p_a', path: '/synthetic/client/app', entries: 2 }, { projectId: 'p_b', path: '/synthetic/server/app', entries: 3 }];
+  mockFetch(u => u.pathname.endsWith('/projects') ? { ok: true, text: async () => JSON.stringify(page(projects)) } : u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify(page([{ ...entry, projectPath: projects[0].path }])) } : undefined);
+  await mount();
+  const locations = Array.from(root.querySelectorAll('.wb-library-project-list .wb-library-project small')).map(node => node.textContent);
+  expect(locations).toEqual(['/synthetic/client', '/synthetic/server']);
+  expect(root.querySelector('.wb-library-entry-project')?.textContent).toContain('/synthetic/client');
+  expect(root.querySelector('.wb-library-project-list button')?.getAttribute('aria-label')).toContain('/synthetic/client/app');
 });
 it('shows an unassigned record without turning its cwd into a project and retains explicit resume', async () => {
   const unassigned = { ...entry, projectId: null, projectPath: null, recordedCwd: '/synthetic/Documents/Codex/2026-09-23/new-chat' };
@@ -248,6 +257,25 @@ it('keeps project navigation independent of message, source and group filters', 
   for (const field of ['q', 'sourceId', 'group']) expect(projectRequest.searchParams.has(field)).toBe(false);
   expect(root.querySelector<HTMLInputElement>('[aria-label="搜索项目"]')?.value).toBe('app');
 });
+it('defaults project navigation to primary sessions and switches scope without changing the selected project or reader', async () => {
+  history.replaceState(null, '', '/?view=records&project=p_a&q=needle&source=s&entry=e_a&revision=v1');
+  const fetch = mockFetch(); await mount();
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/projects?')).every(([url]) => new URL(url, 'http://localhost').searchParams.get('projectScope') === 'primary')).toBe(true);
+  const scope = root.querySelector<HTMLSelectElement>('[aria-label="项目导航范围"]')!;
+  expect(scope.value).toBe('primary');
+  const bodyReads = fetch.mock.calls.filter(([url]) => url.includes('/entries/e_a?')).length;
+  await act(async () => { scope.value = 'all'; scope.dispatchEvent(new Event('change', { bubbles: true })); });
+  await flush();
+  expect(location.search).toContain('projectScope=all');
+  for (const value of ['project=p_a', 'q=needle', 'source=s', 'entry=e_a', 'revision=v1']) expect(location.search).toContain(value);
+  expect(fetch.mock.calls.some(([url]) => url.includes('/projects?') && new URL(url, 'http://localhost').searchParams.get('projectScope') === 'all')).toBe(true);
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/entries/e_a?'))).toHaveLength(bodyReads);
+  expect(root.querySelector('[data-role=user]')).not.toBeNull();
+  expect(fetch.mock.calls.filter(([url]) => !url.includes('/projects?')).every(([url]) => !new URL(url, 'http://localhost').searchParams.has('projectScope'))).toBe(true);
+  await act(async () => { history.replaceState(null, '', '/?view=records&project=p_a&q=needle&source=s&entry=e_a&revision=v1'); dispatchEvent(new PopStateEvent('popstate')); });
+  await flush();
+  expect(root.querySelector<HTMLSelectElement>('[aria-label="项目导航范围"]')?.value).toBe('primary');
+});
 it('retains selected project identity without matches or a matching project page', async () => {
   history.replaceState(null, '', '/?view=records&project=p_elsewhere&q=missing');
   mockFetch(u => u.pathname.endsWith('/entries') ? { ok: true, text: async () => JSON.stringify({ ...page([]), selectedProject: { projectId: 'p_elsewhere', path: '/synthetic/elsewhere', status: 'available' }, totalRecords: 0 }) } : undefined);
@@ -255,6 +283,7 @@ it('retains selected project identity without matches or a matching project page
   expect(root.querySelector('h1')?.textContent).toContain('elsewhere');
   const path = root.querySelector('.wb-library-selected-path');
   expect(path?.querySelector('summary')).not.toBeNull();
+  expect((path as HTMLDetailsElement)?.open).toBe(true);
   expect(path?.textContent).toContain('/synthetic/elsewhere');
   expect(root.textContent).toContain('当前筛选 · 0 条来源记录');
 });

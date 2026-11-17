@@ -7,3 +7,5 @@ Author: Microsoft Corporation. License: [Creative Commons Attribution 4.0 Intern
 Adaptation: each SVG's `viewBox`, path `d`, `fill-rule` and `clip-rule` attributes have been extracted into a static TypeScript object. Missing fill/clip rules use the SVG default `nonzero`; geometry is unchanged. The application controls display color and size via CSS. SVG wrappers are rendered with Preact, without HTML injection, an icon font, remote asset requests or a runtime package dependency.
 
 Object keys correspond exactly to the upstream `src/icons/<key>.svg` filenames. `Icons.tsx` maps the workbench's semantic names to this subset. Preserve the source and license comment when updating or distributing these icons.
+
+`Icons.tsx` also contains seven project-authored outline symbols for the computer, devices, globe, settings, menu, terminal and dock controls. Their geometry is separate from the Codicons subset and uses the repository license; no upstream glyphs or new icon packages were added for those controls.

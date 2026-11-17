@@ -11,7 +11,7 @@ R7 归属/来源模型通过验证后，真实页面仍出现大量相同的 AGE
 
 采用来源独立的派生呈现模型。有效已存标题优先，否则第一条真实用户请求；只排除已确认闭合包装，保留混合消息实际请求及不确定用户文本。新增有界、脱敏 `preview` 和正文 `presentation`；默认对话突出，上下文/工具/内部记录按需核查，错误/缺口保持显式。完整来源记录和恢复身份不改变。
 
-catalog 投影 4 重读旧缓存，不迁移原始 rollout、Observer 或 Run；organization schema 1、配置 schema 2 不变。预览不是摘要生成、任务状态或完整尾部保证。页面按用户项目/任务组织，完整身份与精确技术计数作为次级可达信息。具体接口、预算与验收见[整理契约 §10](../design/session-organization.md#10-试用改进任务识别与人类对话优先)。
+当前 catalog 投影 6 重读旧缓存，补充受测 guardian 来源、托管环境包装识别及 fork 元数据归属修补，不迁移原始 rollout、Observer 或 Run；organization schema 1、配置 schema 2 不变。预览不是摘要生成、任务状态或完整尾部保证。页面按用户项目/任务组织，完整身份与精确技术计数作为次级可达信息。具体接口、预算与验收见[整理契约 §10](../design/session-organization.md#10-试用改进任务识别与人类对话优先)。
 
 ## Alternatives
 

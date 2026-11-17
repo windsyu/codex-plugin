@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const { expect } = require('playwright/test');
 const { observeSecurePage, trackDocumentSockets } = require('./secure-probe-utils.cjs');
-let stage = 'input', browser, server, reported = false, socketDiagnostics;
+let stage = 'input', browser, server, reported = false, socketDiagnostics, runDiagnostics;
 const report = value => { if (!reported) { process.stdout.write(JSON.stringify(value) + '\n'); reported = true; } };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function cookie(value, origin) {
@@ -41,6 +41,17 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
   await alice.addCookies([cookie(input.gateways[0].accountCookie,origin)]);
   await bob.addCookies([cookie(input.gateways[otherIndex].accountCookie,origin)]);
   const pages=[]; let errors=0, assets=0, events=0, terminals=0, channels=0, starts=0, inputs=0, plaintext=0, markerLeaks=0, encryptedSearches=0;
+  let metadataResponses=0;
+  // Mobile project navigation lives in a dialog in the new product frame.
+  // Exercise visible navigation; do not force-click the hidden desktop sidebar.
+  async function applicationPage(page,name) {
+    await page.getByRole('button',{name:'展开项目与会话',exact:true}).click();
+    const drawer=page.getByRole('dialog',{name:'项目与会话导航',exact:true});
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole('link',{name,exact:true}).click();
+    await expect(drawer).not.toBeVisible();
+  }
+  const overview=page=>page.getByRole('navigation',{name:'产品导航',exact:true}).getByRole('link',{name:'工作台',exact:true}).click();
   const marker='E2EE_SYNTHETIC_SEARCH_MARKER', markerBytes=Buffer.from(marker);
   const publicKeys=new Set();
   const activeSockets=new Map();
@@ -71,6 +82,21 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
   for (let index=0;index<input.gateways.length;index++) {
     stage=`workbench-${index}`; const gateway=input.gateways[index]; const context=gateway.accountCookie===input.gateways[0].accountCookie?alice:bob;
     const page=await context.newPage(); page.setDefaultTimeout(12000); pages.push(page);
+    let expectedName;
+    const wrongName='SYNTHETIC-OTHER-GATEWAY-NAME';
+    await page.route('**/relay/v1/gateways',async route=>{
+      const response=await route.fetch();
+      assert.equal(response.status(),200);
+      const metadata=await response.json();
+      const target=metadata.gateways.find(computer=>computer.gatewayId===gateway.gatewayId);
+      assert.ok(target&&typeof target.name==='string'&&target.name.length>0);
+      expectedName=target.name;
+      // Keep the real target metadata, but deliberately put an unrelated
+      // synthetic ID first. Names are display data, never routing authority.
+      metadata.gateways=[{gatewayId:'ffffffff-ffff-4fff-8fff-ffffffffffff',name:wrongName,status:'online'},...metadata.gateways.filter(computer=>computer.gatewayId!==gateway.gatewayId),target];
+      metadataResponses++;
+      await route.fulfill({response,json:metadata});
+    });
     let pageSockets=0;
     await observe(page,gateway,()=>pageSockets++);
     stage=`workbench-${index}-document`;
@@ -80,10 +106,15 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     await page.waitForFunction(()=>window.__secureProbe.application);
     const result=await page.evaluate(()=>window.__secureProbe.application);
     assert.equal(result.instanceId,gateway.expectedInstanceId); assert.equal(result.remoteOwner,true);assert.equal(pageSockets,1);
+    stage=`workbench-${index}-fixed-computer-name`;
+    await expect.poll(()=>typeof expectedName).toBe('string');
+    await expect(page.locator('.wb-product-identity strong')).toHaveText(expectedName);
+    await expect(page.locator('.wb-navigation-identity strong')).toHaveText(expectedName);
+    await expect(page.locator('.wb-product')).not.toContainText(wrongName);
     stage=`workbench-${index}-settings-public-relay-link-count`;
     await expect(page.getByRole('link',{name:'公网接入',exact:true})).toHaveCount(0);
     stage=`workbench-${index}-settings-click`;
-    await page.getByRole('link',{name:'设置',exact:true}).click();
+    await applicationPage(page,'设置');
     stage=`workbench-${index}-settings-form-visible`;
     await expect(page.locator('#wb-settings-form')).toBeVisible();
     stage=`workbench-${index}-settings-route`;
@@ -92,7 +123,7 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
     assert.equal(pageSockets,1,'Application SPA pages must reuse their channel');
     stage=`workbench-${index}-reload`;
     await page.reload(); await expect(page.locator('#wb-settings-form')).toBeVisible();
-    await page.getByRole('link',{name:'全部历史',exact:true}).click();
+    await applicationPage(page,'全部历史');
     assert.equal(new URL(page.url()).pathname,`/g/${gateway.gatewayId}/history`);
     if (index === 0 && input.gateways.length === 3) {
       stage='remote-history-reader';
@@ -108,12 +139,12 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
       await page.goBack();
     }
     await page.goBack(); await expect(page.locator('#wb-settings-form')).toBeVisible();
-    await page.getByRole('link',{name:'项目概览',exact:true}).click();
+    await overview(page);
     const dimensions=await page.evaluate(()=>({viewport:document.documentElement.clientWidth,content:document.documentElement.scrollWidth}));
     assert.ok(dimensions.content<=dimensions.viewport+1,'mobile document must not overflow horizontally');
     if(index===0) {
       stage='encrypted-search-privacy';
-      await page.getByRole('link',{name:'全部历史',exact:true}).click();
+      await applicationPage(page,'全部历史');
       const search=page.getByRole('searchbox',{name:'搜索会话和消息',exact:true});
       await search.fill(marker);await search.press('Enter');
       await page.waitForFunction(value=>new URLSearchParams(location.hash.slice(1)).get('q')===value,marker);
@@ -122,25 +153,43 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
       await page.reload();await expect(search).toHaveValue(marker);
       assert.equal(new URL(page.url()).search,'');assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('q'),marker);
       await search.fill('');await search.press('Enter');
-      await page.getByRole('link',{name:'项目概览',exact:true}).click();
+      await overview(page);
     }
     if(gateway.runId) {
       stage='run-navigation'; const run=new URL(gateway.url); run.searchParams.set('run',gateway.runId);const beforeRun=pageSockets;
+      stage='run-navigation-document';
       const response=await page.goto(run.href); assert.equal(response.status(),200);
+      stage='run-navigation-terminal-ready';
       await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true',{timeout:15000});
+      stage='run-navigation-canonical-route';
       assert.equal(new URL(page.url()).pathname,`/g/${gateway.gatewayId}/runs/${gateway.runId}/chat`);
+      runDiagnostics={events,terminals,beforeRun,pageSockets};
+      stage='run-navigation-stream-observation';
+      // Terminal readiness and the reading SSE head arrive independently on
+      // the multiplexed Run channel. Require the real successful SSE head,
+      // rather than assuming it preceded the terminal snapshot/grant.
+      try { await expect.poll(()=>events,{timeout:12000}).toBeGreaterThan(0); }
+      finally { runDiagnostics={events,terminals,beforeRun,pageSockets}; }
       assert.ok(events>0); assert.ok(terminals>0);
+      stage='run-navigation-channel-count';
       assert.equal(pageSockets,beforeRun+2,'Run document opens one Application and one multiplexed Run channel');
       const terminal=await page.locator('.wb-terminal').elementHandle();const sockets=pageSockets;
-      await page.getByRole('link',{name:'文件',exact:true}).click();
+      stage='run-navigation-files';
+      await page.getByRole('navigation',{name:'会话功能',exact:true}).getByRole('link',{name:'文件',exact:true}).click();
       assert.equal(new URL(page.url()).pathname,`/g/${gateway.gatewayId}/runs/${gateway.runId}/files`);
-      await page.getByRole('link',{name:'用量与状态',exact:true}).click();
+      stage='run-navigation-usage';
+      await page.locator('.wb-session-options summary').click();
+      await page.getByRole('navigation',{name:'会话选项',exact:true}).getByRole('link',{name:'用量与状态',exact:true}).click();
       await page.goBack();
+      stage='run-navigation-back-route';
       assert.equal(new URL(page.url()).pathname,`/g/${gateway.gatewayId}/runs/${gateway.runId}/files`);
-      await page.getByRole('link',{name:'实时对话',exact:true}).click();
+      await page.getByRole('navigation',{name:'会话功能',exact:true}).getByRole('link',{name:'对话',exact:true}).click();
+      stage='run-navigation-terminal-preserved';
       assert.ok(await terminal.evaluate(node=>node===document.querySelector('.wb-terminal')),'same Run keeps its terminal DOM');
       assert.equal(pageSockets,sockets,'feature navigation must not reopen terminal WebSocket');
+      stage='run-navigation-reload';
       await page.reload();await expect(page.locator('.wb-terminal')).toHaveAttribute('data-ready','true');
+      stage='run-navigation-new-tab';
       const tab=await context.newPage();let tabSockets=0;await observe(tab,gateway,()=>tabSockets++);await tab.goto(run.href); await expect(tab.locator('.wb-terminal')).toHaveAttribute('data-ready','true');
       assert.equal(tabSockets,2,'new tab owns fresh Application and Run channels');
       assert.equal(new URL(tab.url()).pathname,`/g/${gateway.gatewayId}/runs/${gateway.runId}/chat`);await tab.close();
@@ -182,7 +231,7 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
   stage='parent-revocation-bob-home';
   await expect(bobPage.locator('.wb-home')).toBeVisible();
   stage='parent-revocation-bob-settings-click';
-  await bobPage.getByRole('link',{name:'设置',exact:true}).click();
+  await applicationPage(bobPage,'设置');
   stage='parent-revocation-bob-settings-form-visible';
   await expect(bobPage.locator('#wb-settings-form')).toBeVisible();
   stage='parent-revocation-bob-socket-retained';
@@ -193,11 +242,12 @@ setTimeout(() => { report({stage:'failed',check:stage,reason:'deadline'}); void 
   await Promise.all(pages.map(page=>page.evaluate(()=>window.__secureProbeMetric({kind:'barrier'}))));
   stage='final-metrics-assertions';
   assert.equal(plaintext,0);assert.equal(markerLeaks,0);assert.ok(encryptedSearches>0);assert.equal(errors,0); assert.ok(assets>=input.gateways.length);assert.equal(starts,0);assert.equal(inputs,0);
-  report({stage:'passed',chrome:browser.version(),mobileWidth:390,portals:2,workbenches:input.gateways.length,assetResponses:assets,sse:events,terminalStreams:terminals,encryptedChannels:channels,crossGatewayDenied:true,accountSwitchDenied:true,parentRevocationClearsPages:true,otherAccountPreserved:true,deepRoutes:true,refreshAndBack:true,sameRunTerminalPreserved:true,implicitLaunches:starts,implicitInputs:inputs,plaintextBusinessRequests:plaintext,searchPrivacy:true});
+  assert.ok(metadataResponses>=input.gateways.length);
+  report({stage:'passed',chrome:browser.version(),mobileWidth:390,portals:2,workbenches:input.gateways.length,assetResponses:assets,sse:events,terminalStreams:terminals,encryptedChannels:channels,crossGatewayDenied:true,accountSwitchDenied:true,parentRevocationClearsPages:true,otherAccountPreserved:true,deepRoutes:true,refreshAndBack:true,sameRunTerminalPreserved:true,fixedComputerNames:true,metadataResponses,implicitLaunches:starts,implicitInputs:inputs,plaintextBusinessRequests:plaintext,searchPrivacy:true});
   await alice.close(); await bob.close(); await shutdown(0);
 })().catch(async error=>{
   const message=typeof error?.message==='string'?error.message:'';
   const reason=/strict mode violation/.test(message)?'ambiguous_locator':/toBeVisible/.test(message)?'expected_element_not_visible':/toHaveCount/.test(message)?'unexpected_element_count':/Target.*closed|page.*closed|browser.*closed/.test(message)?'target_closed':/detached/.test(message)?'element_detached':/Timeout|timed out/.test(message)?'operation_timeout':/Execution context was destroyed/.test(message)?'navigation_context_changed':'unclassified';
   const sockets=socketDiagnostics?await socketDiagnostics():undefined;
-  report({stage:'failed',check:stage,kind:['AssertionError','TimeoutError'].includes(error?.name)?error.name:'operation_failed',reason,sockets});void shutdown(1);
+  report({stage:'failed',check:stage,kind:['AssertionError','TimeoutError'].includes(error?.name)?error.name:'operation_failed',reason,sockets,runDiagnostics});void shutdown(1);
 });

@@ -48,6 +48,7 @@ AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和
 | 文档 | 职责 |
 | --- | --- |
 | [工作台方案](design/workbench.md) | 体验目标、架构与可靠性取舍 |
+| [前端设计](design/frontend/README.md)、[布局与实现映射](design/frontend/workbench-ui.md)与[远程连接设计](design/frontend/remote-access.md) | 生产视觉、响应式、远程功能入口与组件对应关系；原图和独立原型导出作为本地资料，不纳入 Git |
 | [核心约束](design/development-constraints.md) | V2 边界及工程约束 |
 | [详细设计](design/workbench-detailed-design.md) | 接入、代理、输入、保存、API、恢复与性能 |
 | [历史首页与项目启动](design/history-home.md) | Application/Run、跨来源历史、新建与恢复 |
@@ -61,5 +62,6 @@ AI agent 先读 [AGENTS](../AGENTS.md)，再按改动归属阅读组件架构和
 ## 参考研究
 
 - [cc-viewer 功能与实现](references/cc-viewer.md)：固定源码基线的实现分析，不直接成为本项目要求。
+- [Codex 历史存放与项目映射](references/codex-history-project-mapping.md)：区分日期布局、原生项目关联、执行目录、fork 继承和仓库范围检索；说明 JSONL reader 的证据边界。
 
 新增详细文档按上述职责归类并登记索引，不再平铺在仓库或 `docs/` 根目录。源码目录可保留简短导航；随发布包分发的第三方来源、修改说明与许可证保留原位。任务进度和现场证据仍放 Issue/PR、CI 或受管产物，不归入长期技术文档。通用链接使用相对路径，外部源码引用固定 commit；移动文件时同时更新入站链接、图片与中文锚点，并运行 `node scripts/dev.mjs docs`。

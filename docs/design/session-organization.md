@@ -14,7 +14,7 @@
 
 ## 2. 已核对事实、参考与限制
 
-本次源码基线：本项目 `b0ae129`；token-monitor `542c269b3ceebf7924b118c6057b423230dafe92`，其 vendor manifest 指向 tokscale fork `d5e8ad9b25bfafb43b5b6804940929b728a6f48a`。本次没有读取用户私人会话来衡量噪音比例。
+初始设计参考基线：本项目 `b0ae129`；token-monitor `542c269b3ceebf7924b118c6057b423230dafe92`，其 vendor manifest 指向 tokscale fork `d5e8ad9b25bfafb43b5b6804940929b728a6f48a`。运行时适配以当前实现和合成回归为准，参考项目不能代替来源证据。
 
 | 事实 | 证据与影响 |
 | --- | --- |
@@ -25,7 +25,9 @@
 | 基线首页主/子代理同级混列；项目和会话共用 q/source/group；项目路径来自当前页 | 本次以独立项目查询、selectedProject 和分层组查询替代；[首页实现](../../web/src/workbench/HistoryLibraryPanel.tsx)。原展示问题不等于证明所有现有归属都是错误的 |
 | 原生与旧库仅在显式同 nativeHome、同 nativeThreadId 时关联；工作台 Run 不是 thread | [关联实现](../../src/history/library.rs)、[来源契约](history-home.md#52-数据模型与身份)。不能把同名、同 cwd 或近似时间当作副本 |
 
-**项目选择：**继续使用完整路径身份，不扩大 Desktop 启发式；增加展示层次、归属解释和本机显式覆盖。**待验证：**当前受测 CLI 的 rollout 是否提供足以细分 guardian review 的明确字段。token-monitor 读取私有 SQLite 的实现不是本项目的协议依据；没有受测 rollout/公共协议证据时只显示已确认子代理，不开放专门审查判定。
+**项目选择：**继续使用完整路径身份，不扩大 Desktop 启发式；增加展示层次、归属解释和本机显式覆盖。真实试用中已观察到精确来源 `source={"subagent":{"other":"guardian"}}`，并以合成 rollout 回归：此封闭形状分类为 `background_review`，依据码 `native_source_guardian_v1`。未知、额外字段或冲突形状仍保守处理；不根据英文审查提示、模型名或结果 JSON 判断类别。此为受测来源适配，不声称所有官方版本均使用该形状；token-monitor 私有 SQLite 不是本项目的协议依据。
+
+追加官方研究基线为 `c0cc9fc820f62e4dbdde68214dd6d792d6c8a7ee`，见[历史存放与项目映射](../references/codex-history-project-mapping.md)。官方 `projectId` 独立于 cwd/roots，本机项目关系仅存 state 元数据，未写入 rollout；当前 reader 尚未取得这份关系，不能声称复原了官方项目。详情与调整界面显示 `cwd_inferred` 等现有依据，人工归属仍优先。仅凭多 root、Git remote、父会话或日期目录不能补齐项目。
 
 ## 3. 范围与非目标
 
@@ -68,6 +70,7 @@ interface Organization {
 ```
 
 - 原生 `conversationKind` 仅采用受测封闭来源变体/明确父关系；review 比一般 subagent 更具体。字段冲突或来源未知记 unknown 并诊断。没有父字段本身不能证明 ordinary。
+- 首次可靠身份声明的有效 `forked_from_id` 可解释后续对应异 ID 的 SessionMeta：该行仅保留为继承 context，不覆盖本记录 cwd/项目/类型/父关系。可靠身份建立后，缺失/无效/nil ID 或未声明异 ID 不得覆盖 owner 字段；相同 ID 修改 cwd、来源等已采用字段也保留诊断、原归属并禁用恢复。后续重复不能清除冲突。首次身份不可靠时只读，不因后续声明开启恢复；不能从父记录分配项目。按需窗口固定使用 catalog 已核验的来源元数据。catalog 6 强制重读旧 checkpoint，不迁移原始记录或人工覆盖。
 - 工作台条目是 `kind=workbench` 的运行记录，不据“未捕获父 ID”声称为一个主会话；旧库没有足够类型证据则 unknown。
 - 默认主要会话区包含 ordinary 与 unknown；“类型未确认”在行的记录信息内可查，不作为默认任务标签反复展示。仅有确凿证据的辅助记录折叠，不把未知伪装成 ordinary。
 - 未归类的中文原因分别为“应用生成的工作目录”“来源未记录项目”“工作目录未记录”“元数据无法解释”“身份信息冲突”“用户设为未归类”“归属未确认”。不将 Desktop 形态解释成官方确认的“用户从未选择项目”。
@@ -76,11 +79,13 @@ interface Organization {
 
 ### 5.1 稳定的项目导航
 
-保留两栏，不建项目管理页。左侧固定“全部项目”“未归类会话”；项目显示目录名与缩略路径，完整路径可通过键盘/触摸展开，同名路径不只靠 tooltip 区分。缩略只是呈现，API/启动校验仍使用完整路径。
+保留两栏，不建项目管理页。左侧固定“全部项目”“未归类会话”；项目显示目录名与父目录，避免缩略路径再次重复已经显示的项目名；完整路径可通过键盘/触摸展开，同名路径不只靠 tooltip 区分。跨项目会话行也显示项目名和父目录，选中项目后完整路径默认展开。缩略只是呈现，API/启动校验仍使用完整路径。
 
 项目导航有独立项目搜索，只搜名称/路径；右侧搜索会话/消息、来源和类别筛选不重排/清空左侧项目。左侧数量是来源记录数，可查其含义；右侧精确计数放在“数量与来源”，注明当前筛选且不宣称唯一对话数。选中项目的摘要独立于项目分页和会话匹配；无结果时仍保留项目名/路径，不取第一条记录推断当前项目。选中项目成为页面主标题，项目路径保持可展开；来源和目录差异不代替任务标题。
 
 `GET /library/projects` 新增 `projectQ`（最多 512 字符）；与旧 `q` 同时提供返回 400，旧 q 契约不变；entries/body 不接受 projectQ。新 UI 不给项目查询传入右侧 q/source/group。`GET /library/entries` 增加 `selectedProject`，从全部启用来源和有效归属解析，包含 ID、路径和状态 `available|missing|indexing|unknown`；available 表示当前可确认项目目录存在，missing 表示目录消失，indexing 表示目录覆盖不足且未取得摘要，unknown 表示不可确认。新建必须有当前 available 摘要，加载或失败时不借备用路径启用。`totalRecords` 为完整当前筛选集合的来源记录数，不从当前页累加；selectedProject 不从当前筛选计算。移除项目筛选继续遵循现有 projectExists 的缺口保护。
+
+项目导航默认选择“主要会话项目”，明确向 `GET /library/projects` 传 `projectScope=primary`；可切换“全部记录项目”（`projectScope=all`），查看仅含辅助会话或工作台运行的目录。旧客户端省略参数时保持 all。primary 在项目聚合、排序与分页之前按会话区规则筛选，排除工作台 Run、已确认子代理和后台审查，保留 ordinary 与 unknown；`entries` 计数和 `unassignedRecords` 使用相同范围。未知值与非 projects 请求携带该参数返回 `invalid_query`。范围只影响项目导航，不更改自动项目归属，不以临时目录名推断类别；切换范围保留当前项目、会话搜索、来源、展开区与已打开正文，不额外读取正文。URL 的 `projectScope=all` 参与前进/后退和分页状态，省略时使用 UI 默认 primary；项目摘要与恢复仍独立核验完整来源。
 
 ### 5.2 默认分层与来源折叠
 
@@ -195,9 +200,11 @@ interface SessionGroup {
 
 在已授权来源内完成派生呈现，不调用模型，不读取 Desktop 私有数据库，不重命名原始会话。优先保留当前来源已存的有效语义标题（例如 Observer 的 `name`）；否则取第一条真实用户请求，最多 120 个 Unicode 字符。工作台项目名不是任务标题；没有可确认用户请求时保留“未命名会话”，不编造主题。
 
-只有完整、已确认形状的包装可识别为注入上下文：AGENTS 标头加闭合 INSTRUCTIONS、已知封闭 environment_context，以及精确 `{page_id:null}` 的 external_codex_apps_open_page。混合消息保留包装之外的真实请求；不因出现 AGENTS、XML、代码或“系统”字样而删除用户讨论，畸形/未知包装保守作为正文。原始脱敏字段始终留在详情。
+只有完整、已确认形状的包装可识别为注入上下文：AGENTS 标头加闭合 INSTRUCTIONS、已知封闭 environment_context，以及精确 `{page_id:null}` 的 external_codex_apps_open_page。环境包装允许完整 cwd+shell，或两者均缺省且 current_date+timezone+filesystem 完整的受测托管形状；filesystem 仍严格验证嵌套结构。混合消息保留包装之外的真实请求；不因出现 AGENTS、XML、代码或“系统”字样而删除用户讨论，畸形/未知包装保守作为正文。已确认 guardian 的请求/回复属于 activity，不参与人类任务标题和交流预览；辅助区仍可读取全部记录及脱敏详情。原始脱敏字段始终留在详情。
 
-Entry 和 SessionGroup 成员新增可选 `preview: {text: string; role: 'user'|'assistant'} | null`，最多 240 个 Unicode 字符，是当前来源已观察的最近有效交流片段，不是模型生成的任务总结，也不表示任务完成。native 流扫描在正文缓存满后仍可更新有界预览；Observer/Workbench 只在原有预算内选取已观察交流，不保证未读取尾部的全源最新。标题、预览和正文使用同一纯呈现规则且脱敏，不从另一份来源借用预览。派生 catalog 投影由 3 升到 4，仅重建缓存；organization schema 1 与配置 schema 2 不变。
+已观察的附件包装还须完整包含前导 `# Files mentioned by the user:`、一个或多个“文件名: 绝对路径”记录、可选的精确 `Image attachment: true`、固定附件免责声明、`## My request:` 和非空实际请求；只提取分隔后的请求，不读取附件或执行其中指令。前导 ambient browser 包装只识别精确 `source="ambient-ui-state"`、闭合标签、固定免责声明及受测的单标签页/HTTP(S) URL 四行结构。额外字段、相对附件路径、未知格式、引用示例和不完整包装均保留为正文；不把关键词或普通 Markdown 标题当作上下文依据。
+
+Entry 和 SessionGroup 成员新增可选 `preview: {text: string; role: 'user'|'assistant'} | null`，最多 240 个 Unicode 字符，是当前来源已观察的最近有效交流片段，不是模型生成的任务总结，也不表示任务完成。native 流扫描在正文缓存满后仍可更新有界预览；Observer/Workbench 只在原有预算内选取已观察交流，不保证未读取尾部的全源最新。标题、预览和正文使用同一纯呈现规则且脱敏，不从另一份来源借用预览。当前派生 catalog 投影为 6，重读旧目录以应用 guardian、托管环境和 fork 元数据归属修正，仅重建缓存；organization schema 1 与配置 schema 2 不变。
 
 ### 10.2 默认阅读与核查
 

@@ -79,3 +79,13 @@ observer.toml
 .DS_Store
 
 # Images used by documentation are allowed; content checks enforce all other binaries.
+
+# Local Open Design exports and reference material; production sources stay tracked.
+/index.jpg
+/docs/design/frontend/reference/
+/docs/design/frontend/opendesign/
+/docs/design/frontend/prototype/
+/docs/design/frontend/commercial/
+/docs/design/frontend/source-manifest.json
+/docs/design/frontend/opendesign-brief.md
+/web/e2e/design-prototype-probe.mjs

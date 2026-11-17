@@ -68,7 +68,7 @@ flowchart LR
 
 默认只有本机 Application 监听。点击某个 Run 开启后增加**一个共用 IPv4 设备监听**，绑定 0.0.0.0:port；局域网 IP 与 Tailscale IP/MagicDNS 都访问这个端口。多项目共用监听与地址缓存，业务按显式 runId 分派给各自的 Router/WebState/LiveHub/终端。保留本机 listener 以维持电脑 URL，不为 LAN/Tailscale 各建服务。第二个 Run 直接复用已发现地址，慢发现不占请求派发锁。独立 ReadingServer 的单 Run 装配保留原契约。
 
-端口默认 OS 分配，显式端口占用则报告冲突。开启会接受本机 IPv4 网卡连接，不能把 wildcard 描述成仅限某张 Wi-Fi；不会自动修改防火墙，受保护 API 始终需配对。只有本机管理会话可开启、读取配对链接和撤销，模型代理不跟随开放。
+端口默认 OS 分配，显式端口占用则报告冲突。开启会接受本机 IPv4 网卡连接，不能把 wildcard 描述成仅限某张 Wi-Fi；不会自动修改防火墙，受保护 API 始终需配对。本机 owner 与有效 RemoteOwner 可管理当前 Run 的设备接入、读取配对链接和撤销浏览器；PairedRun 无管理权限，模型代理不跟随开放。此权限不包含应用级公网连接器管理，后者仍仅限本机 owner。
 
 地址目录收集活动网卡的私有 IPv4，以及只读 Tailscale 状态提供的本机 IP/完整 DNSName；使用同一实际设备端口，不展示其他 tailnet 设备或账号。MagicDNS URL 使用完整名称以避免依赖手机搜索域补全。
 
@@ -106,13 +106,13 @@ Application 下手机链接为 `/?run=<id>#pair=<token>`，复用 fragment → P
 
 这是可选配置片段，需合并进现有 JSON；[schema](../configuration/workbench.config.schema.json)已支持，也可在“设置 → 高级启动设置”修改。0 为自动，非零为 1024–65535；缺省保持省略。沿用 JSON 修订/If-Match，保存后下次开启生效，不保存开放状态/凭证。旧二进制回退需移除新字段或使用旧配置副本，不迁移历史。
 
-下表省略 /workbench/v1；access 管理只限本机管理会话。沿用现有校验和错误封装，JSON 拒绝未知字段、接入与配对正文上限 1KiB，不按网络拆 API：
+下表省略 /workbench/v1；access 管理限本机 owner 与有效 RemoteOwner，作用域为当前 Run。沿用现有校验和错误封装，JSON 拒绝未知字段、接入与配对正文上限 1KiB，不按网络拆 API：
 
 | 方法与路径 | 契约要点 |
 | --- | --- |
 | GET /access | runEpoch、revision、state、port、addresses、pairingId、devices、notice、error；地址含 id/label/origin，不返回密钥 |
 | POST /access/enable | runEpoch + If-Match，启用一个共用监听，不带 mode/candidateId |
-| GET /access/pairing | 仅本机管理会话、接入 ready 且有可用地址；返回 runEpoch、pairingId、links（addressId/url）、revision；无状态修改、不要求 If-Match，重复读取同一码 |
+| GET /access/pairing | 仅本机 owner / RemoteOwner、接入 ready 且有可用地址；返回 runEpoch、pairingId、links（addressId/url）、revision；无状态修改、不要求 If-Match，重复读取同一码 |
 | POST /access/disable | runEpoch + If-Match；撤销全部访问，重复停止不误停新 generation |
 | DELETE /access/devices/{sessionId}?runEpoch=… | If-Match，撤销一个浏览器授权 |
 | POST /pair | 复用 token 兑换；固定配对码在所有设备地址可重复使用，本机私有 capability 不在设备 listener 兑换 |
